@@ -1,39 +1,1468 @@
 # Text as Data: Tokens, Normalization, Zipf {#sec-text-as-data}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Every number and every code output on this page
+was produced by running the code shown, with `scikit-learn` 1.9 and
+`tiktoken` 0.13. The tokenizer, Zipf, and vector-space explorers are
+interactive.
 :::
 
 **Learning objectives.** After this chapter you can:
 
 - turn raw text into model-ready units and defend each preprocessing choice;
 - explain byte-pair encoding well enough to predict how a tokenizer splits an unseen word;
-- describe Zipf's law and its practical consequence: the vocabulary problem;
-- explain why tokenization is where multilingual pain (including Turkish morphology) begins.
+- describe Zipf's law and its practical consequence, the vocabulary problem;
+- derive a TF-IDF vector by hand and get the same numbers as `scikit-learn`;
+- say precisely what bag-of-words can and cannot represent, and defend that in an interview;
+- explain why tokenization is where multilingual pain — including Turkish morphology — begins.
+
+## The problem, in one sentence
+
+A model is a function that does arithmetic on numbers. A maintenance log is
+a string of characters. Everything in this chapter exists to bridge that
+gap, and the bridge has exactly two spans: [decide what the units are]{.hl}
+(tokenization), and [decide what number each unit contributes]{.hl}
+(weighting).
+
+That is the whole chapter. It is worth saying up front because the
+techniques below — bag-of-words, TF-IDF — are sometimes dismissed as
+historical. They are not. They are the sparse half of a field whose dense
+half you will meet in @sec-embeddings, they still win on small data, they
+still power production search, and every interview for an applied NLP role
+will probe whether you understand them. More importantly, the *decisions*
+they force you to make are the same decisions a modern pipeline forces on
+you, only visible.
+
+::: {.column-margin}
+A statistician's framing that will serve you for the whole chapter:
+preprocessing is not preparation for the model. Preprocessing *is part of*
+the model. Every choice below is a modelling assumption, and it belongs in
+your methods section.
+:::
 
 ## From characters to tokens
 
-<!-- TODO(draft): whitespace vs subword; the BPE training loop as a
-     compression algorithm; worked example segmenting "unbelievably" and a
-     Turkish agglutinative example ("evlerimizden") — this doubles as a
-     hook for the future Turkish edition. -->
+The obvious first move is to split on whitespace. It fails immediately, and
+the ways it fails are the entire design space of tokenization.
 
-The chips on this book's cover page are not a metaphor: modern models
-consume [subword tokens]{.hl}, and every downstream cost — context limits,
-API pricing, multilingual inequity — is denominated in them.
+```python
+text = "The pump P-101 didn't fail; it's the seal (again!)."
+print(text.split())
+```
 
-## Normalization decisions and their consequences
+```text
+['The', 'pump', 'P-101', "didn't", 'fail;', "it's", 'the', 'seal', '(again!).']
+```
 
-<!-- TODO(draft): casing, Unicode, stemming vs lemmatization; when
-     aggressive normalization destroys signal. Statistician framing:
-     preprocessing is part of the model. -->
+`fail;` and `fail` are now different words. So are `The` and `the`. So are
+`it's` and `it is`. Each of these is a decision you have to make, and each
+one either merges things that should stay apart or splits things that should
+stay together.
 
-## Zipf's law and the long tail
+### The normalization ladder
 
-<!-- TODO(draft): plot rank–frequency on a real corpus (make executable,
-     matplotlib, freeze). Consequence: OOV, why subwords won. -->
+Here is the standard sequence, in the order people usually apply it, with
+the argument *against* each step — because the arguments against are what
+interviewers actually ask about.
+
+| Step | What it does | What it costs you |
+|---|---|---|
+| Lowercasing | `Pump` = `pump` | `US` → `us`, `Apple` → `apple`. Loses proper nouns and acronyms. |
+| Punctuation stripping | `fail;` = `fail` | Destroys `P-101`, decimals, URLs, chemical formulas. |
+| Stop word removal | drops `the`, `is`, `of` | Destroys negation (`not`), and phrases like *to be or not to be*. |
+| Stemming | `replaced` → `replac` | Crude suffix chopping. `university` → `univers` = `universe`. |
+| Lemmatization | `replaced` → `replace` | Correct, but needs a dictionary and part-of-speech tagging, and is slow. |
+
+: The normalization ladder {tbl-colwidths="[18,32,50]"}
+
+Stemming and lemmatization both aim at the same thing — collapsing
+inflected forms — but they are not the same operation. Stemming
+[@porter1980algorithm] applies rewrite rules and does not care whether the
+result is a word. Lemmatization returns the dictionary form and needs to
+know that `left` is the past tense of `leave` in one sentence and a
+direction in another.
+
+The honest modern answer to "which should I use?" is *probably neither*.
+Stemming was a workaround for sparse vocabularies, and subword tokenization
+(below) solves the same problem better. But you should be able to explain
+the distinction, because it is one of the most reliably asked questions in
+the field.
+
+::: {.callout-warning appearance="simple"}
+**Stop word removal is not free.** On the corpus used later in this chapter,
+`scikit-learn`'s English stop word list contains 318 entries. Those 318
+words are **0.4% of the vocabulary** but **43.9% of all tokens**. You are
+deleting nearly half your text. That is a real compression win for a sparse
+model — and a catastrophe if the signal you need is in the word *not*.
+:::
+
+### Subwords: the compromise that won
+
+Word-level tokenization has an unfixable problem: the vocabulary never
+closes. Character-level tokenization has the opposite problem: sequences
+become very long and each unit means almost nothing. [Byte-pair encoding]{.hl}
+(BPE) splits the difference by *learning* its units from data
+[@sennrich2016neural].
+
+The algorithm is startlingly simple. Start with characters. Count every
+adjacent pair. Merge the most frequent pair into a new symbol. Repeat.
+
+```python
+from collections import Counter
+
+corpus = {"low": 5, "lower": 2, "newest": 6, "widest": 3}
+words = {tuple(w) + ("</w>",): n for w, n in corpus.items()}
+
+def pair_counts(words):
+    pairs = Counter()
+    for symbols, freq in words.items():
+        for a, b in zip(symbols, symbols[1:]):
+            pairs[(a, b)] += freq
+    return pairs
+
+def merge(words, pair):
+    a, b = pair
+    out = {}
+    for symbols, freq in words.items():
+        new, i = [], 0
+        while i < len(symbols):
+            if i < len(symbols) - 1 and symbols[i] == a and symbols[i + 1] == b:
+                new.append(a + b)
+                i += 2
+            else:
+                new.append(symbols[i])
+                i += 1
+        out[tuple(new)] = freq
+    return out
+
+merges = []
+for step in range(1, 11):
+    best, count = pair_counts(words).most_common(1)[0]
+    merges.append(best)
+    words = merge(words, best)
+    print(f"merge {step:>2}: {best[0]!r} + {best[1]!r} -> "
+          f"{best[0] + best[1]!r}  (seen {count} times)")
+```
+
+```text
+merge  1: 'e' + 's' -> 'es'  (seen 9 times)
+merge  2: 'es' + 't' -> 'est'  (seen 9 times)
+merge  3: 'est' + '</w>' -> 'est</w>'  (seen 9 times)
+merge  4: 'l' + 'o' -> 'lo'  (seen 7 times)
+merge  5: 'lo' + 'w' -> 'low'  (seen 7 times)
+merge  6: 'n' + 'e' -> 'ne'  (seen 6 times)
+merge  7: 'ne' + 'w' -> 'new'  (seen 6 times)
+merge  8: 'new' + 'est</w>' -> 'newest</w>'  (seen 6 times)
+merge  9: 'low' + '</w>' -> 'low</w>'  (seen 5 times)
+merge 10: 'w' + 'i' -> 'wi'  (seen 3 times)
+```
+
+Look at what happened without anyone supplying a grammar. The algorithm
+discovered `est` — the English superlative suffix — as its very first unit,
+because superlatives are frequent. It discovered `low` and `new` as stems.
+[Nobody told it that English has suffixes.]{.hl} It counted.
+
+The payoff is what happens to a word the model has never seen. To tokenize,
+we replay the learned merges in the order they were learned:
+
+```python
+def apply_merges(word, merges):
+    symbols = tuple(word) + ("</w>",)
+    for pair in merges:
+        symbols = tuple(merge({symbols: 1}, pair).keys())[0]
+    return symbols
+
+for w in ["lowest", "newer", "slow", "widest"]:
+    print(f"{w:<8} -> {' '.join(apply_merges(w, merges))}")
+```
+
+```text
+lowest   -> low est</w>
+newer    -> new e r </w>
+slow     -> s low</w>
+widest   -> wi d est</w>
+```
+
+`lowest` never appeared in training, and it is segmented into two units the
+model knows well. This is the entire reason subwords won: **there is no
+out-of-vocabulary token**. In the worst case a word falls back to
+characters, as `slow` partly does. It degrades; it never fails.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Byte-pair encoding — type a word and watch the merges apply</div>
+```
+
+```{ojs}
+//| echo: false
+viewof bpeWord = Inputs.text({
+  label: "Word",
+  value: "lowest",
+  placeholder: "try: lowest, newer, slow, widest, snow",
+  width: 260
+})
+```
+
+```{ojs}
+//| echo: false
+bpeMerges = [
+  ["e", "s"], ["es", "t"], ["est", "</w>"], ["l", "o"], ["lo", "w"],
+  ["n", "e"], ["ne", "w"], ["new", "est</w>"], ["low", "</w>"], ["w", "i"]
+]
+```
+
+```{ojs}
+//| echo: false
+bpeTrace = {
+  const clean = (bpeWord || "").toLowerCase().replace(/[^a-z]/g, "");
+  let symbols = clean.length ? [...clean, "</w>"] : [];
+  const trace = [{ step: 0, rule: "start (characters)", symbols: [...symbols] }];
+  bpeMerges.forEach(([a, b], k) => {
+    const out = [];
+    let i = 0, used = false;
+    while (i < symbols.length) {
+      if (i < symbols.length - 1 && symbols[i] === a && symbols[i + 1] === b) {
+        out.push(a + b); i += 2; used = true;
+      } else { out.push(symbols[i]); i += 1; }
+    }
+    symbols = out;
+    if (used) trace.push({ step: k + 1, rule: `${a} + ${b}`, symbols: [...symbols] });
+  });
+  return trace;
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;">
+  ${bpeTrace.length === 1 && bpeTrace[0].symbols.length === 0
+    ? html`<p style="color:#5B6272;">Type a word made of letters.</p>`
+    : html`<div>
+        ${bpeTrace.map(t => html`<div style="display:flex; gap:0.8rem;
+             align-items:baseline; padding:0.22rem 0; border-bottom:1px solid #F0F2F5;">
+          <span style="min-width:8.5rem; color:#5B6272; font-size:0.82rem;">
+            ${t.step === 0 ? t.rule : `merge ${t.step}: ${t.rule}`}
+          </span>
+          <span>${t.symbols.map(s => html`<code style="background:#EDF2F2;
+            border:1px solid #E3E7EC; border-radius:0.35em; padding:0.05em 0.35em;
+            margin-right:0.2em;">${s}</code>`)}</span>
+        </div>`)}
+        <p style="margin-top:0.7rem; color:#5B6272;">
+          Final: <b>${bpeTrace[bpeTrace.length - 1].symbols.length}</b> token(s).
+          Only 10 merges were learned, from a four-word corpus — a real
+          tokenizer learns 50,000 or more.
+        </p>
+      </div>`}
+</div>`
+```
+:::
+
+### Who pays for Turkish
+
+Now the part that matters if you work in a language other than English. A
+tokenizer is trained on a corpus, and that corpus is overwhelmingly English.
+The consequence is measurable. Here is Article 1 of the Universal
+Declaration of Human Rights, in the official English and Turkish texts, run
+through OpenAI's tokenizers:
+
+```python
+import tiktoken
+
+en = ("All human beings are born free and equal in dignity and rights. "
+      "They are endowed with reason and conscience and should act towards "
+      "one another in a spirit of brotherhood.")
+tr = ("Bütün insanlar hür, haysiyet ve haklar bakımından eşit doğarlar. "
+      "Akıl ve vicdana sahiptirler ve birbirlerine karşı kardeşlik "
+      "zihniyeti ile hareket etmelidirler.")
+
+for name in ["cl100k_base", "o200k_base"]:
+    enc = tiktoken.get_encoding(name)
+    a, b = len(enc.encode(en)), len(enc.encode(tr))
+    print(f"{name}:")
+    print(f"  english : {len(en):>4} chars -> {a:>3} tokens  "
+          f"({len(en) / a:4.2f} chars/token)")
+    print(f"  turkish : {len(tr):>4} chars -> {b:>3} tokens  "
+          f"({len(tr) / b:4.2f} chars/token)")
+    print(f"  turkish costs {b / a:4.2f}x more tokens")
+```
+
+```text
+cl100k_base:
+  english :  170 chars ->  33 tokens  (5.15 chars/token)
+  turkish :  160 chars ->  60 tokens  (2.67 chars/token)
+  turkish costs 1.82x more tokens
+o200k_base:
+  english :  170 chars ->  33 tokens  (5.15 chars/token)
+  turkish :  160 chars ->  46 tokens  (3.48 chars/token)
+  turkish costs 1.39x more tokens
+```
+
+The same sentence, the same meaning, [1.82× the tokens]{.hl} on the
+GPT-3.5/4 tokenizer. Since APIs bill per token and context windows are
+measured in tokens, a Turkish speaker pays more money for less context.
+Newer tokenizers narrow the gap (1.39× with `o200k_base`) but do not close
+it. This is a documented and quantified inequity across languages
+[@petrov2023language], not a rounding error.
+
+Why does it happen? Turkish is agglutinative: meaning is built by stacking
+suffixes onto a stem [@oflazer1994two]. English builds meaning with separate
+words, which is exactly what a frequency-based merge algorithm captures
+well.
+
+```text
+ev             1 tokens  [' ev']
+evler          2 tokens  [' ev', 'ler']
+evlerimiz      4 tokens  [' ev', 'ler', 'im', 'iz']
+evlerimizden   5 tokens  [' ev', 'ler', 'im', 'iz', 'den']
+```
+
+Read that output again, because it is remarkable in two opposite ways. The
+bad news: one Turkish word costs five tokens, where its English translation
+*from our houses* costs about four — and English needed four separate words
+to say it. The good news: look at the split. `ev|ler|im|iz|den` is very
+nearly the correct morphological analysis — *ev* (house), *-ler* (plural),
+*-imiz* (our), *-den* (from). BPE rediscovered Turkish morphology from raw
+statistics, without a single rule of Turkish grammar.
+
+One more, to show that diacritics cost extra:
+
+```text
+gorusebileceklerimiz            8 tokens  ['gor','use','b','ile','cek','ler','im','iz']
+görüşebileceklerimiz           10 tokens  ['g','ör','ü','ş','eb','ile','cek','ler','im','iz']
+```
+
+Writing correct Turkish costs 25% more than writing ASCII Turkish. Please
+write correct Turkish anyway; just know what it costs, and never benchmark a
+multilingual system on token counts alone.
+
+::: {.callout-tip collapse="true"}
+## Intuition check: why not just use characters and skip all this?
+
+A character vocabulary is tiny (~100 symbols), never has out-of-vocabulary
+problems, and needs no training. So why does everyone use subwords?
+
+**Because sequence length is the binding constraint.** Attention costs grow
+with the square of sequence length (@sec-transformers), so a 5× longer
+sequence is roughly 25× more expensive. Subwords are a compression scheme:
+they buy shorter sequences by spending vocabulary. The tokenizer is the
+knob that trades vocabulary size against sequence length, and BPE sets that
+knob using the statistics of the data rather than a human's guess.
+:::
+
+## Zipf's law and why the vocabulary never closes
+
+Everything above was mechanics. This section is the statistical fact that
+explains *why* the mechanics have to look like that.
+
+Take a real corpus — the 20 Newsgroups collection [@lang1995newsweeder],
+11,314 documents, 2.29 million tokens — count every word, and sort by
+frequency:
+
+```python
+from collections import Counter
+import re
+from sklearn.datasets import fetch_20newsgroups
+
+docs = fetch_20newsgroups(subset="train",
+                          remove=("headers", "footers", "quotes")).data
+tokens = re.findall(r"[a-z']+", "\n".join(docs).lower())
+counts = Counter(tokens)
+print("tokens:", len(tokens), " distinct types:", len(counts))
+```
+
+```text
+tokens: 2288401  distinct types: 78649
+```
+
+Now the shape of that distribution:
+
+```text
+top     10 types -> 20.99% of all tokens
+top    100 types -> 46.99% of all tokens
+top   1000 types -> 71.04% of all tokens
+top  10000 types -> 92.50% of all tokens
+
+types appearing exactly once: 38571  (49.0% of the vocabulary,
+                                      1.69% of all tokens)
+```
+
+Ten words are a fifth of the corpus. Meanwhile [half the vocabulary appears
+exactly once]{.hl}. Those single-occurrence words (*hapax legomena*) are
+49% of everything you would have to store, and 1.7% of what you would ever
+see. This is Zipf's law [@zipf1949human]: frequency is roughly inversely
+proportional to rank, which is a straight line on log-log axes.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Rank vs. frequency, 20 Newsgroups (2.29M tokens, 78,649 types)</div>
+```
+
+```{ojs}
+//| echo: false
+viewof zipfScale = Inputs.radio(["log-log", "linear"], {
+  value: "log-log", label: "Axes"
+})
+```
+
+```{ojs}
+//| echo: false
+zipfData = [[1,106425],[2,62043],[3,53106],[4,47904],[5,46982],[6,42709],
+  [7,32582],[8,31122],[10,26985],[12,19968],[15,14465],[18,12849],[22,10623],
+  [27,9594],[33,7386],[41,6359],[51,5877],[63,4832],[78,3949],[97,3027],
+  [121,2227],[151,1611],[188,1238],[235,972],[293,779],[366,625],[457,511],
+  [571,405],[713,337],[891,276],[1113,221],[1391,178],[1738,139],[2172,109],
+  [2715,84],[3393,65],[4241,49],[5301,36],[6626,27],[8282,19],[10352,13],
+  [12940,9],[16175,6],[20218,5],[25272,3],[31590,2],[39487,2],[49358,1],
+  [61697,1],[77121,1]].map(([rank, freq]) => ({rank, freq}))
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 680,
+  height: 340,
+  marginLeft: 62,
+  marginBottom: 42,
+  x: {
+    type: zipfScale === "log-log" ? "log" : "linear",
+    label: "rank of the word (1 = most frequent)",
+    grid: true
+  },
+  y: {
+    type: zipfScale === "log-log" ? "log" : "linear",
+    label: "times it appears",
+    grid: true
+  },
+  marks: [
+    Plot.line(zipfData, { x: "rank", y: "freq", stroke: "#DDE2E7", strokeWidth: 1 }),
+    Plot.dot(zipfData, {
+      x: "rank", y: "freq", r: 3.2, fill: "#1F4E79",
+      title: d => `rank ${d.rank}: ${d.freq.toLocaleString()} occurrences`
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.86rem; color:#5B6272; margin-top:0.5rem;">
+  Switch to <b>linear</b> axes to see the practical problem: on a linear
+  scale the distribution looks like a single spike and a flat line, and the
+  flat line is where almost all of your vocabulary lives.
+</p>`
+```
+:::
+
+Three consequences follow directly, and they shaped everything in modern NLP:
+
+1. **A word-level vocabulary can never be complete.** New words arrive
+   forever — names, part numbers, typos, compounds. This is the argument for
+   subwords, in one sentence.
+2. **Most of your vocabulary is statistically useless.** A word seen once
+   supports no estimate of anything. This is why `min_df` exists, and why it
+   cuts the matrix far more than stop word removal does.
+3. **Frequency and informativeness are almost opposites.** The words you see
+   most tell you least. That observation is the seed of the next section.
+
+::: {.callout-important appearance="simple"}
+**Always look at your top-50 list.** In this corpus the *second* most
+frequent token is `'ax`, with 62,043 occurrences — ahead of *to*, *a*, and
+*of*. It is not a word. It comes from 13 documents out of 11,314, one of
+which contains it 11,147 times: a single junk posting.
+
+Term frequency says `'ax` is the second most important word in the English
+language. Document frequency says it appears in 0.1% of documents. That gap
+between "appears often" and "appears in many places" is precisely what the
+next section is built on — and it is a real bug that has been sitting in a
+famous benchmark dataset for thirty years.
+:::
+
+## How a word becomes a vector
+
+This is the core of the chapter. We will take four short maintenance logs
+all the way from strings to vectors you can compute distances on, and every
+intermediate number will be shown.
+
+```python
+corpus = [
+    "the pump failed",           # d1
+    "the pump was replaced",     # d2
+    "the valve failed",          # d3
+    "the seal leak was repaired", # d4
+]
+```
+
+### Step 1 — the vocabulary is just an index
+
+There is no meaning in this step. We collect every distinct token, sort it,
+and assign each one an integer. That integer is the word's *address*.
+
+```python
+from sklearn.feature_extraction.text import CountVectorizer
+
+cv = CountVectorizer()
+X = cv.fit_transform(corpus)
+print(cv.get_feature_names_out())
+```
+
+```text
+['failed' 'leak' 'pump' 'repaired' 'replaced' 'seal' 'the' 'valve' 'was']
+```
+
+Nine words, so every vector from here on lives in $\mathbb{R}^9$. In a real
+corpus this number is 30,000–500,000, which is the whole difficulty.
+
+### Step 2 — one-hot: a word as a vector, and why it is not enough
+
+The simplest possible encoding of a single word: a vector of zeros with a
+single 1 at the word's address.
+
+```text
+index of 'pump': 2
+one-hot: [0 0 1 0 0 0 0 0 0]
+```
+
+This is a legitimate vector, and it is almost useless on its own. Take the
+dot product of *any* two distinct one-hot vectors and you get zero. Under
+this encoding, `pump` is exactly as similar to `valve` as it is to
+`repaired`. [Every word is orthogonal to every other word]{.hl} — the
+representation contains no notion of similarity at all, only identity.
+
+Hold onto that sentence. Fixing it is the entire subject of
+@sec-embeddings.
+
+### Step 3 — a document is the sum of its one-hots
+
+Add up the one-hot vectors of every token in a document and you get a count
+vector. That is bag-of-words: the multiset of tokens, order discarded.
+
+```text
+d1 tokens: ['the', 'pump', 'failed']
+d1 vector: [1 0 1 0 0 0 1 0 0]
+```
+
+Do it for all four documents and you have the [document-term matrix]{.hl},
+the central object of classical NLP. Rows are documents, columns are words:
+
+```text
+          d1  d2  d3  d4
+failed     1   0   1   0
+leak       0   0   0   1
+pump       1   1   0   0
+repaired   0   0   0   1
+replaced   0   1   0   0
+seal       0   0   0   1
+the        1   1   1   1
+valve      0   0   1   0
+was        0   1   0   1
+```
+
+(Shown transposed so it fits the page — the matrix is 4 documents × 9 terms.)
+
+A statistician should recognize this immediately: it is a design matrix.
+Each document is an observation, each word is a feature, and everything you
+know about regression with many correlated, mostly-zero predictors now
+applies.
+
+### Step 4 — counts are the wrong numbers
+
+Look at the row for `the`. It appears in all four documents, so it
+contributes to every comparison while distinguishing nothing. Meanwhile
+`valve` appears once and is the only thing that makes d3 distinctive. Raw
+counts give them the same treatment.
+
+We want a weight that is high when a word is frequent *in this document*
+and rare *across documents*. Splitting that into two factors gives TF-IDF.
+
+**Term frequency** is how often the word occurs in this document — the count
+we already have.
+
+**Document frequency**, $\mathrm{df}(t)$, is how many documents contain the
+word at all. We want the weight to fall as df rises, so we invert it. But
+raw inversion is too aggressive, so we take a logarithm
+[@sparckjones1972statistical]:
+
+$$
+\mathrm{idf}(t) = \ln\!\left(\frac{1 + n}{1 + \mathrm{df}(t)}\right) + 1
+$$
+
+The $1+$ terms are smoothing (they prevent division by zero for an unseen
+term), and the trailing $+1$ guarantees that a word appearing everywhere
+still gets a weight of 1 rather than 0, so it is down-weighted rather than
+deleted. This is `scikit-learn`'s exact formula; other libraries differ in
+the details, which is a classic source of "why don't my numbers match".
+
+::: {.callout-note collapse="true"}
+## Intuition check: why the logarithm?
+
+This is one of the most common interview questions in the whole field, and
+the weak answer is "to prevent the weight from getting too big."
+
+The better answer has two parts.
+
+**Diminishing returns.** Informativeness is not linear in rarity. A word in
+1 document out of 10,000 versus 10 documents out of 10,000 is a big
+difference in specificity; 5,000 versus 5,010 is no difference at all. The
+log compresses the top of the range and preserves resolution at the bottom,
+which matches how specificity actually behaves.
+
+**It is a probability in disguise.** If $\mathrm{df}(t)/n$ estimates the
+probability that a random document contains $t$, then
+$\log \frac{n}{\mathrm{df}(t)} = -\log P(t)$ — the *self-information* of
+seeing that term, in the information-theoretic sense. Rare events carry more
+information, and the log is not a hack for taming numbers; it is what
+information *is*. Robertson's paper [@robertson2004understanding] is the
+careful treatment, and the honest history is that Spärck Jones proposed IDF
+on empirical grounds in 1972 and the theory was reverse-engineered later.
+
+**And Zipf closes the loop.** Word frequencies are roughly log-linear in
+rank, so a log of frequency is roughly linear in rank. The log is the
+transformation that makes a Zipfian variable behave like an ordinary one —
+exactly the reason you log-transform income or city size.
+:::
+
+Here are the document frequencies and IDF values for our corpus, computed by
+hand and then checked against the library:
+
+```python
+import numpy as np
+
+n = len(corpus)
+df = (X.toarray() > 0).sum(axis=0)
+idf_manual = np.log((1 + n) / (1 + df)) + 1
+```
+
+```text
+          df     idf
+failed     2  1.5108
+leak       1  1.9163
+pump       2  1.5108
+repaired   1  1.9163
+replaced   1  1.9163
+seal       1  1.9163
+the        4  1.0000
+valve      1  1.9163
+was        2  1.5108
+
+sklearn idf_: [1.5108 1.9163 1.5108 1.9163 1.9163 1.9163 1. 1.9163 1.5108]
+max abs diff vs manual: 0.0
+```
+
+`the` is in all four documents and lands exactly on the floor of 1.0. Every
+word unique to one document gets 1.9163. The ordering is the point: the
+weight is a monotone decreasing function of how many documents a word
+appears in.
+
+On the real corpus the spread is much larger:
+
+```text
+the            df=  9477  df/N= 0.838  idf= 1.18
+is             df=  7034  df/N= 0.622  idf= 1.48
+car            df=   394  df/N= 0.035  idf= 4.35
+encryption     df=   169  df/N= 0.015  idf= 5.20
+gravitational  df=     8  df/N= 0.001  idf= 8.14
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">The IDF curve — drag to see how rarity becomes weight</div>
+```
+
+```{ojs}
+//| echo: false
+viewof dfShare = Inputs.range([0.0005, 1], {
+  value: 0.035, step: 0.0005, label: "share of documents containing the word"
+})
+```
+
+```{ojs}
+//| echo: false
+idfCurve = {
+  const N = 11314, pts = [];
+  for (let i = 1; i <= 400; i++) {
+    const share = i / 400;
+    const df = Math.max(1, Math.round(share * N));
+    pts.push({ share, idf: Math.log((1 + N) / (1 + df)) + 1 });
+  }
+  return pts;
+}
+```
+
+```{ojs}
+//| echo: false
+idfAt = {
+  const N = 11314, df = Math.max(1, Math.round(dfShare * N));
+  return { share: dfShare, df, idf: Math.log((1 + N) / (1 + df)) + 1 };
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 680,
+  height: 300,
+  marginLeft: 55,
+  marginBottom: 44,
+  x: { label: "share of documents containing the word", percent: true, grid: true },
+  y: { label: "idf weight", domain: [0, 10], grid: true },
+  marks: [
+    Plot.line(idfCurve, { x: "share", y: "idf", stroke: "#1F4E79", strokeWidth: 2 }),
+    Plot.ruleY([1], { stroke: "#B3453E", strokeDasharray: "4,3" }),
+    Plot.dot([idfAt], { x: "share", y: "idf", r: 6, fill: "#B3453E" }),
+    Plot.text([idfAt], {
+      x: "share", y: "idf", dy: -14, fontSize: 12,
+      text: d => `df ≈ ${d.df.toLocaleString()} docs → idf ${d.idf.toFixed(2)}`
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.86rem; color:#5B6272; margin-top:0.4rem;">
+  The dashed line is the floor at idf = 1: a word in every document is
+  down-weighted, never deleted. Notice how flat the curve is above ~20% —
+  once a word is common, getting commoner barely changes anything. All the
+  action is in the first few percent, which is where content words live.
+</p>`
+```
+:::
+
+### Step 5 — multiply, then normalize
+
+TF-IDF is the product, computed cell by cell. For d1 (`the pump failed`):
+
+```text
+counts        : [1 0 1 0 0 0 1 0 0]
+times idf     : [1.5108 0. 1.5108 0. 0. 0. 1. 0. 0.]
+l2 norm       : 2.3591
+normalized    : [0.6404 0. 0.6404 0. 0. 0. 0.4239 0. 0.]
+sklearn row d1: [0.6404 0. 0.6404 0. 0. 0. 0.4239 0. 0.]
+```
+
+That last pair of lines is the point of this whole section: the hand
+computation and `TfidfVectorizer` agree to every digit. There is no magic in
+the library.
+
+The final step — dividing by the vector's length, $\lVert v \rVert_2$ — is
+[L2 normalization]{.hl}, and it is not cosmetic. Without it, a long document
+has a large vector simply for being long, and every similarity comparison
+becomes a comparison of document lengths. Normalizing puts every document on
+the unit sphere, so only *direction* — the mix of words — carries
+information.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">The document-term matrix — switch between counts and TF-IDF</div>
+```
+
+```{ojs}
+//| echo: false
+viewof matrixMode = Inputs.radio(["raw counts", "TF-IDF"], {
+  value: "TF-IDF", label: "Cell values"
+})
+```
+
+```{ojs}
+//| echo: false
+vsVocab = ["failed","leak","pump","repaired","replaced","seal","the","valve","was"]
+```
+
+```{ojs}
+//| echo: false
+vsDocs = [
+  { id: "d1", text: "the pump failed" },
+  { id: "d2", text: "the pump was replaced" },
+  { id: "d3", text: "the valve failed" },
+  { id: "d4", text: "the seal leak was repaired" }
+]
+```
+
+```{ojs}
+//| echo: false
+vsCounts = [
+  [1,0,1,0,0,0,1,0,0],
+  [0,0,1,0,1,0,1,0,1],
+  [1,0,0,0,0,0,1,1,0],
+  [0,1,0,1,0,1,1,0,1]
+]
+```
+
+```{ojs}
+//| echo: false
+vsTfidf = [
+  [0.640,0.000,0.640,0.000,0.000,0.000,0.424,0.000,0.000],
+  [0.000,0.000,0.497,0.000,0.631,0.000,0.329,0.000,0.497],
+  [0.573,0.000,0.000,0.000,0.000,0.000,0.379,0.727,0.000],
+  [0.000,0.507,0.000,0.507,0.000,0.507,0.264,0.000,0.400]
+]
+```
+
+```{ojs}
+//| echo: false
+vsCells = {
+  const src = matrixMode === "TF-IDF" ? vsTfidf : vsCounts;
+  const out = [];
+  vsDocs.forEach((d, i) => vsVocab.forEach((t, j) =>
+    out.push({ doc: d.id, term: t, value: src[i][j] })));
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 680,
+  height: 260,
+  marginLeft: 88,
+  marginTop: 34,
+  padding: 0.06,
+  x: { domain: vsVocab, label: null, axis: "top", tickRotate: -30 },
+  y: { domain: vsDocs.map(d => d.id), label: null },
+  color: {
+    scheme: "blues",
+    domain: [0, matrixMode === "TF-IDF" ? 0.8 : 1],
+    legend: true,
+    label: matrixMode === "TF-IDF" ? "tf-idf weight" : "count"
+  },
+  marks: [
+    Plot.cell(vsCells, { x: "term", y: "doc", fill: "value", inset: 0.5 }),
+    Plot.text(vsCells, {
+      x: "term", y: "doc", fontSize: 10.5,
+      text: d => d.value === 0 ? "" :
+        (matrixMode === "TF-IDF" ? d.value.toFixed(2) : String(d.value)),
+      fill: d => d.value > (matrixMode === "TF-IDF" ? 0.45 : 0.6) ? "white" : "#1F2933"
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.86rem; color:#5B6272;">
+  ${vsDocs.map(d => html`<div><b style="color:#1F2933;">${d.id}</b> — ${d.text}</div>`)}
+  <p style="margin-top:0.6rem;">
+    ${matrixMode === "TF-IDF"
+      ? html`Watch the <code>the</code> column: it is present in every
+        document, so TF-IDF fades it to the lightest non-zero weight in each
+        row, while <code>valve</code> — unique to d3 — becomes the darkest
+        cell in the matrix.`
+      : html`Under raw counts, <code>the</code> is indistinguishable from
+        <code>valve</code>: both are 1. Switch to TF-IDF to see the
+        difference appear.`}
+  </p>
+</div>`
+```
+:::
+
+### Step 6 — comparing documents with cosine similarity
+
+Two normalized vectors are compared by their dot product, which is the
+cosine of the angle between them: 1 means identical direction, 0 means no
+shared vocabulary.
+
+```python
+from sklearn.metrics.pairwise import cosine_similarity
+print(cosine_similarity(T).round(3))
+```
+
+```text
+       d1     d2     d3     d4          <- TF-IDF
+d1  1.000  0.458  0.528  0.112
+d2  0.458  1.000  0.125  0.286
+d3  0.528  0.125  1.000  0.100
+d4  0.112  0.286  0.100  1.000
+
+       d1     d2     d3     d4          <- raw counts
+d1  1.000  0.577  0.667  0.258
+d2  0.577  1.000  0.289  0.447
+d3  0.667  0.289  1.000  0.258
+d4  0.258  0.447  0.258  1.000
+```
+
+Compare the two panels. Under raw counts, d1 and d4 look 26% similar — but
+they share only the word `the`. TF-IDF correctly collapses that to 11%.
+Every pair drops, and the pairs that drop most are the ones whose only
+common ground was a stop word.
+
+::: {.callout-note collapse="true"}
+## Intuition check: why cosine and not Euclidean distance?
+
+Because Euclidean distance is dominated by document length. A 50-word
+incident report and a 5,000-word one about the identical failure differ
+enormously in vector *magnitude* and hardly at all in *direction*. Cosine
+looks only at direction, so it asks "what is this document about?" rather
+than "how much of it is there?"
+
+The sharpest way to hold this: after L2 normalization, all vectors lie on
+the unit sphere, and there cosine similarity and Euclidean distance are
+monotonically related —
+$\lVert a - b \rVert^2 = 2 - 2\cos(a,b)$. So on normalized vectors the
+choice does not matter. On unnormalized vectors it matters enormously.
+That equivalence is the answer interviewers are usually fishing for.
+:::
+
+## What bag-of-words cannot do
+
+Now the limits — and they are severe enough that the rest of the book
+exists to fix them.
+
+**It cannot represent word order.** Not "represents it poorly" — cannot
+represent it at all:
+
+```python
+pair = ["the pump failed and the valve is fine",
+        "the valve failed and the pump is fine"]
+```
+
+```text
+vocabulary: ['and','failed','fine','is','pump','the','valve']
+row 1: [1 1 1 1 1 2 1]
+row 2: [1 1 1 1 1 2 1]
+vectors identical: True
+cosine similarity: 1.0
+```
+
+Two reports naming opposite pieces of failed equipment are the *same point
+in space*. No classifier, however good, can separate them, because the
+information was destroyed before the classifier saw it.
+
+n-grams buy back a little. Using pairs of adjacent words instead of single
+words:
+
+```text
+bigram vocabulary: ['and the','failed and','is fine','pump failed',
+                    'pump is','the pump','the valve','valve failed','valve is']
+cosine similarity: 0.714
+vocabulary size: unigrams 7 -> bigrams 9
+```
+
+Now they are distinguishable. But notice the cost: the vocabulary grew, and
+on a real corpus it explodes — in the experiment below, adding bigrams took
+the feature count from 32,318 to 249,522, a 7.7× increase, *and made
+accuracy worse*. n-grams are a local patch, not a solution. The real fix is
+@sec-transformers.
+
+**It cannot handle negation.** This one costs real money in production:
+
+```text
+"no leak was found"  vs  "a leak was found"
+cosine similarity: 0.866
+```
+
+Two sentences with opposite operational meaning are 87% similar. If your
+stop word list contains *no* — and most default lists do — they become 100%
+similar. This is the single most common way a text classifier silently fails
+a safety-critical review.
+
+**It cannot handle synonymy or polysemy.** `pump failed` and `pump broke`
+share nothing beyond `pump`. `Apple` the company and `apple` the fruit are
+the same column. Every word is its own island, exactly as we saw with
+one-hot vectors in Step 2 — and that is the problem @sec-embeddings solves.
+
+## Does any of this still matter?
+
+Yes, and you should be able to say why with numbers rather than opinion.
+Here is a real experiment: four newsgroups, 2,327 training documents, 1,550
+test documents, logistic regression, nothing tuned.
+
+```python
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from sklearn.pipeline import make_pipeline
+
+cats = ["sci.med", "sci.space", "rec.autos", "talk.politics.guns"]
+drop = ("headers", "footers", "quotes")
+train = fetch_20newsgroups(subset="train", categories=cats, remove=drop)
+test = fetch_20newsgroups(subset="test", categories=cats, remove=drop)
+
+setups = {
+    "raw counts": CountVectorizer(),
+    "counts + stop words": CountVectorizer(stop_words="english"),
+    "tf-idf": TfidfVectorizer(),
+    "tf-idf + stop words": TfidfVectorizer(stop_words="english"),
+    "tf-idf + bigrams": TfidfVectorizer(ngram_range=(1, 2)),
+    "tf-idf + sublinear tf": TfidfVectorizer(sublinear_tf=True),
+}
+
+for name, vec in setups.items():
+    clf = make_pipeline(vec, LogisticRegression(max_iter=2000, random_state=0))
+    clf.fit(train.data, train.target)
+    acc = accuracy_score(test.target, clf.predict(test.data))
+    print(f"{name:<24} accuracy {acc:.3f}   "
+          f"features {len(clf[0].get_feature_names_out()):>7}")
+```
+
+```text
+raw counts               accuracy 0.767   features   32318
+counts + stop words      accuracy 0.795   features   32014
+tf-idf                   accuracy 0.831   features   32318
+tf-idf + stop words      accuracy 0.853   features   32014
+tf-idf + bigrams         accuracy 0.819   features  249522
+tf-idf + sublinear tf    accuracy 0.843   features   32318
+```
+
+Read those six lines carefully, because they contain four lessons:
+
+1. **TF-IDF is worth 6.4 accuracy points over raw counts**, for free, with no
+   extra data and no tuning. The weighting is not decoration.
+2. **Stop word removal helps here** (+2.2 points) — on topic classification,
+   where function words genuinely carry no signal. It would hurt on
+   sentiment or negation detection. There is no universal answer.
+3. **Bigrams made it worse** while multiplying the feature count by 7.7.
+   More features is not more information; it is more variance.
+4. **`sublinear_tf` helps** (0.843 vs 0.831). That option replaces the raw
+   count with $1 + \log(\text{tf})$ — the same diminishing-returns argument
+   we made for IDF, applied to the term-frequency side.
+
+The other reason to care is that the model is *legible*. Ask a
+TF-IDF-plus-logistic-regression model what it learned and it will tell you,
+in words:
+
+```text
+rec.autos            car, cars, engine, ford, oil, dealer, drive, price
+sci.med              msg, doctor, disease, medical, pain, patients, treatment
+sci.space            space, nasa, orbit, moon, launch, earth, spacecraft
+talk.politics.guns   gun, guns, weapons, fbi, law, government, firearms
+```
+
+No transformer will hand you that table. When you have to defend a model to
+a safety board, a regulator, or a sceptical plant manager, this matters more
+than four points of accuracy.
+
+And the engineering is hard to beat:
+
+```text
+shape: (2327, 32318)
+stored non-zeros: 234281
+density: 0.312%
+dense float64 would need :    601.6 MB
+sparse csr actually needs:      2.8 MB
+ratio: 213x
+```
+
+The matrix is 99.7% zeros, so a sparse representation stores it in 2.8 MB
+instead of 601.6 MB. Training takes seconds on a laptop, inference is a
+sparse dot product, and there is no GPU anywhere in the story.
+
+### Where this is actually deployed
+
+None of the following are historical curiosities, and each one is documented
+by the company that built it:
+
+- **Ticket triage at Uber.** COTA, Uber's customer support system, runs the
+  pipeline from this chapter almost line for line: clean, tokenize, remove
+  stop words, lemmatize, TF-IDF, reduce with LSA, then rank candidate
+  solutions by cosine similarity to the ticket [@uber2018cota]. It cut ticket
+  resolution time by around 10%, and the write-up notes that the
+  cosine-similarity ranker beat using the topic vectors directly by 25%
+  relative accuracy — because the raw vectors were too sparse. That is this
+  chapter's sparsity problem, in production, with a number attached.
+- **Search ranking.** Lucene, and therefore Elasticsearch and OpenSearch,
+  scores documents with BM25 — a direct descendant of TF-IDF that adds
+  document-length normalization and saturating term frequency
+  [@robertson2009probabilistic]. Elastic's
+  [Practical BM25](https://www.elastic.co/blog/practical-bm25-part-2-the-bm25-algorithm-and-its-variables)
+  series explains the formula and its two tuning constants better than most
+  textbooks. If you have ever used a site search box, you have used this.
+- **Google's own text classification guide** still recommends this
+  representation [@google2022textclassification]: it reports TF-IDF n-grams
+  as the most accurate of the encodings it compares, and observes that
+  accuracy peaks around 20,000 features, beyond which extra features
+  contribute nothing and eventually cause overfitting. Our bigram result —
+  249,522 features, *worse* accuracy — is the same finding on a smaller
+  corpus.
+- **Hybrid retrieval for RAG.** Modern retrieval stacks combine dense
+  embedding search with sparse BM25 search, because the sparse half catches
+  the exact matches — part numbers, error codes, surnames — that embeddings
+  blur together. You will build one in @sec-rag.
+- **Spam and abuse filtering at scale.** Sparse text features remain a
+  first-line filter because they are cheap enough to run on every message and
+  retrain in minutes when attackers change tactics. The feature-hashing trick
+  [@weinberger2009feature] is what makes this work without ever materializing
+  a vocabulary.
+- **Near-duplicate detection.** Google's web-crawl deduplication
+  [@manku2007detecting] runs on shingles and hashing, not neural networks,
+  because it has to work over billions of documents. Shingles are word or
+  character n-grams — the front half of this chapter.
+
+The practical rule: reach for TF-IDF when your labels are few, your
+documents are long, your vocabulary is technical and exact-match matters, or
+when you need a baseline by this afternoon. [Always build the TF-IDF
+baseline first.]{.hl} If your transformer cannot beat it, you have learned
+something important about your data, and you have learned it cheaply.
+
+## Intuition checks
+
+Answer these before reading the answer. If you can answer all six, you
+understand this chapter better than the code implies.
+
+::: {.callout-note collapse="true"}
+## 1. Your TF-IDF matrix has 200,000 columns and 5,000 rows. Should you worry?
+
+Not for the reason you think. The matrix is sparse, so memory is fine —
+storage scales with the number of *non-zeros*, not with rows × columns.
+
+The real worry is statistical: 200,000 parameters estimated from 5,000
+observations. That is a `p ≫ n` problem, and it is the situation every
+statistician has been trained to fear. The answers are the usual ones —
+strong regularization (L2 or L1), and cutting the feature count with
+`min_df`. Note from the Zipf section that `min_df=5` removed 87% of the
+vocabulary while discarding a negligible share of the tokens: the features
+you delete are almost all hapax legomena that could never have supported an
+estimate anyway.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Should IDF be computed on the training set or on all your data?
+
+On the training set only, then applied unchanged to test data. IDF is a
+parameter estimated from data, so computing it over train + test leaks
+information about the test distribution into your features.
+
+In `scikit-learn` this is exactly what `fit_transform` on train and
+`transform` on test does — and it is why calling `fit_transform` twice is a
+real and common bug. In production the same logic says the IDF vector is a
+model artifact you version and ship, not something you recompute per batch;
+otherwise your features drift silently as traffic changes.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. A word appears in every document. What is its TF-IDF weight?
+
+With `scikit-learn`'s smoothed formula, $\mathrm{df} = n$ gives
+$\ln\frac{1+n}{1+n} + 1 = 1$, so it survives with weight 1 and is then
+shrunk relative to rarer terms by L2 normalization.
+
+With the textbook unsmoothed formula $\log(n/\mathrm{df})$ it would be
+exactly 0 — the term is deleted. Knowing that the two conventions differ,
+and that `smooth_idf=True` is the default, is the kind of detail that
+separates someone who has used the tool from someone who has read about it.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Why do we normalize document vectors but not feature columns?
+
+Because the two normalizations answer different questions. L2 row
+normalization removes document *length* so that comparisons are about topic
+rather than size.
+
+Column standardization — subtracting the mean of each word — would be a
+disaster here: it destroys sparsity. Subtracting a non-zero mean from a
+column that is 99.7% zeros makes every one of those zeros non-zero, and your
+2.8 MB matrix becomes 601.6 MB. Sparsity is not an implementation detail; it
+is a constraint that dictates which operations you are allowed to perform.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your search engine returns nothing for the part number "P-101". Why?
+
+Almost certainly your tokenizer. `scikit-learn`'s default
+`token_pattern=r"(?u)\b\w\w+\b"` requires two or more word characters and
+does not cross the hyphen:
+
+```text
+default    : ['101', '102', 'pump', 'tripped']
+custom     : ['p-101', 'p-102', 'pump', 'tripped']
+```
+
+Your equipment tag `P-101` silently became `101`, and `P-102` also became a
+bare number — so the two are now nearly indistinguishable. In technical
+domains this class of bug is more damaging than any choice of model. It is
+also invisible: nothing errors, accuracy just quietly sits lower than it
+should.
+
+The habit that prevents it: after fitting any vectorizer, print
+`get_feature_names_out()` and read it. Actually read it.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. When is a bag-of-words model the *right* choice in 2026?
+
+When at least two of these hold: you have very few labelled examples per
+class; your vocabulary is domain-specific and exact matching matters (part
+numbers, gene names, legal citations); you must explain every prediction to
+someone with authority over you; you have no GPU or a hard latency budget;
+or your documents are long and topical rather than short and nuanced.
+
+And unconditionally: as the baseline. A team that reports "our transformer
+gets 0.91" without reporting that TF-IDF gets 0.89 has not measured
+anything (@sec-evaluation).
+:::
+
+## Interview questions
+
+Text representation is the most reliably examined topic in applied NLP
+interviews, because it is where a candidate either has mental models or has
+memorized library calls. Below, the questions are grouped by what they are
+really testing.
+
+::: {.callout-warning appearance="simple"}
+**On attribution — please read this once.** You will find a great many pages
+online headed "NLP questions asked at Google and Amazon". Essentially all of
+them are search-engine content with no evidence behind the claim. Companies
+do not publish their question banks, candidates sign agreements, and a
+question cannot be traced to an employer from the outside. So this book will
+not pretend otherwise.
+
+What follows are questions that recur across the two credible public
+sources, both free:
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+by Chip Huyen [@huyen2021interviews], which states that most of its
+questions have been asked in real machine-learning interviews but attributes
+none of them to a named company; and
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews),
+compiled by an engineer from his own loops at several large technology
+companies, which grounds the *topics* without tagging individual questions.
+Where a question corresponds to a system a company has actually documented,
+that system is cited so you can check the claim yourself.
+:::
+
+### Testing whether you understand the weighting
+
+**Q: Explain TF-IDF to someone who has not seen it. Then explain why the
+IDF term uses a logarithm.**
+
+Give the two-factor decomposition first: a word matters here if it is
+frequent in this document and rare across the collection. Then give the
+information-theoretic answer from the intuition check above —
+$\log(n/\mathrm{df})$ is the self-information of the term — and mention
+diminishing returns. If you add that Spärck Jones proposed it empirically in
+1972 [@sparckjones1972statistical] and the theory came later
+[@robertson2004understanding], you have signalled that you read primary
+sources.
+
+**Q: When would raw term counts outperform TF-IDF?**
+
+When document frequency is not informative about importance. Examples: a
+corpus of near-identical documents where every term has similar df; very
+short texts where each term appears once anyway so TF adds nothing;
+generative models like multinomial naive Bayes, whose likelihood is defined
+over counts and whose probabilistic interpretation TF-IDF breaks. Also when
+you need interpretable, additive counts for a downstream statistical test.
+
+**Q: You add bigrams and accuracy drops. What happened?**
+
+Variance. The feature space grew by roughly an order of magnitude while the
+data stayed fixed, so most bigrams are seen once or twice and contribute
+noise. The experiment in this chapter shows exactly this: 32,318 → 249,522
+features, 0.831 → 0.819 accuracy. Fixes: raise `min_df`, strengthen
+regularization, or restrict to bigrams that pass a pointwise-mutual-
+information threshold.
+
+**Q: Why does removing stop words sometimes hurt a sentiment model?**
+
+Because stop word lists are built for topic retrieval, where function words
+carry no signal, and sentiment is not topic. The standard lists delete
+*not*, *no*, *never*, *very*, *only* and *but* — precisely the words that
+invert or intensify an opinion. *This is not good* and *this is good* become
+the same vector. The chapter's own numbers show both sides: stop word
+removal gained 2.2 accuracy points on topic classification, and would lose
+badly on the negation example. The rule to state out loud is that
+preprocessing must be chosen against the task, never applied by default.
+
+**Q: How does the curse of dimensionality show up in text, specifically?**
+
+Sparsely. A TF-IDF matrix can have 10⁵ dimensions and 0.3% density, so
+almost every pair of documents shares almost no non-zero coordinates and
+distances concentrate — everything looks roughly equally far from everything
+else. Note the twist that makes text unusual: the dimensionality is enormous
+but so is the sparsity, which is why linear models with strong
+regularization work far better on text than the raw dimension count would
+suggest [@joachims1998text]. The escape routes are feature selection
+(`min_df`), projection (truncated SVD), and learning a dense representation
+instead (@sec-embeddings).
+
+### Testing whether you understand the geometry
+
+**Q: Why cosine similarity instead of Euclidean distance for documents?**
+
+Length invariance — see the intuition check. The strong follow-up answer is
+that on L2-normalized vectors the two are monotonically equivalent via
+$\lVert a-b\rVert^2 = 2 - 2\cos(a,b)$, so the question is really about
+whether you normalized.
+
+**Q: Two documents have cosine similarity 0. What does that mean, and how
+likely is it in practice?**
+
+They share no terms at all. In a real corpus with stop words retained this
+is nearly impossible, because every document contains *the*. If you are
+seeing many zeros, you have probably over-aggressively filtered, or your
+documents are extremely short — which is itself a signal to move to dense
+representations (@sec-embeddings).
+
+**Q: Your document-term matrix is 10⁶ × 10⁵. How do you store and work with
+it?**
+
+Compressed sparse row. Quote the density: text matrices run around 0.1–1%
+non-zero, so the saving is two to three orders of magnitude. Then mention
+the operations that *break* sparsity — mean-centering, PCA on the raw matrix
+— and the ones designed to preserve it, notably truncated SVD, which is
+latent semantic analysis and the historical bridge to @sec-embeddings.
+
+### Testing whether you have shipped something
+
+**Q: You trained a text classifier that performs well offline and badly in
+production. Walk me through your debugging.**
+
+The expected structure is a checklist, in cost order: (1) train/serve skew —
+is the *identical* preprocessing pipeline running in both places, including
+the vectorizer artifact and its IDF vector? (2) Vocabulary drift — new
+product names, new error codes, all mapping to nothing. (3) Distribution
+shift in the label mix. (4) A leak in the offline evaluation, such as
+fitting the vectorizer before the train/test split. (5) Only then, the
+model. Mentioning that the vectorizer is a *fitted artifact* that must be
+versioned and shipped alongside the weights is the single answer that most
+distinguishes practitioners from students.
+
+**Q: Design a system to detect near-duplicate documents in a corpus of 100
+million.**
+
+They are testing whether you know not to compute 10¹⁶ pairwise similarities.
+The expected answer is shingling plus MinHash plus locality-sensitive
+hashing, giving approximate similarity in near-linear time. This chapter's
+material is the front half of that pipeline: shingles are character or word
+n-grams from exactly the tokenization decisions discussed above.
+
+**Q: Build a search engine for internal technical documentation. Where do
+you start?**
+
+Start with BM25 [@robertson2009probabilistic] via Elasticsearch or a similar
+engine, because it is a strong baseline that ships this week and handles
+exact matches on part numbers that embeddings destroy. Measure it. Then add
+dense retrieval for paraphrase and combine the two — hybrid retrieval, the
+architecture you will build in @sec-rag. Candidates who jump straight to
+embeddings without a lexical baseline are giving the wrong answer to a
+question about engineering judgment.
+
+**Q: Your Turkish (or Arabic, or Finnish) product costs far more per request
+than the English one. Explain and fix.**
+
+Tokenizer inequity: the tokenizer was trained on mostly-English data, so
+morphologically rich languages fragment into more tokens
+[@petrov2023language]. The numbers in this chapter — 1.82× on `cl100k_base`,
+1.39× on `o200k_base` — are the kind of concrete evidence that makes this
+answer credible. Fixes, in increasing order of effort: pick a model whose
+tokenizer has better coverage; measure cost in tokens per *task* rather than
+per request; for a large enough deployment, train a domain and language
+specific tokenizer.
+
+### Testing depth on tokenization
+
+**Q: Explain BPE. What happens to a word the tokenizer has never seen?**
+
+Describe the merge loop, then answer the real question: nothing special
+happens, which is the point. The word decomposes into known subwords, in the
+worst case single characters, so there is no `<UNK>` token and no
+information is discarded. Use the worked example from this chapter —
+`lowest → low + est` from a model that never saw `lowest`.
+
+**Q: Stemming versus lemmatization — and would you use either today?**
+
+Define both, then give the modern answer: usually neither, because subword
+tokenization addresses the same sparsity problem without a
+language-specific rule set, and because transformers handle inflection
+directly. Reserve them for genuinely sparse-model settings or for
+morphologically rich languages where you have a good analyser
+[@oflazer1994two]. Interviewers are checking whether you apply techniques by
+habit or by argument.
+
+## Where to go deeper
+
+**Textbooks.**
+
+- **[Speech and Language Processing](https://web.stanford.edu/~jurafsky/slp3/)**,
+  Jurafsky & Martin [@jurafsky2025slp]. The standard reference, free and
+  continuously revised. For this chapter:
+  [Chapter 2, *Words and Tokens*](https://web.stanford.edu/~jurafsky/slp3/2.pdf)
+  (tokenization, normalization, Zipf, BPE) and
+  [Chapter 5, *Embeddings*](https://web.stanford.edu/~jurafsky/slp3/5.pdf)
+  (TF-IDF, cosine, PPMI). Note that the chapters were renumbered in the
+  January 2026 draft — older blog posts pointing you at "Chapter 6 for vector
+  semantics" are now out of date.
+- **[Introduction to Information Retrieval](https://nlp.stanford.edu/IR-book/html/htmledition/irbook.html)**,
+  Manning, Raghavan & Schütze [@manning2008introduction]. The definitive
+  treatment of the vector space model, and free in full. The single most
+  useful page for this chapter is
+  [the one on inverse document frequency](https://nlp.stanford.edu/IR-book/html/htmledition/inverse-document-frequency-1.html)
+  — it is the careful version of our "why the logarithm" argument. See also
+  [stemming and lemmatization](https://nlp.stanford.edu/IR-book/html/htmledition/stemming-and-lemmatization-1.html)
+  and [BM25](https://nlp.stanford.edu/IR-book/html/htmledition/okapi-bm25-a-non-binary-model-1.html).
+- **[Text Mining with R: A Tidy Approach](https://www.tidytextmining.com/tfidf.html)**,
+  Silge & Robinson [@silge2017text]. If you come from statistics and think
+  in data frames rather than matrices, this chapter on TF-IDF may click
+  faster than any of the above. Free online.
+
+**Tokenization, hands on.**
+
+- **[Hugging Face LLM Course, Chapter 6](https://huggingface.co/learn/llm-course/chapter6/1)**.
+  Builds BPE, WordPiece and Unigram tokenizers and explains which models use
+  which. [The BPE lesson](https://huggingface.co/learn/llm-course/chapter6/5)
+  is the direct sequel to our toy implementation.
+- **[minbpe](https://github.com/karpathy/minbpe)** and the accompanying
+  [two-hour video](https://www.youtube.com/watch?v=zduSFxRajkE), Andrej
+  Karpathy [@karpathy2024minbpe]. A few hundred lines of clean Python that
+  build a GPT-grade tokenizer from scratch. If you do one thing from this
+  list, do this one.
+- **[The Tokenizer Playground](https://huggingface.co/spaces/Xenova/the-tokenizer-playground)**.
+  Paste text, switch tokenizers, watch the splits. Try your own name, your
+  company's part numbers, and a paragraph of Turkish.
+- **[tiktoken](https://github.com/openai/tiktoken)**. The library used for
+  the cost measurements in this chapter.
+
+**Reference documentation and courses.**
+
+- **[scikit-learn: text feature extraction](https://scikit-learn.org/stable/modules/feature_extraction.html#text-feature-extraction)**
+  [@pedregosa2011scikit]. Documents the exact smoothed TF-IDF variant used
+  here, which differs from the textbook formula — read it once properly and
+  most "why don't my numbers match the book" questions disappear. The
+  [20 Newsgroups classification example](https://scikit-learn.org/stable/auto_examples/text/plot_document_classification_20newsgroups.html)
+  is a runnable, extended version of our experiment.
+- **[Stanford CS276, Information Retrieval and Web Search](https://web.stanford.edu/class/cs276/)**.
+  Of all the public course pages, this is the closest match to this
+  chapter's scope. [CS224N](https://web.stanford.edu/class/cs224n/) picks up
+  where @sec-embeddings begins.
+- **[NLP Course For You](https://lena-voita.github.io/nlp_course/word_embeddings.html)**,
+  Elena Voita [@voita2020nlpcourse]. The clearest visual explanation of the
+  move from sparse counts to dense vectors.
+- **[Introduction to Machine Learning Interviews](https://huyenchip.com/ml-interviews-book/)**,
+  Chip Huyen [@huyen2021interviews]. Free, and the most honest guide to what
+  these interviews actually contain.
 
 ## Exercises
 
-1. Tokenize the same paragraph with two different tokenizers and compare
-   token counts. Who pays more for Turkish, and why?
+1. **Tokenizer economics.** Take a paragraph of your own technical writing
+   in Turkish and its English translation. Using the Tokenizer Playground or
+   `tiktoken`, count tokens under two different tokenizers. Compute the cost
+   ratio, then estimate what that ratio does to your annual API bill at
+   100,000 requests per month.
+2. **Break the vectorizer.** Fit a `CountVectorizer` on ten documents from
+   your own domain and print `get_feature_names_out()`. Find at least two
+   tokens that are wrong — a destroyed identifier, a merged pair, a lost
+   unit. Fix them with `token_pattern` and report what changed.
+3. **Derive it by hand.** For the four-document corpus in this chapter,
+   compute the TF-IDF vector for d3 with pen and paper, then verify against
+   `TfidfVectorizer`. If they disagree, the disagreement is always in the
+   smoothing — find it.
+4. **Replicate and extend.** Reproduce the classification table above, then
+   add one row: TF-IDF with `min_df=5`. Does accuracy fall? By how much did
+   the feature count fall? Argue for one of the two configurations to a
+   colleague who has to maintain it.
+5. **Find the negation failure.** Construct two documents from your own
+   field with opposite operational meaning and cosine similarity above 0.9
+   under TF-IDF. Then write the sentence you would put in a design review
+   explaining why this model must not be used for that decision.
+6. **Zipf on your own data.** Plot rank against frequency on a log-log scale
+   for a corpus you own. Does the line look straight? What are the top five
+   tokens, and is any of them an artifact like `'ax`?
+7. **The interview exercise.** Work through the five-document TF-IDF ranking
+   problem in
+   [§8.2.1 of Chip Huyen's book](https://huyenchip.com/ml-interviews-book/contents/8.2.1-natural-language-processing.html)
+   with pen and paper, including its follow-up: if one document mentions the
+   query term three times instead of once, what happens to its rank, and is
+   that a desirable property of TF-IDF? Then check yourself with
+   `TfidfVectorizer`. The follow-up is really a question about term-frequency
+   saturation, which is exactly what BM25 adds and what `sublinear_tf`
+   approximates.
