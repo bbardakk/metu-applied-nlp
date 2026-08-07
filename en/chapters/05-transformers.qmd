@@ -1,0 +1,286 @@
+# Transformers and Attention {#sec-transformers}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Chapter status: core sections drafted, later sections in outline.** The two
+interactive explorers below are fully functional.
+:::
+
+**Learning objectives.** After this chapter you can:
+
+- explain self-attention as a *learned weighted average* over token representations;
+- read the equation $\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\big(QK^{\top}/\sqrt{d_k}\big)\,V$ term by term;
+- describe why multiple heads exist and what different heads specialize in;
+- explain how a model turns scores into text — and what temperature, top-k, and top-p actually do to the distribution.
+
+## The problem attention solves
+
+By @sec-language-models we could predict the next word, but our recurrent
+models had a bottleneck: everything the model knew about the sentence had to
+be squeezed through a fixed-size state, one step at a time. Long-range
+relationships — a pronoun and the noun it refers to, a verb and its distant
+subject — kept getting lost.
+
+The Transformer's answer [@vaswani2017attention] is almost embarrassingly
+direct: [let every token look at every other token, and learn how much each
+one matters]{.hl}. If you have ever computed a weighted average, you already
+own the core intuition. Attention is a weighted average of token vectors
+where *the weights themselves are predicted from the data*.
+
+## Self-attention, step by step
+
+Each token's vector is projected three ways — a **query** ("what am I looking
+for?"), a **key** ("what do I contain?"), and a **value** ("what do I pass
+along if selected?"). The score between token $i$ and token $j$ is the dot
+product $q_i \cdot k_j$, scaled and pushed through a softmax so each row
+becomes a probability distribution:
+
+$$
+\operatorname{Attention}(Q, K, V) = \operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right) V
+$$
+
+That softmax row is exactly the set of weights in the weighted average. A
+statistician's translation: for every token, the model runs a tiny,
+data-dependent regression over the whole sentence deciding *which other
+tokens are informative right now*.
+
+### Explore: what is a head looking at?
+
+Different attention heads learn different, often interpretable, habits. The
+widget below shows a stylized attention matrix for one sentence. Each **row**
+is a token doing the looking; each **column** is a token being looked at;
+darker means more weight. Switch heads and watch the pattern change —
+especially the row for `it`.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Attention head explorer — “The robot poured coffee because it was ready.”</div>
+```
+
+```{ojs}
+//| echo: false
+viewof headChoice = Inputs.radio(
+  [
+    "Pronoun head — what does “it” attend to?",
+    "Previous-token head",
+    "Uniform head (bag of words)"
+  ],
+  { value: "Pronoun head — what does “it” attend to?", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+attnData = {
+  const tokens = ["The", "robot", "poured", "coffee", "because", "it", "was", "ready", "."];
+  const n = tokens.length;
+  const M = Array.from({ length: n }, () => new Array(n).fill(0));
+
+  if (headChoice.startsWith("Previous")) {
+    for (let i = 0; i < n; i++) {
+      if (i === 0) { M[i][i] = 1; }
+      else { M[i][i - 1] = 0.82; M[i][i] = 0.18; }
+    }
+  } else if (headChoice.startsWith("Uniform")) {
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] = 1 / n;
+  } else {
+    // Pronoun (coreference-flavored) head
+    for (let i = 0; i < n; i++) { M[i][i] = 0.62; if (i > 0) M[i][i - 1] = 0.38; }
+    const it = tokens.indexOf("it");
+    M[it] = new Array(n).fill(0);
+    M[it][tokens.indexOf("robot")]  = 0.46;  // is “it” the robot…
+    M[it][tokens.indexOf("coffee")] = 0.34;  // …or the coffee?
+    M[it][it] = 0.12;
+    M[it][tokens.indexOf("ready")]  = 0.08;
+  }
+
+  const cells = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++)
+      cells.push({ from: tokens[i], to: tokens[j], w: M[i][j] });
+  return { tokens, cells };
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 640,
+  height: 480,
+  marginLeft: 70,
+  marginBottom: 60,
+  x: { domain: attnData.tokens, label: "…attends to (key)", tickRotate: -35 },
+  y: { domain: [...attnData.tokens].reverse(), label: "token (query)…" },
+  color: { type: "linear", range: ["#F2F5F5", "#0E7C7B"], label: "attention weight", legend: true },
+  marks: [
+    Plot.cell(attnData.cells, {
+      x: "to", y: "from", fill: "w", inset: 1.5, rx: 4,
+      title: d => `${d.from} → ${d.to}: ${d.w.toFixed(2)}`
+    })
+  ]
+})
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+The ambiguity in the pronoun head is real, and it is the classic
+*Winograd* setup: in "…because it was **ready**", `it` is probably the
+coffee; swap in "…because it was **empty**" and `it` flips to the pot.
+Resolving that takes world knowledge — which is exactly what large-scale
+pretraining buys.
+:::
+:::
+
+<!-- TODO: add the Q/K/V worked numeric example (3 tokens, d=4) here. -->
+
+## Multi-head attention, positions, and the block
+
+<!-- TODO(draft): why h parallel heads; concatenation + output projection;
+     positional information (learned vs RoPE); residual + layer norm; the
+     full Transformer block diagram. Port figures from the CME 295-based
+     workshop deck. -->
+
+One head is one habit; real models run dozens in parallel and mix the
+results. Because attention itself is order-blind, position must be injected
+explicitly — the model literally cannot tell "dog bites man" from "man bites
+dog" without it.
+
+## From scores to text: decoding
+
+A language model's forward pass ends in a vector of **logits** — one raw
+score per vocabulary token. What happens next is not learning; it is a
+[sampling policy you control at inference time]{.hl}, and it changes the
+character of the output more than most people expect.
+
+- **Temperature** $\tau$ rescales logits before the softmax:
+  $p_i \propto \exp(z_i/\tau)$. Low $\tau$ sharpens, high $\tau$ flattens.
+- **Top-k** keeps only the $k$ highest-probability tokens, then renormalizes.
+- **Top-p (nucleus)** keeps the smallest set of tokens whose cumulative
+  probability exceeds $p$, then renormalizes [@holtzman2020curious].
+
+### Explore: temperature, top-k, and top-p
+
+The model has just read *"After the lecture, the students were completely
+____"* and produced the logits below. Gray bars show the raw softmax
+distribution; teal bars show what survives your sampling policy, after
+renormalization. Try $\tau = 0.2$, then $\tau = 1.8$. Then cut the tail with
+top-p $= 0.6$.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Sampling policy explorer — the same logits, reshaped</div>
+```
+
+```{ojs}
+//| echo: false
+viewof temperature = Inputs.range([0.1, 2.0], { value: 1.0, step: 0.05, label: "Temperature τ" })
+```
+```{ojs}
+//| echo: false
+viewof topK = Inputs.range([1, 12], { value: 12, step: 1, label: "Top-k" })
+```
+```{ojs}
+//| echo: false
+viewof topP = Inputs.range([0.05, 1.0], { value: 1.0, step: 0.05, label: "Top-p (nucleus)" })
+```
+
+```{ojs}
+//| echo: false
+samplingDist = {
+  const candidates = [
+    { token: "exhausted",   logit:  4.2 },
+    { token: "confused",    logit:  3.7 },
+    { token: "silent",      logit:  3.1 },
+    { token: "inspired",    logit:  2.9 },
+    { token: "lost",        logit:  2.5 },
+    { token: "quiet",       logit:  2.2 },
+    { token: "bored",       logit:  1.8 },
+    { token: "energized",   logit:  1.4 },
+    { token: "hungry",      logit:  1.0 },
+    { token: "transformed", logit:  0.5 },
+    { token: "purple",      logit: -0.5 },
+    { token: "recursive",   logit: -1.2 }
+  ];
+
+  // 1) temperature-scaled softmax
+  const ws = candidates.map(d => Math.exp(d.logit / temperature));
+  const Z = ws.reduce((a, b) => a + b, 0);
+  let rows = candidates
+    .map((d, i) => ({ ...d, p: ws[i] / Z }))
+    .sort((a, b) => b.p - a.p);
+
+  // 2) top-k filter
+  rows = rows.map((d, i) => ({ ...d, kept: i < topK }));
+
+  // 3) top-p (nucleus) filter over what survived top-k
+  let cum = 0;
+  rows = rows.map(d => {
+    const before = cum;
+    if (d.kept) cum += d.p;
+    return { ...d, kept: d.kept && before < topP };
+  });
+
+  // 4) renormalize the survivors
+  const Zk = rows.filter(d => d.kept).reduce((a, d) => a + d.p, 0) || 1;
+  return rows.map(d => ({ ...d, pFinal: d.kept ? d.p / Zk : 0 }));
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 640,
+  height: 380,
+  marginLeft: 100,
+  x: {
+    label: "P(next token)",
+    domain: [0, Math.max(0.4, ...samplingDist.map(d => d.pFinal), ...samplingDist.map(d => d.p)) * 1.15],
+    tickFormat: ".0%"
+  },
+  y: { domain: samplingDist.map(d => d.token), label: null },
+  marks: [
+    Plot.barX(samplingDist, { y: "token", x: "p", fill: "#D4DADF" }),
+    Plot.barX(samplingDist.filter(d => d.kept), { y: "token", x: "pFinal", fill: "#0E7C7B" }),
+    Plot.text(samplingDist.filter(d => d.kept), {
+      y: "token", x: "pFinal",
+      text: d => (d.pFinal * 100).toFixed(1) + "%",
+      dx: 6, textAnchor: "start", fill: "#5B6272", fontSize: 11
+    }),
+    Plot.ruleX([0])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+md`**${samplingDist.filter(d => d.kept).length} of 12** candidate tokens survive
+this policy. Gray = raw softmax at τ = ${temperature.toFixed(2)}; teal =
+renormalized sampling distribution.`
+```
+:::
+
+Notice what a low temperature does *not* do: it never changes the ranking,
+only the contrast. Top-k and top-p, by comparison, are hard cutoffs — they
+exist mainly to stop the model from ever picking `recursive` in a sentence
+about tired students. This trio is your first, cheapest lever in every
+applied system you will build in Part III.
+
+## Where to go deeper
+
+Three outside visualizations pair beautifully with this chapter: the
+[Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/)
+for step-by-step diagrams, Georgia Tech's
+[Transformer Explainer](https://poloclub.github.io/transformer-explainer/),
+which runs a live GPT-2 in your browser, and Brendan Bycroft's
+[3D LLM walkthrough](https://bbycroft.net/llm).
+
+## Exercises
+
+1. In the attention explorer, the pronoun head splits its weight roughly
+   46/34 between *robot* and *coffee*. Rewrite the sentence so a good model
+   should flip that ratio, and justify your edit.
+2. Show algebraically that temperature scaling never changes the argmax
+   token. What does this imply about greedy decoding?
+3. Set $\tau = 1$, top-k $= 12$. Find the smallest top-p that still keeps
+   at least four tokens. Explain the cumulative-mass logic behind your
+   answer.
+
+<!-- TODO: homework notebook link (Colab badge) once notebooks/ is added. -->
