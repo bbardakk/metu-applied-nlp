@@ -55,7 +55,7 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
 
 ## 3) İnteraktifler (OJS)
 
-Örnekler `en/chapters/05-transformers.qmd` içinde: attention-head explorer
+Örnekler `en/chapters/06-transformers.qmd` içinde: attention-head explorer
 ve temperature/top-k/top-p sampling explorer. Desen: `viewof x =
 Inputs.range(...)` girdileri → hesap hücresi → `Plot.plot(...)`. Tamamı
 tarayıcıda çalışır; build sırasında Python gerekmez. Yeni widget için bu
