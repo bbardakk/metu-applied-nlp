@@ -1,0 +1,1919 @@
+# Gömmeler: Koordinat Olarak Kelimeler {#sec-gommeler}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 3. bölüm](../../en/chapters/03-embeddings.html). Bu sayfadaki
+her sayı ve her kod çıktısı, gösterilen kodun Python 3.12 üzerinde
+`gensim` 4.4, `scikit-learn` 1.9 ve NumPy 2.5 ile çalıştırılmasıyla
+üretildi. Skip-gram, analoji ve alt kelime gezginleri tamamen
+etkileşimlidir.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- dağılımsal hipotezi açıklayabilir, onu önce bir matrise sonra koordinatlara dönüştürebilirsiniz;
+- PPMI'yı ve kesik SVD'yi türetebilir, her birinin neyi düzelttiğini söyleyebilirsiniz;
+- negatif örneklemeli skip-gram'ı sıfırdan yazabilir ve onu bir lojistik regresyon olarak anlatabilirsiniz;
+- verilen bir problem için word2vec, GloVe, fastText ve doc2vec arasında seçim yapıp seçiminizi savunabilirsiniz;
+- geometriyi teşhis edebilirsiniz — anizotropi, frekans etkileri, kosinüsün ilişkililik ile benzerliği birbirine karıştırması;
+- statik bir gömmenin tam olarak neyi yapamadığını söyleyebilirsiniz; ki bu, [5. bölümün](../../en/chapters/05-transformers.html) var oluş sebebidir.
+
+## Problem, tek cümlede
+
+[2. bölüm](02-metin-veri.qmd) rahatsız edici bir yerde bitmişti. İşe yarayan
+belge vektörleri kurduk, işe yaramayan kelime vektörleri kurduk. Her kelime
+bir one-hot sütunuydu: `pump`, `pumps` ve `impeller` birbirine dik üç ayrı
+yöndü; her biri diğerine, `pump`'ın `Wednesday`'e uzak olduğu kadar uzaktı.
+Herhangi iki farklı kelime arasındaki kosinüs benzerliği, kurgu gereği,
+her zaman tam olarak sıfırdı.
+
+Bu küçük bir kusur değil. Modelin kelimeler arasında hiçbir genelleme
+yapamaması demek. Eğitim verinizde *the pump failed*, test verinizde *the
+pumps failed* varsa, bir kelime torbası modeli aktarılabilir hiçbir şey
+öğrenmemiştir. İlk cümle hakkında bildiği her şey, ikinci cümlenin hiç
+dokunmadığı bir koordinatın altında dosyalanmıştır.
+
+Bu bölüm tam olarak bunu düzeltiyor ve düzeltme tek bir fikirden ibaret:
+[birim matrisi öğrenilmiş bir matrisle değiştirin]{.hl}. Her kelimeye kendi
+eksenini vermek yerine, her kelimeye kısa bir sayı listesi verin — 100, ya
+da 300 — ve bu listeyi, benzer biçimde kullanılan kelimeler birbirine yakın
+düşecek şekilde konumlandırın. İşte o liste bir [gömmedir]{.hl}.
+
+::: {.column-margin}
+İstatistikçinin çerçevesi: one-hot kodlama, kategori başına bir parametresi
+olan ve hiç havuzlama yapmayan doymuş bir modeldir. Gömme ise aynı modelin
+düşük ranklı kısıt altındaki hâlidir; bu da bir tür kısmi havuzlamadır.
+Benzer davranan kelimeler parametre paylaşmaya zorlanır ve genelleme
+*tam olarak* bu paylaşımdır.
+:::
+
+## Dağılımsal hipotez
+
+> *"Bir kelimeyi, arkadaşlarından tanırsınız."* — J.R. Firth, 1957
+> [@firth1957synopsis]
+
+Firth dilbilimsel yöntem üzerine konuşuyordu; işlevsel hâlini Zellig Harris
+zaten ortaya koymuştu [@harris1954distributional]. İddia şu: bir kelimenin
+anlamı, göründüğü bağlamların dağılımından geri kazanılabilir. İki kelime
+aynı boşluklarda görünüyorsa — *the ___ failed*, *replaced the ___*,
+*___ pressure* — anlamları her ne ise, benzer bir şey anlamaktadırlar.
+
+Bu bir bahistir ve bunun bir bahis olduğunu açıkça söylemekte fayda var.
+Konusal ve işlevsel benzerlik için olağanüstü iyi çalışır. Zıt anlamlılarda
+başarısız olur, çünkü *hot* ile *cold* neredeyse aynı arkadaş çevresinde
+gezer — ve bu bölümün ilerleyen kısmında bu başarısızlığı gerçek sayılarla
+izleyeceğiz.
+
+Ama bütün alanı mümkün kılan tek bir özelliği var: etikete ihtiyaç
+duymuyor. Denetim sinyali ham metnin kendisi. Gömmelerin, NLP'de "daha çok
+veri"nin "daha çok zekâ"yı güvenilir biçimde yendiği ilk yer olmasının
+sebebi budur.
+
+## Önce sayalım: eş-oluşum, PPMI, SVD
+
+word2vec'ten önce tarif şuydu: neyin neyin yanında geçtiğini say, yaygın
+kelimeler baskın çıkmasın diye sayımları yeniden ağırlıklandır, sonra
+çarpanlara ayır. Bunu elle bir kez yapmaya değer, çünkü sonraki yöntemleri
+çok daha az gizemli kılıyor — ve çünkü @levy2014neural, word2vec'in sessizce
+aynı şeyi yaptığını gösterdi.
+
+İşte her sayısını kontrol edebileceğiniz kadar küçük, on cümlelik bir
+derlem.
+
+```python
+import numpy as np
+
+corpus = [
+    "the king rules the castle",
+    "the queen rules the castle",
+    "the king eats an apple",
+    "the queen eats a banana",
+    "the royal castle is grand",
+    "a banana is sweet fruit",
+    "an apple is sweet fruit",
+    "the man eats an apple",
+    "the woman eats a banana",
+    "the king and queen are royal",
+]
+
+tokens = [s.split() for s in corpus]
+vocab = sorted({w for s in tokens for w in s})
+idx = {w: i for i, w in enumerate(vocab)}
+V = len(vocab)
+print("sentences:", len(corpus), " vocabulary:", V)
+print(vocab)
+```
+
+```text
+sentences: 10  vocabulary: 19
+['a', 'an', 'and', 'apple', 'are', 'banana', 'castle', 'eats', 'fruit', 'grand', 'is', 'king', 'man', 'queen', 'royal', 'rules', 'sweet', 'the', 'woman']
+```
+
+### 1. adım — neyin neyin yanında geçtiğini sayın
+
+Bir kelimenin bağlamı, etrafındaki penceredir. Pencere 2 demek: solda iki
+token, sağda iki token. Bu pencereyi her konum üzerinde kaydırın ve
+gördüğünüz her (kelime, komşu) çifti için ilgili hücreye bir ekleyin.
+
+```python
+W = 2
+C = np.zeros((V, V))
+for sent in tokens:
+    for i, w in enumerate(sent):
+        for j in range(max(0, i - W), min(len(sent), i + W + 1)):
+            if i != j:
+                C[idx[w], idx[sent[j]]] += 1
+```
+
+```text
+### raw co-occurrence, a few rows
+            eats   rules   royal   sweet     the  castle
+king           1       1       0       0       4       0
+queen          1       1       1       0       3       0
+apple          2       0       0       1       0       0
+banana         2       0       0       1       0       0
+```
+
+Yapı şimdiden görünüyor: `king` ile `queen` neredeyse aynı satıra sahip,
+`apple` ile `banana` da öyle. Bu, dağılımsal hipotezin iş başında olması
+demek. $C$'nin satırları *zaten* kelime vektörleridir — 19 boyutlu
+vektörler — ve one-hot'ların aksine birbirine dik değildirler.
+
+Ama 2. bölümün hastalığını taşıyorlar.
+
+```text
+### the same problem as chapter 2: 'the' dominates
+  the      total co-occurrences    22
+  eats     total co-occurrences    16
+  is       total co-occurrences    11
+  queen    total co-occurrences    10
+  king     total co-occurrences     9
+  a        total co-occurrences     8
+```
+
+`king` satırındaki en büyük sayı `the`; bu da krallar hakkında size hiçbir
+şey söylemiyor. Ham sayımlar ilişkiyi değil, fırsatı ölçer.
+
+### 2. adım — PPMI, yani IDF'in daha zeki kuzeni
+
+Sormak istediğimiz soru şu: *bu iki kelime, tesadüfün öngöreceğinden daha
+sık mı birlikte geçiyor?* Noktasal karşılıklı bilgi (pointwise mutual
+information) tam olarak bunu sorar.
+
+$$
+\mathrm{PMI}(w, c) = \log \frac{P(w, c)}{P(w)\,P(c)}
+$$
+
+$w$ ile $c$ bağımsızsa oran 1, PMI 0 olur. Birbirlerini çekiyorlarsa
+pozitif olur. İtiyorlarsa negatif — ve negatif PMI meşhur biçimde
+güvenilmezdir, çünkü iki kelimenin tesadüften *daha az* birlikte geçtiğini
+saptamak, daha çok geçtiğini saptamaktan çok daha fazla veri gerektirir.
+Bu yüzden sıfırdan kırpıyoruz ve buna [pozitif PMI]{.hl} diyoruz.
+
+$$
+\mathrm{PPMI}(w, c) = \max\!\left(0,\ \log \frac{c_{wc}\, N}{c_{w\ast}\, c_{\ast c}}\right)
+$$
+
+```python
+total = C.sum()
+row = C.sum(axis=1, keepdims=True)
+col = C.sum(axis=0, keepdims=True)
+with np.errstate(divide="ignore", invalid="ignore"):
+    pmi = np.log((C * total) / (row * col))
+pmi[~np.isfinite(pmi)] = 0.0
+PPMI = np.maximum(pmi, 0.0)
+```
+
+```text
+### PPMI for the same cells
+            eats   rules   royal   sweet     the  castle
+king        0.00    0.69    0.00    0.00    1.07    0.00
+queen       0.00    0.59    1.06    0.00    0.67    0.00
+apple       0.94    0.00    0.00    1.23    0.00    0.00
+banana      0.94    0.00    0.00    1.23    0.00    0.00
+```
+
+Ham tabloyla karşılaştırın. `apple`–`sweet` çiftinin sayımı 1'di, satırdaki
+en küçük sıfırdan farklı sayı; şimdi 1.23, yani satırdaki *en büyük* değer.
+Sayım küçüktü çünkü `sweet` nadir bir kelime, ve PPMI bunu bölerek dışarı
+atıyor.
+
+::: {.column-margin}
+PPMI ile IDF aynı içgüdünün farklı düzeylerde uygulanmış hâlidir. IDF bir
+kelimenin bir belge içinde ne kadar şaşırtıcı olduğunu sorar; PMI ise bir
+kelimenin başka bir kelimenin yanında ne kadar şaşırtıcı olduğunu. İkisi de
+gözlenen bir frekansı beklenen bir frekansa böler ve logaritmasını alır.
+:::
+
+::: {.callout-note collapse="true"}
+## Sezgi kontrolü: negatifleri saklamak yerine neden kırpıyoruz?
+
+Bir milyon token'lık bir derlemde iki kelimenin her biri 10 kez geçsin ve
+hiç birlikte görünmesin. Bağımsızlık altında beklenen eş-oluşum yaklaşık
+0,0002'dir; dolayısıyla sıfır gözlemek hiç de şaşırtıcı değildir — itme
+yönünde hiçbir kanıt taşımaz. Ama $\log(0)$, $-\infty$'dur ve
+yumuşatılsa bile vektöre baskın çıkan büyük bir negatif sayı üretir.
+
+Negatif PMI değerleri, tam da en az veriye sahip olduğunuz kelimeler için
+örnekleme gürültüsünün egemenliğindedir — ki bu kelimeler çoğunluktur.
+Kırpma, onları kestiremediğimizin kaba ama etkili bir itirafıdır. Hoş bir
+yan etkisi de var: matrisi seyrek tutar. @levy2015improving, iyi ayarlanmış
+PPMI'nın çoğu ölçütte word2vec ile yarışabildiğini buldu — insanların sinir
+ağlarına atfettiği farkın büyük kısmı, aslında hiperparametre özenindeki
+bir farkmış.
+:::
+
+### 3. adım — çarpanlara ayırın, çünkü 19 boyut hâlâ 19 fazla
+
+PPMI satırları şimdiden makul davranıyor:
+
+```text
+### nearest neighbours before factorization (PPMI rows, 19-D)
+  king     queen 0.55, are 0.55, man 0.45, the 0.37
+  apple    man 0.79, fruit 0.52, banana 0.40, is 0.31
+  eats     a 0.55, an 0.55, man 0.34, woman 0.34
+```
+
+`king` → `queen` doğru. `apple` → `man` değil ve bu öğretici: ikisi de
+*the man eats an apple* cümlesinde geçiyor, yani on cümlelik bir derlemde
+paylaşılan tek bir cümle sahte bir ilişki uydurmaya yetiyor. Seyrek sayım
+vektörleri, tam da verinin inceldiği yerde kırılgandır.
+
+Kesik tekil değer ayrışımı (SVD) bunu, her şeyi modellemeyi reddederek
+düzeltir. Yalnızca en büyük tekil değerlere sahip $d$ yönü tutun; kendine
+özgü eş-oluşumları — `apple`–`man` kazasını da — atarken tekrar eden yapıyı
+korumuş olursunuz.
+
+$$
+\mathrm{PPMI} \approx U_d \Sigma_d V_d^\top, \qquad
+\text{gömme} = U_d \Sigma_d
+$$
+
+```python
+U, S, Vt = np.linalg.svd(PPMI, full_matrices=False)
+emb = U[:, :d] * S[:d]
+```
+
+```text
+### singular values (how much structure each dimension carries)
+  5.75  4.76  4.03  3.71  3.64  3.08  3.03  2.80
+  first 2 dimensions hold 36.8% of the variance
+  first 5 dimensions hold 65.4% of the variance
+
+### nearest neighbours after SVD to 5 dimensions
+  king     queen 0.90, are 0.88, the 0.74, castle 0.65
+  apple    banana 1.00, woman 0.86, man 0.85, fruit 0.74
+  eats     an 0.95, a 0.95, man 0.64, woman 0.63
+  castle   are 0.82, is 0.80, king 0.65, queen 0.61
+```
+
+`apple`'ın en yakın komşusu artık 0.79'luk `man` değil, 1.00'lık `banana`.
+Hiçbir şey eklenmedi — aynı sayımlar, sıkıştırıldı — ama gösterimi beş
+boyuttan geçmeye zorlamak, modeli tekrar etmeyen tesadüf yerine tekrar eden
+örüntüyü tercih etmeye itti.
+
+Bu, gizli anlambilimsel çözümlemedir (latent semantic analysis,
+@deerwester1990indexing) ve word2vec'ten yirmi yıldan fazla eskidir.
+
+```text
+### compression
+  one-hot / count row : 19 numbers per word
+  svd embedding       : 5 numbers per word
+  any two one-hots    : cosine 0.00 (always)
+  king vs queen (2-D) : cosine 0.996
+  king vs banana(2-D) : cosine 0.141
+```
+
+::: {.callout-warning appearance="simple"}
+**Fark etmeye değer bir ayrıntı, çünkü bölümün sonunda geri gelecek.**
+Bu oyuncak uzayda her kelimenin birinci koordinatı *negatif*. Bütün
+kelimelerin işaretini paylaştığı bir boyut, onların hiçbirini birbirinden
+ayıramaz — bu ortak bir yöndür, karşıtlık taşıyan bir yön değil. Dolayısıyla
+1. ve 2. boyutu çizmek resmin yarısını çöpe atar; aşağıdaki şekil bu yüzden
+2. ve 3. boyutu çiziyor.
+
+Gerçek gömme uzayları da aynı kusuru büyük ölçekte taşır; adı
+[anizotropi]{.hl} ve bölümün ilerisinde GloVe üzerinde ölçeceğiz.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">On cümle, iki koordinata indirgendi — SVD'nin 2. ve 3. boyutu</div>
+```
+
+```{ojs}
+//| echo: false
+toyPts = [
+  {w: "king", x: -0.824, y: -0.667, g: "krallık"},
+  {w: "queen", x: -1.585, y: -0.321, g: "krallık"},
+  {w: "royal", x: -1.163, y: 1.871, g: "krallık"},
+  {w: "castle", x: -0.324, y: -1.489, g: "krallık"},
+  {w: "rules", x: -0.595, y: 0.680, g: "krallık"},
+  {w: "man", x: 0.292, y: -0.170, g: "insan"},
+  {w: "woman", x: 0.249, y: -0.115, g: "insan"},
+  {w: "apple", x: 1.026, y: -0.015, g: "yiyecek"},
+  {w: "banana", x: 0.978, y: 0.048, g: "yiyecek"},
+  {w: "fruit", x: 1.388, y: 0.514, g: "yiyecek"},
+  {w: "sweet", x: 1.655, y: 0.147, g: "yiyecek"},
+  {w: "eats", x: 0.661, y: -0.070, g: "yiyecek"}
+]
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 420, marginLeft: 55, marginBottom: 45,
+  x: {label: "2. boyut", grid: true, domain: [-2.1, 2.1]},
+  y: {label: "3. boyut", grid: true, domain: [-2.0, 2.3]},
+  color: {legend: true, domain: ["krallık", "insan", "yiyecek"],
+          range: ["#0E7C7B", "#C1666B", "#5B6272"]},
+  marks: [
+    Plot.ruleY([0], {stroke: "#E3E7EC"}),
+    Plot.ruleX([0], {stroke: "#E3E7EC"}),
+    Plot.dot(toyPts, {x: "x", y: "y", fill: "g", r: 6}),
+    Plot.text(toyPts, {x: "x", y: "y", text: "w", dy: -13, fontSize: 12})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.85rem; color:#5B6272; margin-top:0.4rem;">
+Krallık solda, yiyecek sağda, insanlar arada — sadece on cümleden, başka
+hiçbir şeyden değil. <code>man</code> ile <code>woman</code> neredeyse üst
+üste düşüyor, çünkü bu derlemde tıpatıp aynı biçimde kullanılıyorlar.</p>`
+```
+:::
+
+## Saymaktan tahmin etmeye: word2vec
+
+2013'te Mikolov ve arkadaşları matrisi tümüyle atlayan bir yöntem yayımladı
+[@mikolov2013efficient; @mikolov2013distributed]. Eş-oluşumları sayıp
+çarpanlara ayırmak yerine, bağlamı *tahmin eden* bir sınıflandırıcı eğitin —
+sonra sınıflandırıcıyı atın, ağırlıklarını saklayın.
+
+[Skip-gram]{.hl} formülasyonu: bir merkez kelime verildiğinde, etrafındaki
+kelimeleri tahmin et. Derlemin üzerinde bir pencere kaydırın; her konum
+eğitim örnekleri üretir.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Skip-gram — bir cümle yazın, eğitim çiftlerinin belirişini izleyin</div>
+```
+
+```{ojs}
+//| echo: false
+viewof sgSentence = Inputs.text({
+  label: "Cümle",
+  value: "the pump failed during the night shift",
+  width: 420
+})
+```
+
+```{ojs}
+//| echo: false
+viewof sgWindow = Inputs.range([1, 4], {label: "Pencere boyu", step: 1, value: 2})
+```
+
+```{ojs}
+//| echo: false
+sgTokens = (sgSentence || "").toLowerCase().split(/\s+/).filter(t => t.length)
+```
+
+```{ojs}
+//| echo: false
+viewof sgCentre = Inputs.range([0, Math.max(0, sgTokens.length - 1)],
+  {label: "Merkez konumu", step: 1, value: 1})
+```
+
+```{ojs}
+//| echo: false
+sgPairs = {
+  const out = [];
+  sgTokens.forEach((w, i) => {
+    for (let j = Math.max(0, i - sgWindow);
+         j <= Math.min(sgTokens.length - 1, i + sgWindow); j++) {
+      if (i !== j) out.push({centre: w, context: sgTokens[j], ci: i, cj: j});
+    }
+  });
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;">
+  <div style="margin:0.5rem 0 0.7rem 0;">
+    ${sgTokens.map((t, i) => {
+      const c = i === sgCentre;
+      const inWin = Math.abs(i - sgCentre) <= sgWindow && i !== sgCentre;
+      return html`<code style="background:${c ? "#0E7C7B" : inWin ? "#D6EAE9" : "#F4F6F8"};
+        color:${c ? "#fff" : "#1E2229"};
+        border:1px solid ${c ? "#0E7C7B" : "#E3E7EC"}; border-radius:0.35em;
+        padding:0.12em 0.42em; margin-right:0.25em;">${t}</code>`;
+    })}
+  </div>
+  <p style="color:#5B6272; margin:0 0 0.5rem 0;">
+    <b>${sgTokens[sgCentre] ?? "—"}</b> merkezi
+    <b>${sgPairs.filter(p => p.ci === sgCentre).length}</b> çift üretiyor.
+    Cümlenin tamamı <b>${sgPairs.length}</b> çift üretiyor.
+  </p>
+  <div>
+    ${sgPairs.filter(p => p.ci === sgCentre).map(p => html`<span
+      style="display:inline-block; border:1px solid #E3E7EC; border-radius:0.4em;
+      padding:0.15em 0.5em; margin:0 0.3em 0.3em 0; font-size:0.85rem;">
+      (<b>${p.centre}</b>, ${p.context})</span>`)}
+  </div>
+  <p style="color:#5B6272; margin-top:0.7rem; font-size:0.85rem;">
+    Denetim sinyalinin tamamı bu. Etiket yok, anotasyon yok — sadece metin,
+    çiftlere kesilmiş hâlde. 6 milyar token'lık bir derlem, pencere 5 ile
+    bunlardan yaklaşık 60 milyar tane üretir.</p>
+</div>`
+```
+:::
+
+### Negatif örnekleme bir lojistik regresyondur
+
+400.000 kelimelik bir sözlükten bir bağlam kelimesi tahmin etmek, milyarlarca
+çiftin her biri için 400.000 sınıf üzerinde softmax almak demektir. Bu
+umutsuz bir iş. word2vec'i pratik kılan numara, bunu bir istatistikçinin
+anında tanıyacağı bir soruyla değiştirir [@mikolov2013distributed]:
+
+> Verilen bu kelime çifti, derlemden gelen *gerçek* bir çift mi, yoksa benim
+> uydurduğum bir çift mi?
+
+Bu, ikili sınıflandırmadır. Her gerçek $(w, c)$ çifti için, bir gürültü
+dağılımından $K$ tane sahte bağlam kelimesi çekin ve onları 0 ile
+etiketleyin. Sonra doğrusal öngörücüsü iki kelimenin vektörlerinin iç çarpımı
+olan bir lojistik regresyon uydurun:
+
+$$
+P(\text{gerçek} \mid w, c) = \sigma(\mathbf{v}_w \cdot \mathbf{u}_c),
+\qquad \sigma(z) = \frac{1}{1 + e^{-z}}
+$$
+
+ve her zamanki log kaybı en küçükleyin:
+
+$$
+\mathcal{L} = -\log \sigma(\mathbf{v}_w \cdot \mathbf{u}_c)
+- \sum_{k=1}^{K} \log \sigma(-\mathbf{v}_w \cdot \mathbf{u}_{n_k})
+$$
+
+Gizli katman yok, sigmoid dışında doğrusal olmayan hiçbir şey yok ve
+"gömme" dediğimiz şey, her kelimeye iliştirilmiş katsayı vektöründen ibaret.
+Hayatınızda bir kez lojistik regresyon uydurduysanız, word2vec'in %99'unu
+uydurmuşsunuz demektir. Alışılmadık tek yan, *hem* öngörücülerin *hem* de
+katsayıların öğreniliyor olması; bunu bir regresyon değil, bir çarpanlara
+ayırma yapan da budur.
+
+::: {.column-margin}
+Bir değil, iki matris öğrenilir: kelimeler merkez rolündeyken
+$\mathbf{v}_w$, bağlam rolündeyken $\mathbf{u}_c$. Neredeyse herkes
+$\mathbf{u}$'yu atıp $\mathbf{v}$'yi saklar. Toplamak bazen biraz işe yarar;
+GloVe'un yazarları bunu önerir [@pennington2014glove].
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Amaç fonksiyonu — iç çarpımı sürükleyin, kaybı izleyin</div>
+```
+
+```{ojs}
+//| echo: false
+viewof nsDot = Inputs.range([-6, 6], {label: "v·u (iç çarpım)", step: 0.1, value: 0.0})
+```
+
+```{ojs}
+//| echo: false
+nsSigmoid = z => 1 / (1 + Math.exp(-z))
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 260, marginLeft: 55, marginBottom: 42,
+  x: {label: "v·u", domain: [-6, 6], grid: true},
+  y: {label: "kayıp  −log σ(±z)", domain: [0, 6], grid: true},
+  color: {legend: true, domain: ["gerçek çift", "sahte çift"],
+          range: ["#0E7C7B", "#C1666B"]},
+  marks: [
+    Plot.line(d3.range(-6, 6.05, 0.1).map(z => ({z, l: -Math.log(nsSigmoid(z)), k: "gerçek çift"})),
+      {x: "z", y: "l", stroke: "k", strokeWidth: 2}),
+    Plot.line(d3.range(-6, 6.05, 0.1).map(z => ({z, l: -Math.log(nsSigmoid(-z)), k: "sahte çift"})),
+      {x: "z", y: "l", stroke: "k", strokeWidth: 2}),
+    Plot.ruleX([nsDot], {stroke: "#1E2229", strokeDasharray: "3,3"})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem; display:flex; gap:2rem; flex-wrap:wrap;">
+  <div><span style="color:#5B6272;">σ(v·u) =</span>
+    <b>${nsSigmoid(nsDot).toFixed(3)}</b></div>
+  <div><span style="color:#0E7C7B;">bu çift gerçekse kayıp:</span>
+    <b>${(-Math.log(nsSigmoid(nsDot))).toFixed(3)}</b></div>
+  <div><span style="color:#C1666B;">sahteyse kayıp:</span>
+    <b>${(-Math.log(nsSigmoid(-nsDot))).toFixed(3)}</b></div>
+</div>
+<p style="font-size:0.85rem; color:#5B6272; margin-top:0.6rem;">
+Eğitim, gerçek çiftlerin iç çarpımını sağa, sahte çiftlerinkini sola iter.
+Birim uzunluktaki iki vektörün iç çarpımı <i>zaten</i> kosinüsleri olduğuna
+göre, "benzer kelimelerin benzer vektörleri olur" ortaya çıkan bir özellik
+değildir — kelimenin tam anlamıyla kayıp fonksiyonunun kendisidir.</p>`
+```
+:::
+
+### Mimariden daha çok önem taşıyan iki ayrıntı
+
+**Sık kelimelerin altörneklenmesi.** *the* her şeyin yanında geçer;
+dolayısıyla onu içeren çiftler neredeyse hiç bilgi taşımaz ama verinin
+devasa bir kısmını oluşturur. word2vec, bir token'ı frekansına bağlı bir
+olasılıkla atar; $w$ kelimesini şu olasılıkla tutar:
+
+$$
+p_{\text{tut}}(w) = \left(\sqrt{\frac{f(w)}{t}} + 1\right)\cdot\frac{t}{f(w)},
+\qquad t \approx 10^{-3}
+$$
+
+Bu, nadir kelimelere dokunmaz ve [2. bölümde](02-metin-veri.qmd) çizdiğiniz
+Zipf eğrisinin tepesini agresif biçimde seyreltir. Aşağıdaki koşuda sözlük
+içindeki token'ların %26,6'sını atıyor — 6.397.826 token 4.698.743'e
+iniyor — ve attığının neredeyse tamamı `the`, `of`, `and` ve arkadaşları.
+
+**0,75 üssü.** Negatif örnekler tekil kelime (unigram) dağılımından değil,
+$P(w) \propto f(w)^{0.75}$ dağılımından çekilir. Bu, dağılımı yassılaştırır;
+böylece nadir kelimeler, frekanslarının hak ettiğinden daha sık negatif
+olarak örneklenir. Ampirik olarak seçilmiştir ve önemlidir:
+@levy2015improving'in, insanların modele atfettiği başarının önemli bir
+kısmını üstlendiğini saptadığı hiperparametrelerden biridir.
+
+### Sıfırdan yazmak
+
+Kabaca altmış satır NumPy; `text8`'in (İngilizce Wikipedia'nın temizlenmiş
+bir dökümü) ilk 40 milyon karakteri üzerinde eğitildi. Hiçbir derin öğrenme
+çatısı yok — aşağıdaki güncelleme kuralı, yukarıdaki log kaybının gradyanının
+açık açık yazılmış hâli.
+
+```python
+import gzip, time
+from collections import Counter
+import numpy as np
+import gensim.downloader as api
+
+rng = np.random.default_rng(0)
+
+with gzip.open(api.load("text8", return_path=True), "rt") as f:
+    raw = f.read(40_000_000).split()
+
+MIN_COUNT = 20
+counts = Counter(raw)
+vocab = [w for w, c in counts.most_common() if c >= MIN_COUNT]
+idx = {w: i for i, w in enumerate(vocab)}
+V = len(vocab)
+
+total = sum(counts[w] for w in vocab)
+freq = np.array([counts[w] / total for w in vocab])
+keep = np.minimum(1.0, (np.sqrt(freq / 1e-3) + 1) * (1e-3 / freq))
+
+ids = np.array([idx[w] for w in raw if w in idx], dtype=np.int32)
+ids = ids[rng.random(len(ids)) < keep[ids]]          # subsampling
+
+noise = freq ** 0.75                                  # the 0.75 exponent
+noise /= noise.sum()
+cum = np.cumsum(noise)
+
+D, K, WINDOW, EPOCHS, LR0 = 100, 5, 5, 3, 0.02
+Wc = ((rng.random((V, D)) - 0.5) / D).astype(np.float32)   # centre vectors
+Wo = np.zeros((V, D), dtype=np.float32)                    # context vectors
+
+centres, contexts = [], []
+for off in range(1, WINDOW + 1):
+    centres.append(ids[:-off]); contexts.append(ids[off:])
+    centres.append(ids[off:]); contexts.append(ids[:-off])
+centres = np.concatenate(centres)
+contexts = np.concatenate(contexts)
+N = len(centres)
+
+BATCH = 2048
+n_batches = N // BATCH
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -8, 8)))
+
+for epoch in range(EPOCHS):
+    for b in range(n_batches):
+        sl = rng.integers(0, N, BATCH)
+        c, o = centres[sl], contexts[sl]
+        negs = np.searchsorted(cum, rng.random((BATCH, K))).astype(np.int32)
+        targets = np.concatenate([o[:, None], negs], axis=1)   # (B, K+1)
+        labels = np.zeros((BATCH, K + 1), dtype=np.float32)
+        labels[:, 0] = 1.0                       # first column is the real pair
+
+        v = Wc[c]                                              # (B, D)
+        u = Wo[targets]                                        # (B, K+1, D)
+        score = sigmoid(np.einsum("bkd,bd->bk", u, v))         # (B, K+1)
+        err = (score - labels).astype(np.float32)              # the residual
+
+        lr = LR0 * max(1e-4, 1 - (epoch * n_batches + b) / (EPOCHS * n_batches))
+        gv = np.einsum("bk,bkd->bd", err, u)
+        gu = err[:, :, None] * v[:, None, :]
+        np.clip(gv, -1.0, 1.0, out=gv)
+        np.clip(gu, -1.0, 1.0, out=gu)
+        np.add.at(Wc, c, -lr * gv)
+        np.add.at(Wo, targets.ravel(), (-lr * gu).reshape(-1, D))
+
+E = Wc / (np.linalg.norm(Wc, axis=1, keepdims=True) + 1e-9)
+```
+
+`err = score - labels` satırına bakın. Bu, *tahmin eksi gözlem* — bir
+lojistik regresyonun artığı. Altındaki her gradyan, o artığın diğer vektörle
+çarpımından ibaret. İstatistik tanıdık geliyorsa, gelmeli.
+
+```text
+tokens read: 6794527
+vocabulary (min_count=20): 18677
+tokens after subsampling: 4698743
+training pairs: 46987400
+### training
+  epoch 1    0.0%  loss  4.159
+  epoch 1  100.0%  loss  2.417
+  epoch 2  100.0%  loss  2.371
+  epoch 3  100.0%  loss  2.351
+  trained in 1865s
+
+### nearest neighbours, from ~60 lines of NumPy
+  king      consort 0.75, kings 0.75, isabella 0.75, aram 0.74, regent 0.73
+  france    spain 0.79, italy 0.75, netherlands 0.74, switzerland 0.73, portugal 0.72
+  physics   mechanics 0.82, quantum 0.80, bose 0.80, chemistry 0.78, bohr 0.76
+  monday    friday 0.87, thursday 0.85, weekend 0.84, tuesday 0.84, wednesday 0.83
+  car       racing 0.74, cars 0.74, driver 0.70, automobile 0.69, motor 0.68
+  three     four 0.95, five 0.93, two 0.91, six 0.91, one 0.89
+  pump      ignition 0.88, pedals 0.87, injected 0.87, compartment 0.86, oven 0.86
+```
+
+::: {.callout-tip collapse="true"}
+## Sezgi kontrolü: `np.add.at` burada neden gradyan kırpması istiyor?
+
+Gerçek word2vec çiftleri teker teker işler; dolayısıyla sık bir kelimenin
+vektörü güncellemeler arasında tazelenir. Yığınlama (batching) bunu bozar:
+`np.add.at`, tekrarlanan bir indeks için bütün gradyanları *biriktirir* ve
+toplamı tek adımda uygular. 2048 çiftlik bir yığında yaygın bir kelime yüz
+kez görünebilir; yani hiç kıpırdamamış bir vektörden hesaplanmış yüz
+güncellemeyi üst üste yer.
+
+Kırpma olmadan bu koşu yarım epoch içinde `nan`'a ıraksıyor — ki bu bölüm
+için ilk çalıştırıldığında, 0,05 öğrenme hızıyla, tam olarak bu oldu. Kırpma
+bir modelleme tercihi değil; doğası gereği sıralı bir algoritmayı
+vektörleştirmenin bedeli. Aynı zamanda, "makaleyi yeniden yazdım ama
+çalışmadı" durumunun neden genellikle denklemlerle değil optimizasyon
+ayrıntılarıyla ilgili olduğunun iyi bir örneği.
+:::
+
+### İki aile aslında baştan beri tek aileymiş
+
+Alan bir yıl boyunca saymayı (LSA, PPMI+SVD) ve tahmin etmeyi (word2vec)
+rakip felsefeler gibi ele aldı. Sonra @levy2014neural, negatif örneklemeli
+skip-gram'ın *örtük olarak* bir matrisi çarpanlara ayırdığını kanıtladı — ve
+o matris, $\log K$ kadar kaydırılmış PPMI:
+
+$$
+\mathbf{v}_w \cdot \mathbf{u}_c = \mathrm{PMI}(w, c) - \log K
+$$
+
+en iyi noktada. Sinir ağı, kostüm giymiş bir matris çarpanlarına ayırmaydı.
+@levy2015improving devamında şunu gösterdi: sayım temelli yöntemlere
+word2vec'in sessizce kullandığı hiperparametreleri verdiğinizde —
+altörnekleme, bağlam dağılımı yumuşatma, dinamik pencereler — performans
+farkı büyük ölçüde buharlaşıyor.
+
+Bu ders gömmelerin çok ötesine genelleşir ve okuduğunuz her makaleye
+taşımaya değer: yeni bir yöntem eskisini yendiğinde, iyileşmenin bir kısmı
+yöntemden, bir kısmı ayardan gelir ve bu ayrım nadiren raporlanır.
+
+## GloVe: sayma, ama kayıp fonksiyonuyla
+
+GloVe [@pennington2014glove] bu sentezi ciddiye aldı. Küresel eş-oluşum
+matrisini kurun, sonra vektörleri, iç çarpımları logaritmik eş-oluşum
+sayımlarını yeniden üretecek biçimde uydurun ve nadir çiftlerin ağırlığını
+düşürün:
+
+$$
+\mathcal{L} = \sum_{w,c} f(X_{wc})
+\left(\mathbf{v}_w \cdot \mathbf{u}_c + b_w + b_c - \log X_{wc}\right)^2
+$$
+
+Bu, logaritmik sayımlar üzerinde ağırlıklı en küçük kareler; üstelik kelime
+başına bir sabit terimle. İstatistiğin olabileceği kadar klasik. Önceden
+eğitilmiş GloVe vektörleri, statik gömme isteyen çoğu insanın ilk uzandığı
+şeydir; bölümün geri kalanında onları kullanacağız.
+
+```python
+import numpy as np
+import gensim.downloader as api
+
+g = api.load("glove-wiki-gigaword-100")
+print("vectors:", len(g.index_to_key), " dimensions:", g.vector_size)
+v = g["king"]
+print("king[:8] =", np.round(v[:8], 3))
+print("norm:", round(float(np.linalg.norm(v)), 3))
+```
+
+```text
+vectors: 400000  dimensions: 100
+trained on Wikipedia 2014 + Gigaword 5, 6 billion tokens
+king[:8] = [-0.323 -0.876  0.22   0.253  0.23   0.739 -0.38  -0.353]
+norm: 6.118
+```
+
+Bir kelime artık bu: yüz tane sayı ve hiçbiri tek başına bir şey ifade
+etmiyor. Boyutlar "krallık" ve "cinsiyet" değil — öğrenilmiş bir uzayın
+keyfî bir tabanı. 37. boyutun ne anlama geldiğini sormak, boy-kilo veri
+kümesinin üçüncü temel bileşeninin ne anlama geldiğini sormak gibidir.
+Bazen bir cevabı vardır; genellikle yoktur.
+
+```python
+for w in ["king", "pump", "turkey", "python", "bank"]:
+    print(f"  {w:<8} " + ", ".join(f"{a} {b:.2f}"
+          for a, b in g.most_similar(w, topn=6)))
+```
+
+```text
+  king     prince 0.77, queen 0.75, son 0.70, brother 0.70, monarch 0.70, throne 0.69
+  pump     pumps 0.84, pumping 0.77, pumped 0.71, gasoline 0.64, fuel 0.63, petrol 0.63
+  turkey   ankara 0.75, turkish 0.72, greece 0.71, syria 0.70, bulgaria 0.69, russia 0.69
+  python   monty 0.69, php 0.59, perl 0.58, cleese 0.54, flipper 0.51, ruby 0.51
+  bank     banks 0.81, banking 0.75, credit 0.70, investment 0.69, financial 0.68, securities 0.67
+```
+
+Bunlardan üçü ikinci bir bakışı hak ediyor.
+
+`turkey` bize `ankara`, `turkish`, `greece` döndürüyor — ülke; kuştan eser
+yok. `python` ise `monty` ve `cleese` (komedi topluluğu), `php` ve `perl`
+(dil) ve `flipper` (hayvan) döndürüyor — üç farklı anlam tek bir noktaya
+karıştırılmış. `bank` yalnızca finansal anlamı veriyor; nehir kıyısı oylamayı
+kaybetmiş.
+
+Statik bir gömmenin tanımlayıcı sınırı budur: [bağlam ne olursa olsun,
+kelime biçimi başına tek vektör]{.hl}. Üç anlamı olan bir kelime, üç anlamın
+ağırlıklı ortalamasını alır; bu da hiçbirini ifade etmeyen bir konumdur.
+Bunu düzeltmek,
+[5. bölümdeki](../../en/chapters/05-transformers.html) bağlamsal modellerin
+en büyük tek motivasyonudur.
+
+## Meşhur analoji ve gizlediği şey
+
+Gömmeleri NLP'nin dışında da ünlü yapan sonuç:
+
+```python
+res = g.most_similar(positive=["king", "woman"], negative=["man"], topn=5)
+```
+
+```text
+  queen        0.7699
+  monarch      0.6843
+  throne       0.6756
+  daughter     0.6595
+  princess     0.6521
+```
+
+$\text{king} - \text{man} + \text{woman} \approx \text{queen}$. Gerçekten de
+çarpıcı bir sonuç: kimse modele cinsiyeti anlatmadı, yine de `man` ile
+`woman` arasındaki fark, kabaca `king` ile `queen` arasındaki farkın aynısı
+ve vektör toplama bunu geri kazanıyor.
+
+Şimdi genellikle anlatılmayan kısım. `gensim`, üç girdi kelimesini sessizce
+sonuçlardan çıkarıyor. Aynı soruyu bu filtre olmadan sorun:
+
+```python
+target = g["king"] - g["man"] + g["woman"]
+target /= np.linalg.norm(target)
+sims = g.get_normed_vectors() @ target
+for i in np.argsort(-sims)[:6]:
+    print(f"  {g.index_to_key[i]:<12} {sims[i]:.4f}")
+```
+
+```text
+  king         0.8552
+  queen        0.7834
+  monarch      0.6934
+  throne       0.6833
+  daughter     0.6809
+  prince       0.6713
+```
+
+$\text{king} - \text{man} + \text{woman}$'a en yakın vektör, açık farkla
+**`king`**. `man`'i çıkarıp `woman`'ı eklemek vektörü hareket ettirdi, ama
+`king`'in mahallesinden çıkacak kadar değil. Meşhur sonuç, gerçekte sorulan
+sorunun asıl cevabını eleyen sonradan uygulanmış bir filtreye bağlı.
+
+Bu bir "yakaladım" anı değil — filtre savunulabilir, çünkü girdinin size geri
+yansıtılmasını genellikle istemezsiniz. Ama gösterinin neyi kanıtladığını
+değiştirir; @nissim2020fair ve @linzen2016issues, analoji görevinin akıl
+yürütme kanıtı olarak fazlasıyla abartıldığını uzun uzun tartışır. Birkaçını
+kendiniz deneyin:
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Analoji gezgini — gerçek GloVe sonuçları, filtreli ve filtresiz</div>
+```
+
+```{ojs}
+//| echo: false
+anaData = [{"a":"king","b":"man","c":"woman","label":"king − man + woman","rows":[{"w":"king","s":0.8552,"inp":true},{"w":"queen","s":0.7834,"inp":false},{"w":"monarch","s":0.6934,"inp":false},{"w":"throne","s":0.6833,"inp":false},{"w":"daughter","s":0.6809,"inp":false},{"w":"prince","s":0.6713,"inp":false},{"w":"princess","s":0.6644,"inp":false},{"w":"mother","s":0.6579,"inp":false},{"w":"elizabeth","s":0.6563,"inp":false},{"w":"father","s":0.6392,"inp":false},{"w":"wife","s":0.6352,"inp":false},{"w":"son","s":0.634,"inp":false}]},{"a":"paris","b":"france","c":"italy","label":"paris − france + italy","rows":[{"w":"rome","s":0.8084,"inp":false},{"w":"milan","s":0.7317,"inp":false},{"w":"italy","s":0.7273,"inp":true},{"w":"naples","s":0.709,"inp":false},{"w":"venice","s":0.701,"inp":false},{"w":"turin","s":0.697,"inp":false},{"w":"paris","s":0.6912,"inp":true},{"w":"italian","s":0.6649,"inp":false},{"w":"vienna","s":0.6573,"inp":false},{"w":"genoa","s":0.6455,"inp":false},{"w":"florence","s":0.6329,"inp":false},{"w":"berlin","s":0.6286,"inp":false}]},{"a":"walking","b":"walk","c":"swim","label":"walking − walk + swim","rows":[{"w":"swim","s":0.855,"inp":true},{"w":"swimming","s":0.8063,"inp":false},{"w":"surfing","s":0.66,"inp":false},{"w":"swam","s":0.6528,"inp":false},{"w":"rowing","s":0.6436,"inp":false},{"w":"jogging","s":0.6327,"inp":false},{"w":"biking","s":0.6298,"inp":false},{"w":"canoeing","s":0.621,"inp":false},{"w":"kayaking","s":0.6197,"inp":false},{"w":"diving","s":0.6171,"inp":false},{"w":"sailing","s":0.6153,"inp":false},{"w":"jumping","s":0.6097,"inp":false}]},{"a":"bigger","b":"big","c":"small","label":"bigger − big + small","rows":[{"w":"larger","s":0.8778,"inp":false},{"w":"smaller","s":0.8575,"inp":false},{"w":"small","s":0.8274,"inp":true},{"w":"large","s":0.7902,"inp":false},{"w":"tiny","s":0.7166,"inp":false},{"w":"bigger","s":0.6993,"inp":true},{"w":"relatively","s":0.6444,"inp":false},{"w":"size","s":0.6427,"inp":false},{"w":"sized","s":0.6238,"inp":false},{"w":"significant","s":0.617,"inp":false},{"w":"less","s":0.6125,"inp":false},{"w":"fewer","s":0.6025,"inp":false}]},{"a":"madrid","b":"spain","c":"germany","label":"madrid − spain + germany","rows":[{"w":"munich","s":0.8566,"inp":false},{"w":"berlin","s":0.8068,"inp":false},{"w":"frankfurt","s":0.761,"inp":false},{"w":"germany","s":0.7464,"inp":true},{"w":"dortmund","s":0.7416,"inp":false},{"w":"hamburg","s":0.7404,"inp":false},{"w":"stuttgart","s":0.7357,"inp":false},{"w":"bayern","s":0.725,"inp":false},{"w":"cologne","s":0.7239,"inp":false},{"w":"leverkusen","s":0.6978,"inp":false},{"w":"borussia","s":0.6707,"inp":false},{"w":"bonn","s":0.6678,"inp":false}]},{"a":"windows","b":"microsoft","c":"google","label":"windows − microsoft + google","rows":[{"w":"windows","s":0.8446,"inp":true},{"w":"window","s":0.7043,"inp":false},{"w":"walls","s":0.6181,"inp":false},{"w":"google","s":0.6165,"inp":true},{"w":"dashboard","s":0.6085,"inp":false},{"w":"web","s":0.5967,"inp":false},{"w":"lights","s":0.5888,"inp":false},{"w":"portal","s":0.5844,"inp":false},{"w":"doors","s":0.5805,"inp":false},{"w":"portals","s":0.5776,"inp":false},{"w":"roofs","s":0.5763,"inp":false},{"w":"roof","s":0.5737,"inp":false}]},{"a":"mice","b":"mouse","c":"goose","label":"mice − mouse + goose","rows":[{"w":"goose","s":0.6856,"inp":true},{"w":"cows","s":0.561,"inp":false},{"w":"rats","s":0.5488,"inp":false},{"w":"infants","s":0.5313,"inp":false},{"w":"geese","s":0.5298,"inp":false},{"w":"turkeys","s":0.5287,"inp":false},{"w":"pigs","s":0.5248,"inp":false},{"w":"calves","s":0.5219,"inp":false},{"w":"diets","s":0.5172,"inp":false},{"w":"chickens","s":0.5071,"inp":false},{"w":"elk","s":0.5068,"inp":false},{"w":"babies","s":0.5035,"inp":false}]},{"a":"einstein","b":"physics","c":"biology","label":"einstein − physics + biology","rows":[{"w":"einstein","s":0.7377,"inp":true},{"w":"genetics","s":0.696,"inp":false},{"w":"biology","s":0.6027,"inp":true},{"w":"evolutionary","s":0.5566,"inp":false},{"w":"freud","s":0.5345,"inp":false},{"w":"genetic","s":0.5326,"inp":false},{"w":"biochemistry","s":0.53,"inp":false},{"w":"neuroscience","s":0.5232,"inp":false},{"w":"molecular","s":0.5065,"inp":false},{"w":"folkman","s":0.4983,"inp":false},{"w":"evolution","s":0.4968,"inp":false},{"w":"genes","s":0.4935,"inp":false}]}]
+```
+
+```{ojs}
+//| echo: false
+viewof anaPick = Inputs.select(anaData.map(d => d.label),
+  {label: "Analoji", value: "king − man + woman"})
+```
+
+```{ojs}
+//| echo: false
+viewof anaHide = Inputs.toggle({label: "Üç girdi kelimesini gizle (gensim'in yaptığı)", value: false})
+```
+
+```{ojs}
+//| echo: false
+anaRows = {
+  const d = anaData.find(x => x.label === anaPick);
+  return (anaHide ? d.rows.filter(r => !r.inp) : d.rows).slice(0, 8);
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;">
+  ${anaRows.map((r, i) => html`<div style="display:flex; align-items:center;
+      gap:0.7rem; padding:0.2rem 0; border-bottom:1px solid #F0F2F5;">
+    <span style="width:1.4rem; color:#5B6272; font-size:0.8rem;">${i + 1}</span>
+    <span style="width:9rem; ${r.inp ? "color:#C1666B; font-weight:600;" : ""}">
+      ${r.w}${r.inp ? " ←girdi" : ""}</span>
+    <span style="flex:1; max-width:16rem; background:#F0F2F5; border-radius:0.3em;">
+      <span style="display:block; height:0.55rem; border-radius:0.3em;
+        background:${r.inp ? "#C1666B" : "#0E7C7B"};
+        width:${Math.max(2, (r.s / anaRows[0].s) * 100)}%;"></span></span>
+    <span style="color:#5B6272; font-variant-numeric:tabular-nums;">${r.s.toFixed(3)}</span>
+  </div>`)}
+  <p style="color:#5B6272; margin-top:0.7rem; font-size:0.85rem;">
+    Bu sekiz analojinin beşinde ham en yakın komşu, girdi kelimelerinden
+    biri. <i>mice − mouse + goose</i>'u deneyin: hedeflenen cevap
+    <code>geese</code> ancak 5. sırada, <code>cows</code> ve
+    <code>rats</code>'in gerisinde. <i>madrid − spain + germany</i>'yi
+    deneyin: <code>berlin</code> değil <code>munich</code> dönüyor — model
+    "Alman şehri"ni öğrenmiş ama "başkenti"ni öğrenmemiş.</p>
+</div>`
+```
+:::
+
+Aritmetiğin geometrik görüntüsü, 100 boyuttan 2 boyuta indirgenmiş hâliyle
+şöyle:
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Otuz kelime, iki boyuta izdüşürüldü</div>
+```
+
+```{ojs}
+//| echo: false
+projPts = [{"w":"king","x":0.524,"y":-0.835,"g":"krallık"},{"w":"queen","x":0.615,"y":-0.725,"g":"krallık"},{"w":"prince","x":0.456,"y":-0.74,"g":"krallık"},{"w":"princess","x":0.658,"y":-0.692,"g":"krallık"},{"w":"monarch","x":0.449,"y":-0.596,"g":"krallık"},{"w":"throne","x":0.462,"y":-0.832,"g":"krallık"},{"w":"man","x":0.57,"y":0.191,"g":"insan"},{"w":"woman","x":0.715,"y":0.201,"g":"insan"},{"w":"boy","x":0.804,"y":0.277,"g":"insan"},{"w":"girl","x":0.85,"y":0.223,"g":"insan"},{"w":"brother","x":0.588,"y":-0.316,"g":"insan"},{"w":"sister","x":0.564,"y":-0.179,"g":"insan"},{"w":"france","x":-0.805,"y":-0.448,"g":"ülke"},{"w":"italy","x":-0.874,"y":-0.25,"g":"ülke"},{"w":"spain","x":-0.743,"y":-0.346,"g":"ülke"},{"w":"germany","x":-1.0,"y":-0.048,"g":"ülke"},{"w":"japan","x":-0.65,"y":0.423,"g":"ülke"},{"w":"turkey","x":-0.802,"y":0.014,"g":"ülke"},{"w":"paris","x":-0.572,"y":-0.242,"g":"başkent"},{"w":"rome","x":-0.542,"y":-0.299,"g":"başkent"},{"w":"madrid","x":-0.79,"y":-0.091,"g":"başkent"},{"w":"berlin","x":-0.754,"y":0.024,"g":"başkent"},{"w":"tokyo","x":-0.608,"y":0.515,"g":"başkent"},{"w":"ankara","x":-0.717,"y":0.009,"g":"başkent"},{"w":"walk","x":0.359,"y":0.813,"g":"fiil"},{"w":"walking","x":0.434,"y":0.813,"g":"fiil"},{"w":"swim","x":0.393,"y":0.923,"g":"fiil"},{"w":"swimming","x":0.205,"y":0.78,"g":"fiil"},{"w":"run","x":0.047,"y":0.695,"g":"fiil"},{"w":"running","x":0.16,"y":0.738,"g":"fiil"}]
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 460, marginLeft: 55, marginBottom: 45,
+  x: {label: "1. bileşen", grid: true},
+  y: {label: "2. bileşen", grid: true},
+  color: {legend: true,
+          domain: ["krallık", "insan", "ülke", "başkent", "fiil"],
+          range: ["#0E7C7B", "#C1666B", "#3C6E71", "#D4A15A", "#5B6272"]},
+  marks: [
+    Plot.dot(projPts, {x: "x", y: "y", fill: "g", r: 5}),
+    Plot.text(projPts, {x: "x", y: "y", text: "w", dy: -12, fontSize: 11})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.85rem; color:#5B6272; margin-top:0.4rem;">
+Beş grup temiz biçimde ayrışıyor ve ülkeler başkentlerinin yanına düşüyor.
+Bunu dikkatle okuyun: bu iki bileşen, 100 boyutlu vektörlerin varyansının
+yalnızca <b>%37,5</b>'ini tutuyor; yani sayfadaki uzaklıklar, uzaydaki
+uzaklıkların bir gölgesi. Bu bölümde verilen her sayı 100 boyutta
+hesaplandı, asla böyle bir izdüşümden değil.</p>`
+```
+:::
+
+## fastText: parçalardan yapılmış kelimeler
+
+Buraya kadarki her şeyde kelime biçimi başına tek bir vektör vardı ve
+yalnızca eğitim sırasında görülen biçimler için öğrenilmişti. Modelin hiç
+görmediği bir kelimeyi sorun, istisna alırsınız. İngilizce için bu bir
+sinir bozukluğu. Türkçe için bir tasarım hatası.
+
+İşte karşılaştırılabilir büyüklükte iki Wikipedia örneklemi, biri Türkçe
+biri İngilizce:
+
+```python
+### corpora
+  turkish   103040 lines    1458213 tokens    138578 types
+  english    44079 lines    1828840 tokens     78140 types
+```
+
+Türkçe **1,46 milyon token'dan 138.578 farklı kelime biçimi** üretti;
+İngilizce *daha fazla* token'dan — 1,83 milyon — 78.140 üretti. Türkçenin
+eklemeli yapısı, `ev`, `evim`, `evimde`, `evimdeki`, `evlerimizdekiler`
+biçimlerinin kelime düzeyinde bir sözlükte beş ayrı girdi olması demektir;
+her biri kendi vektörünü ister ve her biri kendi seyrek birkaç oluşumundan
+kestirilir.
+
+```text
+### vocabulary growth: new word forms per million tokens
+  turkish  250k:45688  500k:73435  750k:97412  1000k:112644  1250k:126389
+  english  250k:22869  500k:34016  750k:42854  1000k:52347  1250k:60178
+
+### the tail: how much of the vocabulary is seen exactly once
+  turkish   50.0% of types are hapax (69296 of 138578)
+  english   46.7% of types are hapax (36503 of 78140)
+
+### out-of-vocabulary rate: train on 90%, test on the last 10%
+  turkish   7.33% of tokens unseen, 28.99% of types unseen
+  english   4.72% of tokens unseen, 23.29% of types unseen
+```
+
+Bir milyon token'da Türkçe 112.644 farklı biçim görmüşken İngilizce 52.347
+görmüş — iki katından fazla — ve eğri hâlâ düzleşmiyor. Ayrılmış metinde
+yaklaşık her on dört Türkçe token'dan biri, modelin hiç görmediği bir
+biçim. Sözlüğün yarısı tam olarak bir kez geçiyor; yani vektörlerinizin
+yarısı tek bir gözlemden kestiriliyor.
+
+fastText'in cevabı [@bojanowski2017enriching] kelimeyi bölünmez saymayı
+bırakmak. Kelimeyi, karakter n-gram'larının toplamı artı bütün kelime için
+bir vektör olarak temsil edin:
+
+$$
+\mathbf{v}_{\text{kelime}} = \mathbf{v}_{\langle\text{kelime}\rangle}
++ \sum_{n\text{-gram } g} \mathbf{v}_g
+$$
+
+Görülmemiş bir kelimenin de n-gram'ları vardır ve o n-gram'lar başka
+kelimeler üzerinde eğitilmiştir. Sözlük açık hâle gelir.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Karakter n-gram'ları — bir kelime yazın, fastText'in gerçekte neyi sakladığını görün</div>
+```
+
+```{ojs}
+//| echo: false
+viewof ftWord = Inputs.text({
+  label: "Kelime", value: "kitaplarımızdaki",
+  placeholder: "deneyin: evlerimizde, pumping, cavitation", width: 320
+})
+```
+
+```{ojs}
+//| echo: false
+viewof ftN = Inputs.range([3, 6], {label: "n-gram boyu", step: 1, value: 4})
+```
+
+```{ojs}
+//| echo: false
+ftGrams = {
+  const w = "<" + (ftWord || "").toLowerCase().trim() + ">";
+  const out = [];
+  for (let i = 0; i + ftN <= w.length; i++) out.push(w.slice(i, i + ftN));
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+viewof ftOther = Inputs.text({label: "Şununla karşılaştır", value: "kitaplar", width: 320})
+```
+
+```{ojs}
+//| echo: false
+ftShared = {
+  const b = "<" + (ftOther || "").toLowerCase().trim() + ">";
+  const set = new Set();
+  for (let i = 0; i + ftN <= b.length; i++) set.add(b.slice(i, i + ftN));
+  return set;
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;">
+  <div style="margin:0.4rem 0 0.6rem 0;">
+    ${ftGrams.map(gm => html`<code style="background:${ftShared.has(gm) ? "#D6EAE9" : "#F4F6F8"};
+      border:1px solid ${ftShared.has(gm) ? "#0E7C7B" : "#E3E7EC"};
+      border-radius:0.35em; padding:0.1em 0.4em; margin:0 0.25em 0.3em 0;
+      display:inline-block;">${gm}</code>`)}
+  </div>
+  <p style="color:#5B6272;">
+    ${ftN} boyunda <b>${ftGrams.length}</b> n-gram;
+    bunlardan <b style="color:#0E7C7B;">${ftGrams.filter(gm => ftShared.has(gm)).length}</b>
+    tanesi <i>${ftOther}</i> kelimesinde de geçiyor.
+    fastText 3'ten 6'ya kadar bütün boyları aynı anda kullanır; yani gerçek
+    sayı bunun kabaca dört katı.</p>
+  <p style="color:#5B6272; font-size:0.85rem;">
+    Açılı ayraçlar kelime sınırlarını işaretler; model bir eki, aynı
+    harflerin kelime ortasındaki hâlinden böyle ayırt eder.</p>
+</div>`
+```
+:::
+
+Aynı Türkçe Wikipedia örnekleminde eğitildiklerinde, word2vec ile fastText
+derlemin hiç içermediği kelimelerde çok farklı davranıyor:
+
+```text
+### a word the corpus never saw
+  kitaplarımızdaki   in word2vec vocab: False   in fastText vocab: False
+    fastText still answers: kitapları 0.91, kitapların 0.91, kitaplıkları 0.90, kitaplarda 0.90
+    word2vec raises: KeyError
+  bilgisayarcılık    in word2vec vocab: False   in fastText vocab: False
+    fastText still answers: bilgisayara 0.96, bilgisayarlı 0.96, bilgisayar 0.96, bilgisayarı 0.96
+    word2vec raises: KeyError
+```
+
+Aynı numara yazım hatalarını da halleder; fastText'in kullanıcı üretimi
+metinlerde sessizce popüler bir seçim olmasının sebebi budur:
+
+```text
+  philosphy       in vocab: False
+    philosophy 0.96, philosophie 0.95, philosophies 0.94, philology 0.94, philo 0.93
+  governmentt     in vocab: False
+    government 0.98, governments 0.94, governmental 0.93, governs 0.91, govern 0.91
+```
+
+### Alt kelimelerin bedeli
+
+Şimdi eğitim içeriklerinin atladığı kısım. Karakter n-gram'ları, benzer
+yazılışın benzer anlam ima ettiğini *varsayarak* morfoloji satın alır — ve
+bu varsayım her dilde zaman zaman fena hâlde yanlıştır.
+
+```text
+### morphology: does fastText put inflected forms together?
+  ft  kitap    kitapta 0.96, kitaba 0.95, kitab 0.94, kitabın 0.94, kitabı 0.93
+  w2v kitap    eseri 0.81, makale 0.80, eseriyle 0.80, kitabın 0.80, kitaplar 0.79
+
+  ft  yaz      yao 0.78, yağ 0.77, yağdı 0.77, yayoi 0.76, yay 0.75
+  w2v yaz      kış 0.86, olimpiyatları 0.84, aylarında 0.83, gündönümü 0.80
+```
+
+`kitap` için fastText `kitap`'ın çekimlerini döndürüyor; word2vec ise
+`eseri`, `makale` gibi *anlamsal* komşular veriyor. Hangisini istediğiniz
+tamamen görevinize bağlı.
+
+`yaz` için — hem mevsim hem de "yazmak" emri — fark çok daha keskin.
+word2vec `kış`, `olimpiyatları`, `gündönümü` döndürüyor; mevsimi öğrenmiş.
+fastText ise `yao`, `yağ`, `yayoi`, `yay` döndürüyor — harf paylaşan ama
+başka hiçbir şey paylaşmayan kelimeler. Üç harfli kelimeler büyük ölçüde
+n-gram'dan ibarettir, dolayısıyla alt kelime sinyali anlamsal sinyali
+boğar.
+
+```text
+### the price, measured
+  kitap    kitle    fastText +0.667   word2vec +0.446
+```
+
+`kitap` ile `kitle` alakasız iki kelime; sadece üç harf paylaşıyorlar.
+fastText onları word2vec'in bulduğundan bir buçuk kat daha benzer buluyor.
+
+::: {.callout-important appearance="simple"}
+**Aklınızda kalması gereken kural.** Alt kelime modelleri, morfolojik
+kapsama karşılığında anlamsal keskinlikten feragat eder. Sözlüğünüz açık ve
+kelimeleriniz uzunsa bu takası yapın — Türkçe, Fince, Macarca, Almanca
+bileşik kelimeler, kimyasal adlar, ürün kodları, kullanıcı üretimi metin.
+Sözlüğünüz kapalıysa ve yükü kısa kelimeler taşıyorsa reddedin. Ve dikkat
+edin: bu, [2. bölümdeki](02-metin-veri.qmd) BPE takasının *aynısıdır*; sadece
+artık bölütlemeye değil anlama uygulanıyor.
+:::
+
+## Belgeler vektör olarak
+
+[2. bölümde](02-metin-veri.qmd) 20 Newsgroups gönderilerini TF-IDF ile
+sınıflandırmıştık. Artık kelime vektörlerimiz var — işe yarıyorlar mı? Akla
+gelen ilk hamle, bir belgedeki kelime vektörlerinin ortalamasını almak; bu
+da 32.000 boyutlu seyrek bir vektör yerine 100 boyutlu bir belge vektörü
+verir.
+
+```python
+def average(docs):
+    out = np.zeros((len(docs), g.vector_size), dtype=np.float32)
+    for i, d in enumerate(docs):
+        vs = [g[w] for w in d if w in g.key_to_index]
+        if vs:
+            out[i] = np.mean(vs, axis=0)
+    return out
+```
+
+doc2vec [@le2014distributed] daha az naif bir şey yapar: aynı negatif
+örnekleme numarasıyla, belge kimliğini fazladan bir bağlam gibi ele alarak
+*belge* başına bir vektör öğrenir. Aynı dört kategori, aynı eğitim/test
+ayrımı, üstünde aynı lojistik regresyon.
+
+```text
+### documents as vectors: four ways
+tf-idf (chapter 2 baseline)        accuracy 0.853   dimensions   32014
+averaged glove                     accuracy 0.820   dimensions     100
+idf-weighted averaged glove        accuracy 0.822   dimensions     100
+doc2vec (PV-DBOW, 40 epochs)       accuracy 0.839   dimensions     100
+averaged glove + doc2vec           accuracy 0.845   dimensions     200
+```
+
+Bu tabloyu dikkatle okuyun, çünkü pazarlamanın vaat ettiği sonuç değil.
+**Seyrek 2. bölüm referansı kazanıyor.** Bu görevde her yoğun yöntem
+TF-IDF'e kaybediyor ve en iyileri bile yaklaşabilmek için iki gösterimin
+birleştirilmesine ihtiyaç duyuyor.
+
+Yoğun yöntemlerin satın aldığı şey doğruluk değil, boyut: 0,853'e karşı
+0,820, ama **320 kat daha az boyutla**. On milyon belge vektörü
+saklıyorsanız veya üzerlerinde en yakın komşu araması yapıyorsanız, bu oran
+mimarinizi belirler. 2.327 eğitim belgesiyle dört haber grubunu
+sınıflandırıyorsanız, size hiçbir şey kazandırmaz.
+
+::: {.column-margin}
+Bu kadar kaba bir yöntem olan ortalama alma neden yine de bu kadar iyi
+gidiyor? Çünkü konu sınıflandırması büyük ölçüde bir "konu torbası"
+problemidir ve bir belgenin kelime vektörlerinin ortalaması, konu merkezinin
+makul bir kestirimidir. @arora2017simple, ağırlıklı ortalamaya birinci temel
+bileşenin çıkarılmasının eklenmesinin, cümle benzerliğinde gerçekten zor
+yenilir bir referans olduğunu gösteriyor.
+:::
+
+Buradan ayrılmadan önce iki ölçüm daha. Birincisi, kapsama:
+
+```text
+### coverage: how much of the corpus does glove actually know?
+  tokens covered: 98.6%
+  types covered : 84.5%  (23395 of 27681)
+```
+
+Token'ların %98,6'sı ama türlerin yalnızca %84,5'i — eksik kalan %15, tam
+olarak nadir, bilgi taşıyan, alana özgü kelimelerdir ve ortalama alma onları
+sessizce düşürür.
+
+İkincisi, hiçbir ortalamanın düzeltemeyeceği başarısızlık:
+
+```python
+a = "the pump failed and the valve is fine".split()
+b = "the valve failed and the pump is fine".split()
+va = np.mean([g[w] for w in a], axis=0)
+vb = np.mean([g[w] for w in b], axis=0)
+```
+
+```text
+### what averaging destroys
+  cosine of the two averaged vectors: 1.0000
+  identical: True
+```
+
+Benzer değil — kayan nokta hassasiyetinde *özdeş*, çünkü toplama
+değişmelidir. Bir bakım ekibini tesisin taban tabana zıt uçlarına
+gönderecek iki cümlenin vektörü aynı. Bu, 2. bölümün kelime torbası
+problemidir; hâlâ tamamen çözülmemiş, sadece 32.000 yerine 100 boyutta.
+
+Kelime sırası, diziyi okuyan bir model gerektirir. O da
+[4.](../../en/chapters/04-language-models.html) ve
+[5. bölümlerdir](../../en/chapters/05-transformers.html).
+
+## Geometrinin sorunları var
+
+Statik gömmeler faydalıdır ve aynı zamanda eğitim içeriklerinin itiraf
+ettiğinden daha tuhaftır. Adını koyabilmeniz gereken üç kusur.
+
+### Kosinüs benzerliği değil, ilişkililiği ölçer
+
+```text
+  good       bad        0.770
+  hot        cold       0.725
+  increase   decrease   0.881
+  cat        dog        0.880
+  cat        car        0.311
+  teacher    student    0.808
+```
+
+`increase` ile `decrease` 0,881 alıyor. `cat` ile `dog` 0,880. Tam zıt
+anlamlı çift, ilişkili iki hayvandan *daha* benzer çıkıyor.
+
+Bu GloVe'da bir hata değil; dağılımsal hipotezin tam olarak söz verdiği şeyi
+yapması. Zıt anlamlılar bağlam içinde kusursuz biçimde birbirinin yerine
+geçer — *sales increased sharply* de *sales decreased sharply* de akıcıdır —
+dolayısıyla aynı arkadaş çevresinde gezerler ve aynı yere düşerler. Gömme
+*ilişkililiği* kodlar; benzerlik de zıtlık da birer ilişkililik türüdür.
+
+Sonucu hem pratik hem ağırdır: **statik kelime vektörleri arasındaki ham
+kosinüs benzerliğinden asla bir duygu ya da kutupluluk değişkeni
+üretmeyin.** Ölçüt topluluğu bu ayrımı bilerek iki veri kümesi kurarak
+resmileştirdi — ilişkililik için WordSim-353 [@finkelstein2002placing] ve
+katı benzerlik için SimLex-999 [@hill2015simlex] — ve modeller bu ikisinde
+çok farklı puanlar alır; birazdan göreceğiz.
+
+### Uzay izotropik değil
+
+Gömmeler uzaylarını iyi kullanıyor olsaydı, rastgele iki kelime 90°'de,
+diğer herhangi bir açıda olduğu kadar sık bulunur ve ortalama kosinüs sıfıra
+yakın olurdu. Öyle değiller.
+
+```python
+sample = rng.choice(50000, size=4000, replace=False)
+S = M[sample]
+vals = (S @ S.T)[np.triu_indices(4000, k=1)]
+```
+
+```text
+  mean cosine between random word pairs : 0.029
+  std                                   : 0.119
+  share of pairs with cosine > 0        : 56.9%
+  norm of the mean vector               : 0.171
+  after subtracting the mean, mean cosine: -0.000
+```
+
+Her vektörün büyük bir ortak bileşeni var; bu yüzden bütün kelimeler bir
+ölçüde aynı yöne bakıyor ve rastgele çiftlerin %56,9'unun kosinüsü pozitif.
+Vektörler kürenin tamamını değil, dar bir koniyi kaplıyor — oyuncak SVD'de
+her kelimenin birinci koordinatının negatif olmasıyla gördüğümüz kusurun
+aynısı.
+
+Ortalama vektörü çıkarmak bunun çoğunu kaldırır; ilk birkaç temel bileşeni
+de kaldırmak daha fazlasını halleder. @mu2018allbutthetop bunun tek satır
+kod tuttuğunu ve çoğu benzerlik ölçütünü iyileştirdiğini gösterdi. Sorun
+modern modellerde de kaybolmuyor — @ethayarajh2019contextual, BERT ve
+GPT-2'den gelen bağlamsal gömmelerin statik olanlardan *daha* anizotropik
+olduğunu buldu, daha az değil.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">8 milyon rastgele kelime çiftinin kosinüsü, ortalama çıkarılmadan önce ve sonra</div>
+```
+
+```{ojs}
+//| echo: false
+anisoData = [{"x":-0.575,"raw":5,"centred":4},{"x":-0.525,"raw":13,"centred":5},{"x":-0.475,"raw":30,"centred":17},{"x":-0.425,"raw":91,"centred":172},{"x":-0.375,"raw":466,"centred":1543},{"x":-0.325,"raw":3292,"centred":10528},{"x":-0.275,"raw":19099,"centred":52224},{"x":-0.225,"raw":81573,"centred":181429},{"x":-0.175,"raw":259774,"centred":461214},{"x":-0.125,"raw":611031,"centred":876010},{"x":-0.075,"raw":1067028,"centred":1264630},{"x":-0.025,"raw":1403084,"centred":1426436},{"x":0.025,"raw":1431741,"centred":1292741},{"x":0.075,"raw":1173616,"centred":971029},{"x":0.125,"raw":810182,"centred":630974},{"x":0.175,"raw":499591,"centred":375474},{"x":0.225,"raw":287900,"centred":210057},{"x":0.275,"raw":160168,"centred":113503},{"x":0.325,"raw":87639,"centred":61294},{"x":0.375,"raw":47704,"centred":32520},{"x":0.425,"raw":25435,"centred":16806},{"x":0.475,"raw":13127,"centred":8436},{"x":0.525,"raw":6695,"centred":4460},{"x":0.575,"raw":3425,"centred":2362},{"x":0.625,"raw":1979,"centred":1394},{"x":0.675,"raw":1188,"centred":884},{"x":0.725,"raw":763,"centred":630},{"x":0.775,"raw":513,"centred":437},{"x":0.825,"raw":356,"centred":325},{"x":0.875,"raw":244,"centred":227}]
+```
+
+```{ojs}
+//| echo: false
+viewof anisoShow = Inputs.radio(["ikisi de", "yalnızca ham", "yalnızca ortalanmış"],
+  {label: "Göster", value: "ikisi de"})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 300, marginLeft: 65, marginBottom: 45,
+  x: {label: "kosinüs benzerliği", grid: true},
+  y: {label: "çift sayısı", grid: true},
+  color: {legend: true, domain: ["ham", "ortalama çıkarılmış"],
+          range: ["#C1666B", "#0E7C7B"]},
+  marks: [
+    Plot.ruleX([0], {stroke: "#B7BDC7", strokeDasharray: "3,3"}),
+    ...(anisoShow !== "yalnızca ortalanmış" ? [Plot.line(anisoData,
+      {x: "x", y: "raw", stroke: () => "ham", strokeWidth: 2, curve: "monotone-x"})] : []),
+    ...(anisoShow !== "yalnızca ham" ? [Plot.line(anisoData,
+      {x: "x", y: "centred", stroke: () => "ortalama çıkarılmış", strokeWidth: 2, curve: "monotone-x"})] : [])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.85rem; color:#5B6272; margin-top:0.4rem;">
+Ham dağılım sıfırın sağında duruyor; ortalama vektörü çıkarmak onu yeniden
+ortalıyor. Bu tek satırlık düzeltme — bazen üst temel bileşenler de
+çıkarılarak — <i>all-but-the-top</i> yöntemidir
+(Mu &amp; Viswanath, 2018) ve çoğu benzerlik ölçütünü bedavaya iyileştirir.
+Anizotropi bağlamsal modellerde daha iyi değil, daha kötüdür
+(Ethayarajh, 2019).</p>`
+```
+:::
+
+### Frekans sızıyor
+
+Bir gömmenin anlamı kodlaması beklenir. Kelimenin ne sıklıkta geçtiğini de
+kodlar, çünkü sık kelimeler daha çok gradyan güncellemesi alır.
+
+```text
+### mean vector norm by frequency rank (GloVe, 400k words)
+  rank      0-100     mean norm  6.19
+  rank    100-1000    mean norm  5.85
+  rank   1000-10000   mean norm  5.45
+  rank  10000-100000  mean norm  4.99
+  rank 100000-400000  mean norm  3.62
+  spearman(log rank, norm) over the top 100k words: -0.313
+```
+
+Norm, nadirlikle birlikte monoton biçimde düşüyor. Kosinüs normları
+görmezden gelir; bu da onu tercih etmek için bir sebep daha. Ama ham iç
+çarpım kullanan, Öklid uzaklığı kullanan ya da gömmeleri normalleştirmeden
+bir modele veren her yöntem, kısmen kelime frekansını modelliyor demektir.
+
+Daha da önemlisi, nadirlikle birlikte *kalite* de düşüyor — ve alan
+sözlüğünüz kuyrukta yaşıyor:
+
+```text
+  water        rank    430  natural 0.70, dry 0.68, salt 0.68, clean 0.68, drinking 0.67
+  turbine      rank  15747  turbines 0.80, compressor 0.78, generator 0.72, engine 0.70
+  cavitation   rank 109044  aliasing 0.56, barotrauma 0.54, attenuation 0.54, breakage 0.53
+  impeller     rank 124835  armature 0.62, evaporator 0.61, nozzle 0.60, centrifugal 0.59
+  eutectic     rank 159022  azeotrope 0.61, azeotropic 0.55, tiwai 0.54, bifurcation 0.52
+```
+
+15.747. sıradaki `turbine` mükemmel. 109.044. sıradaki `cavitation`
+(kavitasyon) `aliasing` ve `attenuation` döndürüyor — kulağa teknik gelen
+ama pompa fiziğiyle hiç ilgisi olmayan kelimeler. `eutectic` (ötektik) önce
+`azeotrope`'u doğru buluyor, sonra `tiwai`ye ve `breadcrumb`a savruluyor.
+
+::: {.callout-warning appearance="simple"}
+**Mühendisler için bu bölümdeki en önemli pratik nokta budur.** Önceden
+eğitilmiş gömmeler, Wikipedia'nın sık konuştuğu kelimelerde mükemmel;
+probleminizi tanımlayan sözlükte güvenilmezdir. Bunların üzerine kurulu bir
+şeyi sahaya çıkarmadan önce, alanınızdaki en önemli yirmi terimi arayın ve
+komşularını okuyun. Yukarıdaki `eutectic` satırına benziyorlarsa; alana
+uyarlanmış vektörlere, bir alt kelime modeline ya da tamamen başka bir
+yaklaşıma ihtiyacınız var — ve bunu şimdi öğrenmek, sahaya çıktıktan sonra
+öğrenmekten çok daha ucuz.
+:::
+
+## Yanlılık veridedir, geometri onu kaydeder
+
+Meslek kelimelerini `woman` − `man` eksenine izdüşürün:
+
+```python
+axis = g["woman"] - g["man"]
+axis /= np.linalg.norm(axis)
+proj = float(g[w] @ axis / np.linalg.norm(g[w]))
+```
+
+```text
+  doctor        +0.109  ->  woman
+  nurse         +0.329  ->  woman
+  engineer      -0.123  ->  man
+  teacher       +0.152  ->  woman
+  programmer    -0.083  ->  man
+  homemaker     +0.363  ->  woman
+  scientist     -0.046  ->  man
+  receptionist  +0.281  ->  woman
+```
+
+`nurse`, `homemaker` ve `receptionist` `woman` tarafında; `engineer`,
+`programmer` ve `scientist` `man` tarafında oturuyor. Bunu kimse elle
+koymadı. Bu kelimelerin 2014 Wikipedia ve haber metinlerinde nasıl
+kullanıldığının sadık bir ölçümü [@bolukbasi2016man].
+@caliskan2017semantics, gömmelerin belgelenmiş insan örtük çağrışımlarının
+tamamını — ırksal olanlar dâhil — yeniden ürettiğini ve etki büyüklüklerinin
+psikoloji çalışmalarında bulunanlarla eşleştiğini gösterdi.
+
+Bundan üç sonuç çıkıyor ve mülakatçılar üçünü de sorar.
+
+1. **Bu bir arıza değil, bir ölçümdür.** Model, yanlı bir derlemi doğru
+   biçimde özetliyor. Bilinçli kullanıldığında gömmeler, metindeki yanlılığı
+   ölçekte incelemek için *nicel bir enstrümandır*.
+2. **Kararlara aktarılır.** Bu vektörler üzerine kurulmuş bir özgeçmiş eleme
+   sistemi çağrışımı da miras alır ve bir insanın aksine onu her başvurana,
+   sonsuza kadar, aynı şekilde uygular.
+3. **Yanlılığı gidermek göründüğünden zordur.** Özgün yöntem bir cinsiyet
+   yönünü izdüşümle dışarı atar [@bolukbasi2016man]. @gonen2019lipstick
+   bunun çoğunlukla yanlılığı sakladığını gösterdi: arındırılmış vektörler
+   hâlâ cinsiyete göre kümeleniyor ve bir sınıflandırıcı özgün gruplamayı
+   yüksek doğrulukla geri kazanıyor. Bilgi kaldırılmamış, yeniden
+   dağıtılmıştı.
+
+::: {.callout-note collapse="true"}
+## Sezgi kontrolü: bu testte yanlılık göstermeyen bir model yansız mıdır?
+
+Hayır ve asıl faydalı kısım gerekçe. Bu test, tek bir kelime çiftiyle
+tanımlanmış tek bir yönü ölçüyor. `woman` − `man` ile hizalı olmayan
+yanlılık ona görünmez ve @gonen2019lipstick tam olarak bu başarısızlık
+biçimini arındırılmış vektörlerde gösterdi: aynı veride izdüşüm testini
+geçiyor, kümeleme testinde kalıyorlar.
+
+Genel ilke şu: bir adillik ölçütünü geçmek, model hakkında değil ölçüt
+hakkında kanıttır. Hangi testi çalıştırdığınızı, o testin neyi
+saptayabildiğini ve yapısal olarak neyi saptayamadığını raporlayın.
+:::
+
+## Bir gömmenin iyi olup olmadığını nasıl anlarsınız?
+
+İki değerlendirme ailesi var ve bu ayrım mülakatlarda önemlidir.
+
+**İçsel (intrinsic)** değerlendirme, uzayın insan yargılarıyla doğrudan
+uyuşup uyuşmadığını sorar: insan benzerlik puanlarıyla korelasyon ya da
+analoji kümesindeki doğruluk. Hızlıdır ve aşağı akış görevi gerektirmez.
+
+**Dışsal (extrinsic)** değerlendirme, gömmenin gerçekten önemsediğiniz şeyi
+iyileştirip iyileştirmediğini sorar: sınıflandırıcınızın doğruluğu, arama
+motorunuzun anma (recall) değeri. Yavaştır ve karşılığını veren tek
+değerlendirme odur.
+
+```python
+from gensim.test.utils import datapath
+pear, spear, oov = g.evaluate_word_pairs(datapath("wordsim353.tsv"))
+score, sections = g.evaluate_word_analogies(datapath("questions-words.txt"))
+```
+
+```text
+### two similarity benchmarks that disagree on purpose
+  WordSim-353 (relatedness)    spearman 0.533   pearson 0.548   oov 0.0%
+  SimLex-999 (similarity)      spearman 0.296   pearson 0.324   oov 0.1%
+
+### the Google analogy set, 19544 questions in 14 categories
+  overall accuracy: 0.633
+    capital-common-countries    0.939  (506 questions)
+    capital-world               0.890  (4524 questions)
+    currency                    0.152  (808 questions)
+    city-in-state               0.308  (2467 questions)
+    family                      0.816  (506 questions)
+    gram1-adjective-to-adverb   0.244  (992 questions)
+    gram2-opposite              0.202  (812 questions)
+    gram3-comparative           0.791  (1332 questions)
+    gram4-superlative           0.543  (1122 questions)
+    gram5-present-participle    0.695  (1056 questions)
+    gram6-nationality-adjective 0.879  (1599 questions)
+    gram7-past-tense            0.554  (1560 questions)
+    gram8-plural                0.720  (1332 questions)
+    gram9-plural-verbs          0.584  (870 questions)
+
+### the same benchmarks on the vectors trained from scratch above
+  WordSim-353                  spearman 0.627   oov 11.9%
+  SimLex-999                   spearman 0.268   oov 13.4%
+  Google analogies             accuracy 0.200
+  (trained on 6.8M tokens; glove saw 6 billion)
+```
+
+Kategori kırılımı, analoji puanının tek bir sayı olmaktan çıkıp bilgi
+vermeye başladığı yerdir. `capital-common-countries` 0,939 ve
+`capital-world` 0,890 — metin, hangi şehrin hangi ülkenin başkenti olduğunu
+durmadan söyler, yani ilişki yoğun biçimde kanıtlanmıştır. Ama `currency`
+**0,152** ve `gram2-opposite` **0,202**. Model ilişkiler üzerine akıl
+yürütmüyor; derleminin sık tekrarladığı ilişkileri yeniden üretiyor. Manşet
+0,633, neredeyse çözülmüşten neredeyse rastgeleye uzanan kategorilerin
+ortalamasıdır; iki gömmeyi sıralamak için tek bir analoji sayısının asla
+kullanılmaması gerektiğinin sebebi de budur.
+
+::: {.callout-warning appearance="simple"}
+**Olduğundan iyi görünen bir karşılaştırma.** Sıfırdan eğitilmiş vektörler
+WordSim-353'te **0,627** alıyor; GloVe'un 0,533'üne karşı — görünüşe göre
+bin kat fazla metinle eğitilmiş bir modeli yeniyorlar. İnanmayın.
+Sözlükleri 18.677 kelime, yani ölçüt çiftlerinin %11,9'u sözlük dışı diye
+atlanıyor ve atlananlar nadir olanlar, yani zor olanlar. GloVe 353 çiftin
+tamamı üzerinden puanlanıyor; NumPy modeli kolay %88 üzerinden.
+
+Bunun üzerinde durmaya değer, çünkü gömme karşılaştırmalarının sessizce
+yanlış olmasının en yaygın yolu budur: **cevap vermeyi reddeden bir model,
+cevap verip bazen yanılan bir modelden daha doğru görünür.** Puanın yanına
+her zaman kapsamayı da yazın. Her iki modelin de aynı soru kümesiyle
+yüzleştiği analojilerde gerçek fark ortaya çıkıyor: 0,200'e karşı 0,633.
+:::
+
+::: {.callout-important appearance="simple"}
+**Asıl manşet, iki benzerlik ölçütü arasındaki farktır.** Aynı vektörler,
+WordSim-353 (ilişkililik) ile SimLex-999'a (katı benzerlik) kıyasla çok daha
+iyi korele oluyor. Bu, `increase`/`decrease` çiftinin 0,881 almasının nicel
+karşılığıdır — ve içsel bir puanın ancak görevinizin bu ikisinden hangisine
+ihtiyaç duyduğunu bildiğinizde yorumlanabilir olmasının sebebidir.
+
+@schnabel2015evaluation, içsel sıralamaların dışsal sıralamalarla sık sık
+çeliştiğini gösterdi. Dürüst iş akışı şu: içsel puanları kaba bozulmaları
+yakalamak için kullanın, iki makul aday arasında seçim yapmak için asla.
+Onun için aşağı akış görevini çalıştırın.
+:::
+
+## Bunlar gerçekte nerede kullanılıyor
+
+Statik gömmeler tarihî bir merak konusu değil. *Teknik* — ayrık bir öğe için
+eş-oluşumdan yoğun bir vektör öğrenmek, sonra üzerinde aritmetik yapmak —
+metnin çok ötesinde altyapıya dönüştü.
+
+- **Airbnb arama sıralaması.** İlan gömmeleri, kullanıcı oturumunu bir cümle
+  ve ilanları kelime sayarak tıklama dizileri üzerinde skip-gram'la
+  eğitildi; rezerve edilen ilan küresel bir bağlam olarak eklendi. Üretim
+  aramasında devreye alındı ve kayda değer bir rezervasyon kazancı
+  raporlandı [@grbovic2018real].
+- **YouTube önerileri.** Video ve arama token'ı gömmeleri öğrenilip bir
+  kullanıcı vektörüne ortalanıyor, sonra derin bir aday üreticisine
+  besleniyor; makale, iki aşamalı önerinin kanonik tarifidir
+  [@covington2016deep].
+- **Item2vec ve torunları.** Aynı skip-gram amaç fonksiyonunun alışveriş
+  sepetlerine ve çalma listelerine uygulanması [@barkan2016item2vec]. Ne
+  zaman bir `*2vec` görseniz, örüntü budur.
+- **Sınıflandırma için fastText.** Ortalanmış alt kelime n-gram'ları
+  üzerinde doğrusal bir model; "derin öğrenme sınıflandırıcılarıyla aynı
+  seviyede" iken CPU'da dakikalar içinde eğitiliyor [@joulin2017bag]. Hâlâ
+  mükemmel bir ilk referans ve yüksek hacimli, düşük gecikmeli metin
+  yönlendirmesi için hâlâ iyi bir üretim cevabı.
+- **Erişim, her yerde.**
+  [8. bölümdeki](../../en/chapters/08-rag.html) her vektör veritabanı ve her
+  RAG hattı, bu bölümün fikrini çalıştırıyor — koordinat olarak metin,
+  kosinüsle karşılaştırma — sadece statik vektörler bağlamsal olanlarla
+  değiştirilmiş hâlde.
+
+Ortak damar: gömmeler, ayrık şeyleri türevlenebilir kılma yöntemidir. Fikrin
+belirli modellerden daha uzun yaşamasının sebebi budur.
+
+## Statik gömmelerin yapamadıkları
+
+Biriktirdiğimiz başarısızlıkları bir araya topluyoruz, çünkü hep birlikte
+kitabın bir sonraki kısmının şartnamesini oluşturuyorlar.
+
+| Sınır | Bu bölümdeki kanıt | Çözen |
+|---|---|---|
+| Kelime biçimi başına tek vektör | `python`, Monty'yi, PHP'yi ve yılanı karıştırıyor | Bağlamsal gömmeler (5. bölüm) |
+| Kelime sırası yok | *pump failed / valve fine* ile tersi özdeş | Dizi modelleri (4. bölüm) |
+| Sözlük dışı kelimeler | word2vec `KeyError` fırlatıyor; Türkçe token'ların %7,3'ü | Alt kelimeler (fastText, BPE) |
+| Zıt anlamlılar eş anlamlı gibi görünüyor | `increase`/`decrease` 0,881'de | Görev denetimli ince ayar |
+| Anizotropik geometri | Rastgele çiftlerin %56,9'unun kosinüsü pozitif | Ortalama çıkarma, beyazlatma |
+| Nadir kelimelerde kalite çöküyor | `eutectic` → `tiwai` | Alan uyarlaması, alt kelimeler |
+| Derlemden emilen yanlılık | `homemaker`, kadın ekseninde +0,363 | Temiz bir çözüm yok; ölçün ve belgeleyin |
+
+: Statik bir gömmenin temsil edemedikleri {tbl-colwidths="[30,42,28]"}
+
+İlk ikisi önemli olanlar ve aynı kök nedeni paylaşıyorlar: statik bir gömme
+bir *arama tablosudur*. Kelime biçiminden vektöre giden bir fonksiyondur ve
+bir fonksiyonun her girdi için tek bir çıktısı vardır. `bank`'a nehirde ve
+piyasada farklı vektörler verebilmek için, gösterimin aranması değil
+cümleden *hesaplanması* gerekir — ki
+[5. bölümün](../../en/chapters/05-transformers.html) yaptığı budur ve bir
+LLM'deki vektörlerin hiçbir yerde saklanmıyor olmasının sebebi de budur.
+
+Geçiş bir anda olmadı. ELMo [@peters2018deep] 2018'de bunu somutlaştırdı:
+cümle üzerinde iki yönlü bir dil modeli çalıştırıp iç durumlarını kelime
+gösterimi olarak kullandı; "kelime başına tek vektör"ün varsayılan olmaktan
+çıktığı an budur. Ondan sonraki her şey — III. kısımda kullanacağınız
+modeller dâhil — bu hamlenin bir inceltmesidir.
+
+## Sezgi kontrolleri
+
+Açmadan önce cevaplayın.
+
+::: {.callout-note collapse="true"}
+## 1. Gömmenizin 300 boyutu var. Neden 300 da 30 ya da 3.000 değil?
+
+Bunda sihirli bir şey yok; kelime düzeyindeki görevler için tesadüfen
+birkaç yüzde dibe vuran bir yanlılık–varyans takası. Çok az boyut olursa
+alakasız kelimeler koordinat paylaşmaya zorlanır (eksik uydurma — bunu
+oyuncak örnekte gördünüz; orada 2 boyut neredeyse her şeyi her şeye benzer
+yapmıştı). Çok fazla olursa nadir kelimeler, avuç içi kadar bağlamlarına
+uydurulmuş vektörler alır ki bu gürültüdür; üstelik bellekte ve arama
+süresinde doğrusal olarak ödersiniz.
+
+Yukarıda kullanılan aynı ölçütlerde ölçüldüğünde, 50'den 100 boyuta çıkmak
+açıkça değiyor:
+
+```text
+  glove-wiki-gigaword-50   d=50   wordsim 0.503  simlex 0.263  analogy 0.464
+  glove-wiki-gigaword-100  d=100  wordsim 0.533  simlex 0.296  analogy 0.633
+```
+
+@pennington2014glove'daki yayımlanmış taramalar, kazançların kabaca 300'ün
+ötesinde düzleştiğini gösteriyor; 300'ün varsayılan hâline gelmesinin sebebi
+bu. Mülakattaki doğru cevap şudur: bunu aşağı akış görevinde ayarlarsınız ve
+birkaç yüz boyuttan sonra karar genellikle doğrulukla değil, depolama ve
+gecikmeyle verilir.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Neden sözlük üzerinde softmax değil de negatif örnekleme?
+
+Maliyet. Tam softmax, her eğitim çifti için sözlüğün tamamı üzerinde
+normalleştirir — çift başına 400.000 iç çarpım, çarpı on milyarlarca çift.
+Negatif örnekleme bunu $K+1$ ikili karara indirir; $K$ tipik olarak 5 ile 20
+arasındadır, yani çift başına maliyet artık sözlük boyutuna bağlı değildir.
+
+Daha derin cevap şu: bu, sadece aritmetiği değil amaç fonksiyonunu da
+değiştirir; artık $P(c \mid w)$'yi kestirmiyor, gerçek çiftleri gürültüden
+ayırt ediyorsunuz. @levy2014neural bu vekil amacın optimumunun kaydırılmış
+PMI olduğunu gösterdi; ikamenin sadece ucuz değil ilkeli olmasının sebebi
+budur. Alternatif, olasılıksal yorumu $O(\log V)$ maliyetle koruyan ve
+artık nadiren kullanılan hiyerarşik softmax'tır.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Elinizde Türkçe 50.000 destek talebi var. Word2vec mi, fastText mi?
+
+fastText — ve gerekçe "Türkçe eklemelidir" değil, bir sayı olmalı. Bu bölüm
+1,46 milyon token'da 138.578 farklı Türkçe biçim, %50 hapax ve ayrılmış
+metinde %7,3 sözlük dışı token ölçtü; 50.000 talep bundan *daha küçük* bir
+derlemdir. Yani kelime düzeyindeki vektörler, sözlüğün çoğu için bir iki
+oluşumdan kestirilecek ve tesadüfen geçmeyen çekimlerde tamamen
+tökezleyecektir.
+
+Karşı argümanı da söyleyin; iyi bir cevabı ezberlenmiş bir cevaptan ayıran
+budur: alt kelimeler `kitap`'ı `kitle`'ye benzetecektir, dolayısıyla göreviniz
+kısa kelimeler arasındaki ince anlamsal ayrımlara bağlıysa ikisini de ölçün.
+Bir de kullanıcı üretimi metinde yazım hatası olduğunu ve alt kelimelerin
+onları da soğurduğunu ekleyin.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. İki belgenin ortalanmış vektörleri arasındaki kosinüs benzerliği 0,95. Aynı şeyden mi bahsediyorlar?
+
+Muhtemelen, ama elinizde sayının ima ettiğinden çok daha az kanıt var; bu
+bölümün ölçtüğü üç sebeple. (a) Uzay anizotropik — *rastgele* kelimeler
+arasındaki taban kosinüs 0 değil 0,029 ve ortalanmış belgeler için taban çok
+daha yüksek, çünkü ortalama alma ortak bileşeni güçlendirir. Yüksek
+kosinüsler ucuzdur. (b) Ortalama alma kelime sırasını yok eder, yani zıt
+iddialar özdeş ortalamaya sahip olabilir. (c) Sözlük dışı ve nadir terimler
+— yani ayırt edici olanlar — ya düşürülür ya kötü kestirilir.
+
+Profesyonel hamle kalibre etmektir: kendi derleminizden rastgele belge
+çiftleri üzerinde kosinüs dağılımını hesaplayın ve ham sayı yerine yüzdelik
+dilimi raporlayın.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Önceden eğitilmiş gömmeleri kendi derleminizde ince ayarlamalı mı, yoksa sıfırdan mı eğitmeli?
+
+Derleminizin boyutunun önceden eğitim derlemine oranına ve alanınızın ne
+kadar saptığına bağlı. Kaba kurallar: ~10 milyon token'ın altında, önceden
+eğitilmiş vektörleri kullanın ve güncellemeyin — yalnızca elinizdeki avuç
+dolusu kelimeye aşırı uydurursunuz. 10 milyon ile birkaç yüz milyon
+arasında, önceden eğitilmişten başlatın ve eğitime devam edin. Bunun
+ötesinde ya da sözlüğünüz genel metinle neredeyse hiç örtüşmüyorsa (kimyasal
+adlar, parça numaraları, klinik kodlar) sıfırdan eğitin.
+
+Üç kuralı da yenen teşhis: alanınızdaki en önemli yirmi terimi alın, önceden
+eğitilmiş komşularına bakın ve `turbine` kalitesinde mi yoksa `eutectic`
+kalitesinde mi olduklarını görün.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Gömmeler TF-IDF'in yerini aldı. Doğru mu, yanlış mı?
+
+Bu hâliyle yanlış ve kanıt bu bölümdeki tablo: 20 Newsgroups üzerinde TF-IDF
+0,853 aldı ve her yoğun yöntem daha düşük puan aldı. Seyrek sözcüksel erişim
+(BM25) de bilgi erişiminde güçlü bir referans olmayı sürdürüyor; üretim
+sistemleri rutin olarak sözcüksel ve yoğun erişimi birlikte çalıştırıp
+sıralamaları kaynaştırıyor — tam da farklı biçimlerde başarısız oldukları
+için: sözcüksel eşleşme kesindir ve nadir tanımlayıcıları halleder, yoğun
+eşleşme başka sözcüklerle anlatımı halleder.
+
+Gömmelerin gerçekten yerini aldığı şey *one-hot kelime* gösterimidir, TF-IDF
+*belge* gösterimi değil. Bu ayrımı açıkça söylemeye değer, çünkü sorunun
+amacı genellikle budur.
+:::
+
+## Mülakat soruları
+
+::: {.callout-warning appearance="simple"}
+**Kaynak gösterimi üzerine — [2. bölümdeki](02-metin-veri.qmd) uyarının
+aynısı.** "Google mülakatlarında sorulan gömme soruları" listelediğini iddia
+eden sayfalar, arkasında hiçbir kanıt olmayan arama motoru içeriğidir.
+Aşağıdakiler, ikisi de ücretsiz olan iki güvenilir açık kaynakta yinelenen
+sorulardır: Chip Huyen'in
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+kitabı [@huyen2021interviews] ve
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews)
+deposu. Bir soru, bir şirketin gerçekten yayımladığı bir sisteme karşılık
+geliyorsa, o sistem kaynak gösterildi; kendiniz de kontrol edebilirsiniz.
+:::
+
+### Amaç fonksiyonunu anlayıp anlamadığınızı sınayanlar
+
+**S: word2vec'i, regresyon bilen ama sinir ağı bilmeyen birine anlatın.**
+
+Bunun, kelime çiftlerini gerçek ya da uydurma diye sınıflandıran bir
+lojistik regresyon olduğunu söyleyin; doğrusal öngörücü, öğrenilen iki
+vektörün iç çarpımıdır ve sakladığınız şey de o vektörlerdir.
+$\sigma(v \cdot u)$'yu yazın, `score - labels` ifadesinin artık olduğunu
+gösterin ve hiç gizli katman olmadığını belirtin. Sonra vuruşu yapın:
+@levy2014neural, optimumun kaydırılmış PPMI matrisinin çarpanlara ayrılması
+olduğunu kanıtladı; yani "sinirsel" yöntem ile "sayım" yöntemi aynı
+yöntemdir.
+
+**S: Skip-gram ve CBOW neyi tahmin eder, hangisini ne zaman tercih
+edersiniz?**
+
+Skip-gram merkez kelimeden bağlamı tahmin eder; CBOW ortalanmış bağlamdan
+merkez kelimeyi. CBOW daha hızlıdır ve bağlamı yumuşatır, dolayısıyla sık
+kelimelerde ve küçük derlemlerde daha iyi gider; skip-gram nadir kelimeler
+için daha iyi gösterimler üretir, çünkü her oluşum ortalamada erimek yerine
+birkaç bağımsız eğitim örneği doğurur. Genelde önemsediğiniz kelimeler nadir
+olanlardır; skip-gram'ın varsayılan olmasının sebebi de budur.
+
+**S: Negatif örnekleme dağılımı neden 0,75 kuvvetine yükseltiliyor?**
+
+Tekil kelime dağılımını yassılaştırmak için; böylece nadir kelimeler ham
+frekanslarının izin vereceğinden daha sık negatif olarak görünür ve
+vektörleri, birlikte geçmedikleri şeylerden uzağa itilir. Üssün ampirik
+olarak seçildiğini dürüstçe söyleyin. Güçlü devam şu: @levy2015improving, bu
+"ayrıntının" word2vec'in sayım temelli yöntemlere üstünlüğünün kayda değer
+bir kısmını açıkladığını gösterdi — özeti aşıp okuduğunuzu belli eden türden
+bir nokta.
+
+**S: Sık kelimelerin altörneklenmesi neden sadece işi hızlandırmakla
+kalmayıp vektörleri *iyileştiriyor*?**
+
+Çünkü (*the*, *pump*) gibi bir çift `pump` hakkında neredeyse hiç bilgi
+taşımaz — *the* her şeyle birlikte geçer — ama bu tür çiftler veriye baskın
+çıkar. Çoğunu kaldırmak etkin sinyal-gürültü oranını yükseltir ve yan etki
+olarak bağlam penceresini token cinsinden genişletir; böylece gerçekten
+bilgilendirici kelimeler birbirini görebilir. Bu bölümdeki koşuda sözlük
+içindeki token'ların %26,6'sını kaldırdı.
+
+### Geometriyi anlayıp anlamadığınızı sınayanlar
+
+**S: `king − man + woman ≈ queen`. Gerçekte ne oluyor ve bu gösterinin nesi
+yanlış?**
+
+Önce farkı açıklayın: cinsiyet yaklaşık olarak tutarlı bir yöndür, dolayısıyla
+onu ekleyip çıkarmak sizi o yön boyunca hareket ettirir. Sonra çekinceyi
+verin — kütüphane girdi kelimelerini eliyor ve bu filtre olmadan en yakın
+vektör 0,855 ile `king`'in kendisi; 0,783'lük `queen`'in önünde. Görevin kötü
+genellediğini ekleyin (`madrid − spain + germany`, `berlin` değil `munich`
+veriyor) ve @nissim2020fair ya da @linzen2016issues'a atıf yapın. Bu cevap,
+bir blog yazısı okumuş olanlarla kodu çalıştırmış olanları birbirinden
+ayırır.
+
+**S: Alakasız iki kelimenin kosinüsü 0,3. Bu yüksek mi düşük mü?**
+
+Bir taban olmadan cevaplanamaz; sorunun amacı da budur. Rastgele GloVe
+çiftleri arasındaki ortalama kosinüs 0,029, standart sapması 0,119; yani 0,3
+kabaca ortalamanın iki buçuk standart sapma üstünde — yüksek. Ama dağılım
+derleme ve modele özgüdür, dolayısıyla kendi tabanınızı verin. Sonra
+anizotropiden söz edin: vektörler bir koniyi kaplar, rastgele çiftlerin
+%56,9'unun kosinüsü pozitiftir ve uzayı ortalamak bunun çoğunu kaldırır
+[@mu2018allbutthetop].
+
+**S: Anlamsal aramanız en üst eşleşme olarak zıt anlamlıları döndürüyor.
+Neden ve ne yaparsınız?**
+
+Çünkü dağılımsal hipotez zıt anlamlıları neredeyse özdeş kılar — aynı
+bağlamlarda birbirlerinin yerine geçerler. `increase`/`decrease` 0,881
+alıyor; `cat`/`dog`'dan yüksek. Çözümler, artan maliyet sırasıyla: sözcüksel
+bir filtre ya da olumsuzlama farkındalığı olan bir kural ekleyin;
+kutupluluğu ayıran bir görevde ince ayarlanmış vektörler kullanın, örneğin
+doğal dil çıkarımıyla eğitilmiş cümle kodlayıcıları [@reimers2019sentencebert];
+ya da çifti birlikte puanlayan bir çapraz kodlayıcıya geçin. Ham metin
+üzerinde hiçbir denetimsiz eğitimin bunu düzeltmediğini açıkça söyleyin,
+çünkü sinyal dağılımda değil.
+
+### Bir şey sahaya çıkarmış olup olmadığınızı sınayanlar
+
+**S: 50 milyon belge için 100 ms altı erişimle belge vektörleri lazım. Kararı
+anlatın.**
+
+Modelle değil, kısıtla başlayın. 100–768 boyut arasındaki yoğun vektörler
+sığan tek seçenek — bu boyutta seyrek bir TF-IDF dizini kesin terim eşleşmesi
+için gayet iyidir ama farklı bir veri yapısıdır. Sonra: kodlayıcı seçimi
+(ortalanmış statik vektörler ucuz ve paralel; transformer kodlayıcı daha iyi
+ve 100 kat pahalı), kaba kuvvet yerine yaklaşık en yakın komşu dizini (HNSW
+ya da IVF-PQ) ve onunla gelen doğruluk–gecikme düğmesi. Yanında sözcüksel
+erişim de çalıştırıp kaynaştıracağınızı belirtin, çünkü yoğun erişim kesin
+tanımlayıcılarda tökezler — [2. bölümdeki](02-metin-veri.qmd) `P-101`
+problemi.
+
+**S: Kendi derleminizde gömme eğittiniz ve önceden eğitilmişlerden kötü
+çıktı. Ne oldu?**
+
+Büyük ihtimalle çok az veri — on milyon token'ın altında vektörler
+ezberliyor. Frekans eşiğini (`min_count`), epoch sayısını ve altörnekleme
+yapıp yapmadığınızı kontrol edin. Sonra *değerlendirmeyi* kontrol edin:
+WordSim-353 üzerinde puanlıyorsanız genel alan ilişkililiğini ölçüyorsunuz
+demektir ve alan vektörlerinizin orada daha kötü olması beklenir; bu, sizin
+göreviniz için kötü olmakla aynı şey değildir. Faydalı orta yolla bitirin:
+önceden eğitilmişten başlatıp eğitime devam edin.
+
+**S: Üretimdeki gömme modelinizin bayatladığını nasıl saptarsınız?**
+
+Canlı trafikte sözlük dışı oranını zaman içinde izleyin — ucuzdur ve
+doğruluk düşmeden önce yükselir. Komşu listelerini anlık görüntüleyip
+karşılaştırdığınız sabit bir alan terimi prob kümesi ekleyin. Ve karşılığını
+veren aşağı akış metriğini izleyin, çünkü optimize ettiğiniz şey hiçbir zaman
+gömmenin kendisi değildir. Bunun bir model problemi değil bir veri kayması
+problemi olduğunu belirtin: vektörler donmuş durumda, değişen dünya.
+
+### Derinliği sınayanlar
+
+**S: 100.000 ürününüz ve tıklama kayıtlarınız var. Bir ürün gömmesi
+tasarlayın.**
+
+Bunu oturumlar üzerinde word2vec olarak tanıyın: her kullanıcı oturumu bir
+"cümle", her ürün bir "kelime" ve negatif örneklemeli skip-gram, kosinüsü
+davranıştaki eş-oluşumu yansıtan ürün vektörleri verir. Airbnb sürümü için
+@grbovic2018real'a atıf yapın ve iki faydalı incelmelerini anın — rezerve
+edilen ilanın her pencereye eklenen küresel bir bağlam olması ve
+negatiflerin tekdüze değil aynı pazardan çekilmesi, ki model pazar içi
+ayrımları öğrensin. Sonra soğuk başlangıç problemini gündeme getirin (yeni
+ürünlerin tıklaması yoktur) ve cevap olarak içerik değişkenlerini ya da alt
+kelime tarzı bileşimi önerin.
+
+**S: PPMI+SVD, word2vec ve GloVe arasındaki bağlantı nedir?**
+
+Üçü de bir eş-oluşum matrisini çarpanlara ayırır; yeniden ağırlıklandırmada
+ve kayıpta ayrışırlar. PPMI+SVD, PMI ile yeniden ağırlıklandırır ve bütün
+hücrelerde kareli yeniden inşa hatasını en küçükler. word2vec örtük olarak
+kaydırılmış PMI'yı hedefler ama lojistik kayıp ve rastgele örneklemeyle;
+dolayısıyla hücreleri geçme sıklıklarına göre ağırlıklandırır. GloVe hedefi
+açık kılar — logaritmik eş-oluşum — ve nadir çiftleri sönümleyen ağırlıklı en
+küçük karelerle çalışır. Sonra @levy2015improving'in dürüst sonucu:
+hiperparametreler eşitlendiğinde karşılaştırılabilir performans gösterirler
+ve seçim genellikle mühendislik gerekçeleriyle yapılır.
+
+## Daha derine
+
+**Makaleler, okuma sırasıyla.** Hepsi ücretsiz.
+
+- **[Efficient Estimation of Word Representations in Vector Space](https://arxiv.org/abs/1301.3781)**
+  [@mikolov2013efficient], ardından
+  **[Distributed Representations of Words and Phrases](https://arxiv.org/abs/1310.4546)**
+  [@mikolov2013distributed]. İlki skip-gram ve CBOW'u önerir; ikincisi
+  negatif örneklemeyi ve altörneklemeyi ekler. İkincisini iki kez okuyun.
+- **[word2vec Parameter Learning Explained](https://arxiv.org/abs/1411.2738)**,
+  Xin Rong [@rong2014word2vec]. Her gradyanı elle türetir. Özgün makale
+  adımları atlıyormuş gibi geldiyse okunacak makale budur — ve algoritmayı
+  kendiniz yazmak için en iyi hazırlıktır. Yanına
+  **[word2vec Explained](https://arxiv.org/abs/1402.3722)**
+  [@goldberg2014word2vec] ekleyin; özgün makalenin türetmeden verdiği negatif
+  örnekleme amacını yeniden kuran dört sayfa.
+- **[Neural Word Embedding as Implicit Matrix Factorization](https://papers.nips.cc/paper/5477-neural-word-embedding-as-implicit-matrix-factorization)**
+  [@levy2014neural] ve
+  **[Improving Distributional Similarity with Lessons Learned](https://aclanthology.org/Q15-1016/)**
+  [@levy2015improving]. word2vec'in gizemini çözen iki makale. İkincisi,
+  ampirik NLP'nin dürüstçe nasıl yapılacağının daha iyi bir modeli.
+- **[GloVe](https://nlp.stanford.edu/pubs/glove.pdf)** [@pennington2014glove]
+  ve **[Enriching Word Vectors with Subword Information](https://arxiv.org/abs/1607.04606)**
+  [@bojanowski2017enriching].
+- **[Man is to Computer Programmer as Woman is to Homemaker?](https://arxiv.org/abs/1607.06520)**
+  [@bolukbasi2016man], ardından
+  **[Lipstick on a Pig](https://arxiv.org/abs/1903.03862)**
+  [@gonen2019lipstick]. İkisini bir çift olarak okuyun — ikincisi
+  birincisinin düzeltmesidir ve bu sıralama, düzeltmelerin nasıl fazla iddialı
+  sunulduğuna dair iyi bir ders.
+
+**Ders kitapları ve dersler.**
+
+- **[Speech and Language Processing](https://web.stanford.edu/~jurafsky/slp3/)**,
+  Jurafsky & Martin [@jurafsky2025slp],
+  [5. bölüm, *Vector Semantics and Embeddings*](https://web.stanford.edu/~jurafsky/slp3/5.pdf).
+  PPMI, SVD, skip-gram ve değerlendirmeyi herhangi bir blog yazısından daha
+  özenle işler; üstelik ücretsiz.
+- **[Stanford CS224N](https://web.stanford.edu/class/cs224n/)**, 1. ve 2.
+  dersler ve eşlik eden notlar. 2. dersteki skip-gram gradyan türetimi, çoğu
+  insanın konuyu öğrendiği türetimdir. 2. ödev (word2vec'i yazmak) herkese
+  açık ve buradaki en iyi tek alıştırma.
+- **[NLP Course For You](https://lena-voita.github.io/nlp_course/word_embeddings.html)**,
+  Elena Voita [@voita2020nlpcourse]. Skip-gram ve negatif örneklemenin
+  var olan en iyi *görsel* anlatımı; animasyonlar iki matrisi apaçık kılıyor.
+
+**Uygulamalı.**
+
+- **[gensim](https://radimrehurek.com/gensim/)** [@rehurek2010software]. Bu
+  bölüm boyunca kullanılan kütüphane;
+  [word2vec öğreticisi](https://radimrehurek.com/gensim/auto_examples/tutorials/run_word2vec.html)
+  kendi metniniz üzerinde eğitilmiş bir modele giden en hızlı yol.
+- **[fastText önceden eğitilmiş vektörleri](https://fasttext.cc/docs/en/crawl-vectors.html)**
+  [@mikolov2018advances]. Türkçe dâhil 157 dil; Common Crawl ve Wikipedia
+  üzerinde eğitilmiş. Kendinizinkini eğitmeden önce buradan başlayın.
+- **[The Illustrated Word2vec](https://jalammar.github.io/illustrated-word2vec/)**,
+  Jay Alammar [@alammar2019word2vec] ve Sebastian Ruder'ın
+  **[On Word Embeddings](https://www.ruder.io/word-embeddings-1/)**
+  [@ruder2016wordembeddings] yazısı. Web'deki en iyi iki ücretsiz anlatım;
+  ilki resimler, ikincisi tarihsel harita için.
+- **[TensorFlow Projector](https://projector.tensorflow.org/)**. word2vec ve
+  GloVe'u tarayıcıda PCA, t-SNE ve UMAP ile yükler. Kendi alan terimlerinizi
+  arayıp mahalleleri inceleyin.
+
+## Alıştırmalar
+
+1. **Oyuncak uzayı farklı bir pencereyle tekrarlayın.** On cümlelik
+   PPMI+SVD'yi pencere 1 ve pencere 4 ile yeniden çalıştırın. Hangi komşu
+   listeleri değişiyor ve geniş pencere uzayı neden daha *konusal*, dar
+   pencere neden daha *sözdizimsel* yapıyor?
+2. **Analojiyi kırın.** Yukarıdaki gezgini ya da `gensim`'i kullanarak
+   $a - b + c$ biçiminde çalışan üç, çalışmayan üç analoji bulun. Her
+   başarısızlık için, modelin bilgiden mi yoksun olduğuna yoksa aritmetiğin
+   mi yanlış araç olduğuna karar verin ve kararınızı savunan bir cümle yazın.
+3. **Kendi alanınızı denetleyin.** Alanınızdaki en önemli yirmi terimi alın,
+   GloVe frekans sıralarına ve beş en yakın komşularına bakın, her listeye
+   iyi / makul / saçma notu verin. Sıra ile notunuz arasındaki korelasyonu
+   raporlayın. İnsanların önceden eğitilmiş vektörleri kullanma biçimini en
+   çok değiştiren alıştırma budur.
+4. **Türkçenin sözlük faturası.** Sahip olduğunuz bir Türkçe derlem ile
+   benzer büyüklükte bir İngilizce derlem alın. Bu bölümdeki tür/token ve
+   hapax sayılarını yeniden üretin. Sonra kestirin: İngilizcenin sözlük dışı
+   oranına ulaşmak için kaç token Türkçe gerekirdi?
+5. **Ortalama almayı bilerek bozun.** Kendi alanınızdan, işletme anlamı
+   birbirinin zıddı olan ve ortalanmış GloVe vektörlerinin kosinüsü 0,99'un
+   üzerinde olan iki cümle kurun. Sonra bir tasarım gözden geçirmesine
+   koyacağınız, bu gösterimin o kararı neden belirlememesi gerektiğini
+   anlatan paragrafı yazın.
+6. **TF-IDF'i yenin.** Bu bölümdeki tabloda TF-IDF her yoğun yöntemin
+   önünde. Bunu değiştirin. Seçenekler: doc2vec hiperparametrelerini
+   ayarlayın, 300 boyutlu vektörler kullanın, @arora2017simple'ın birinci
+   temel bileşeni çıkarılmış ağırlıklı ortalamasını uygulayın ya da daha
+   fazla gösterimi birleştirin. Neyin ne kadar işe yaradığını raporlayın — ve
+   kazancın farklı bir eğitim/test ayrımında hayatta kalıp kalmayacağını.
+7. **Kendiniz yazın.** Stanford CS224N 2. ödevini tamamlayın ya da bu
+   bölümdeki NumPy uygulamasını CBOW ile genişletip ikisini özellikle nadir
+   kelimelerde karşılaştırın. Çalıştırmadan önce farkın yönünü tahmin edin.
+8. **Önemsediğiniz bir yanlılık eksenini ölçün.** Alanınızla ilgili bir
+   ekseni tanımlayan bir kelime çifti seçin, ilgili yirmi terimi bu eksene
+   izdüşürün ve sıralamayı raporlayın. Sonra @gonen2019lipstick'in testini
+   uygulayın: ekseni izdüşümle dışarı attıktan sonra, bir kümeleme özgün
+   grupları hâlâ geri kazanabiliyor mu?
