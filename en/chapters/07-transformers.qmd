@@ -1,8 +1,8 @@
 # Transformers and Attention {#sec-transformers}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: core sections drafted, later sections in outline.** The two
-interactive explorers below are fully functional.
+**Chapter status: core sections drafted, later sections in outline.** The
+interactive attention explorer below is fully functional.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -10,9 +10,11 @@ interactive explorers below are fully functional.
 - explain self-attention as a *learned weighted average* over token representations;
 - read the equation $\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\big(QK^{\top}/\sqrt{d_k}\big)\,V$ term by term;
 - describe why multiple heads exist and what different heads specialize in;
-- explain how a model turns scores into text — and what temperature, top-k, and top-p actually do to the distribution.
+- explain why position must be injected explicitly, and compare absolute, learned, RoPE, and ALiBi;
+- name the techniques that make long contexts affordable — KV cache, GQA/MQA, FlashAttention;
+- state what scaling laws predict, and where the prediction stops.
 
-## The problem attention solves
+## Self-attention from first principles
 
 By @sec-language-models we could predict the next word, but our recurrent
 models had a bottleneck: everything the model knew about the sentence had to
@@ -25,8 +27,6 @@ direct: [let every token look at every other token, and learn how much each
 one matters]{.hl}. If you have ever computed a weighted average, you already
 own the core intuition. Attention is a weighted average of token vectors
 where *the weights themselves are predicted from the data*.
-
-## Self-attention, step by step
 
 Each token's vector is projected three ways — a **query** ("what am I looking
 for?"), a **key** ("what do I contain?"), and a **value** ("what do I pass
@@ -131,137 +131,66 @@ pretraining buys.
 
 <!-- TODO: add the Q/K/V worked numeric example (3 tokens, d=4) here. -->
 
-## Multi-head attention, positions, and the block
-
-<!-- TODO(draft): why h parallel heads; concatenation + output projection;
-     positional information (learned vs RoPE); residual + layer norm; the
-     full Transformer block diagram. Port figures from the CME 295-based
-     workshop deck. -->
+## Multi-head attention and the transformer block
 
 One head is one habit; real models run dozens in parallel and mix the
-results. Because attention itself is order-blind, position must be injected
+results.
+
+<!-- TODO(draft): why h parallel heads; concatenation + output projection;
+     residual connections and layer norm (pre-norm vs post-norm); the
+     feed-forward sublayer; the full Transformer block diagram as a
+     hand-authored .anlp-fig SVG. Port figures from the CME 295-based
+     workshop deck. -->
+
+## Positional information: absolute, learned, RoPE, ALiBi
+
+Because attention itself is order-blind, position must be injected
 explicitly — the model literally cannot tell "dog bites man" from "man bites
-dog" without it.
+dog" without it. This is the same failure the averaged embeddings hit in
+@sec-bake-off, where `kalite iyi fiyat kötü` and `kalite kötü fiyat iyi`
+came out at cosine 1.0000.
 
-## From scores to text: decoding
+<!-- TODO(draft): sinusoidal vs learned absolute embeddings; rotary (RoPE)
+     as a rotation in each 2-d subspace; ALiBi's linear distance bias; why
+     the choice determines how far a model extrapolates beyond its training
+     context length. -->
 
-A language model's forward pass ends in a vector of **logits** — one raw
-score per vocabulary token. What happens next is not learning; it is a
-[sampling policy you control at inference time]{.hl}, and it changes the
-character of the output more than most people expect.
+## Encoder-only, decoder-only, encoder-decoder
 
-- **Temperature** $\tau$ rescales logits before the softmax:
-  $p_i \propto \exp(z_i/\tau)$. Low $\tau$ sharpens, high $\tau$ flattens.
-- **Top-k** keeps only the $k$ highest-probability tokens, then renormalizes.
-- **Top-p (nucleus)** keeps the smallest set of tokens whose cumulative
-  probability exceeds $p$, then renormalizes [@holtzman2020curious].
+<!-- TODO(draft): the three families and the masking that separates them;
+     BERT-style bidirectional encoding for classification (forward-reference
+     @sec-classification), decoder-only for generation, encoder-decoder for
+     translation and summarization. A small table with a representative model
+     and a representative task per family. -->
 
-### Explore: temperature, top-k, and top-p
+## Efficiency: FlashAttention, GQA/MQA, KV cache
 
-The model has just read *"After the lecture, the students were completely
-____"* and produced the logits below. Gray bars show the raw softmax
-distribution; teal bars show what survives your sampling policy, after
-renormalization. Try $\tau = 0.2$, then $\tau = 1.8$. Then cut the tail with
-top-p $= 0.6$.
+<!-- TODO(draft): the quadratic cost of attention stated concretely in
+     memory and FLOPs; the KV cache as the single biggest inference lever
+     (connect to prefix caching in @sec-serving); grouped-query and
+     multi-query attention trading heads for bandwidth; FlashAttention as an
+     IO-aware exact algorithm, not an approximation. -->
 
-::: {.anlp-widget}
-```{=html}
-<div class="widget-title">Sampling policy explorer — the same logits, reshaped</div>
-```
+## Mixture of Experts
 
-```{ojs}
-//| echo: false
-viewof temperature = Inputs.range([0.1, 2.0], { value: 1.0, step: 0.05, label: "Temperature τ" })
-```
-```{ojs}
-//| echo: false
-viewof topK = Inputs.range([1, 12], { value: 12, step: 1, label: "Top-k" })
-```
-```{ojs}
-//| echo: false
-viewof topP = Inputs.range([0.05, 1.0], { value: 1.0, step: 0.05, label: "Top-p (nucleus)" })
-```
+<!-- TODO(draft): sparse routing — total parameters vs active parameters per
+     token; the router and load balancing; why an MoE model's memory cost is
+     set by total parameters while its latency is set by active ones, and
+     what that means for self-hosting decisions in @sec-serving. -->
 
-```{ojs}
-//| echo: false
-samplingDist = {
-  const candidates = [
-    { token: "exhausted",   logit:  4.2 },
-    { token: "confused",    logit:  3.7 },
-    { token: "silent",      logit:  3.1 },
-    { token: "inspired",    logit:  2.9 },
-    { token: "lost",        logit:  2.5 },
-    { token: "quiet",       logit:  2.2 },
-    { token: "bored",       logit:  1.8 },
-    { token: "energized",   logit:  1.4 },
-    { token: "hungry",      logit:  1.0 },
-    { token: "transformed", logit:  0.5 },
-    { token: "purple",      logit: -0.5 },
-    { token: "recursive",   logit: -1.2 }
-  ];
+## Scaling laws and what they predict
 
-  // 1) temperature-scaled softmax
-  const ws = candidates.map(d => Math.exp(d.logit / temperature));
-  const Z = ws.reduce((a, b) => a + b, 0);
-  let rows = candidates
-    .map((d, i) => ({ ...d, p: ws[i] / Z }))
-    .sort((a, b) => b.p - a.p);
+<!-- TODO(draft): loss as a power law in compute, parameters, and data;
+     Chinchilla-style compute-optimal allocation; what the laws do and do not
+     predict (they predict loss, not capability). Keep this honest about
+     extrapolation — connect to @sec-pretraining. -->
 
-  // 2) top-k filter
-  rows = rows.map((d, i) => ({ ...d, kept: i < topK }));
+## Lab: implement attention, then profile it
 
-  // 3) top-p (nucleus) filter over what survived top-k
-  let cum = 0;
-  rows = rows.map(d => {
-    const before = cum;
-    if (d.kept) cum += d.p;
-    return { ...d, kept: d.kept && before < topP };
-  });
-
-  // 4) renormalize the survivors
-  const Zk = rows.filter(d => d.kept).reduce((a, d) => a + d.p, 0) || 1;
-  return rows.map(d => ({ ...d, pFinal: d.kept ? d.p / Zk : 0 }));
-}
-```
-
-```{ojs}
-//| echo: false
-Plot.plot({
-  width: 640,
-  height: 380,
-  marginLeft: 100,
-  x: {
-    label: "P(next token)",
-    domain: [0, Math.max(0.4, ...samplingDist.map(d => d.pFinal), ...samplingDist.map(d => d.p)) * 1.15],
-    tickFormat: ".0%"
-  },
-  y: { domain: samplingDist.map(d => d.token), label: null },
-  marks: [
-    Plot.barX(samplingDist, { y: "token", x: "p", fill: "#D4DADF" }),
-    Plot.barX(samplingDist.filter(d => d.kept), { y: "token", x: "pFinal", fill: "#0E7C7B" }),
-    Plot.text(samplingDist.filter(d => d.kept), {
-      y: "token", x: "pFinal",
-      text: d => (d.pFinal * 100).toFixed(1) + "%",
-      dx: 6, textAnchor: "start", fill: "#5B6272", fontSize: 11
-    }),
-    Plot.ruleX([0])
-  ]
-})
-```
-
-```{ojs}
-//| echo: false
-md`**${samplingDist.filter(d => d.kept).length} of 12** candidate tokens survive
-this policy. Gray = raw softmax at τ = ${temperature.toFixed(2)}; teal =
-renormalized sampling distribution.`
-```
-:::
-
-Notice what a low temperature does *not* do: it never changes the ranking,
-only the contrast. Top-k and top-p, by comparison, are hard cutoffs — they
-exist mainly to stop the model from ever picking `recursive` in a sentence
-about tired students. This trio is your first, cheapest lever in every
-applied system you will build in Part III.
+<!-- TODO(draft): implement scaled dot-product attention in NumPy, verify
+     against a reference implementation, then measure how runtime and memory
+     scale with sequence length. Add a KV cache and re-measure. The point is
+     to feel the quadratic term rather than read about it. -->
 
 ## Where to go deeper
 
@@ -277,10 +206,12 @@ which runs a live GPT-2 in your browser, and Brendan Bycroft's
 1. In the attention explorer, the pronoun head splits its weight roughly
    46/34 between *robot* and *coffee*. Rewrite the sentence so a good model
    should flip that ratio, and justify your edit.
-2. Show algebraically that temperature scaling never changes the argmax
-   token. What does this imply about greedy decoding?
-3. Set $\tau = 1$, top-k $= 12$. Find the smallest top-p that still keeps
-   at least four tokens. Explain the cumulative-mass logic behind your
-   answer.
+2. Attention is order-blind on its own. Take the word-order pair from
+   @sec-bake-off that scored cosine 1.0000 under averaging, and explain
+   precisely which component of a transformer block makes the two sentences
+   representable differently.
+3. A model with 32 layers, 32 heads, and head dimension 128 serves a 100,000
+   token context. Compute the size of the KV cache in gigabytes at 16-bit
+   precision. Then explain why grouped-query attention exists.
 
 <!-- TODO: homework notebook link (Colab badge) once notebooks/ is added. -->

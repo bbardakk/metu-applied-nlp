@@ -14,7 +14,7 @@ kod bölümleri Python + Jupyter engine + `freeze`.
 ├── en/                      # İngilizce kitap (tam Quarto projesi)
 │   ├── _quarto.yml          # bölüm listesi, tema, footer — ana kontrol dosyası
 │   ├── index.qmd            # landing page (BPE-chip hero)
-│   ├── chapters/            # 12 bölüm (05 ve 03 örnek olarak dolu)
+│   ├── chapters/            # 36 bölüm / 7 part (01-04 dolu, kalanı iskelet)
 │   ├── appendices/          # setup, math refresher, EN↔TR sözlük
 │   ├── theme/               # custom-light.scss / custom-dark.scss
 │   └── _templates/          # chapter-template.qmd — yeni bölüm için kopyala
@@ -55,8 +55,9 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
 
 ## 3) İnteraktifler (OJS)
 
-Örnekler `en/chapters/06-transformers.qmd` içinde: attention-head explorer
-ve temperature/top-k/top-p sampling explorer. Desen: `viewof x =
+Örnekler: `en/chapters/07-transformers.qmd` içinde attention-head explorer,
+`en/chapters/15-decoding-structured-output.qmd` içinde temperature/top-k/top-p
+sampling explorer. Desen: `viewof x =
 Inputs.range(...)` girdileri → hesap hücresi → `Plot.plot(...)`. Tamamı
 tarayıcıda çalışır; build sırasında Python gerekmez. Yeni widget için bu
 bloklardan birini kopyalayıp veriyi değiştir.

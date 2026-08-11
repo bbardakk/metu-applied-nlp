@@ -1,0 +1,182 @@
+# Decoding and Structured Output {#sec-decoding}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Chapter status: first section drafted, rest in outline.** The sampling
+explorer below is fully functional.
+:::
+
+**Learning objectives.** After this chapter you can:
+
+- explain what each sampling parameter does to the probability distribution;
+- make a model emit schema-valid output every single time;
+- use logprobs for confidence, routing, and abstention;
+- diagnose repetition and degeneration instead of tuning parameters at random.
+
+## Greedy, beam, temperature, top-k / top-p / min-p
+
+A language model's forward pass ends in a vector of **logits** — one raw
+score per vocabulary token. Everything in @sec-transformers was about
+producing that vector. What happens next is not learning; it is a
+[sampling policy you control at inference time]{.hl}, and it changes the
+character of the output more than most people expect.
+
+- **Temperature** $\tau$ rescales logits before the softmax:
+  $p_i \propto \exp(z_i/\tau)$. Low $\tau$ sharpens, high $\tau$ flattens.
+- **Top-k** keeps only the $k$ highest-probability tokens, then renormalizes.
+- **Top-p (nucleus)** keeps the smallest set of tokens whose cumulative
+  probability exceeds $p$, then renormalizes [@holtzman2020curious].
+
+### Explore: temperature, top-k, and top-p
+
+The model has just read *"After the lecture, the students were completely
+____"* and produced the logits below. Gray bars show the raw softmax
+distribution; teal bars show what survives your sampling policy, after
+renormalization. Try $\tau = 0.2$, then $\tau = 1.8$. Then cut the tail with
+top-p $= 0.6$.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Sampling policy explorer — the same logits, reshaped</div>
+```
+
+```{ojs}
+//| echo: false
+viewof temperature = Inputs.range([0.1, 2.0], { value: 1.0, step: 0.05, label: "Temperature τ" })
+```
+```{ojs}
+//| echo: false
+viewof topK = Inputs.range([1, 12], { value: 12, step: 1, label: "Top-k" })
+```
+```{ojs}
+//| echo: false
+viewof topP = Inputs.range([0.05, 1.0], { value: 1.0, step: 0.05, label: "Top-p (nucleus)" })
+```
+
+```{ojs}
+//| echo: false
+samplingDist = {
+  const candidates = [
+    { token: "exhausted",   logit:  4.2 },
+    { token: "confused",    logit:  3.7 },
+    { token: "silent",      logit:  3.1 },
+    { token: "inspired",    logit:  2.9 },
+    { token: "lost",        logit:  2.5 },
+    { token: "quiet",       logit:  2.2 },
+    { token: "bored",       logit:  1.8 },
+    { token: "energized",   logit:  1.4 },
+    { token: "hungry",      logit:  1.0 },
+    { token: "transformed", logit:  0.5 },
+    { token: "purple",      logit: -0.5 },
+    { token: "recursive",   logit: -1.2 }
+  ];
+
+  // 1) temperature-scaled softmax
+  const ws = candidates.map(d => Math.exp(d.logit / temperature));
+  const Z = ws.reduce((a, b) => a + b, 0);
+  let rows = candidates
+    .map((d, i) => ({ ...d, p: ws[i] / Z }))
+    .sort((a, b) => b.p - a.p);
+
+  // 2) top-k filter
+  rows = rows.map((d, i) => ({ ...d, kept: i < topK }));
+
+  // 3) top-p (nucleus) filter over what survived top-k
+  let cum = 0;
+  rows = rows.map(d => {
+    const before = cum;
+    if (d.kept) cum += d.p;
+    return { ...d, kept: d.kept && before < topP };
+  });
+
+  // 4) renormalize the survivors
+  const Zk = rows.filter(d => d.kept).reduce((a, d) => a + d.p, 0) || 1;
+  return rows.map(d => ({ ...d, pFinal: d.kept ? d.p / Zk : 0 }));
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 640,
+  height: 380,
+  marginLeft: 100,
+  x: {
+    label: "P(next token)",
+    domain: [0, Math.max(0.4, ...samplingDist.map(d => d.pFinal), ...samplingDist.map(d => d.p)) * 1.15],
+    tickFormat: ".0%"
+  },
+  y: { domain: samplingDist.map(d => d.token), label: null },
+  marks: [
+    Plot.barX(samplingDist, { y: "token", x: "p", fill: "#D4DADF" }),
+    Plot.barX(samplingDist.filter(d => d.kept), { y: "token", x: "pFinal", fill: "#0E7C7B" }),
+    Plot.text(samplingDist.filter(d => d.kept), {
+      y: "token", x: "pFinal",
+      text: d => (d.pFinal * 100).toFixed(1) + "%",
+      dx: 6, textAnchor: "start", fill: "#5B6272", fontSize: 11
+    }),
+    Plot.ruleX([0])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+md`**${samplingDist.filter(d => d.kept).length} of 12** candidate tokens survive
+this policy. Gray = raw softmax at τ = ${temperature.toFixed(2)}; teal =
+renormalized sampling distribution.`
+```
+:::
+
+Notice what a low temperature does *not* do: it never changes the ranking,
+only the contrast. Top-k and top-p, by comparison, are hard cutoffs — they
+exist mainly to stop the model from ever picking `recursive` in a sentence
+about tired students. This trio is the cheapest lever you have in every
+applied system from here on.
+
+<!-- TODO(draft): add greedy and beam search alongside these three, plus
+     min-p as the newer alternative that adapts its cutoff to the
+     distribution's peak rather than to a fixed mass. -->
+
+## Repetition, degeneration, and sampling pathologies
+
+<!-- TODO(draft): the repetition trap; why greedy decoding loops;
+    repetition penalties and their side effects. -->
+
+## Constrained decoding: JSON Schema, grammars, regex
+
+<!-- TODO(draft): masking the logits to the set of legal next tokens; what
+    this costs and what it cannot fix (valid JSON that is factually
+    wrong). -->
+
+## Making tool arguments reliable
+
+<!-- TODO(draft): the single highest-leverage use of constrained decoding;
+    forward-reference @sec-tool-design. -->
+
+## Logprobs for confidence, routing, and abstention
+
+<!-- TODO(draft): token probability as a calibrated-ish signal; routing
+    hard cases to a bigger model; teaching a system to say 'I do not
+    know'. -->
+
+## Streaming and incremental parsing
+
+<!-- TODO(draft): partial JSON, incremental validation, and what the user
+    sees while it arrives. -->
+
+## Lab: 100% schema-valid extraction pipeline
+
+<!-- TODO(draft): build an extractor that never emits invalid output, then
+    measure how often valid output is still wrong. -->
+
+## Exercises
+
+1. Show algebraically that temperature scaling never changes the argmax
+   token. What does this imply about greedy decoding?
+2. In the explorer, set $\tau = 1$ and top-k $= 12$. Find the smallest top-p
+   that still keeps at least four tokens, and explain the cumulative-mass
+   logic behind your answer.
+3. Set temperature to 0 and run the same prompt 20 times against a hosted
+   API. Are the outputs identical? Explain what you find.
+4. Take an extraction task with a 40% JSON failure rate. Add constrained
+   decoding and report the new failure rate — and the new error modes.
