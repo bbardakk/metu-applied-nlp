@@ -1,67 +1,961 @@
 # Data, Annotation, and Ground Truth {#sec-data-annotation}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Every number in this chapter was measured on the same Turkish product-review corpus and the same 40,000/10,000 split used in @sec-bake-off, with scikit-learn 1.9.0, NumPy 2.5.2, pandas 3.0.5 on Python 3.12.13. Two of the results are hand audits — readings of 140 Turkish reviews by one person, with the criteria stated before the reading began. Treat those two as one careful reader's judgement, not as a measurement.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- judge whether a dataset is legally and ethically usable before you train on it;
-- write an annotation guideline that two strangers can apply and agree on;
-- compute and interpret inter-annotator agreement, and know when a low score means the task is ill-defined rather than the annotators careless;
-- build splits that do not leak, and detect benchmark contamination.
+- read a sample of your own data and classify what you find into label errors, schema failures, and model errors — and act differently on each;
+- write an annotation guideline that two strangers can apply to the same text and reach the same answer;
+- compute inter-annotator agreement, and recognise when a 93% agreement score is worth less than a coin flip;
+- predict which direction of label noise will hurt you, and by how much, before you spend the annotation budget;
+- build splits that do not leak, and measure what a leak is worth to your reported score.
 
-## Where datasets come from: collection, licensing, provenance
+## The number you have been trusting
 
-<!-- TODO(draft): scraping vs. licensed vs. user-generated; what a licence
-    actually permits; provenance as a first-class artefact. Tie to the
-    Turkish reviews corpus used in @sec-bake-off — where did it come from,
-    and could you ship a product on it? -->
+@sec-bake-off ended with a leaderboard. Tf-idf over word 1–2 grams, fed to a balanced logistic regression, scored **92.57% accuracy and 76.21 macro-F1**. Bag of words scored 73.51. Averaged word2vec scored 61.39. The chapter's conclusion was that representation matters, that the ordering was stable, and that you should reach for the sparse baseline first.
 
-## Label schema design and annotation guidelines
+Every one of those numbers was computed by comparing the model's output against a column called `sentiment`. Not once did we ask where that column came from, who wrote it, what question they were answering, or whether they were right.
 
-<!-- TODO(draft): labels are a modelling decision, not a given. Flat vs.
-    hierarchical; the 'other' class; how many labels before annotators
-    stop being reliable. Show a real guideline document with its edge-case
-    section. -->
+This chapter asks. The setup is deliberately narrow: the representation is frozen at the @sec-bake-off winner, the split is the same, the seed is the same. The only thing that varies is the labels. That isolation is the whole point — when the score moves, you know exactly why.
 
-## Inter-annotator agreement and adjudication
+What comes out is uncomfortable. A 2% error rate in the *test* labels drags the leaderboard's top entry below its bag-of-words rival — not because the model changed, but because the ruler did. Half of the model's most confident "mistakes" turn out not to be mistakes at all: they are texts that a single binary label cannot describe. And 1,000 carefully chosen labels beat 40,000 noisy ones.
 
-<!-- TODO(draft): raw agreement vs. chance-corrected. Cohen's kappa for
-    two annotators, Krippendorff's alpha for many/missing/ordinal. Worked
-    arithmetic on a small confusion table. The key point: your model
-    cannot beat the ceiling that annotator disagreement sets. -->
+::: {.column-margin}
+The corpus is the same one as in @sec-bake-off: 235,165 Turkish product reviews, 93.7% of them labelled positive. The imbalance is not incidental to this chapter — it is the reason most of the results look the way they do.
+:::
 
-## Weak supervision and programmatic labeling
+## Where a label actually comes from
 
-<!-- TODO(draft): labelling functions, conflict resolution, and the
-    generative-model step; when 60%-accurate rules beat 200 hand labels. -->
+A label is manufactured. Someone decided what the categories are, someone wrote instructions, someone read a text and pressed a key, and something aggregated the results. Each step is a place where the label can stop meaning what you think it means.
 
-## Synthetic data generation and quality filtering
+::::: {.anlp-fig}
 
-<!-- TODO(draft): LLM-generated training data; mode collapse and
-    diversity; filtering pipelines; the contamination risk of generating
-    from the model you will evaluate against. -->
+```{=html}
+<div class="fig-title">How a label is manufactured, and where it breaks</div>
+<svg viewBox="0 0 760 256" style="max-width:740px" role="img" aria-label="A five-stage pipeline from raw text to a stored label, with a failure mode attached to each stage.">
+  <defs>
+    <marker id="ch5a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="head"/>
+    </marker>
+    <marker id="ch5a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="head-rose"/>
+    </marker>
+  </defs>
 
-## Splits, leakage, and benchmark contamination
+  <text x="12" y="52" class="t-xs t-b">the</text>
+  <text x="12" y="65" class="t-xs t-b">pipeline</text>
 
-<!-- TODO(draft): temporal, group, and entity-aware splits. Near-duplicate
-    leakage — connect to the 1,657 exact duplicates removed in
-    @sec-bake-off. How to test whether a public benchmark is already in a
-    model's pretraining data. -->
+  <rect x="104" y="34" width="116" height="52" rx="6" class="box"/>
+  <text x="162" y="57" text-anchor="middle" class="t-sm t-b">raw text</text>
+  <text x="162" y="74" text-anchor="middle" class="t-xs t-muted">scraped or logged</text>
 
-## Datasheets, model cards, and data documentation
+  <rect x="236" y="34" width="116" height="52" rx="6" class="box"/>
+  <text x="294" y="57" text-anchor="middle" class="t-sm t-b">schema</text>
+  <text x="294" y="74" text-anchor="middle" class="t-xs t-muted">what the classes are</text>
 
-<!-- TODO(draft): datasheets for datasets; what a good model card
-    contains; documentation as a review gate, not paperwork. -->
+  <rect x="368" y="34" width="116" height="52" rx="6" class="box"/>
+  <text x="426" y="57" text-anchor="middle" class="t-sm t-b">guideline</text>
+  <text x="426" y="74" text-anchor="middle" class="t-xs t-muted">how to decide</text>
+
+  <rect x="500" y="34" width="116" height="52" rx="6" class="box"/>
+  <text x="558" y="57" text-anchor="middle" class="t-sm t-b">annotator</text>
+  <text x="558" y="74" text-anchor="middle" class="t-xs t-muted">reads, presses a key</text>
+
+  <rect x="632" y="34" width="116" height="52" rx="6" class="box-accent"/>
+  <text x="690" y="57" text-anchor="middle" class="t-sm t-b t-accent">stored label</text>
+  <text x="690" y="74" text-anchor="middle" class="t-xs t-muted">one column</text>
+
+  <line x1="222" y1="60" x2="234" y2="60" class="ln" marker-end="url(#ch5a1)"/>
+  <line x1="354" y1="60" x2="366" y2="60" class="ln" marker-end="url(#ch5a1)"/>
+  <line x1="486" y1="60" x2="498" y2="60" class="ln" marker-end="url(#ch5a1)"/>
+  <line x1="618" y1="60" x2="630" y2="60" class="ln" marker-end="url(#ch5a1)"/>
+
+  <text x="12" y="180" class="t-xs t-b t-rose">what</text>
+  <text x="12" y="193" class="t-xs t-b t-rose">breaks</text>
+  <text x="12" y="206" class="t-xs t-b t-rose">here</text>
+
+  <line x1="162" y1="90" x2="162" y2="144" class="ln-rose ln-dash" marker-end="url(#ch5a2)"/>
+  <line x1="294" y1="90" x2="294" y2="144" class="ln-rose ln-dash" marker-end="url(#ch5a2)"/>
+  <line x1="426" y1="90" x2="426" y2="144" class="ln-rose ln-dash" marker-end="url(#ch5a2)"/>
+  <line x1="558" y1="90" x2="558" y2="144" class="ln-rose ln-dash" marker-end="url(#ch5a2)"/>
+  <line x1="690" y1="90" x2="690" y2="144" class="ln-rose ln-dash" marker-end="url(#ch5a2)"/>
+
+  <rect x="104" y="150" width="116" height="92" rx="6" class="box-rose"/>
+  <text x="162" y="172" text-anchor="middle" class="t-xs t-b t-rose">selection</text>
+  <text x="112" y="192" class="t-xs">who writes reviews</text>
+  <text x="112" y="206" class="t-xs">is not who buys</text>
+  <text x="112" y="230" class="t-xs t-mono t-muted">93.7% positive</text>
+
+  <rect x="236" y="150" width="116" height="92" rx="6" class="box-rose"/>
+  <text x="294" y="172" text-anchor="middle" class="t-xs t-b t-rose">schema gap</text>
+  <text x="244" y="192" class="t-xs">texts the classes</text>
+  <text x="244" y="206" class="t-xs">cannot express</text>
+  <text x="244" y="230" class="t-xs t-mono t-muted">50% of flags</text>
+
+  <rect x="368" y="150" width="116" height="92" rx="6" class="box-rose"/>
+  <text x="426" y="172" text-anchor="middle" class="t-xs t-b t-rose">ambiguity</text>
+  <text x="376" y="192" class="t-xs">the guideline is</text>
+  <text x="376" y="206" class="t-xs">silent here</text>
+  <text x="376" y="230" class="t-xs t-mono t-muted">κ = 0.27</text>
+
+  <rect x="500" y="150" width="116" height="92" rx="6" class="box-rose"/>
+  <text x="558" y="172" text-anchor="middle" class="t-xs t-b t-rose">slips</text>
+  <text x="508" y="192" class="t-xs">fatigue, misreading,</text>
+  <text x="508" y="206" class="t-xs">a wrong keystroke</text>
+  <text x="508" y="230" class="t-xs t-mono t-muted">27.5% of flags</text>
+
+  <rect x="632" y="150" width="116" height="92" rx="6" class="box-rose"/>
+  <text x="690" y="172" text-anchor="middle" class="t-xs t-b t-rose">collapse</text>
+  <text x="640" y="192" class="t-xs">disagreement is</text>
+  <text x="640" y="206" class="t-xs">thrown away</text>
+  <text x="640" y="230" class="t-xs t-mono t-muted">1 column left</text>
+</svg>
+```
+
+::: {.fig-cap}
+Everything downstream of the stored label — your training run, your leaderboard, your production monitoring — sees only the last box. The five failure modes underneath it are invisible by the time the data reaches you. The numbers are the ones measured later in this chapter on the review corpus.
+:::
+
+:::::
+
+The last box is the trap. By the time a dataset is a parquet file with a `label` column, the disagreement, the hard cases, and the annotator who was on their fourth hour have all been compressed into a single integer. Nothing in the file tells you which integers were easy.
+
+### The questions to ask before you use a dataset
+
+Before any modelling, answer these six. Write down the ones you cannot answer — the gaps are the finding.
+
+1. **Who produced the text?** Not "the internet". Which platform, which population, which time window. The review corpus is people who chose to write a review after a purchase, which is not the same population as people who bought.
+2. **Who produced the labels?** Platform metadata, crowdworkers, domain experts, or a model? Star ratings converted to sentiment are metadata, not annotation, and they carry the rating scale's own biases.
+3. **What question were they answering?** "Is this review positive?" and "Would you buy this product?" and "Is this customer satisfied?" produce different labels on the same text.
+4. **What licence, and does it cover your use?** Research-only is a real restriction. So is a licence that permits redistribution of the text but not of derived models.
+5. **What consent existed?** Public availability is not consent. A user writing a product review did not agree to be training data, whatever the terms of service say.
+6. **What is missing?** Which reviews were deleted, filtered, or never written. This is the hardest one and the one most worth attempting.
+
+::: {.callout-note collapse="true"}
+## Licensing, in the three sentences that matter to an engineer
+
+**Public is not free.** "I could download it" and "I am permitted to train on it" are different claims. Scraped-from-the-web corpora frequently carry no licence at all, which means the default applies: the text is copyrighted by whoever wrote it.
+
+**The licence travels.** If a dataset is CC BY-NC-SA, a model trained on it may inherit obligations depending on jurisdiction and on how much of the data the model memorises. This is genuinely unsettled law, which is itself the reason to be conservative in anything you ship.
+
+**Provenance is a deliverable.** Record, at minimum: source URL, download date, licence text, and the exact filtering you applied. @longpre2024audit audited 1,800+ popular text datasets and found licence information missing or wrong for a large fraction of them — including datasets used in production. If you did not record it at download time, you will not be able to reconstruct it.
+:::
+
+## Read a hundred rows. Yourself. {#sec-random-audit}
+
+The single most valuable hour in a data project costs nothing and requires no code beyond a random sample. Draw 100 rows from your test set, read them with the label visible, and classify what you see.
+
+I drew 100 rows from the 10,000-row test split with seed 42 and read all of them. The criteria were fixed before reading:
+
+- **error** — the gold label contradicts the text;
+- **undecidable** — a single binary label is not determined by the text;
+- **ok** — everything else.
+
+The result:
+
+```text
+### random 100 test rows, read by hand
+
+errors (gold contradicts the text)          0
+undecidable (binary label not determined)   7
+   ... of which "not yet received"          3
+arguable (defensible either way)            9
+positive labels in the sample              98
+```
+
+Zero outright errors in 100 draws. With zero hits, the rule of three gives a 95% upper bound of 3/n — so the label error rate is **below 3%**, and probably well below. That is a good corpus by the standards of public sentiment data.
+
+The seven undecidable rows are the interesting ones, because they are not errors. Test row 4745 reads, in full:
+
+> `sipariş verdim umarım tez ulaşır :)` — "I placed the order, hope it arrives fast :)"
+
+Gold label: positive. The reviewer has not received the product. There is no product verdict in this text at all; there is a smiley and an expression of hope. Two of the other six are the same shape ("I just ordered it, judging by the reviews…", "it will probably arrive tomorrow"). Two more contain a verdict about the *delivery* that points the opposite way from the verdict about the *product*. One is the string `seat leon st 1.6tdi` and nothing else.
+
+A binary positive/negative schema has no cell for any of these. The annotator did not fail — the schema did. Hold onto that distinction; the rest of the chapter keeps returning to it.
+
+::: {.column-margin}
+Ninety-eight of the hundred were positive, against a corpus rate of 93.7%. That is within sampling noise for n = 100, but it is a reminder that a 100-row sample of a skewed corpus tells you almost nothing about the minority class. To audit the minority class, sample it separately.
+:::
+
+## The schema does more damage than the annotators
+
+If the schema is where the damage is, it should be visible at scale, not just in a hand sample. Turkish gives us a clean probe: the contrastive connectives *ama*, *fakat*, *ancak*, *lakin* — all roughly "but". A review containing one of them is likely to be making two claims at once.
+
+```python
+import re
+CONTRAST = re.compile(r"\b(ama|fakat|ancak|lakin)\b")
+has_but = np.array([bool(CONTRAST.search(tr_lower(t))) for t in test.text])
+```
+
+**2,003 of the 10,000 test reviews (20.03%) contain one.** They behave differently from the rest in every way that matters:
+
+| | "but" reviews | the rest |
+|:---|---:|---:|
+| share of test set | 20.03% | 79.97% |
+| gold negative rate | 11.48% | 5.03% |
+| model accuracy | 84.07 | 94.70 |
+| model macro-F1 | 72.11 | 77.72 |
+| model F1 (negative) | 53.84 | 58.27 |
+
+: The same model, the same test set, split on one function word {tbl-colwidths="[40,30,30]"}
+
+A fifth of the corpus is twice as likely to be negative and ten accuracy points harder. This is not a model deficiency you can fix with a better representation — @sec-bake-off already showed that the ranking of representations is stable. It is a place where the label schema is being asked to compress two verdicts into one bit, and the compression is lossy in a way that correlates with the minority class.
+
+The fix is not a cleverer model. It is either a richer schema (aspect-level labels: product / delivery / price / packaging, each with its own polarity) or an explicit rule in the guideline that tells every annotator which clause wins.
+
+### What a usable guideline looks like
+
+Most annotation guidelines fail the same way: they define the categories and stop. Definitions are the easy part. The hard part is the list of decided cases, because that is the only part that makes two strangers agree.
+
+```text
+### annotation guideline v1 — product review sentiment
+
+TASK
+  Label each review positive (1) or negative (0) according to the
+  reviewer's verdict ON THE PRODUCT.
+
+DECIDED CASES  (these override the definition above)
+  1. Delivery, packaging, seller, and returns are NOT the product.
+     "Fast shipping, product is useless"          -> 0
+     "Shipping was late, the product is great"    -> 1
+  2. Price complaints are NOT negative unless the reviewer says the
+     product is not worth it.
+     "Expensive but excellent"                    -> 1
+     "Not worth this money"                       -> 0
+  3. Mixed verdicts on the product: the FINAL clause wins.
+     "Cuts well but the handle broke"             -> 0
+     "The handle is cheap but it cuts very well"  -> 1
+  4. Not yet received / no verdict given          -> SKIP (do not label)
+  5. Truncated text: if the visible text contains a verdict, label it;
+     otherwise SKIP.
+  6. Negation is not a signal by itself. "fena değil" (not bad) is
+     positive. "kötü değil ama almam" (not bad but I would not buy)
+     is 0 by rule 3.
+
+WHEN TO SKIP
+  Use SKIP freely. A skipped item costs one row. A guessed item costs
+  one row AND corrupts the agreement estimate.
+```
+
+Two properties make this usable. First, every decided case has a worked example on both sides, so an annotator matching by pattern gets it right without understanding the principle. Second, `SKIP` exists. Forcing a binary choice on undecidable items is how you manufacture the disagreement you will later blame on the annotators.
+
+::: {.column-margin}
+Rule 3 — "the final clause wins" — is arbitrary. That is fine. Guidelines do not need to be right; they need to be *decidable and consistent*. An arbitrary rule applied uniformly produces learnable data. A principled rule applied inconsistently does not.
+:::
+
+## Agreement, and why 93% of it can be worthless
+
+You cannot know your labels are good by looking at one annotator's output. You need a second opinion on the same items.
+
+I do not have a second human, so I built a second annotator that is honest about being crude: a lexicon rule, 36 positive phrases and 37 negative phrases with six negators, applied to all 10,000 test rows.
+
+```python
+def annotator_b(text):
+    t = tr_lower(text)
+    neg = any(p in t for p in NEG)
+    pos = any(p in t for p in POS)
+    if neg and not pos:
+        return 0
+    return 1          # default to the majority class, as a tired human would
+```
+
+Call the gold column annotator A and the rule annotator B. Their confusion table:
+
+```text
+### A (gold, rows) vs B (lexicon rule, columns), n = 10,000
+
+                B: negative   B: positive
+A: negative           141           491
+A: positive           167          9201
+```
+
+Raw agreement is $(141 + 9201)/10000 = \mathbf{93.42\%}$. Written on a slide, that number ends the conversation: the annotators agree on 93 out of 100 items, the labels must be fine.
+
+They are not fine. Both annotators call almost everything positive, so most of that agreement is what you would get from two people who never read the texts at all. Cohen's kappa [@cohen1960coefficient] corrects for exactly this:
+
+$$\kappa = \frac{p_o - p_e}{1 - p_e}$$
+
+where $p_o$ is the observed agreement and $p_e$ is the agreement expected if both annotators labelled independently at their own base rates. Here $p_e = 0.9099$, and:
+
+$$\kappa = \frac{0.9342 - 0.9099}{1 - 0.9099} = \mathbf{0.2698}$$
+
+Krippendorff's alpha [@krippendorff2018content], which handles more than two annotators and missing values, gives 0.2655 on the same table — close enough to confirm the reading rather than to add information.
+
+A kappa of 0.27 is, on the conventional (and arbitrary) scales, "fair". In practice it means: **93.42% of these two annotators' agreement is 90.99 points of shared prior and 2.4 points of actual signal.**
+
+::: {.callout-note collapse="true"}
+## The arithmetic of $p_e$, spelled out
+
+$p_e$ is the probability that two independent annotators land on the same label by chance, given how often each of them uses each label.
+
+Annotator A calls 632/10000 = 6.32% of items negative. Annotator B calls 308/10000 = 3.08% negative. So:
+
+$$
+\begin{aligned}
+p_e &= P(\text{both say negative}) + P(\text{both say positive}) \\
+    &= (0.0632)(0.0308) + (0.9368)(0.9692) \\
+    &= 0.00195 + 0.90799 \\
+    &= 0.90994
+\end{aligned}
+$$
+
+Almost all of $p_e$ — 0.908 of 0.910 — comes from the second term. Two annotators who both say "positive" nine times out of ten will agree about nine times out of ten *whatever the texts say*. Kappa's denominator, $1 - p_e = 0.09$, is the room left for genuine agreement, and the numerator, 0.0243, is how much of that room the annotators actually filled.
+
+This is why kappa collapses on skewed tasks and why reporting raw agreement on a skewed task is close to dishonest. It is also why kappa is unstable there: a handful of items moving between cells swings a denominator of 0.09 by a lot. Report both numbers, plus the confusion table, and let the reader see the skew.
+:::
+
+### The same annotators, a different number
+
+If prevalence is doing the work, changing the prevalence should change the answer without changing either annotator. It does. Subsampling to a balanced set — all 632 gold negatives plus 632 random gold positives, n = 1,264:
+
+```text
+### the identical annotators, on a class-balanced subsample
+
+                    full test set (n=10,000)   balanced (n=1,264)
+raw agreement                       93.42%              60.28%
+p_e                                 90.99%              50.00%
+Cohen's kappa                        0.2698              0.2057
+Krippendorff's alpha                 0.2655              0.0722
+```
+
+Raw agreement falls by 33 points. Neither annotator changed. The only thing that changed is the mix of items handed to them — and raw agreement, which most people read as a property of the annotators, turns out to be mostly a property of the sample.
+
+There is a second lesson hiding in B's scores. Annotator B achieves **93.42% accuracy** against gold. @sec-bake-off's majority-class baseline — label everything positive, read nothing — achieves **93.68%**. B's hand-built lexicon, 73 phrases of careful Turkish, performs *worse than a constant*. On macro-F1 the picture is different (63.27 for B against 48.37 for the constant), which is the whole reason @sec-bake-off refused to report accuracy alone.
+
+::: {.anlp-widget}
+
+```{=html}
+<div class="widget-title">What agreement is worth at a given prevalence</div>
+```
+
+```{ojs}
+//| echo: false
+viewof prevalence = Inputs.range([0.02, 0.5], {step: 0.01, value: 0.063, label: "minority class share"})
+viewof rawAgreement = Inputs.range([0.5, 1.0], {step: 0.005, value: 0.934, label: "raw agreement"})
+viewof bias = Inputs.range([0.0, 1.0], {step: 0.05, value: 0.5, label: "B's minority rate ÷ A's"})
+```
+
+```{ojs}
+//| echo: false
+kappaOf = function (prev, obs, ratio) {
+  const a = prev;
+  const b = Math.min(0.999, Math.max(0.001, prev * ratio));
+  const pe = a * b + (1 - a) * (1 - b);
+  return {pe: pe, kappa: pe >= 0.9999 ? 0 : (obs - pe) / (1 - pe)};
+}
+```
+
+```{ojs}
+//| echo: false
+kappaTable = kappaOf(prevalence, rawAgreement, bias)
+```
+
+```{ojs}
+//| echo: false
+html`<table style="width:100%;border-collapse:collapse;font-size:0.9em">
+<tr><td style="padding:4px 8px">observed agreement <i>p<sub>o</sub></i></td>
+    <td style="padding:4px 8px;text-align:right;font-variant-numeric:tabular-nums">${(rawAgreement * 100).toFixed(2)}%</td></tr>
+<tr><td style="padding:4px 8px">chance agreement <i>p<sub>e</sub></i></td>
+    <td style="padding:4px 8px;text-align:right;font-variant-numeric:tabular-nums">${(kappaTable.pe * 100).toFixed(2)}%</td></tr>
+<tr><td style="padding:4px 8px;border-top:1px solid #ddd"><b>Cohen's kappa</b></td>
+    <td style="padding:4px 8px;text-align:right;border-top:1px solid #ddd;font-variant-numeric:tabular-nums"><b>${kappaTable.kappa.toFixed(4)}</b></td></tr>
+<tr><td style="padding:4px 8px" colspan="2">${kappaTable.kappa < 0 ? "worse than chance" : kappaTable.kappa < 0.2 ? "slight" : kappaTable.kappa < 0.4 ? "fair" : kappaTable.kappa < 0.6 ? "moderate" : kappaTable.kappa < 0.8 ? "substantial" : "almost perfect"}</td></tr>
+</table>`
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  height: 230,
+  marginLeft: 46,
+  x: {label: "minority class share", tickFormat: ".0%"},
+  y: {label: "Cohen's kappa", domain: [-0.1, 1.0], grid: true},
+  marks: [
+    Plot.ruleY([0]),
+    Plot.line(
+      d3.range(0.02, 0.505, 0.005).map(p => ({p: p, k: kappaOf(p, rawAgreement, bias).kappa})),
+      {x: "p", y: "k", strokeWidth: 2}
+    ),
+    Plot.dot([{p: prevalence, k: kappaTable.kappa}], {x: "p", y: "k", r: 5, fill: "currentColor"}),
+    Plot.dot([{p: 0.0632, k: 0.2698}], {x: "p", y: "k", r: 4, stroke: "currentColor", fill: "none"}),
+    Plot.text([{p: 0.0632, k: 0.2698}], {x: "p", y: "k", text: ["measured: 0.270"], dy: -14, dx: 30, fontSize: 10})
+  ]
+})
+```
+
+Hold raw agreement fixed and slide the prevalence. The same 93.4% agreement is worth kappa ≈ 0.27 on this corpus and would be worth far less on a more skewed one — and rather more on a balanced one. The hollow circle marks the measured point.
+
+:::
+
+### Adjudication
+
+Agreement measurement is diagnostic; adjudication is the repair. The loop that works:
+
+1. **Both annotators label the same 200 items.** Not a sample of each — the same items.
+2. **Compute kappa and the confusion table.** If kappa is below 0.4, stop. Do not annotate more.
+3. **Read every disagreement together.** Not to decide who was right, but to find out *why* they differed. Most disagreements cluster into three or four recurring situations.
+4. **Add each situation to the guideline as a decided case with examples on both sides.** This is the deliverable.
+5. **Re-annotate a fresh 200 and re-measure.** If kappa did not move, the problem is the schema, not the guideline.
+
+The mistake is treating step 3 as a vote. Adjudicating item by item gets you 200 resolved items. Adjudicating *categories of disagreement* gets you a guideline that resolves the next 20,000.
+
+## Auditing labels at scale {#sec-audit}
+
+You cannot read 40,000 rows. You can make the model tell you which ones to read.
+
+The technique is out-of-fold prediction, the practical core of confident learning [@northcutt2021confident]. Fit on four folds, predict the fifth, repeat. Every training row now has a prediction from a model that never saw it. Where the model is confident in the *other* class, the label is a candidate for being wrong.
+
+```python
+from sklearn.model_selection import StratifiedKFold
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+oof = np.zeros(len(y))
+for a, b in skf.split(Xtr, y):
+    oof[b] = clf().fit(Xtr[a], y[a]).predict_proba(Xtr[b])[:, 1]
+
+# confidence that the stored label is wrong
+wrong_conf = np.where(y == 1, 1 - oof, oof)
+```
+
+On the 40,000 training rows:
+
+| threshold | rows flagged | share | gold positive | gold negative |
+|---:|---:|---:|---:|---:|
+| > 0.50 | 3,026 | 7.57% | — | — |
+| > 0.90 | 92 | 0.23% | 49 | 43 |
+| > 0.95 | 34 | 0.09% | 20 | 14 |
+| > 0.99 | 2 | 0.005% | — | — |
+
+: Rows the model is confident are mislabelled {tbl-colwidths="[18,18,14,25,25]"}
+
+Three things are worth noticing.
+
+**The flags are class-balanced, the corpus is not.** At the 0.90 threshold, 43 of 92 flags are on gold-negative rows — 47% — in a corpus that is 6.3% negative. Per row, 1.70% of negative labels are flagged against 0.13% of positive ones — a negative label is *thirteen times* more likely to be flagged. That is where your annotation quality problem lives.
+
+**Almost nothing is flagged at high confidence.** 92 rows out of 40,000. If you expected a 5% error rate you would expect 2,000. The technique finds errors the model can detect, which is a strict subset of errors that exist — it is blind to errors on texts it also finds hard.
+
+**A flag is a request to read, not a verdict.** So I read them. I took the equivalent 40 highest-confidence flags on the *test* set — where a wrong label costs you a wrong leaderboard rather than a slightly worse model — and classified each by hand into: `error` (gold is wrong), `schema` (a single binary label cannot represent the text), or `model` (the label is defensible and the classifier is wrong).
+
+```text
+### 40 highest-confidence gold/model disagreements, test set, read by hand
+
+error   (gold label is wrong)                        11    27.5%
+schema  (binary label cannot represent the text)     20    50.0%
+model   (label defensible, classifier wrong)          9    22.5%
+                                                     --
+data-side problems                                   31 / 40
+
+schema breakdown:  mixed 12 · truncated 4 · lukewarm 3 · no verdict 1
+```
+
+**Thirty-one of forty are problems with the data, not the model.** Four rows, one from each category, show what the categories mean:
+
+- **Row 6874** (gold = negative, model p(positive) = 0.984). Unambiguous praise, no reservations, labelled negative. A genuine error — someone pressed the wrong key.
+- **Row 8356** (gold = positive, p = 0.059). *"yastıklar ince yeterli değil"* — "the pillows are thin, not enough." Labelled positive. Another genuine error.
+- **Row 8006** (gold = positive, p = 0.034). The review praises the *returns process* at length and never says anything good about the product. The label is defensible under a "was this a good experience" reading; the model was fooled by the praise vocabulary. Model error — and exactly what decided case 1 in the guideline above exists to prevent.
+- **Row 2544** (gold = positive). *"paketleme başarısız. ampüller fena değil"* — "packaging failed. the bulbs are not bad." Two verdicts, opposite directions, different aspects. Neither label is wrong. The schema is.
+
+Five of the nine model errors turn on negation: *fena değil* ("not bad"), *özelliklerinin altında bir ürün değil* ("not a product below its specifications"), and one triple negation. A bag-of-n-grams model has no mechanism for scope of negation — it sees *değil* as a feature and weights it. That limitation is the subject of @sec-transformers.
+
+### What cleaning actually bought
+
+Given 92 suspect rows, the obvious next move is to remove them or flip them and retrain. Both were measured on the untouched test set:
+
+```text
+### repairs, judged on the test set that was never touched
+
+                          acc    macro-F1   F1(neg)
+baseline (no repair)     92.57      76.21     56.47
+drop 92  (p > 0.90)      92.37      75.72     55.61
+flip 92  (p > 0.90)      92.47      75.94     55.99
+drop 34  (p > 0.95)      92.39      75.83     55.83
+flip 34  (p > 0.95)      92.52      76.03     56.15
+drop  2  (p > 0.99)      92.54      76.15     56.37
+flip  2  (p > 0.99)      92.52      76.11     56.31
+```
+
+**Every single repair made the model worse.** Not dramatically — the largest drop is half a macro-F1 point — but uniformly, at every threshold, in both directions.
+
+This is not a failure of the technique; it is the technique working correctly and telling you something you should want to hear. Two reasons:
+
+1. **92 rows out of 40,000 is 0.23% of the training data.** There is no version of this edit that moves a model trained on 40,000 examples. The differences above are noise around zero.
+2. **Half of what you would remove is not an error.** The hand audit says 50% of high-confidence flags are schema failures — texts with real, defensible labels that happen to be hard. Deleting them removes exactly the hard cases the model most needs to see, which is why flipping (which keeps the row) consistently beats dropping (which removes it).
+
+The value of the audit was never the retrained model. It was the finding that half the confusion is schema, which tells you to fix the guideline rather than the labels — a conclusion no automated cleaning pass would have reached. Automated flagging finds the rows; a human reading them produces the insight. @northcutt2021pervasive found label errors in the test sets of ten of the most-used ML benchmarks, and the important consequence there was also not "the models got better after cleaning" — it was that on several benchmarks, correcting the test labels *changed which model won*.
+
+## What label noise costs, and in which direction
+
+Suppose your annotation process has an error rate. How much does it cost? The honest answer is: it depends entirely on which direction the errors go, and the dependence is not subtle.
+
+I corrupted the training labels at controlled rates under three regimes, retrained from scratch, and evaluated against the clean test set. Three seeds each; standard deviation never exceeded 0.50 macro-F1.
+
+```text
+### macro-F1, clean test set, model retrained at each rate
+
+flip rate      0%     1%     2%     5%    10%    20%    30%    40%
+symmetric   76.21  74.18  72.43  68.58  63.34  55.43  49.86  43.71
+neg -> pos  76.21  76.14  76.29  76.27  76.42  76.85  77.12  76.47
+pos -> neg  76.21  74.17  72.87  68.63  63.63  56.69  52.01  47.99
+```
+
+The middle row does not move. You can mislabel **forty percent of the negative class as positive** and lose nothing — at 30% it even reads slightly higher than baseline, which is noise, not a real gain. The bottom row loses 28 points over the same range.
+
+::::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">The same error rate, opposite consequences</div>
+<svg viewBox="0 0 760 344" style="max-width:740px" role="img" aria-label="Line chart of macro-F1 against label flip rate for three noise regimes. The negative-to-positive regime stays flat near 76 while the other two fall to the mid-40s.">
+  <line x1="70" y1="40"  x2="626" y2="40"  class="ln-thin"/>
+  <line x1="70" y1="105" x2="626" y2="105" class="ln-thin"/>
+  <line x1="70" y1="170" x2="626" y2="170" class="ln-thin"/>
+  <line x1="70" y1="40"  x2="70"  y2="235" class="ln"/>
+  <line x1="70" y1="235" x2="626" y2="235" class="ln"/>
+
+  <text x="60" y="44"  text-anchor="end" class="t-xs t-mono t-muted">80</text>
+  <text x="60" y="109" text-anchor="end" class="t-xs t-mono t-muted">67</text>
+  <text x="60" y="174" text-anchor="end" class="t-xs t-mono t-muted">54</text>
+  <text x="60" y="239" text-anchor="end" class="t-xs t-mono t-muted">41</text>
+  <text x="20" y="30" class="t-xs t-b">macro-F1</text>
+
+  <text x="70"  y="255" text-anchor="middle" class="t-xs t-mono t-muted">0%</text>
+  <text x="149" y="255" text-anchor="middle" class="t-xs t-mono t-muted">1%</text>
+  <text x="228" y="255" text-anchor="middle" class="t-xs t-mono t-muted">2%</text>
+  <text x="306" y="255" text-anchor="middle" class="t-xs t-mono t-muted">5%</text>
+  <text x="385" y="255" text-anchor="middle" class="t-xs t-mono t-muted">10%</text>
+  <text x="464" y="255" text-anchor="middle" class="t-xs t-mono t-muted">20%</text>
+  <text x="543" y="255" text-anchor="middle" class="t-xs t-mono t-muted">30%</text>
+  <text x="621" y="255" text-anchor="middle" class="t-xs t-mono t-muted">40%</text>
+  <text x="385" y="275" text-anchor="middle" class="t-xs t-muted">share of the source class flipped</text>
+
+  <polyline points="70,59.0 149,69.1 228,77.8 306,97.1 385,123.3 464,162.8 543,190.7 621,221.4"
+            fill="none" class="ln-rose" stroke-width="2"/>
+  <polyline points="70,59.0 149,59.3 228,58.5 306,58.7 385,57.9 464,55.8 543,54.4 621,57.7"
+            fill="none" class="ln-accent" stroke-width="2"/>
+  <polyline points="70,59.0 149,69.1 228,75.6 306,96.9 385,121.8 464,156.6 543,180.0 621,200.0"
+            fill="none" class="ln ln-dash" stroke-width="2"/>
+
+  <circle cx="70" cy="59" r="3.5" class="box-accent"/>
+  <text x="78" y="36" class="t-xs t-b">76.21 clean</text>
+
+  <text x="634" y="54"  class="t-xs t-b t-accent">neg → pos</text>
+  <text x="634" y="68"  class="t-xs t-mono t-muted">76.47</text>
+  <text x="634" y="196" class="t-xs t-b">pos → neg</text>
+  <text x="634" y="210" class="t-xs t-mono t-muted">47.99</text>
+  <text x="634" y="228" class="t-xs t-b t-rose">symmetric</text>
+  <text x="634" y="242" class="t-xs t-mono t-muted">43.71</text>
+
+  <rect x="70" y="284" width="640" height="52" rx="6" class="box-warm"/>
+  <text x="82" y="301" class="t-xs t-b t-warm">why the flat line is flat</text>
+  <text x="82" y="316" class="t-xs">flipping 40% of 2,529 negatives shrinks the minority class but leaves it pure;</text>
+  <text x="82" y="330" class="t-xs">flipping 10% of 37,471 positives makes the negative class 59.7% garbage.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Three noise regimes on the same 40,000 training rows, evaluated on the same clean test set, three seeds each. The direction of the error matters more than its rate — an asymmetry that follows entirely from the 93.7/6.3 class imbalance.
+:::
+
+:::::
+
+The arithmetic behind the asymmetry is worth doing once, because it generalises to every imbalanced problem you will meet.
+
+**neg → pos at 10%:** 253 of 2,529 negatives are relabelled positive. The positive class grows to 37,724, of which 253 are wrong — **0.67% contamination**. The negative class shrinks to 2,276 but every remaining member is correct. A smaller, pure minority class is still learnable.
+
+**pos → neg at 10%:** 3,747 of 37,471 positives are relabelled negative. The negative class is now 2,529 correct plus 3,747 wrong — **59.7% garbage**. The model is fitting a class whose majority membership is noise. There is nothing to learn.
+
+The same asymmetry appears at rates far too small to notice in a spreadsheet. At **1% pos → neg**, only 375 rows flip — 1% of your data, a rate most teams would call excellent. But 375 rows is **12.9% of the negative class**, and it costs 2.04 macro-F1 points — more than the entire gap between bag of words and tf-idf unigrams in @sec-bake-off, which was 1.56.
+
+Two rules follow, and they are the practically useful output of this section:
+
+- **Measure your annotation error rate per class, not overall.** An overall 1% error rate is meaningless. 1% concentrated in the minority class is a crisis; 1% concentrated in the majority class is free.
+- **When annotators are unsure, bias them toward the majority class.** This is the opposite of most people's instinct, which is to be generous with the interesting minority label. On an imbalanced problem, a false minority label costs many times what a false majority label costs.
+
+::: {.column-margin}
+This asymmetry is a property of the imbalance, not of sentiment. Any task where one class is 5–10% of the data behaves the same way: spam, fraud, medical screening, content moderation. Theory for learning under class-conditional noise is surveyed in @frenay2014classification.
+:::
+
+## Your test set is a ceiling, not a ruler
+
+Everything so far corrupted *training* labels and measured on a clean test set. Now the reverse: one fixed model, trained once on clean data, evaluated against test labels of decreasing quality. The model never changes. Only the ruler does.
+
+```text
+### one fixed model, corrupted test labels, mean of 5 seeds
+
+test noise      acc   macro-F1   F1(neg)   sd(macro-F1)
+    0%        92.57      76.21     56.47          0.00
+    1%        91.73      74.68     53.90          0.23
+    2%        90.85      73.13     51.31          0.12
+    5%        88.31      69.41     45.36          0.17
+   10%        84.19      64.79     38.66          0.24
+   20%        75.48      57.00     28.82          0.36
+```
+
+Line these up against the @sec-bake-off leaderboard, which was computed on clean labels:
+
+| system | macro-F1 |
+|:---|---:|
+| tf-idf 1–2 gram, clean test labels | 76.21 |
+| tf-idf 1–2 gram, **1%** test-label noise | 74.68 |
+| bag of words, clean test labels | 73.51 |
+| tf-idf 1–2 gram, **2%** test-label noise | 73.13 |
+| tf-idf unigram, clean test labels | 71.95 |
+| tf-idf char\_wb 3–5, clean test labels | 70.39 |
+
+: The @sec-bake-off leaderboard, interleaved with the same winner measured against noisier rulers {tbl-colwidths="[62,38]"}
+
+**Two percent noise in the test labels is enough to make the chapter-4 winner score below the system it beat.** Not because it became worse — it is byte-for-byte the same model, making byte-for-byte the same predictions. The comparison inverted because the measuring instrument moved by an amount smaller than most teams would ever detect.
+
+Three consequences:
+
+**Your test labels cap your measurable accuracy.** With 2% test noise, a perfect classifier scores 98%. You cannot measure past your labels' quality, and once your model's error rate approaches your labels' error rate, further improvement is invisible.
+
+**Small differences on a noisy benchmark are not results.** If the test set has 1% label noise, a 1.5-point macro-F1 gap is inside the uncertainty the labels themselves contribute. @sec-bake-off's 15-point gaps survive this; a 0.4-point gap between two BERT variants on a public leaderboard frequently does not. @recht2019imagenet and @beyer2020imagenet document what happens when this is taken seriously on a famous benchmark.
+
+**Spend disproportionately on the test set.** The training set can tolerate noise, especially in the majority class — the middle row of the previous section is the proof. The test set cannot tolerate any. If you have budget for 10,000 careful labels and 40,000 cheap ones, put the careful ones in test.
+
+## Leakage: the errors that make you look good {#sec-leakage}
+
+Label noise makes your score worse than the truth. Leakage makes it better, which is why it survives so much longer.
+
+The raw corpus has 235,165 rows, of which **1,657 are exact duplicate texts** (0.70%). @sec-bake-off de-duplicated before splitting. Suppose it had not:
+
+```text
+### split-before-dedup, the ordinary careless mistake
+
+exact duplicate texts in the raw corpus        1,657   (0.70%)
+test rows also present in train                   45   (0.45% of test)
+near-duplicates after normalisation               34   (0.34% of test)
+
+same model, same run:
+  accuracy on the 45 leaked rows                93.33
+  accuracy on the 9,955 clean rows              91.90
+  macro-F1 on the leaked rows                   76.76
+  macro-F1 on the clean rows                    74.08
+```
+
+A 2.68-point macro-F1 gap on rows the model had memorised. With n = 45 that gap is noisy, and 0.45% contamination is far too little to move the headline number. This corpus's leak is real but small.
+
+Real corpora are frequently worse, and the effect scales in a way that is worth seeing directly. Copying a controlled fraction of the test set into training — precisely what a careless split does, just at a larger dose:
+
+| test rows copied into train | accuracy | macro-F1 | F1 (negative) |
+|---:|---:|---:|---:|
+| 0% | 92.57 | 76.21 | 56.47 |
+| 1% | 92.57 | 76.27 | 56.60 |
+| 2% | 92.62 | 76.41 | 56.86 |
+| 5% | 92.65 | 76.53 | 57.08 |
+| 10% | 92.82 | 77.14 | 58.20 |
+| 25% | 93.33 | 78.59 | 60.82 |
+| 50% | 94.00 | 80.89 | 65.07 |
+| 100% | 95.62 | 85.89 | 74.17 |
+
+: What leakage is worth, at controlled doses {tbl-colwidths="[34,22,22,22]"}
+
+Read the curve as a diagnostic. **A 10% leak buys about one macro-F1 point** — well within the range of a genuine modelling improvement, and completely undetectable from the score alone. A 100% leak buys nearly ten points, which is the size of the gap between two chapters of legitimate work.
+
+That is the danger. Leakage does not produce implausible numbers. It produces *plausible* numbers, slightly better than they should be, which is exactly the shape of a result you want to believe.
+
+The near-duplicate check is more informative than the exact one. Normalising away case, punctuation and whitespace finds 34 test rows whose normalised form appears in training. Their macro-F1 is **67.62** against **76.23** on the rest — *lower*, not higher, because after de-duplication the surviving near-duplicates are mostly short generic fragments (*"güzel ürün"*, *"teşekkürler"*) that are genuinely ambiguous. Not every duplicate is a leak; some are just hard.
+
+### The leaks worth checking for
+
+In rough order of how often they bite:
+
+1. **Exact duplicates across splits.** One line of pandas: `df.drop_duplicates(subset="text")` before splitting, never after.
+2. **Near-duplicates.** Normalise case, punctuation and whitespace; then compare. For longer texts, MinHash or shingled Jaccard.
+3. **Group leakage.** Multiple reviews by the same user, multiple sentences from the same document, multiple images of the same patient. Split on the *group*, not the row. This is the leak that most often survives review, because the rows genuinely differ.
+4. **Temporal leakage.** If your model will run on future data, your test set must be from the future. A random split lets the model see next month while predicting last month.
+5. **Preprocessing leakage.** Fitting the vectoriser, the scaler, or the feature selector on all the data before splitting. In @sec-bake-off's pipeline, `vec.fit_transform(train)` then `vec.transform(test)` — never `fit` on the concatenation.
+6. **Benchmark contamination.** Your public test set was on the web, and the pretrained model you are fine-tuning read the web. @kapoor2023leakage catalogue leakage across 17 scientific fields; @magar2022data and @oren2024proving develop tests for whether a specific benchmark is in a specific model's pretraining data. This becomes the central problem in @sec-llm-eval.
+
+## Where to spend the next thousand labels
+
+You have a budget. The two dials are how many labels you buy and how carefully each is produced. They trade off: careful labels cost more, so you get fewer. Which dial do you turn?
+
+The grid below trains the same model at seven budget sizes and six noise levels, three seeds each, and evaluates all 42 cells on the same clean test set.
+
+```text
+### macro-F1 by budget and label noise (clean test set, 3 seeds)
+
+                 0%      5%     10%     20%     30%     40%
+    500       59.44   58.56   55.57   51.18   47.40   42.12
+  1,000       63.71   60.91   57.77   52.32   46.99   42.78
+  2,500       68.76   64.17   60.03   53.36   48.23   42.93
+  5,000       71.69   66.00   60.21   53.17   47.86   42.42
+ 10,000       73.72   66.47   61.81   54.46   48.53   42.88
+ 20,000       74.89   66.99   62.04   55.21   49.09   43.81
+ 40,000       76.21   68.18   63.20   55.74   49.34   44.16
+```
+
+Read across a row and you learn what noise costs. Read down a column and you learn what volume buys. Read diagonally and you get the finding:
+
+- **1,000 clean labels (63.71) beat 40,000 labels at 10% noise (63.20).** Forty times the data, and it loses.
+- **500 clean labels (59.44) beat 40,000 labels at 20% noise (55.74).** Eighty times the data, and it loses by nearly four points.
+- **Volume only pays when quality is high.** Going from 500 to 40,000 labels buys **16.77** macro-F1 points at 0% noise and **2.04** points at 40%. Scaling a broken annotation process is the most expensive way to accomplish nothing.
+
+::: {.anlp-widget}
+
+```{=html}
+<div class="widget-title">Your annotation budget, two dials</div>
+```
+
+```{ojs}
+//| echo: false
+grid = [
+  {n: 500, r: 0, f: 59.44}, {n: 500, r: 5, f: 58.56}, {n: 500, r: 10, f: 55.57},
+  {n: 500, r: 20, f: 51.18}, {n: 500, r: 30, f: 47.40}, {n: 500, r: 40, f: 42.12},
+  {n: 1000, r: 0, f: 63.71}, {n: 1000, r: 5, f: 60.91}, {n: 1000, r: 10, f: 57.77},
+  {n: 1000, r: 20, f: 52.32}, {n: 1000, r: 30, f: 46.99}, {n: 1000, r: 40, f: 42.78},
+  {n: 2500, r: 0, f: 68.76}, {n: 2500, r: 5, f: 64.17}, {n: 2500, r: 10, f: 60.03},
+  {n: 2500, r: 20, f: 53.36}, {n: 2500, r: 30, f: 48.23}, {n: 2500, r: 40, f: 42.93},
+  {n: 5000, r: 0, f: 71.69}, {n: 5000, r: 5, f: 66.00}, {n: 5000, r: 10, f: 60.21},
+  {n: 5000, r: 20, f: 53.17}, {n: 5000, r: 30, f: 47.86}, {n: 5000, r: 40, f: 42.42},
+  {n: 10000, r: 0, f: 73.72}, {n: 10000, r: 5, f: 66.47}, {n: 10000, r: 10, f: 61.81},
+  {n: 10000, r: 20, f: 54.46}, {n: 10000, r: 30, f: 48.53}, {n: 10000, r: 40, f: 42.88},
+  {n: 20000, r: 0, f: 74.89}, {n: 20000, r: 5, f: 66.99}, {n: 20000, r: 10, f: 62.04},
+  {n: 20000, r: 20, f: 55.21}, {n: 20000, r: 30, f: 49.09}, {n: 20000, r: 40, f: 43.81},
+  {n: 40000, r: 0, f: 76.21}, {n: 40000, r: 5, f: 68.18}, {n: 40000, r: 10, f: 63.20},
+  {n: 40000, r: 20, f: 55.74}, {n: 40000, r: 30, f: 49.34}, {n: 40000, r: 40, f: 44.16}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof budgetN = Inputs.select([500, 1000, 2500, 5000, 10000, 20000, 40000], {value: 40000, label: "labels bought"})
+viewof budgetR = Inputs.select([0, 5, 10, 20, 30, 40], {value: 10, label: "label error rate (%)"})
+```
+
+```{ojs}
+//| echo: false
+chosen = grid.find(d => d.n === budgetN && d.r === budgetR)
+```
+
+```{ojs}
+//| echo: false
+cheaper = grid.filter(d => d.f >= chosen.f && d.n < chosen.n).sort((a, b) => a.n - b.n)[0]
+```
+
+```{ojs}
+//| echo: false
+html`<div style="padding:10px 12px;border-radius:6px;background:rgba(127,127,127,0.08);font-size:0.92em">
+<div>macro-F1 at <b>${budgetN.toLocaleString()}</b> labels with <b>${budgetR}%</b> error:
+<b style="font-variant-numeric:tabular-nums">${chosen.f.toFixed(2)}</b></div>
+<div style="margin-top:6px">${
+  cheaper
+    ? `You would do at least as well with <b>${cheaper.n.toLocaleString()}</b> labels at <b>${cheaper.r}%</b> error (${cheaper.f.toFixed(2)}) — ${(budgetN / cheaper.n).toFixed(0)}× fewer labels.`
+    : `Nothing cheaper in this grid matches it. This cell is on the frontier.`
+}</div></div>`
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  height: 260,
+  marginLeft: 46,
+  x: {type: "log", label: "labels bought", ticks: [500, 1000, 2500, 5000, 10000, 20000, 40000], tickFormat: d => d >= 1000 ? (d / 1000) + "k" : d},
+  y: {label: "macro-F1", domain: [40, 80], grid: true},
+  color: {legend: true, label: "error rate (%)", type: "ordinal"},
+  marks: [
+    Plot.line(grid, {x: "n", y: "f", stroke: "r", strokeWidth: 1.8}),
+    Plot.dot(grid, {x: "n", y: "f", fill: "r", r: 2.5}),
+    Plot.dot([chosen], {x: "n", y: "f", r: 7, stroke: "currentColor", fill: "none", strokeWidth: 2}),
+    cheaper ? Plot.dot([cheaper], {x: "n", y: "f", r: 7, stroke: "currentColor", fill: "none", strokeDasharray: "3,2"}) : null
+  ].filter(d => d)
+})
+```
+
+Every curve flattens; the low-quality curves flatten almost immediately. The dashed circle, when it appears, marks a cheaper cell that does at least as well.
+
+:::
+
+### Not all labels are worth the same
+
+The grid assumed labels are drawn at random. They need not be. Uncertainty sampling — the standard entry point to active learning [@settles2009active] — trains on a small seed, then spends the remaining budget on the items the seed model is least sure about.
+
+```python
+m0 = clf().fit(X_seed, y_seed)                       # 200 random labels
+unc = np.abs(m0.predict_proba(X_pool)[:, 1] - 0.5)   # distance from the boundary
+picks = pool[np.argsort(unc)[:800]]                  # 800 most uncertain
+```
+
+With a budget of exactly 1,000 labels, mean of three seeds:
+
+```text
+### 1,000 labels, spent two ways
+
+                              negatives found    acc   macro-F1   F1(neg)
+1,000 drawn at random                      62  93.50      65.49     34.40
+200 random + 800 uncertain                248  93.59      68.80     40.99
+```
+
+The mechanism is entirely visible in the first column. Random sampling of a 93.7%-positive corpus finds 62 negative examples in 1,000 draws. Uncertainty sampling finds **248** — four times as many — because uncertain items are disproportionately minority-class items. The model then has enough negative examples to learn something about them, and F1 on the negative class rises by 6.6 points.
+
+Put that next to the budget grid: **1,000 uncertainty-sampled labels (68.80) match 2,500 random ones (68.76).** A 2.5× discount on the annotation budget, from twenty lines of code.
+
+Two cautions. The selected set is biased by construction, so it is training data only — **never** build a test set this way. And the discount depends on the seed model being good enough to be usefully uncertain; with 20 seed labels instead of 200, uncertainty is indistinguishable from noise.
+
+## Labels you do not write by hand
+
+Hand annotation is not the only source of labels, and on a 235,000-row corpus it is not a realistic one. Three alternatives, with the failure mode of each.
+
+**Weak supervision.** Write labelling functions — noisy, partial rules — and combine them. The lexicon annotator in this chapter is one such function. Frameworks like Snorkel [@ratner2017snorkel] fit a generative model over many functions to estimate each one's reliability from their agreements and conflicts, without ground truth. This works when you have a dozen genuinely independent rules. It works badly when your rules are correlated — five variations on the same keyword list vote as one rule while looking like five, and the aggregation model believes the consensus.
+
+**Distant supervision.** Use an existing signal as a proxy label: star ratings for sentiment, a knowledge base for relation extraction, user clicks for relevance. Cheap and abundant. The risk is that the proxy is not the target — a 3-star review is not "neutral", it is whatever that platform's users mean by three stars, and the mapping shifts across platforms and across years.
+
+**LLM labelling.** Prompt a large model to label your data. As of 2026 this is often the strongest option per unit cost, and @sec-prompting covers the mechanics. Three things to hold on to. It inherits the model's biases wholesale and they are correlated across every row, so no amount of data averages them out. It is *not* independent of a model you then evaluate — if the same family labelled your test set, your evaluation is partly measuring agreement with that family. And you still need a human-labelled test set to know whether any of it worked. Do not skip that step; it is the only thing standing between you and a confident wrong answer.
+
+::: {.callout-note collapse="true"}
+## Synthetic data, and the quality filter that decides everything
+
+Generating training text with an LLM — Self-Instruct [@wang2023selfinstruct] and its descendants — is now routine. The generation is the easy half. The filter is where the outcome is decided.
+
+Three failure modes are worth knowing by name:
+
+**Mode collapse.** Ask for 10,000 negative reviews and you get 10,000 variations on four templates. Measure diversity explicitly — distinct n-gram ratios, embedding-space coverage using the tools from @sec-embeddings — before you measure anything else.
+
+**Distributional mismatch.** Generated text is fluent, well-punctuated, and correctly spelled. Real Turkish product reviews are none of those things; @sec-turkish-nlp showed how much of the signal lives in exactly the messiness a generator smooths away. A model trained on clean synthetic text and deployed on real text is being asked to generalise across a shift you introduced yourself.
+
+**Recursive contamination.** Training on the output of models trained on model output degrades over generations — @shumailov2024curse calls it model collapse. The tails of the distribution disappear first, which means the rare cases go first, which means exactly the cases you needed the model for.
+
+The rule that survives all three: synthetic data is a training-set technique. Your test set stays human.
+:::
+
+## Write it down: datasheets and model cards
+
+The audits in this chapter produced findings — 20% of reviews contain a contrastive connective, half the confident flags are schema failures, the negative class is twelve times more likely to be flagged. Those findings are worth more than the model, and they evaporate unless someone writes them down.
+
+@gebru2021datasheets proposed datasheets for datasets: a standard document covering motivation, composition, collection, preprocessing, uses, distribution, and maintenance. @mitchell2019model proposed model cards, the same idea for trained models, with performance disaggregated across the groups that matter. Both are conventions, not standards, and both are frequently treated as compliance paperwork.
+
+Treat them instead as a review gate. A datasheet nobody reads is waste; a datasheet that a reviewer reads before approving a launch is the cheapest bug-catching mechanism in the pipeline. @sambasivan2021everyone found, across 53 practitioner interviews, that data problems were pervasive, expensive, and consistently under-valued relative to modelling — "everyone wants to do the model work, not the data work". Documentation is where that asymmetry gets corrected or does not.
+
+Here is what an honest extract for this chapter's corpus looks like:
+
+```text
+### datasheet extract — Turkish product reviews
+
+COMPOSITION
+  235,165 reviews; 233,508 after exact de-duplication (1,657 dupes, 0.70%).
+  93.7% positive. Product category, date, and reviewer are not available.
+
+LABELS
+  Provenance unknown. Most likely derived from star ratings, not from
+  a written annotation guideline. No guideline document exists.
+  No inter-annotator agreement was ever measured by the original creators.
+
+KNOWN LIMITATIONS
+  - 20.03% of reviews contain a contrastive connective (ama/fakat/ancak/
+    lakin); the binary schema cannot represent these. Model macro-F1 on
+    this subset is 72.11 vs 77.72 elsewhere.
+  - A hand audit of 40 high-confidence model/label disagreements found
+    11 outright label errors and 20 texts a binary schema cannot express.
+  - A hand audit of 100 random rows found 0 outright errors (95% upper
+    bound 3%) and 7 rows undecidable under the binary schema.
+  - Selection bias: reviewers are self-selected. Non-reviewers absent.
+
+RECOMMENDED USE
+  Teaching and benchmarking of Turkish text classification.
+NOT RECOMMENDED
+  Any deployment where the cost of a false positive on the negative
+  class is material. The negative class F1 ceiling here is ~56.
+```
+
+Note the shape of it. Every limitation is a measurement with a number attached, and the "not recommended" section is specific enough to stop someone. That is the difference between documentation and paperwork.
+
+## Where the effort actually goes
+
+| activity | cost | what it buys | when to do it |
+|:---|:---|:---|:---|
+| read 100 random rows | 1 hour | the base rate of errors and undecidable items; the questions worth asking | always, first, before any modelling |
+| write a guideline with decided cases | 1 day | the difference between labels two people agree on and labels one person invented | before annotating item 1 |
+| measure kappa on 200 shared items | 2 hours | whether the task is well-defined at all | before annotating item 201 |
+| out-of-fold flagging + hand reading | 1 day | which rows to read; almost never a better model | when agreement is fine but scores are not |
+| leakage audit | 30 minutes | confidence that the number is real | before you report any number to anyone |
+
+: [Strengths]{.pro} and [Weaknesses]{.con} of each data-quality activity, by return on effort {tbl-colwidths="[16,29,32,23]"}
+
+[Strengths]{.pro} — reading rows costs nothing and is the only step that reliably changes what you do next. Guidelines and kappa are cheap up front and compound: every hour spent before the first item is worth many hours of adjudication later. The leakage audit is thirty minutes against the risk of publishing a number that is not true.
+
+[Weaknesses]{.con} — out-of-fold flagging is the seductive one. It produces a ranked list, it feels like automation, and this chapter measured its effect on the model as *zero to slightly negative*. Its value is entirely in the reading it triggers. If you flag and then delete without reading, you have removed your hardest training examples and learned nothing.
+
+## The thing this chapter is really about
+
+@sec-bake-off asked which representation is best and got a clean answer. This chapter asked what the answer is measured against, and found that a 2% wobble in the ruler is enough to reverse the result.
+
+That is not a reason to distrust measurement. It is a reason to measure the ruler. The concrete version, in five lines:
+
+- **Read your data.** A hundred rows, by hand, before anything else. Nothing else in this chapter would have been discovered without it.
+- **The schema fails more often than the annotators do.** Half of this corpus's confident disagreements are texts a binary label cannot express. No model fixes that; a better schema does.
+- **Noise direction matters more than noise rate.** 40% error into the majority class cost nothing. 1% error into the minority class cost more than a full representation upgrade.
+- **Buy quality before volume.** 1,000 clean labels beat 40,000 at 10% noise. Spend the careful budget on the test set.
+- **Audit for leakage before you believe any number**, especially a number you like.
+
+These constraints do not relax as the models get larger. @sec-language-models and @sec-transformers introduce systems with orders of magnitude more capacity, and every one of them is trained against labels somebody manufactured and evaluated against a test set somebody could have contaminated. The models change. The ruler problem does not — it only gets harder to see, which is why @sec-llm-eval and @sec-production-eval have to return to it.
+
+## Intuition checks
+
+::: {.callout-tip collapse="true"}
+## Two annotators agree on 93% of items. Is that good?
+
+Unanswerable without the class balance. On this corpus, 93.42% agreement gave kappa 0.27 — because $p_e$ alone was 90.99%. The same two annotators on a balanced subsample agreed on only 60.28%. Raw agreement is mostly a property of the sample, not the annotators. Always report the confusion table alongside.
+:::
+
+::: {.callout-tip collapse="true"}
+## Your annotators mislabel 10% of items. How much accuracy will you lose?
+
+Depends entirely on direction. Mislabelling 10% of the minority class as majority moved macro-F1 by **+0.21** (76.21 → 76.42) — that is, not at all. Mislabelling 10% of the majority class as minority cost **12.58 points** (76.21 → 63.63). Same error rate, and one direction is free while the other is catastrophic, driven purely by the 93.7/6.3 imbalance.
+:::
+
+::: {.callout-tip collapse="true"}
+## Model A beats model B by 1.2 macro-F1 on your test set. Ship A?
+
+Not yet. On this corpus, 1% test-label noise moved the score by 1.53 points. If you have not measured your test set's label quality, a 1.2-point gap is inside the noise the labels contribute. Read 100 test rows, estimate the error rate, and then decide whether the gap survives it.
+:::
+
+::: {.callout-tip collapse="true"}
+## An automated audit flags 92 of your 40,000 training labels. Delete them?
+
+No. Read them. When measured, dropping those 92 rows made every metric *worse* (76.21 → 75.72 macro-F1), because roughly half of them were not errors — they were hard, correctly-labelled cases with mixed or truncated content. Flipping beat dropping for the same reason. The flags are a reading list.
+:::
+
+::: {.callout-tip collapse="true"}
+## You have budget for 5,000 careful labels or 40,000 cheap ones. Which?
+
+Careful, unless "cheap" means under roughly 3% error. 5,000 clean labels scored 71.69. The 40,000 scored 76.21 clean, but only 68.18 at 5% noise and 63.20 at 10% — so interpolating, the eight-fold larger set stops being worth it somewhere near 2.8% error. And regardless of the choice, spend the careful budget on the test set first — you cannot measure past your labels' quality.
+:::
+
+## Further reading
+
+- @gebru2021datasheets and @mitchell2019model — the two documentation conventions everything else references. Short, readable, and worth copying the section headings from directly.
+- @northcutt2021confident for the theory behind out-of-fold flagging, and @northcutt2021pervasive for what it found in ten standard benchmarks — including the cases where fixing the test labels changed the winner.
+- @artstein2008inter — the clearest treatment of agreement coefficients for NLP specifically, including when kappa is the wrong tool.
+- @aroyo2015truth and @plank2022problem — the argument that annotator disagreement is signal about the task, not noise to be averaged away. This reframes most of what this chapter treats as a problem.
+- @sambasivan2021everyone — 53 interviews on why data work is under-valued in practice. Read it before your first industrial project rather than after.
+- @kapoor2023leakage for a taxonomy of leakage across 17 scientific fields, and @bender2018data on data statements as a documentation practice with a specific bias focus.
+- @klie2023annotation surveys automatic annotation-error detection methods, if you want more than the single out-of-fold technique used here.
 
 ## Lab: run a small annotation project end to end
 
-<!-- TODO(draft): students annotate ~200 Turkish items in pairs, measure
-    agreement, adjudicate, then train on their own labels and compare to
-    the provided gold set. -->
+Work in pairs. The point is to produce a guideline and an agreement number, not a good model.
+
+1. **Draw 200 items** from the Turkish review corpus with a fixed seed. Both partners get the identical 200 items and do not see the gold labels.
+2. **Write guideline v0 together** — the class definitions only, no decided cases. Ten minutes, no more.
+3. **Annotate the first 100 items independently.** Allow `SKIP`. Record how long it took.
+4. **Compute raw agreement, Cohen's kappa, and the confusion table.** Report all three. Compare your kappa to this chapter's 0.2698.
+5. **Read every disagreement together** and group them into recurring situations. You should find three to five.
+6. **Write guideline v1**, adding each situation as a decided case with a worked example on both sides. Follow the format in this chapter.
+7. **Annotate the remaining 100 items** independently under v1 and re-measure. Report the change in kappa and say honestly whether it came from the guideline or from practice.
+8. **Compare to the provided gold labels.** For every item where you and your partner agreed but gold disagreed, decide which is right. Report how many gold labels you believe are wrong, and how many are texts your schema cannot express — the same two categories used in @sec-audit.
+
+Deliverable: guideline v1, the two confusion tables, both kappa values, and a one-paragraph statement of what your schema cannot represent.
 
 ## Exercises
 
-1. Take a public dataset you might use and answer four questions: who collected it, under what licence, with what consent, and what does the label actually mean? Note which you cannot answer.
-2. Two annotators label 100 items; they agree on 90. Compute Cohen's kappa when the class balance is 50/50, and again when it is 95/5. Explain the difference to someone who thinks 90% agreement is 90% agreement.
+1. Take a public dataset you might use and answer the six questions in this chapter: who produced the text, who produced the labels, what question they were answering, what licence applies, what consent existed, and what is missing. Write down which you cannot answer — the gaps are the result.
+2. Two annotators label 100 items and agree on 90. Compute Cohen's kappa when the class balance is 50/50, and again when it is 95/5. Explain the difference to someone who believes 90% agreement is 90% agreement.
+3. Reproduce the random-100 audit on a dataset of your own. Classify each row as error, undecidable, or ok, using criteria you write down *before* you start reading. Report the counts and the rule-of-three upper bound.
+4. Reproduce the noise-direction experiment on a *balanced* dataset. Does the asymmetry between the two directions survive? Explain the result from the class counts, as this chapter did.
+5. Build a second annotator for a task of your own — a lexicon, a regex, or an LLM prompt. Compute kappa against the gold labels, then compute it again on a class-balanced subsample. Report both, and say which one you would put in a paper.
+6. Run the out-of-fold flagging procedure on your own training set. Read the twenty highest-confidence flags. Classify each as error, schema, or model. Then retrain with them dropped and with them flipped, and report whether either helped.
+7. Take a benchmark result you believe — yours or a published one — and audit it for all six kinds of leakage listed in @sec-leakage. Report which checks you could actually perform and which you could not.
+8. Using the budget grid, compute the break-even error rate at which 5,000 labels beat 40,000: the noise level where the 5,000-row clean score equals the 40,000-row noisy score. Then argue, with the numbers, for how a team with a fixed budget should split it between training and test annotation.
