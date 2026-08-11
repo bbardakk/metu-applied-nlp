@@ -16,14 +16,16 @@ kod bölümleri Python + Jupyter engine + `freeze`.
 │   ├── index.qmd            # landing page (BPE-chip hero)
 │   ├── chapters/            # 36 bölüm / 7 part (01-04 dolu, kalanı iskelet)
 │   ├── appendices/          # setup, math refresher, EN↔TR sözlük
+│   │                        #   glossary.csv = sözlüğün tek doğruluk kaynağı
 │   ├── theme/               # custom-light.scss / custom-dark.scss
 │   └── _templates/          # chapter-template.qmd — yeni bölüm için kopyala
 ├── tr/                      # Türkçe kitap (aynı yapı, çeviri iskeleti)
 ├── .github/workflows/
 │   ├── publish.yml          # main push → render en + tr → Pages deploy
 │   └── pr-check.yml         # PR → render kontrolü (deploy yok)
+├── scripts/                 # build-glossary.py — CSV'den sözlük tablosu üretir
 ├── index.html               # kök yönlendirme → /en/
-└── Makefile                 # preview / render / serve kısayolları
+└── Makefile                 # preview / render / serve / glossary kısayolları
 ```
 
 ## 1) Lokal kurulum ve önizleme
@@ -45,6 +47,9 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
   `en/chapters/NN-isim.qmd` olarak kopyala → `en/_quarto.yml` içindeki
   `chapters:` listesine doğru part altına ekle. Silme/sıralama da aynı
   listeden.
+- **Sözlüğe terim ekleme:** `en/appendices/glossary.csv`'yi düzenle (grup
+  sırası korunur, grup içinde alfabetik), sonra `make glossary`.
+  `c-glossary.qmd`'deki tablolar üretilmiştir — elle düzenleme.
 - **İmza stiller:** vurgu için `[önemli ifade]{.hl}` (fosforlu kalem
   efekti); interaktifleri `::: {.anlp-widget}` bloğu içine al.
 - **Çapraz referans:** başlık çapasıyla `@sec-transformers`; kaynakça için
@@ -85,8 +90,9 @@ yayınlar:
 İki workflow var:
 
 - `.github/workflows/publish.yml` — `main` push'unda render + Pages deploy.
-- `.github/workflows/pr-check.yml` — pull request'te iki dili de render eder,
-  deploy etmez. Kırık build main'e giremez.
+- `.github/workflows/pr-check.yml` — pull request'te sözlüğün CSV'siyle
+  eşitliğini doğrular, iki dili de render eder, deploy etmez. Kırık build
+  main'e giremez.
 
 **Custom domain:** Settings → Pages → Custom domain; `public/` köküne CNAME
 workflow'da eklenebilir (assemble adımına `echo "alan.adi" > public/CNAME`).
@@ -100,8 +106,8 @@ değerleri yapıştır. TR için aynısını `tr/_quarto.yml`'a kopyala.
 
 ## 7) Türkçe sürümü büyütme
 
-1. Terim önce `en/appendices/c-glossary.qmd`'de sabitlenir (tek doğruluk
-   kaynağı), sonra çeviri yapılır.
+1. Terim önce `en/appendices/glossary.csv`'de sabitlenir (tek doğruluk
+   kaynağı) ve `make glossary` ile tablolar üretilir, sonra çeviri yapılır.
 2. `en/chapters/NN-xxx.qmd` → `tr/chapters/NN-xxx.qmd` olarak çevir,
    `tr/_quarto.yml` `chapters:` listesine ekle.
 3. `tr/index.qmd`'deki çeviri durumu tablosunu güncelle.
