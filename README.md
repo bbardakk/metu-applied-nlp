@@ -89,10 +89,14 @@ yayınlar:
 
 İki workflow var:
 
-- `.github/workflows/publish.yml` — `main` push'unda render + Pages deploy.
+- `.github/workflows/publish.yml` — `main` push'unda sözlük kontrolü +
+  render + Pages deploy.
 - `.github/workflows/pr-check.yml` — pull request'te sözlüğün CSV'siyle
   eşitliğini doğrular, iki dili de render eder, deploy etmez. Kırık build
   main'e giremez.
+
+Sözlük kontrolü iki workflow'da da var: PR'sız doğrudan `main`'e push
+yapılsa bile bayat bir sözlük tablosu yayına gidemez.
 
 **Custom domain:** Settings → Pages → Custom domain; `public/` köküne CNAME
 workflow'da eklenebilir (assemble adımına `echo "alan.adi" > public/CNAME`).
