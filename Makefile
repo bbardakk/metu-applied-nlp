@@ -1,7 +1,7 @@
 # Applied NLP book — local workflow
 # Requires: quarto (https://quarto.org), python deps from requirements.txt
 
-.PHONY: preview preview-tr render serve glossary glossary-check clean
+.PHONY: preview preview-tr render serve glossary glossary-check check-links check clean
 
 ## Rebuild the glossary tables from en/appendices/glossary.csv
 glossary:
@@ -10,6 +10,13 @@ glossary:
 ## Fail if the glossary tables are out of sync with the CSV
 glossary-check:
 	python3 scripts/build-glossary.py --check
+
+## Fail on dead @sec- refs, unknown citations, or stale hard-coded chapter links
+check-links:
+	python3 scripts/check-links.py
+
+## Every fast check CI runs, without the full render
+check: glossary-check check-links
 
 ## Live-preview the English edition (auto-reloads on save)
 preview:
