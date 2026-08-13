@@ -1,32 +1,41 @@
 # Transformers and Attention {#sec-transformers}
 
-::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: core sections drafted, later sections in outline.** The
-interactive attention explorer below is fully functional.
-:::
-
 **Learning objectives.** After this chapter you can:
 
 - explain self-attention as a *learned weighted average* over token representations;
-- read the equation $\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\big(QK^{\top}/\sqrt{d_k}\big)\,V$ term by term;
+- read the equation $\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\big(QK^{\top}/\sqrt{d_k}\big)\,V$ term by term, and compute every number in it by hand for a three-token sentence;
+- walk one sentence through a complete transformer block — multi-head attention, residual, layer norm, feed-forward — and say what each token gained;
 - describe why multiple heads exist and what different heads specialize in;
 - explain why position must be injected explicitly, and compare absolute, learned, RoPE, and ALiBi;
+- explain why the attention mask is the difference between BERT and GPT;
+- estimate a model's parameter count and KV cache size from its shape, and say which one limits you;
 - name the techniques that make long contexts affordable — KV cache, GQA/MQA, FlashAttention;
+- separate a mixture-of-experts model's total parameters from its active ones, and say which decides your hardware bill;
 - state what scaling laws predict, and where the prediction stops.
 
 ## Self-attention from first principles
 
 By @sec-language-models we could predict the next word, but our recurrent
 models had a bottleneck: everything the model knew about the sentence had to
-be squeezed through a fixed-size state, one step at a time. Long-range
-relationships — a pronoun and the noun it refers to, a verb and its distant
-subject — kept getting lost.
+be squeezed through a fixed-size state, one step at a time. That was literal,
+not metaphorical — a sequence-to-sequence translator encoded the entire source
+sentence into a single vector before emitting a word of the target
+[@sutskever2014sequence]. Long-range relationships — a pronoun and the noun it
+refers to, a verb and its distant subject — kept getting lost, and longer
+sentences translated worse.
 
-The Transformer's answer [@vaswani2017attention] is almost embarrassingly
-direct: [let every token look at every other token, and learn how much each
-one matters]{.hl}. If you have ever computed a weighted average, you already
-own the core intuition. Attention is a weighted average of token vectors
-where *the weights themselves are predicted from the data*.
+Attention was invented to patch exactly this. @bahdanau2015neural let the
+decoder look back at *all* of the encoder's states and learn which ones
+mattered at each output step, and the length-related collapse went away. Note
+the date: this is 2015, and there is still a recurrent network underneath.
+
+The Transformer's contribution three years later [@vaswani2017attention] was to
+notice that the patch was doing all the work, and to throw away everything
+else. Its answer is almost embarrassingly direct: [let every token look at
+every other token, and learn how much each one matters]{.hl}. If you have ever
+computed a weighted average, you already own the core intuition. Attention is
+a weighted average of token vectors where *the weights themselves are
+predicted from the data*.
 
 Each token's vector is projected three ways — a **query** ("what am I looking
 for?"), a **key** ("what do I contain?"), and a **value** ("what do I pass
@@ -129,20 +138,956 @@ pretraining buys.
 :::
 :::
 
-<!-- TODO: add the Q/K/V worked numeric example (3 tokens, d=4) here. -->
+## One layer, three tokens, every number {#sec-attention-worked}
 
-## Multi-head attention and the transformer block
+That equation is four symbols wide and hides five separate steps. The fastest
+way to stop being afraid of it is to run it once, completely, on numbers small
+enough to check with a pencil.
 
-One head is one habit; real models run dozens in parallel and mix the
-results.
+The sentence is Turkish: **kedi sütü içti**, "the cat drank the milk". It is
+chosen because Turkish puts the verb last, so `içti` ("drank") has to reach
+*backwards* for both of the things it needs — who did the drinking, and what
+got drunk. That makes the pattern we are looking for easy to state in advance:
+if attention is doing anything sensible, the row for `içti` should lean on the
+other two tokens and not on itself.
 
-<!-- TODO(draft): why h parallel heads; concatenation + output projection;
-     residual connections and layer norm (pre-norm vs post-norm); the
-     feed-forward sublayer; the full Transformer block diagram as a
-     hand-authored .anlp-fig SVG. Port figures from the CME 295-based
-     workshop deck. -->
+Everything is deliberately tiny. Three tokens, a model width of
+$d_{\text{model}} = 4$, and a head size of $d_k = d_v = 2$.
 
-## Positional information: absolute, learned, RoPE, ALiBi
+::: {.callout-warning appearance="simple" icon="false"}
+**These matrices are set by hand, not learned.** They are chosen so the
+arithmetic stays legible and so each dimension means something you can name. A
+trained model finds matrices that are wider, denser, and not interpretable one
+column at a time. What transfers from this example is the *procedure* and the
+*shapes* — never these particular values.
+:::
+
+We give the four embedding dimensions meanings, so that "why is this number
+big?" always has an answer:
+
+| token | meaning | animate | liquid | action | always-on |
+|:--|:--|--:|--:|--:|--:|
+| `kedi` | cat | 0.9 | 0.1 | 0.0 | 0.5 |
+| `sütü` | milk (object) | 0.1 | 0.9 | 0.0 | 0.5 |
+| `içti` | drank | 0.0 | 0.1 | 0.9 | 0.5 |
+
+The fourth dimension is the same for all three tokens. Watch what happens to
+it: because it never varies, it cannot help one token tell another apart, and
+it will drop out of every comparison below. A constant feature is worth
+exactly nothing to attention.
+
+### Step 1 — project each token three ways
+
+The same input vector is multiplied by three different learned matrices to
+produce a query, a key, and a value. This is the only place the model's
+parameters enter the attention calculation at all.
+
+$$
+Q = XW^Q, \qquad K = XW^K, \qquad V = XW^V
+$$
+
+The three matrices encode three different questions. $W^Q$ builds *what am I
+looking for*, $W^K$ builds *what do I advertise*, and $W^V$ builds *what do I
+hand over if chosen*:
+
+$$
+W^Q=\begin{bmatrix}2&0\\0&2\\2&2\\0&0\end{bmatrix}\;
+W^K=\begin{bmatrix}1.5&0\\0&1.5\\0&0\\0&0\end{bmatrix}\;
+W^V=\begin{bmatrix}1&0\\0&1\\0&0\\0.2&0.2\end{bmatrix}
+$$
+
+Read $W^Q$ one row at a time. The *action* row is `[2, 2]`, so anything verb-like
+issues a query that looks for an agent **and** an object. In $W^K$ the *action*
+row is `[0, 0]`: a verb advertises neither, so nothing will want to attend to
+it. Multiplying through:
+
+| token | query $q_i$ | key $k_i$ | value $v_i$ |
+|:--|:--|:--|:--|
+| `kedi` | `[1.80, 0.20]` | `[1.35, 0.15]` | `[1.00, 0.20]` |
+| `sütü` | `[0.20, 1.80]` | `[0.15, 1.35]` | `[0.20, 1.00]` |
+| `içti` | `[1.80, 2.00]` | `[0.00, 0.15]` | `[0.10, 0.20]` |
+
+Two rows are worth pausing on. `içti` has the only query that is large in
+*both* coordinates — it is shopping for two things at once. And `içti` has a
+value of `[0.10, 0.20]`, which is nearly nothing: the verb carries no
+agent-content and no object-content of its own. Hold on to that; it is the
+punchline.
+
+### Step 2 — every query meets every key
+
+Score token $i$ against token $j$ with a dot product, $q_i \cdot k_j$. Nine
+tokens pairs, nine numbers, arranged so that [each **row** is one token doing
+the looking and each **column** is a token being looked at]{.hl}:
+
+$$
+QK^{\top} = \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & 2.46 & 0.54 & 0.03\\
+\texttt{sütü} & 0.54 & 2.46 & 0.27\\
+\texttt{içti} & 2.73 & 2.97 & 0.30
+\end{array}
+$$
+
+The dot product is large when two vectors point the same way, so these numbers
+are similarity scores and nothing more exotic. The largest entry in the table
+is $2.97$, and it is `içti` looking at `sütü`. The verb has found its object.
+The smallest entry in the `içti` row, $0.30$, is the verb looking at itself —
+exactly as designed, since verbs advertise nothing.
+
+### Step 3 — divide by the square root of the head size
+
+$$
+\frac{QK^{\top}}{\sqrt{d_k}} = \frac{QK^{\top}}{\sqrt{2}}
+= \frac{QK^{\top}}{1.4142}
+$$
+
+$$
+\begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & 1.7395 & 0.3818 & 0.0212\\
+\texttt{sütü} & 0.3818 & 1.7395 & 0.1909\\
+\texttt{içti} & 1.9304 & 2.1001 & 0.2121
+\end{array}
+$$
+
+This step looks like fussy bookkeeping and is not. A dot product of two random
+$d_k$-dimensional vectors has a standard deviation that grows like
+$\sqrt{d_k}$, so without the division the scores get systematically larger as
+heads get wider — and softmax reacts to *absolute* size. Measured over 20,000
+random pairs:
+
+| $d_k$ | std. dev. of $q\cdot k$ | after dividing by $\sqrt{d_k}$ |
+|--:|--:|--:|
+| 2 | 1.414 | 1.000 |
+| 8 | 2.859 | 1.011 |
+| 64 | 8.029 | 1.004 |
+| 512 | 22.746 | 1.005 |
+
+The left column is $\sqrt{d_k}$ to three digits, which is the whole point. The
+consequence shows up when one token competes against 64 others — here is the
+average weight the *winning* key receives:
+
+| $d_k$ | with $1/\sqrt{d_k}$ | without it |
+|--:|--:|--:|
+| 2 | 0.104 | 0.165 |
+| 8 | 0.105 | 0.420 |
+| 64 | 0.108 | 0.786 |
+| 512 | 0.107 | **0.928** |
+
+::: {.callout-note appearance="simple" icon="false"}
+Without the scaling, a 512-dimensional head hands 93% of its weight to a
+single token — before it has learned anything. That is a softmax in
+saturation, and a saturated softmax has almost no gradient, so the head can no
+longer be *taught* where to look. With the scaling, the competition stays at
+roughly the same temperature no matter how wide the head is. The scaled column
+barely moves: 0.104, 0.105, 0.108, 0.107.
+:::
+
+### Step 4 — softmax turns scores into weights
+
+Softmax exponentiates each row and divides by the row's total, which forces
+every row to be non-negative and to sum to one. Spelled out completely for the
+`içti` row:
+
+$$
+\begin{aligned}
+\text{scaled scores} &= [\,1.9304,\; 2.1001,\; 0.2121\,]\\
+\exp(\cdot) &= [\,6.8923,\; 8.1670,\; 1.2363\,]\\
+\textstyle\sum \exp(\cdot) &= 16.2956\\
+\text{weights} &= [\,6.8923,\; 8.1670,\; 1.2363\,]/16.2956\\
+&= [\,0.4230,\; 0.5012,\; 0.0759\,]
+\end{aligned}
+$$
+
+Doing that to all three rows gives the attention matrix:
+
+$$
+A = \operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)
+= \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & \mathbf{0.6961} & 0.1791 & 0.1249\\
+\texttt{sütü} & 0.1750 & \mathbf{0.6804} & 0.1446\\
+\texttt{içti} & 0.4230 & \mathbf{0.5012} & 0.0759
+\end{array}
+$$
+
+Every row sums to 1.000. The two content words spend about 70% of their
+attention on themselves, which is the sensible thing for a noun to do — it
+already *is* the information it needs. The verb does something different: it
+splits 42% / 50% across its subject and its object and keeps only 7.6% for
+itself. The prediction we made before running any arithmetic came out.
+
+### Step 5 — the weighted average
+
+Finally, multiply the weights by the values. Nothing new happens here; this is
+an ordinary weighted average, with the weights supplied by step 4.
+
+$$
+\operatorname{Attention}(Q,K,V) = AV
+$$
+
+| token | value **before** attention | output **after** attention |
+|:--|:--|:--|
+| `kedi` | `[1.00, 0.20]` | `[0.7444, 0.3433]` |
+| `sütü` | `[0.20, 1.00]` | `[0.3256, 0.7443]` |
+| `içti` | `[0.10, 0.20]` | `[0.5308, 0.6009]` |
+
+Look at the last row, because it is the reason the whole mechanism exists.
+`içti` arrived carrying `[0.10, 0.20]` — almost no agent-content, almost no
+object-content. It leaves carrying `[0.5308, 0.6009]`. [The verb has picked up
+both of its arguments without anyone telling it which words those
+were]{.hl}; it simply asked, and the two tokens with matching keys answered.
+That new vector is what the next layer sees when it looks at position 3.
+
+The two nouns moved less, and in the direction you would expect: `kedi` went
+from `[1.00, 0.20]` to `[0.74, 0.34]`, keeping most of its own identity while
+picking up a little of the object it is now associated with.
+
+::: {.callout-tip appearance="simple" icon="false"}
+Every step above is either a matrix multiply or a softmax. There is no loop
+over positions, no recurrence, and nothing that has to happen in order —
+which is exactly why this replaced the recurrent models of
+@sec-language-models. All nine scores can be computed at the same time, on
+hardware that is very good at computing many things at the same time.
+:::
+
+### Do it yourself
+
+The widget runs the arithmetic above live. Step through the pipeline one stage
+at a time; the two switches let you break the mechanism on purpose and watch
+what happens.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">One attention layer, stage by stage — “kedi sütü içti”</div>
+```
+
+```{ojs}
+//| echo: false
+qkvTok = ["kedi", "sütü", "içti"]
+```
+
+```{ojs}
+//| echo: false
+// The same hand-set matrices the text works through, so the widget and the
+// prose can never drift apart.
+qkvE  = [[0.9, 0.1, 0.0, 0.5],
+         [0.1, 0.9, 0.0, 0.5],
+         [0.0, 0.1, 0.9, 0.5]]
+```
+
+```{ojs}
+//| echo: false
+qkvWQ = [[2, 0], [0, 2], [2, 2], [0, 0]]
+```
+
+```{ojs}
+//| echo: false
+qkvWK = [[1.5, 0], [0, 1.5], [0, 0], [0, 0]]
+```
+
+```{ojs}
+//| echo: false
+qkvWV = [[1, 0], [0, 1], [0, 0], [0.2, 0.2]]
+```
+
+```{ojs}
+//| echo: false
+qkvMul = (A, B) =>
+  A.map(r => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)))
+```
+
+```{ojs}
+//| echo: false
+qkvTrans = M => M[0].map((_, j) => M.map(r => r[j]))
+```
+
+```{ojs}
+//| echo: false
+qkvSoftmax = row => {
+  const finite = row.filter(v => Number.isFinite(v));
+  const m = Math.max(...finite);
+  const e = row.map(v => Number.isFinite(v) ? Math.exp(v - m) : 0);
+  const s = e.reduce((a, b) => a + b, 0);
+  return e.map(v => v / s);
+}
+```
+
+```{ojs}
+//| echo: false
+viewof qkvStage = Inputs.radio(
+  ["1 · project → Q, K, V",
+   "2 · scores QKᵀ",
+   "3 · scale ÷ √dₖ",
+   "4 · softmax → weights",
+   "5 · weighted average → output"],
+  { value: "4 · softmax → weights", label: "Stage" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof qkvScaleOn = Inputs.toggle(
+  { label: "divide by √dₖ", value: true }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof qkvMaskOn = Inputs.toggle(
+  { label: "causal mask (decoder)", value: false }
+)
+```
+
+```{ojs}
+//| echo: false
+qkvPipe = {
+  const Q = qkvMul(qkvE, qkvWQ);
+  const K = qkvMul(qkvE, qkvWK);
+  const V = qkvMul(qkvE, qkvWV);
+  const raw = qkvMul(Q, qkvTrans(K));
+  const denom = qkvScaleOn ? Math.sqrt(2) : 1;
+  let scaled = raw.map(r => r.map(v => v / denom));
+  if (qkvMaskOn)
+    scaled = scaled.map((r, i) => r.map((v, j) => (j <= i ? v : -Infinity)));
+  const A = scaled.map(qkvSoftmax);
+  const out = qkvMul(A, V);
+  return { Q, K, V, raw, scaled, A, out };
+}
+```
+
+```{ojs}
+//| echo: false
+qkvShown = {
+  const s = qkvStage[0];
+  if (s === "2") return { M: qkvPipe.raw,    fmt: v => v.toFixed(2), heat: false };
+  if (s === "3") return { M: qkvPipe.scaled, fmt: v => Number.isFinite(v) ? v.toFixed(4) : "−∞", heat: false };
+  if (s === "4") return { M: qkvPipe.A,      fmt: v => v.toFixed(4), heat: true };
+  return { M: null };
+}
+```
+
+```{ojs}
+//| echo: false
+qkvStage[0] === "1" || qkvStage[0] === "5"
+  ? html`<table style="width:100%;font-size:0.86rem;border-collapse:collapse">
+      <tr style="border-bottom:1px solid #ccc">
+        <th style="text-align:left;padding:.35rem">token</th>
+        ${(qkvStage[0] === "1"
+            ? ["query q", "key k", "value v"]
+            : ["value v (before)", "output (after)"]
+          ).map(h => `<th style="text-align:left;padding:.35rem">${h}</th>`).join("")}
+      </tr>
+      ${qkvTok.map((t, i) => `<tr style="border-bottom:1px solid #eee">
+        <td style="padding:.35rem"><code>${t}</code></td>
+        ${(qkvStage[0] === "1"
+            ? [qkvPipe.Q[i], qkvPipe.K[i], qkvPipe.V[i]]
+            : [qkvPipe.V[i], qkvPipe.out[i]]
+          ).map(v => `<td style="padding:.35rem;font-family:monospace">[${v.map(x => x.toFixed(4)).join(", ")}]</td>`).join("")}
+      </tr>`).join("")}
+    </table>`
+  : Plot.plot({
+      width: 560,
+      height: 240,
+      marginLeft: 78,
+      marginBottom: 46,
+      x: { domain: qkvTok, label: "…attends to (key)" },
+      y: { domain: [...qkvTok].reverse(), label: "token (query)…" },
+      color: qkvShown.heat
+        ? { type: "linear", domain: [0, 1], range: ["#F2F5F5", "#0E7C7B"] }
+        : { type: "linear", range: ["#F2F5F5", "#0E7C7B"] },
+      marks: [
+        Plot.cell(
+          qkvTok.flatMap((_, i) => qkvTok.map((_, j) => ({ i, j, v: qkvShown.M[i][j] }))),
+          { x: d => qkvTok[d.j], y: d => qkvTok[d.i],
+            fill: d => Number.isFinite(d.v) ? d.v : 0, inset: 1.5, rx: 4 }
+        ),
+        Plot.text(
+          qkvTok.flatMap((_, i) => qkvTok.map((_, j) => ({ i, j, v: qkvShown.M[i][j] }))),
+          { x: d => qkvTok[d.j], y: d => qkvTok[d.i],
+            text: d => qkvShown.fmt(d.v),
+            fill: d => (Number.isFinite(d.v) && d.v > (qkvShown.heat ? 0.55 : 2.0)) ? "white" : "#1a1f33",
+            fontSize: 12 }
+        )
+      ]
+    })
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.85rem;opacity:0.8;margin-top:0.2rem">${
+  qkvStage[0] === "1" ? "Three projections of the same input. <code>içti</code> is the only token whose query is large in both coordinates — it is looking for two things at once."
+  : qkvStage[0] === "2" ? "Raw dot products. The largest entry is <code>içti</code> → <code>sütü</code>: the verb has found its object."
+  : qkvStage[0] === "3" ? (qkvScaleOn ? "Scores divided by √2, which keeps softmax out of saturation as heads get wider." : "<b>Scaling is off.</b> With wider heads this is what pushes softmax into saturation and kills the gradient.")
+  : qkvStage[0] === "4" ? "Each row now sums to 1. The nouns keep ~70% on themselves; the verb splits its attention across its two arguments."
+  : "The weighted average. <code>içti</code> arrives with almost nothing and leaves carrying both of its arguments."
+}</div>`
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Two things to try. Turn **causal mask** on and watch the top-right of the
+matrix go to zero — `kedi` can then only see itself, which is the constraint
+that makes a model able to generate text left to right (@sec-model-families).
+Turn **divide by √dₖ** off and watch every weight drift toward the extremes;
+at $d_k=2$ the effect is mild, which is precisely why the problem went
+unnoticed until people built wide heads.
+:::
+:::
+
+### The same picture, geometrically
+
+Because we chose $d_k = 2$, every query and key is a point on a plane and the
+dot product becomes something you can *see*. A query scores highly against a
+key when the two arrows point in a similar direction and both are long.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Queries and keys live in the same 2-D space</div>
+```
+
+```{ojs}
+//| echo: false
+viewof qkvWho = Inputs.radio(qkvTok, { value: "içti", label: "Whose query?" })
+```
+
+```{ojs}
+//| echo: false
+{
+  const i = qkvTok.indexOf(qkvWho);
+  const q = qkvPipe.Q[i];
+  const arrows = [
+    ...qkvTok.map((t, j) => ({ t, x: qkvPipe.K[j][0], y: qkvPipe.K[j][1], kind: "key" })),
+    { t: qkvWho, x: q[0], y: q[1], kind: "query" }
+  ];
+  return Plot.plot({
+    width: 560, height: 380, marginLeft: 55, marginBottom: 45,
+    x: { domain: [-0.25, 2.3], label: "dimension 1  →  “agent-ness”", grid: true },
+    y: { domain: [-0.25, 2.3], label: "dimension 2  →  “object-ness”", grid: true },
+    marks: [
+      Plot.ruleX([0]), Plot.ruleY([0]),
+      Plot.arrow(arrows, {
+        x1: 0, y1: 0, x2: "x", y2: "y",
+        stroke: d => d.kind === "query" ? "#B3453E" : "#0E7C7B",
+        strokeWidth: d => d.kind === "query" ? 2.4 : 1.6,
+        headLength: 9
+      }),
+      Plot.text(arrows, {
+        x: "x", y: "y", text: d => d.kind === "query" ? `q(${d.t})` : `k(${d.t})`,
+        dx: 16, dy: -8, fontSize: 12,
+        fill: d => d.kind === "query" ? "#B3453E" : "#1a1f33"
+      })
+    ]
+  });
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.85rem;opacity:0.8">
+Scores for <b>${qkvWho}</b>'s query against each key —
+${qkvTok.map((t, j) =>
+  `<code>${t}</code> ${qkvPipe.raw[qkvTok.indexOf(qkvWho)][j].toFixed(2)}`
+).join(" · ")}
+&nbsp;→&nbsp; weights
+${qkvPipe.A[qkvTok.indexOf(qkvWho)].map(w => w.toFixed(3)).join(" · ")}
+</div>`
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Select `içti`. Its query (red) points diagonally, up and to the right, so it
+has a large dot product with **both** `kedi`'s key and `sütü`'s key. Select
+`kedi` and the query swings towards the horizontal axis, lining up with its
+own key and nothing else. The attention pattern is not a lookup table — it is
+this geometry, repeated for every token.
+:::
+:::
+
+## Multi-head attention and the transformer block {#sec-block}
+
+One head is one habit. The head we just built has exactly one idea about
+language — *find me an agent and an object* — and it applies that idea to
+every token whether or not it makes sense. A model that could only do this
+would be a very narrow instrument.
+
+The fix is embarrassingly simple: run several heads side by side on the same
+input, each with its own $W^Q$, $W^K$, $W^V$, and let them specialise.
+
+### A second head, same sentence
+
+Keep everything about `kedi sütü içti` and add one more head, with a different
+job. Head 1 asks *who are my arguments*. [Head 2 asks the opposite question —
+*which verb governs me*]{.hl}, which in a verb-final language means the nouns
+should both point forward to `içti`:
+
+$$
+W^{Q}_{2}=\begin{bmatrix}2.5&0\\2.5&0\\0&2.5\\0&0\end{bmatrix}\;
+W^{K}_{2}=\begin{bmatrix}0&1.6\\0&1.6\\2&0\\0&0\end{bmatrix}\;
+W^{V}_{2}=\begin{bmatrix}0&0.6\\0&0.6\\1&0\\0&0\end{bmatrix}
+$$
+
+The query dimensions now mean *looking for an action* and *looking for a
+noun*; the key dimensions mean *I am an action* and *I am a noun*. Running the
+same five steps gives a completely different matrix:
+
+::: {layout-ncol="2"}
+**Head 1 — argument structure**
+
+| | `kedi` | `sütü` | `içti` |
+|:--|--:|--:|--:|
+| `kedi` | **0.6961** | 0.1791 | 0.1249 |
+| `sütü` | 0.1750 | **0.6804** | 0.1446 |
+| `içti` | 0.4230 | **0.5012** | 0.0759 |
+
+**Head 2 — which verb governs me**
+
+| | `kedi` | `sütü` | `içti` |
+|:--|--:|--:|--:|
+| `kedi` | 0.0383 | 0.0383 | **0.9234** |
+| `sütü` | 0.0383 | 0.0383 | **0.9234** |
+| `içti` | **0.4675** | 0.4675 | 0.0650 |
+:::
+
+The two heads disagree about almost every row, and that disagreement is the
+entire point. In head 1, `kedi` mostly looks at itself. In head 2, `kedi`
+spends 92% of its attention on the verb. Neither is wrong; they are reading
+two different relations off the same three words.
+
+::: {.callout-note appearance="simple" icon="false"}
+**Real heads are not this tidy.** Published analyses of trained models do find
+heads with recognisable jobs — attending to the previous token, to the
+matching bracket, to the syntactic head of a phrase [@clark2019bert] — but
+most heads resist any one-sentence description, many are redundant, and a
+large fraction can be pruned with little loss [@michel2019sixteen]. Treat
+"head 2 finds the verb" as a description of *this* hand-built example, not as
+a claim about what trained heads do.
+:::
+
+### Concatenate, then project
+
+Each head produces a $d_v$-wide vector per token. Stack them side by side and
+push the result through one more matrix $W^O$:
+
+$$
+\operatorname{MultiHead}(X) = \operatorname{Concat}(\text{head}_1, \dots,
+\text{head}_h)\, W^O
+$$
+
+With two heads of width 2, the concatenation is exactly 4 wide — back to
+$d_{\text{model}}$, which is not a coincidence. [The head size is chosen as
+$d_k = d_{\text{model}} / h$ precisely so that concatenating them lands you
+where you started]{.hl}:
+
+| token | h1 agent | h1 object | h2 action | h2 noun |
+|:--|--:|--:|--:|--:|
+| `kedi` | 0.7444 | 0.3433 | 0.8310 | 0.1014 |
+| `sütü` | 0.3256 | 0.7443 | 0.8310 | 0.1014 |
+| `içti` | 0.5308 | 0.6009 | 0.0585 | 0.5649 |
+
+$W^O$ then decides how much of each head's report to write back into the model's
+working memory. Ours routes head 1's agent and object content into the
+*animate* and *liquid* dimensions and head 2's action content into the
+*action* dimension:
+
+$$
+W^O=\begin{bmatrix}1&0&0&0\\0&1&0&0\\0&0&1&0\\0.2&0.2&0&0\end{bmatrix}
+\qquad\Longrightarrow\qquad
+\begin{array}{r|rrrr}
+ & \text{animate} & \text{liquid} & \text{action} & \text{bias}\\\hline
+\texttt{kedi} & 0.7646 & 0.3635 & 0.8310 & 0.0000\\
+\texttt{sütü} & 0.3458 & 0.7646 & 0.8310 & 0.0000\\
+\texttt{içti} & 0.6438 & 0.7139 & 0.0585 & 0.0000
+\end{array}
+$$
+
+::: {.callout-important appearance="simple" icon="false"}
+**Multi-head attention is not more expensive than single-head attention.**
+$h$ heads of width $d_{\text{model}}/h$ have the same total parameter count
+and the same FLOP count as one head of width $d_{\text{model}}$: the $W^Q$,
+$W^K$, $W^V$ projections are $3d^2$ either way, and $W^O$ adds $d^2$, for
+$4d^2$ in total. Splitting into heads buys you several independent attention
+patterns for free. This is a rare thing in machine learning and it is why the
+design stuck.
+:::
+
+### The payoff, in numbers
+
+Now read the attention output as a *change* to each token. Every token started
+with a vector saying what it is in isolation; the attention sublayer hands
+back what it learned from the rest of the sentence:
+
+| token | started with | attention added | reading |
+|:--|:--|:--|:--|
+| `içti` | animate 0.0, liquid 0.1 | animate **+0.6438**, liquid **+0.7139** | the verb has acquired an agent and an object |
+| `kedi` | action 0.0 | action **+0.8310** | the noun has found the verb it belongs to |
+| `sütü` | action 0.0 | action **+0.8310** | so has the other one |
+
+[This is what "contextual embedding" means, stated as arithmetic.]{.hl} The
+verb `içti` entered the layer knowing only that it was an action; it leaves
+carrying numeric traces of *who* drank and *what* got drunk. That is the
+difference between the static vectors of @sec-embeddings, where `içti` has one
+vector forever, and a transformer, where its vector is rebuilt from its
+neighbours at every layer.
+
+The `bias` column gained exactly zero, in every row. The constant dimension
+was useless in step 2 and it is still useless now — a feature that never
+varies can neither ask a question nor answer one.
+
+### Residual connections: adding, not replacing
+
+Notice the word *added*. The sublayer output is not the new representation;
+it is summed onto the old one:
+
+$$
+x \;\leftarrow\; x + \operatorname{MultiHead}(x)
+$$
+
+This is the [residual connection](#gloss-residual-connection){#term-residual-connection .term-ref}, and it is doing more work than its one-line
+definition suggests. Because every sublayer *adds* to a running vector rather
+than overwriting it, the sequence of vectors running through the depth of the
+model is often called the **residual stream**: a shared workspace that each
+layer reads from and writes to. A layer that has nothing useful to contribute
+can output near-zero and leave the stream intact, which means adding layers to
+a transformer starts from "do no harm" rather than from scratch.
+
+::: {#gloss-residual-connection .column-margin .term-gloss}
+**residual connection** — a shortcut that adds a sublayer's input to its output, so the layer only has to learn a correction rather than a whole new representation. [↩](#term-residual-connection){.term-back}
+:::
+
+It also fixes the gradient. Differentiating $x + f(x)$ with respect to $x$
+gives $1 + f'(x)$: there is a path from the loss back to every earlier layer
+whose derivative is exactly 1, no matter how small $f'$ becomes. Without it,
+gradients through dozens of stacked sublayers shrink multiplicatively and the
+early layers stop learning — the same vanishing-gradient wall that limited
+depth before @he2016deep.
+
+### Layer normalisation, and why it moved to the front
+
+Residual streams grow. Every sublayer adds something, so the numbers drift
+upward in scale as depth increases, and both attention (through the softmax)
+and the feed-forward nonlinearity care about scale. [Layer
+normalisation](#gloss-layer-normalization){#term-layer-normalization .term-ref} rescales each token's vector on its own [@ba2016layer] — across
+its $d_{\text{model}}$ features, not across the batch, and not across the
+sequence:
+
+$$
+\operatorname{LN}(x) = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma
++ \beta,
+\qquad \mu = \frac{1}{d}\sum_j x_j,
+\qquad \sigma^2 = \frac{1}{d}\sum_j (x_j - \mu)^2
+$$
+
+::: {#gloss-layer-normalization .column-margin .term-gloss}
+**layer normalization** — rescaling each token's feature vector to zero mean and unit variance, computed across that token's own features rather than across the batch. [↩](#term-layer-normalization){.term-back}
+:::
+
+Applied to our post-attention vectors, with $\gamma = 1$ and $\beta = 0$:
+
+| token | animate | liquid | action | bias |
+|:--|--:|--:|--:|--:|
+| `kedi` | 1.6543 | −0.8299 | −0.0699 | −0.7545 |
+| `sütü` | −0.8509 | 1.6508 | −0.0602 | −0.7397 |
+| `içti` | −0.4932 | 0.4908 | 1.3268 | −1.3244 |
+
+Every row now has mean 0 and standard deviation 1. Note what that costs:
+[after normalisation a feature is only meaningful *relative to the token's own
+other features*]{.hl}. `içti` gained a lot of animate content above, but it
+gained even more liquid and action content, so its animate value comes out
+negative. Absolute magnitudes are gone; only the profile survives.
+
+That independence from other examples is why layer norm and not batch norm.
+Batch normalisation computes statistics across the batch, which breaks when
+sequences have different lengths, makes training depend on batch composition,
+and requires storing running statistics for inference. Layer norm needs one
+token's own numbers and nothing else, so it behaves identically at batch size
+512 and batch size 1.
+
+**Where it goes matters.** The original Transformer put the normalisation
+*after* the residual add, $\operatorname{LN}(x + f(x))$ — post-norm. Every
+model of consequence since GPT-2 puts it *before* the sublayer,
+$x + f(\operatorname{LN}(x))$ — pre-norm. The difference is that pre-norm
+leaves the residual path completely clean: there is an unbroken identity
+connection from the input embedding to the final layer, with nothing sitting
+on it. Post-norm rescales the stream at every block, so the identity path
+is no longer an identity, and deep post-norm models need a learning-rate
+warmup to train at all [@xiong2020layernorm]. Everything below is pre-norm.
+
+### The feed-forward sublayer
+
+Attention moves information *between* tokens. It cannot do anything else: an
+attention output is a weighted average of value vectors, and averaging is
+linear. Something has to supply the nonlinearity, and something has to give
+each token a chance to process what it just received, privately.
+
+That is the second sublayer — a two-layer MLP applied to each position
+separately and identically:
+
+$$
+\operatorname{FFN}(x) = \sigma(x W_1 + b_1)\, W_2 + b_2,
+\qquad W_1 \in \mathbb{R}^{d \times d_{\text{ff}}},
+\qquad W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}
+$$
+
+with $d_{\text{ff}} = 4d$ by convention. [The words *separately and
+identically* carry the weight: `kedi`'s FFN computation does not see `sütü` at
+all.]{.hl} Every cross-token interaction in a transformer happens in
+attention, and nowhere else. This is worth remembering when you are debugging
+a model that mixes up two entities in a long document — the mixing can only
+have come from an attention pattern.
+
+To watch it work, take $d_{\text{ff}} = 8$ (a real model would use 16 here;
+this is shrunk to fit on a page) and hand-set the columns of $W_1$ so each
+neuron is a recognisable detector, with the bias as its firing threshold:
+
+| detector | fires on | `kedi` | `sütü` | `içti` |
+|:--|:--|--:|--:|--:|
+| animate + action | a verb-bearing agent | **0.6845** | 0 | 0 |
+| liquid + action | a verb-bearing object | 0 | **0.6906** | **0.9176** |
+| animate + liquid | two nouns at once | 0 | 0 | 0 |
+| animate only | | **1.1543** | 0 | 0 |
+| liquid only | | 0 | **1.1508** | 0 |
+| action only | | 0 | 0 | **0.8268** |
+| any noun | | 0 | 0 | 0 |
+| constant | | 0 | 0 | 0 |
+
+Read the columns. `kedi` fires *animate + action* — after attention it is no
+longer just an animate thing, it is an animate thing attached to a verb.
+`içti` fires *liquid + action*, having absorbed its object. The ReLU zeroes
+everything below threshold, which is how a linear layer becomes a set of
+switches.
+
+Two honest observations. First, `içti` misses the *animate + action* detector
+by 0.066 — it has the agent content, but layer normalisation pushed that
+feature below the token's own average, and a threshold is a threshold. Second,
+the *constant* neuron never fires for anything: after normalisation the
+always-on dimension is below every token's mean. Hand-designed detectors are
+brittle in exactly this way, which is part of why trained networks spread each
+concept across many neurons instead of one.
+
+### The whole block
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">One pre-norm transformer block</div>
+<svg viewBox="0 0 764 320" style="max-width:744px" role="img"
+     aria-label="A transformer block drawn left to right. The residual stream runs straight across the middle. It branches into a layer norm followed by multi-head attention, whose output is added back to the stream. It then branches again into a layer norm followed by a position-wise feed-forward network, whose output is also added back. Attention mixes information across tokens; the feed-forward network processes each token alone.">
+  <defs>
+    <marker id="blk-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="blk-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <!-- the residual stream -->
+  <line x1="14" y1="176" x2="750" y2="176" class="ln" marker-end="url(#blk-a)"/>
+  <text x="14" y="164" class="t-xs t-muted t-b">RESIDUAL STREAM</text>
+  <text x="20" y="200" class="t-mono t-xs">x</text>
+  <text x="700" y="200" class="t-mono t-xs">x'</text>
+
+  <!-- branch 1 -->
+  <circle cx="86" cy="176" r="4" class="chip"/>
+  <path d="M86,176 L86,116 L150,116" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <rect x="154" y="92" width="86" height="48" rx="9" class="box"/>
+  <text x="197" y="114" class="t-sm t-mid t-b">LayerNorm</text>
+  <text x="197" y="130" class="t-xs t-mid t-muted">per token</text>
+  <line x1="242" y1="116" x2="266" y2="116" class="ln-accent" marker-end="url(#blk-b)"/>
+  <rect x="270" y="86" width="132" height="60" rx="9" class="box-accent"/>
+  <text x="336" y="108" class="t-sm t-mid t-b">Multi-head</text>
+  <text x="336" y="124" class="t-sm t-mid t-b">attention</text>
+  <text x="336" y="139" class="t-xs t-mid t-muted">4d² params</text>
+  <path d="M402,116 L444,116 L444,168" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <circle cx="444" cy="176" r="11" class="chip"/>
+  <text x="444" y="181" class="t-sm t-mid t-b">+</text>
+
+  <!-- branch 2 -->
+  <circle cx="480" cy="176" r="4" class="chip"/>
+  <path d="M480,176 L480,116 L512,116" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <rect x="516" y="92" width="72" height="48" rx="9" class="box"/>
+  <text x="552" y="120" class="t-sm t-mid t-b">LayerNorm</text>
+  <line x1="590" y1="116" x2="608" y2="116" class="ln-accent" marker-end="url(#blk-b)"/>
+  <rect x="612" y="86" width="104" height="60" rx="9" class="box-warm"/>
+  <text x="664" y="108" class="t-sm t-mid t-b">Feed-</text>
+  <text x="664" y="124" class="t-sm t-mid t-b">forward</text>
+  <text x="664" y="139" class="t-xs t-mid t-muted">8d² params</text>
+  <path d="M664,146 L664,168" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <circle cx="664" cy="176" r="11" class="chip"/>
+  <text x="664" y="181" class="t-sm t-mid t-b">+</text>
+
+  <!-- the contrast -->
+  <line x1="14" y1="238" x2="750" y2="238" class="ln-thin"/>
+  <rect x="270" y="252" width="132" height="24" rx="6" class="box-accent"/>
+  <text x="336" y="268" class="t-xs t-mid t-b">MIXES ACROSS TOKENS</text>
+  <rect x="612" y="252" width="104" height="24" rx="6" class="box-warm"/>
+  <text x="664" y="268" class="t-xs t-mid t-b">EACH TOKEN ALONE</text>
+  <text x="14" y="268" class="t-sm">The only place information</text>
+  <text x="14" y="286" class="t-sm">crosses between positions</text>
+  <text x="14" y="304" class="t-sm">is the accent-coloured box.</text>
+  <text x="430" y="292" class="t-xs t-muted">TWO THIRDS OF THE PARAMETERS</text>
+  <text x="430" y="306" class="t-xs t-muted">ARE IN THE FEED-FORWARD HALF.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The pre-norm arrangement used by essentially every model since GPT-2: the
+normalisation sits on the branch, never on the stream, so there is an
+unbroken identity path from the input embedding to the output. Stack this
+block $L$ times — 12 for GPT-2 small, 80 for a 70B-class model — and you have
+a transformer.
+:::
+::::
+
+### Watch the representation change
+
+Everything above happens to three vectors of four numbers each. Step through
+the block and watch them move.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">The residual stream, one stage at a time</div>
+```
+
+```{ojs}
+//| echo: false
+blkDims = ["animate", "liquid", "action", "bias"]
+```
+
+```{ojs}
+//| echo: false
+blkStages = [
+  {
+    key: "input",
+    label: "1 · input embeddings",
+    note: "Each token knows only what it is in isolation. `içti` has no idea who drank.",
+    rows: [[0.9, 0.1, 0.0, 0.5], [0.1, 0.9, 0.0, 0.5], [0.0, 0.1, 0.9, 0.5]]
+  },
+  {
+    key: "attn",
+    label: "2 · + multi-head attention",
+    note: "The residual add. `içti` gains animate +0.64 and liquid +0.71; both nouns gain action +0.83.",
+    rows: [[1.6646, 0.4635, 0.8310, 0.5], [0.4458, 1.6646, 0.8310, 0.5],
+           [0.6438, 0.8139, 0.9585, 0.5]]
+  },
+  {
+    key: "ln",
+    label: "3 · LayerNorm (on the branch)",
+    note: "Zero mean, unit variance, per token. Absolute size is gone; only the profile survives.",
+    rows: [[1.6543, -0.8299, -0.0699, -0.7545], [-0.8509, 1.6508, -0.0602, -0.7397],
+           [-0.4932, 0.4908, 1.3268, -1.3244]]
+  },
+  {
+    key: "out",
+    label: "4 · + feed-forward = block output",
+    note: "Same shape as the input, which is the whole reason you can stack these.",
+    rows: [[2.2847, 0.4635, 1.1733, 0.5], [0.4458, 2.2860, 1.1763, 0.5],
+           [0.6438, 1.1810, 1.6654, 0.5]]
+  }
+]
+```
+
+```{ojs}
+//| echo: false
+viewof blkStage = Inputs.radio(
+  blkStages.map(s => s.label),
+  { value: blkStages[0].label, label: "Stage" }
+)
+```
+
+```{ojs}
+//| echo: false
+blkNow = blkStages.find(s => s.label === blkStage)
+```
+
+```{ojs}
+//| echo: false
+blkLong = ["kedi", "sütü", "içti"].flatMap(
+  (t, i) => blkDims.map((d, j) => ({ token: t, dim: d, value: blkNow.rows[i][j] }))
+)
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 74,
+  marginTop: 26,
+  height: 250,
+  width: 660,
+  x: { domain: [-1.9, 2.9], grid: true, label: "value" },
+  y: { label: null, domain: blkDims },
+  fy: { label: null, domain: ["kedi", "sütü", "içti"] },
+  color: { domain: blkDims, range: ["#0E7C7B", "#4C6EF5", "#B3453E", "#9AA3AE"], legend: false },
+  marks: [
+    Plot.barX(blkLong, { x: "value", y: "dim", fy: "token", fill: "dim" }),
+    Plot.ruleX([0]),
+    Plot.text(blkLong, {
+      x: "value", y: "dim", fy: "token",
+      text: d => d.value.toFixed(2),
+      textAnchor: d => (d.value >= 0 ? "start" : "end"),
+      dx: d => (d.value >= 0 ? 4 : -4),
+      fontSize: 10
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="margin:0.4rem 0 0;font-size:0.85rem;">${blkNow.note}</p>`
+```
+:::
+
+Compare stage 1 with stage 4. Every token leaves the block with a longer
+vector than it arrived with — norms go from 1.03 to roughly 2.2–2.7 — and,
+more importantly, with content it did not have. `kedi` entered as *animate*
+and leaves as *animate, attached to an action*. That is one block. Stack
+twelve and each one gets to condition on what the previous eleven worked out.
+
+### Where the parameters actually live
+
+The block has a fixed shape, so its size is a formula. With $d_{\text{ff}} =
+4d$:
+
+| part | matrices | parameters |
+|:--|:--|--:|
+| attention | $W^Q, W^K, W^V, W^O$, each $d \times d$ | $4d^2$ |
+| feed-forward | $d \times 4d$ and $4d \times d$ | $8d^2$ |
+| **block total** | | $\mathbf{12d^2}$ |
+
+Biases and layer-norm parameters are $O(d)$ and round to nothing. So:
+
+| $d_{\text{model}}$ | attention | feed-forward | one block |
+|--:|--:|--:|--:|
+| 768 | 2,359,296 | 4,718,592 | 7,077,888 |
+| 1,024 | 4,194,304 | 8,388,608 | 12,582,912 |
+| 4,096 | 67,108,864 | 134,217,728 | 201,326,592 |
+| 8,192 | 268,435,456 | 536,870,912 | 805,306,368 |
+
+[Two thirds of every transformer is the feed-forward half.]{.hl} People say
+"attention is all you need" and then build models in which attention is a
+third of the weights.
+
+A rule of thumb is only worth having if it reproduces a number you can look
+up. GPT-2 small is public: vocabulary 50,257, $d = 768$, 12 layers, context
+1,024.
+
+| part | arithmetic | parameters |
+|:--|:--|--:|
+| token embeddings | $50{,}257 \times 768$ | 38,597,376 |
+| position embeddings | $1{,}024 \times 768$ | 786,432 |
+| 12 blocks | $12 \times 12 \times 768^2$ | 84,934,656 |
+| **total** | | **124,318,464** |
+
+The published size is ~124M. The rule lands within 0.26%, which is close
+enough to trust it for capacity planning and not close enough to quote to four
+digits.
+
+::: {.column-margin}
+Notice what the table does *not* contain: an output projection back to the
+vocabulary. GPT-2 ties the output weights to the input embedding matrix, so
+those 38.6M parameters are counted once and used twice.
+:::
+
+## Positional information: absolute, learned, RoPE, ALiBi {#sec-position}
 
 Because attention itself is order-blind, position must be injected
 explicitly — the model literally cannot tell "dog bites man" from "man bites
@@ -150,47 +1095,787 @@ dog" without it. This is the same failure the averaged embeddings hit in
 @sec-bake-off, where `kalite iyi fiyat kötü` and `kalite kötü fiyat iyi`
 came out at cosine 1.0000.
 
-<!-- TODO(draft): sinusoidal vs learned absolute embeddings; rotary (RoPE)
-     as a rotation in each 2-d subspace; ALiBi's linear distance bias; why
-     the choice determines how far a model extrapolates beyond its training
-     context length. -->
+### First, prove the problem is real
 
-## Encoder-only, decoder-only, encoder-decoder
+That claim is easy to state and easy to believe without checking, so check
+it. Take the worked example, shuffle the three tokens into the order `içti
+kedi sütü`, run attention again, then un-shuffle the outputs and compare:
 
-<!-- TODO(draft): the three families and the masking that separates them;
-     BERT-style bidirectional encoding for classification (forward-reference
-     @sec-classification), decoder-only for generation, encoder-decoder for
-     translation and summarization. A small table with a representative model
-     and a representative task per family. -->
+| token | outputs, original order | outputs, shuffled then un-shuffled |
+|:--|:--|:--|
+| `kedi` | `[0.7444, 0.3433]` | `[0.7444, 0.3433]` |
+| `sütü` | `[0.3256, 0.7443]` | `[0.3256, 0.7443]` |
+| `içti` | `[0.5308, 0.6009]` | `[0.5308, 0.6009]` |
 
-## Efficiency: FlashAttention, GQA/MQA, KV cache
+Largest disagreement anywhere in the table: $1.11 \times 10^{-16}$, which is
+floating-point noise and not a difference. [Self-attention is *permutation
+equivariant*: shuffle the inputs and the outputs shuffle with them, otherwise
+untouched.]{.hl}
 
-<!-- TODO(draft): the quadratic cost of attention stated concretely in
-     memory and FLOPs; the KV cache as the single biggest inference lever
-     (connect to prefix caching in @sec-serving); grouped-query and
-     multi-query attention trading heads for bandwidth; FlashAttention as an
-     IO-aware exact algorithm, not an approximation. -->
+This is not a bug that someone forgot to fix; it follows from the definition.
+Every token's output is a weighted sum over all tokens, and a sum does not
+care what order you add things in. Nothing anywhere in $QK^{\top}$, softmax,
+or $AV$ can see an index. A bag of words with a very clever averaging scheme
+is still a bag of words.
 
-## Mixture of Experts
+### Adding a position signal
 
-<!-- TODO(draft): sparse routing — total parameters vs active parameters per
-     token; the router and load balancing; why an MoE model's memory cost is
-     set by total parameters while its latency is set by active ones, and
-     what that means for self-hosting decisions in @sec-serving. -->
+The original Transformer's answer is to build a vector for each *slot* and add
+it to whatever word lands there [@vaswani2017attention]. The vector is made of
+sines and cosines at geometrically spaced frequencies:
 
-## Scaling laws and what they predict
+$$
+\text{PE}_{(\text{pos},\, 2i)} = \sin\!\left(\frac{\text{pos}}{10000^{2i/d}}\right),
+\qquad
+\text{PE}_{(\text{pos},\, 2i+1)} = \cos\!\left(\frac{\text{pos}}{10000^{2i/d}}\right)
+$$
 
-<!-- TODO(draft): loss as a power law in compute, parameters, and data;
-     Chinchilla-style compute-optimal allocation; what the laws do and do not
-     predict (they predict loss, not capability). Keep this honest about
-     extrapolation — connect to @sec-pretraining. -->
+At $d = 4$ there are two frequencies — one fast, one a hundred times slower —
+and the whole encoding fits in three rows:
 
-## Lab: implement attention, then profile it
+| position | $\sin(\text{pos})$ | $\cos(\text{pos})$ | $\sin(\text{pos}/100)$ | $\cos(\text{pos}/100)$ |
+|--:|--:|--:|--:|--:|
+| 0 | 0.0000 | 1.0000 | 0.0000 | 1.0000 |
+| 1 | 0.8415 | 0.5403 | 0.0100 | 1.0000 |
+| 2 | 0.9093 | −0.4161 | 0.0200 | 0.9998 |
 
-<!-- TODO(draft): implement scaled dot-product attention in NumPy, verify
-     against a reference implementation, then measure how runtime and memory
-     scale with sequence length. Add a KV cache and re-measure. The point is
-     to feel the quadratic term rather than read about it. -->
+Add $0.3 \times \text{PE}$ to the embeddings and repeat the shuffle test.
+[The subtlety that makes it work: when the words move, the position vectors do
+**not** move with them.]{.hl} Position 0 is still position 0, so a word that
+was first and is now third gets a different vector than before:
+
+| token | outputs, original order | outputs, shuffled then un-shuffled |
+|:--|:--|:--|
+| `kedi` | `[0.8029, 0.7345]` | `[1.1319, 0.5094]` |
+| `sütü` | `[0.6385, 1.0023]` | `[0.7489, 0.6805]` |
+| `içti` | `[0.7865, 0.8342]` | `[0.8767, 0.6607]` |
+
+Largest disagreement: **0.3289**. The order-blindness is gone.
+
+::: {#gloss-positional-encoding .column-margin .term-gloss}
+**positional encoding** — the position signal added to (or applied to) token embeddings, because attention alone is order-blind. [↩](#term-positional-encoding){.term-back}
+:::
+
+### Why sinusoids in particular
+
+Any distinct vector per slot would break the tie. Sinusoids were chosen
+because of a property that is easy to state and, unusually for this
+literature, exactly true. For a [positional encoding](#gloss-positional-encoding){#term-positional-encoding .term-ref} built this way,
+
+$$
+\text{PE}_{p} \cdot \text{PE}_{p+k} \;=\; \sum_{i} \cos(k\,\omega_i)
+$$
+
+The $p$ terms cancel by the angle-difference identity, and what survives
+depends only on $k$ — the *offset*. So the similarity between two positions is
+a function of how far apart they are and not of where they sit in the
+sequence.
+
+If that were only approximately true it would be worth much less, so measure
+it. Sweeping $p$ across 256 positions at $d = 64$ and holding the offset
+fixed:
+
+| offset $k$ | mean $\text{PE}_p \cdot \text{PE}_{p+k}$ | std over $p$ | range over $p$ |
+|--:|--:|--:|--:|
+| 0 | 32.000000 | 1.6e−15 | 1.1e−14 |
+| 1 | 30.916832 | 7.8e−15 | 4.6e−14 |
+| 2 | 28.303862 | 1.1e−14 | 7.8e−14 |
+| 4 | 23.934362 | 7.4e−15 | 5.0e−14 |
+| 8 | 22.413912 | 5.8e−15 | 3.9e−14 |
+| 16 | 19.372820 | 5.8e−15 | 3.9e−14 |
+| 32 | 19.553972 | 1.0e−14 | 7.1e−14 |
+| 64 | 13.906089 | 1.2e−14 | 9.1e−14 |
+
+A standard deviation of $10^{-14}$ across 256 different absolute positions is
+the identity holding exactly, in floating point. Every position vector also
+has the same length, $\sqrt{d/2} = 5.656854$, to ten digits — the encoding
+adds direction, never magnitude.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**Read the middle column honestly.** The mean is *not* monotonic in $k$: offset
+32 scores higher than offset 16. It is a sum of cosines, so it wobbles. The
+correct claim is "this quantity depends only on the offset", which the last
+two columns establish beyond argument. The tempting claim — "nearby positions
+look more similar than distant ones" — is not what the table shows, and a
+textbook that says it anyway is asking you to trust a picture over the
+numbers.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Sinusoidal position encodings, as a picture</div>
+```
+
+```{ojs}
+//| echo: false
+viewof peDim = Inputs.range([8, 64], { step: 8, value: 32, label: "d_model" })
+```
+
+```{ojs}
+//| echo: false
+viewof peN = Inputs.range([16, 128], { step: 16, value: 64, label: "positions" })
+```
+
+```{ojs}
+//| echo: false
+peGrid = {
+  const out = [];
+  for (let pos = 0; pos < peN; pos++)
+    for (let i = 0; i < peDim / 2; i++) {
+      const w = pos / Math.pow(10000, (2 * i) / peDim);
+      out.push({ pos, dim: 2 * i, v: Math.sin(w) });
+      out.push({ pos, dim: 2 * i + 1, v: Math.cos(w) });
+    }
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 46,
+  height: 300,
+  width: 680,
+  x: { label: "position →", ticks: 8 },
+  y: { label: "↑ dimension", reverse: true },
+  color: { type: "diverging", scheme: "BuRd", domain: [-1, 1], legend: true },
+  marks: [Plot.cell(peGrid, { x: "pos", y: "dim", fill: "v" })]
+})
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Low dimensions (top) flip sign every few positions; high dimensions (bottom)
+barely change across the whole window. That spread of wavelengths is the
+point — the fast dimensions encode "which neighbour", the slow ones encode
+"roughly where in the document". Push `d_model` up and watch more slow
+dimensions appear at the bottom.
+:::
+:::
+
+### Learned absolute positions
+
+Sinusoids are elegant and, as it turned out, unnecessary. BERT and GPT-2 both
+threw them away and used an ordinary embedding table indexed by position: row
+0 is the vector for slot 0, learned by gradient descent like any other
+parameter [@devlin2019bert; @radford2019language]. It works about as well, and
+you saw the cost in the parameter table above — GPT-2 small spends 786,432
+parameters on it.
+
+The real cost is elsewhere. [A learned table has exactly as many rows as you
+trained it with.]{.hl} GPT-2's table has 1,024 rows, so token 1,025 has no
+vector at all — not a degraded one, none. The context limit is not a tuning
+choice you can relax at inference time; it is baked into the shape of a
+weight matrix. Every "extend the context window" method for this family of
+models is fundamentally about manufacturing rows that were never trained.
+
+### RoPE: rotate instead of add
+
+The dominant choice today is rotary position embedding, and its idea is a
+genuine change of kind rather than a better table [@su2024roformer]. RoPE adds
+nothing to the embedding. It takes the query and key vectors — after
+projection, inside each head — splits them into consecutive pairs of
+coordinates, and *rotates* each pair by an angle proportional to the position:
+
+$$
+\begin{bmatrix} q'_{2i} \\ q'_{2i+1} \end{bmatrix}
+=
+\begin{bmatrix} \cos m\theta_i & -\sin m\theta_i \\
+                \sin m\theta_i & \phantom{-}\cos m\theta_i \end{bmatrix}
+\begin{bmatrix} q_{2i} \\ q_{2i+1} \end{bmatrix},
+\qquad \theta_i = 10000^{-2i/d}
+$$
+
+Rotating a vector by $m\theta$ and another by $n\theta$ and then taking their
+dot product leaves an angle of $(m-n)\theta$. So the attention *score itself*
+becomes a function of the offset — not a side channel added to the embedding
+and hoped to survive the projections, but the score.
+
+That is a strong claim, so here it is measured. One fixed random query and
+key, $d = 64$, scored at a fixed offset from four wildly different absolute
+positions ($n = 0, 100, 1000, 5000$):
+
+| offset $m-n$ | score | spread across the four positions |
+|--:|--:|--:|
+| 0 | 2.152941 | 2.2e−15 |
+| 1 | 3.606170 | 1.5e−13 |
+| 2 | 5.453257 | 3.1e−13 |
+| 5 | 6.457170 | 5.0e−13 |
+| 10 | 8.827710 | 1.4e−13 |
+| 50 | −0.061180 | 1.5e−13 |
+| 200 | −13.740668 | 4.1e−14 |
+
+Now the same measurement on the additive scheme, where the position vector is
+summed into the embedding before projection:
+
+| offset $m-n$ | score at $n=0$ | at $n=100$ | at $n=1000$ | spread |
+|--:|--:|--:|--:|--:|
+| 0 | 31.19 | 26.98 | 48.15 | 26.3 |
+| 1 | 31.82 | 27.54 | 47.52 | 26.6 |
+| 10 | 13.74 | 20.55 | 38.85 | 25.1 |
+| 200 | 1.86 | 6.43 | 25.00 | 23.1 |
+
+[A spread of $10^{-13}$ against a spread of 26.]{.hl} With addition, "five
+tokens back" means something different at position 0 than at position 5,000,
+and the model has to learn to cope with that. With rotation it means the same
+thing everywhere, for free. RoPE also preserves vector norms exactly — a
+rotation is a rotation — so it cannot distort the magnitude of a query the way
+addition can.
+
+This is why RoPE is in Llama, Qwen, Mistral, Gemma, and essentially every
+open-weight model released since 2023, and why the main context-extension
+tricks for those models (position interpolation, NTK-aware scaling, YaRN) are
+all reparameterisations of $\theta_i$ rather than new tables.
+
+### ALiBi: skip the encoding, penalise distance
+
+The most economical answer is to encode nothing and simply subtract a penalty
+proportional to distance, directly on the attention scores [@press2022alibi]:
+
+$$
+\text{score}(i, j) = q_i \cdot k_j - m\,(i - j)
+$$
+
+Each head gets its own fixed slope $m$, on a geometric schedule. With eight
+heads the slopes are $\tfrac12, \tfrac14, \tfrac18, \dots, \tfrac{1}{256}$, so
+the head with $m = 0.5$ has accumulated one nat of penalty after 2 tokens and
+is effectively local, while the head with $m = 1/256$ needs 256 tokens to
+accumulate the same penalty and is effectively global. Different heads see
+different distance scales, by construction.
+
+The bias a head with $m = 0.5$ adds, over six tokens:
+
+| | 0 | 1 | 2 | 3 | 4 | 5 |
+|:--|--:|--:|--:|--:|--:|--:|
+| **pos 0** | 0.0 | −∞ | −∞ | −∞ | −∞ | −∞ |
+| **pos 1** | −0.5 | 0.0 | −∞ | −∞ | −∞ | −∞ |
+| **pos 2** | −1.0 | −0.5 | 0.0 | −∞ | −∞ | −∞ |
+| **pos 3** | −1.5 | −1.0 | −0.5 | 0.0 | −∞ | −∞ |
+| **pos 4** | −2.0 | −1.5 | −1.0 | −0.5 | 0.0 | −∞ |
+| **pos 5** | −2.5 | −2.0 | −1.5 | −1.0 | −0.5 | 0.0 |
+
+That single matrix is the causal mask and the position signal at once, and it
+contains no learned parameters whatsoever. Because it is defined by a formula
+over $i - j$, it is defined for any distance, which is what lets an ALiBi
+model trained at length 1,024 run at length 2,048 without falling over — the
+result the paper's title advertises.
+
+### Choosing
+
+| scheme | how position enters | extra parameters | beyond training length |
+|:--|:--|:--|:--|
+| sinusoidal | added to embeddings | none | defined, but quality degrades |
+| learned absolute | added to embeddings | $n_{\text{ctx}} \times d$ | **undefined** — no row exists |
+| RoPE | rotates Q and K per head | none | degrades gracefully; extendable by rescaling $\theta$ |
+| ALiBi | subtracted from scores | none | degrades gracefully by design |
+
+[The column that matters in practice is the last one.]{.hl} When a vendor
+announces a context window, they are describing a property of the position
+scheme as much as of the training data — and when a model becomes strangely
+unreliable past some length, the position scheme is the first place to look.
+Advertised context length and *usable* context length are different numbers,
+a gap we will measure rather than assume in @sec-context-engineering.
+
+## Encoder-only, decoder-only, encoder-decoder {#sec-model-families}
+
+Here is a fact that sounds like a simplification and is not:
+[the structural difference between BERT and GPT is which entries of the
+attention matrix are allowed to be non-zero.]{.hl}
+
+Same blocks, same multi-head attention, same feed-forward sublayer, same
+residual stream. What differs is a [causal mask](#gloss-causal-mask){#term-causal-mask .term-ref} applied to the scores before the
+softmax — and, following from that, what the model can be trained to do.
+
+::: {#gloss-causal-mask .column-margin .term-gloss}
+**causal mask** — blocks every position from attending to later ones, so the model can be trained to generate left to right. [↩](#term-causal-mask){.term-back}
+:::
+
+### The mask is the architecture
+
+Look at the three patterns.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Which token may look at which</div>
+```
+
+```{ojs}
+//| echo: false
+mskToks = ["kedi", "sütü", "içti", "çünkü", "açtı"]
+```
+
+```{ojs}
+//| echo: false
+viewof mskKind = Inputs.radio(
+  ["bidirectional (encoder)", "causal (decoder)", "prefix (prefix-LM)"],
+  { value: "causal (decoder)", label: "Mask" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof mskPrefix = Inputs.range([1, 4], {
+  step: 1, value: 2, label: "prefix length", disabled: !mskKind.startsWith("prefix")
+})
+```
+
+```{ojs}
+//| echo: false
+mskCells = {
+  const n = mskToks.length;
+  const out = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++) {
+      let ok;
+      if (mskKind.startsWith("bidirectional")) ok = true;
+      else if (mskKind.startsWith("causal")) ok = j <= i;
+      else ok = i < mskPrefix ? j < mskPrefix : j <= i;
+      out.push({ q: mskToks[i], k: mskToks[j], ok });
+    }
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 62,
+  marginTop: 46,
+  height: 280,
+  width: 420,
+  x: { domain: mskToks, label: "attended to (key) →", axis: "top", tickRotate: -30 },
+  y: { domain: mskToks, label: "↓ attending (query)" },
+  color: { domain: [true, false], range: ["#0E7C7B", "#E6E3DC"], legend: false },
+  marks: [
+    Plot.cell(mskCells, { x: "k", y: "q", fill: "ok", inset: 1.5 }),
+    Plot.text(mskCells, {
+      x: "k", y: "q", text: d => (d.ok ? "✓" : "·"),
+      fill: d => (d.ok ? "white" : "#9AA3AE"), fontSize: 13
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="margin:0.4rem 0 0;font-size:0.85rem;">${
+  mskKind.startsWith("bidirectional")
+    ? "Every token sees the whole sentence, including what comes after it. Excellent representations — and useless for generation, because predicting the next word is trivial when you can already see it."
+    : mskKind.startsWith("causal")
+    ? "Strictly lower triangular. Token i sees only tokens 0…i, so \"predict the next one\" is an honest task at every position at once. This is the mask that makes pre-training on raw text work."
+    : "The first " + mskPrefix + " tokens see each other in both directions; everything after is causal. Used when there is a fixed instruction or document to encode and a continuation to generate."
+}</p>`
+```
+:::
+
+Turn on the causal mask and the top-right triangle goes grey. `kedi`, in
+position 0, can then attend only to itself. That constraint is the entire
+reason a decoder can be trained on raw text: with it, the model can be asked
+to predict *every* token in a sentence simultaneously without ever seeing the
+answer, which turns one document into thousands of training signals.
+
+Mechanically it is one line — set the masked scores to $-\infty$ before the
+softmax, so $e^{-\infty} = 0$ and those tokens receive exactly zero weight.
+Setting the weights to zero *after* the softmax would not be equivalent,
+because the remaining weights would no longer sum to 1.
+
+### The three families
+
+| family | mask | trained to | representative | good at |
+|:--|:--|:--|:--|:--|
+| encoder-only | bidirectional | fill in masked tokens | BERT [@devlin2019bert] | classification, extraction, retrieval embeddings |
+| decoder-only | causal | predict the next token | GPT, Llama, Qwen | generation, and — since scale — everything else |
+| encoder-decoder | bidirectional in, causal out | produce a target sequence | T5 [@raffel2020exploring], BART | translation, summarization, any input→output rewrite |
+
+An encoder-decoder needs one extra mechanism. Its decoder runs self-attention
+over what it has generated so far, and then a second attention sublayer called
+**cross-attention** in which [the queries come from the decoder while the keys
+and values come from the encoder]{.hl}. It is the same arithmetic you worked
+through above — the only change is that $Q$ and $K, V$ are computed from two
+different sequences. That is how "attend to the source sentence while writing
+the translation" is expressed.
+
+::: {.column-margin}
+Cross-attention is also how most multimodal models attach an image to a
+language model: the image encoder produces keys and values, the language model
+supplies the queries. We come back to this in @sec-multimodal.
+:::
+
+### Why decoder-only won
+
+In 2019 the sensible prediction was that each family would keep its niche.
+That is not what happened; almost everything you will use in this book is
+decoder-only. Three reasons, in rough order of importance.
+
+**One objective, all the data.** Next-token prediction needs no labels, no
+corruption scheme, and no paired data. Every document on the internet is
+training data for it, and every position in that document is a training
+example.
+
+**Task-as-text.** Once a model is good enough at continuation, classification
+and translation and summarization can all be *written down* as prompts rather
+than built as separate heads. The architectural specialisation of an
+encoder-decoder stops paying for itself when a general model can be asked
+politely. This is the story of @sec-prompting.
+
+**Cheap incremental decoding.** With a causal mask, the representation of
+token $i$ never depends on anything after it — so when you append a token, all
+the earlier work is still valid. That is what makes the KV cache possible, and
+the KV cache is why generation costs what it costs.
+
+::: {.callout-note appearance="simple" icon="false"}
+**Encoder-only models are not obsolete.** For classification and retrieval at
+volume, a 110M-parameter BERT-style encoder is often 100× cheaper per document
+than a generative model and just as accurate, because it emits one vector in
+one forward pass instead of decoding token by token. The embedding models
+behind every retrieval system in @sec-rag are encoders. Choosing a 7B decoder
+for sentiment analysis is a common and expensive mistake — and @sec-bake-off
+already showed how often the cheaper representation wins.
+:::
+
+## Efficiency: FlashAttention, GQA/MQA, KV cache {#sec-attention-cost}
+
+Everything so far has been about what attention computes. This section is
+about what it costs, which is the part that decides whether you can actually
+run the thing.
+
+### The quadratic term, in bytes
+
+$QK^{\top}$ is $n \times n$. That is the whole problem in one line. Written
+naively, a single head at a single layer must hold that matrix in memory:
+
+| sequence length | entries in $QK^{\top}$ | one score matrix at fp16 |
+|--:|--:|--:|
+| 512 | 262,144 | 0.0005 GiB |
+| 4,096 | 16,777,216 | 0.03 GiB |
+| 32,768 | 1,073,741,824 | 2.00 GiB |
+| 100,000 | 10,000,000,000 | 18.63 GiB |
+
+[Eighteen gigabytes for one head at one layer.]{.hl} Multiply by 32 heads and
+32 layers and the number stops being a memory problem and becomes a fantasy.
+
+### When does attention actually dominate?
+
+The quadratic term is not always the term that matters, and people routinely
+overestimate it. Per layer, ignoring constants:
+
+$$
+\underbrace{24\,n\,d^2}_{\text{projections and FFN}}
+\qquad\text{versus}\qquad
+\underbrace{4\,n^2 d}_{\text{scores and weighting}}
+$$
+
+Setting them equal gives $n = 6d$. Below that, the transformer spends most of
+its time on matrix multiplications that are perfectly ordinary and linear in
+sequence length:
+
+| $d_{\text{model}}$ | sequence length $n$ | | attention's share of FLOPs |
+|--:|--:|:--|--:|
+| 768 | 1,024 | | 18% |
+| 768 | 4,608 | *crossover* | 50% |
+| 768 | 32,768 | | 88% |
+| 4,096 | 4,096 | | 14% |
+| 4,096 | 24,576 | *crossover* | 50% |
+| 4,096 | 100,000 | | 80% |
+
+[At the context lengths most applications actually use, attention is a
+*minority* of the compute.]{.hl} A 4,096-wide model running 4,096 tokens
+spends 86% of its arithmetic on the feed-forward and projection matrices. The
+quadratic term is a wall you hit at long context, not a tax you pay at every
+length — and knowing which regime you are in tells you whether optimising
+attention is worth any of your time.
+
+### FlashAttention: don't build the matrix
+
+Here is the observation that made long context practical: on a modern GPU,
+attention is not limited by arithmetic. It is limited by moving that
+$n \times n$ matrix between fast on-chip memory and slow high-bandwidth
+memory. The FLOPs are cheap; the round trips are not [@dao2022flashattention].
+
+FlashAttention therefore never materialises the score matrix. It walks through
+the sequence in tiles, keeping a running softmax normaliser so that a
+partially-computed softmax can be corrected as new tiles arrive, and
+accumulates the output directly.
+
+::: {.callout-important appearance="simple" icon="false"}
+**FlashAttention is exact.** It is not a sparse approximation, a low-rank
+factorisation, or a windowed heuristic. It computes precisely the same
+numbers as the naive implementation, in the same order of arithmetic
+operations, and differs only in what it stores. You never trade quality for
+it — which is why it went from a paper to a default in about eighteen months,
+and why memory use in attention is now linear in $n$ even though the
+computation is still quadratic.
+:::
+
+### The KV cache: the number that decides deployment
+
+Generation is incremental. Having produced 500 tokens, the model produces the
+501st — and because the mask is causal, the keys and values of the first 500
+have not changed. Recomputing them would be pure waste, so they are kept. That
+store is the [KV cache](#gloss-kv-cache){#term-kv-cache .term-ref}, and it converts generation from quadratic-per-token to
+linear-per-token.
+
+::: {#gloss-kv-cache .column-margin .term-gloss}
+**KV cache** — stored keys and values from earlier tokens, so generation does not recompute them. Its size, not the model's, usually decides how many users a GPU can serve. [↩](#term-kv-cache){.term-back}
+:::
+
+It also eats your GPU:
+
+$$
+\text{bytes} = 2 \times L \times h_{\text{kv}} \times d_{\text{head}} \times
+n_{\text{tokens}} \times \text{bytes per value}
+$$
+
+The leading 2 is for K and V. Note what is *absent*: the number of query
+heads, and the model's parameter count. Note what is present: the number of
+tokens, linearly, and **per concurrent request**.
+
+| model shape | layers | KV heads | head dim | context | KV cache |
+|:--|--:|--:|--:|--:|--:|
+| 7B-class | 32 | 32 | 128 | 4,096 | 2.1 GB |
+| 7B-class | 32 | 32 | 128 | 32,768 | 17.2 GB |
+| 70B-class | 80 | 64 | 128 | 32,768 | 85.9 GB |
+| 7B-class | 32 | 32 | 128 | 100,000 | 52.4 GB |
+
+A 7B model in fp16 is 14 GB of weights. At 100,000 tokens of context its KV
+cache is 52 GB — [nearly four times the model itself, for one
+conversation.]{.hl} This is the arithmetic behind every "why is long context
+so expensive?" question, and it is why serving systems care so much about how
+that memory is partitioned and reused (@sec-serving).
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">KV cache calculator</div>
+```
+
+```{ojs}
+//| echo: false
+viewof kvLayers = Inputs.range([8, 128], { step: 4, value: 32, label: "layers" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvQHeads = Inputs.range([8, 128], { step: 4, value: 32, label: "query heads" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvScheme = Inputs.radio(
+  ["MHA (KV heads = query heads)", "GQA, 8 KV heads", "GQA, 4 KV heads", "MQA (1 KV head)"],
+  { value: "MHA (KV heads = query heads)", label: "Scheme" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof kvCtx = Inputs.range([1024, 200000], { step: 1024, value: 32768, label: "context tokens" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvBytes = Inputs.radio([2, 1], {
+  value: 2, label: "bytes per value", format: b => (b === 2 ? "fp16 (2)" : "fp8 (1)")
+})
+```
+
+```{ojs}
+//| echo: false
+kvHeads = kvScheme.startsWith("MHA") ? kvQHeads
+  : kvScheme === "GQA, 8 KV heads" ? 8
+  : kvScheme === "GQA, 4 KV heads" ? 4 : 1
+```
+
+```{ojs}
+//| echo: false
+kvTotal = 2 * kvLayers * kvHeads * 128 * kvCtx * kvBytes
+```
+
+```{ojs}
+//| echo: false
+kvBaseline = 2 * kvLayers * kvQHeads * 128 * kvCtx * 2
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;line-height:1.7;">
+  <div style="font-size:1.6rem;font-weight:600;">${(kvTotal / 1e9).toFixed(1)} GB</div>
+  <div>head dim fixed at 128 · ${kvHeads} KV head${kvHeads === 1 ? "" : "s"} ·
+  ${(kvTotal / kvCtx / 1e3).toFixed(1)} KB per token</div>
+  <div style="margin-top:0.35rem;">
+  ${kvTotal < kvBaseline
+    ? `<strong>${(kvBaseline / kvTotal).toFixed(1)}× smaller</strong> than fp16 multi-head attention at the same shape (${(kvBaseline / 1e9).toFixed(1)} GB).`
+    : "This is the multi-head fp16 baseline."}
+  </div>
+  <div style="margin-top:0.35rem;color:#8a8a8a;">
+  For scale: one 80 GB accelerator holds
+  ${Math.max(0, Math.floor(80e9 / kvTotal))} concurrent request${Math.floor(80e9 / kvTotal) === 1 ? "" : "s"} of this size,
+  before leaving any room for the weights.
+  </div>
+</div>`
+```
+:::
+
+### GQA and MQA: fewer keys, same queries
+
+The formula has an obvious lever. Nothing requires every query head to have
+its own key and value head — several query heads can share one set.
+
+- **Multi-query attention** takes this to the limit: all query heads share a
+  single K/V head [@shazeer2019fast].
+- **Grouped-query attention** is the compromise that won: query heads are
+  divided into groups, one K/V head per group [@ainslie2023gqa].
+
+On the 32-layer, 32-head, 100,000-token model above:
+
+| scheme | KV heads | KV cache | reduction |
+|:--|--:|--:|--:|
+| MHA | 32 | 52.4 GB | 1× |
+| GQA | 8 | 13.1 GB | **4×** |
+| MQA | 1 | 1.6 GB | **32×** |
+
+MQA's 32× is tempting and slightly too aggressive — quality degrades and
+training gets unstable. GQA with 4 or 8 groups recovers essentially all the
+quality for most of the saving, which is why Llama 2 70B, Llama 3, Mistral,
+and nearly everything since ship with it. [It is a rare case where the
+efficiency trick has almost no accuracy cost, which is exactly why it became
+universal.]{.hl}
+
+Notice, finally, that these are decisions frozen at training time. You cannot
+convert an MHA checkpoint to GQA at deployment without retraining — which is
+why "how big is the KV cache" belongs in your model-selection checklist, not
+in your optimisation backlog.
+
+## Mixture of Experts {#sec-moe}
+
+Two thirds of a transformer is the feed-forward sublayer, and every token goes
+through all of it. A [mixture of experts](#gloss-mixture-of-experts){#term-mixture-of-experts .term-ref} asks whether it has to.
+
+Replace the single feed-forward network in a block with $E$ copies — the
+*experts* — plus a small learned **router** that scores the experts for each
+token and sends it to the best $k$, usually $k = 2$. Only those $k$ run. The
+other $E - k$ sit idle for that token, and a different token in the same
+sentence may take a different pair.
+
+::: {#gloss-mixture-of-experts .column-margin .term-gloss}
+**mixture of experts** — replaces one feed-forward network with many, routing each token to a few of them, so total parameters and per-token compute stop being the same number. [↩](#term-mixture-of-experts){.term-back}
+:::
+
+[This severs a link that had held since the beginning: total parameters and
+per-token compute stop being the same number.]{.hl} Take $d = 4096$, 32
+layers, 8 experts, top-2 routing:
+
+| | total parameters | active per token |
+|:--|--:|--:|
+| dense | 6.4B | 6.4B |
+| MoE, 8 experts, top-2 | **36.5B** | **10.7B** |
+
+The MoE model holds 5.7× the parameters of the dense one and does 1.67× the
+arithmetic. Its memory bill follows the first number and its latency follows
+the second.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**You rent the GPU for the total and get the latency of the active.** All 36.5B
+parameters must be resident — the router's choice is per token, so any expert
+may be needed at any moment. A "small active parameter count" in a launch post
+tells you about speed, not about what you need to buy. This is the single
+most misread number in open-weight model announcements, and it matters
+directly when you cost out self-hosting in @sec-serving.
+:::
+
+The idea is old [@shazeer2017outrageously] and became practical when the
+routing was simplified to one expert per token and the engineering worked out
+at scale [@fedus2022switch]. The hard part in practice is not the routing rule
+but **load balancing**: nothing stops the router from falling in love with
+three experts and starving the rest, which wastes the parameters you paid for
+and can collapse training. Real systems add an auxiliary loss that penalises
+uneven expert usage — an explicit correction for a failure mode that the main
+objective is happy to walk into.
+
+## Scaling laws and what they predict {#sec-scaling-laws}
+
+Transformers turned out to have a property that almost nothing else in machine
+learning has: [make them bigger and their loss falls in a way you can predict
+in advance.]{.hl} Loss follows a power law in parameters, in data, and in
+compute — a straight line on log-log axes over many orders of magnitude
+[@kaplan2020scaling]. That predictability is the reason anyone was willing to
+spend nine figures on a training run.
+
+The first version of the analysis suggested growing the model much faster than
+the data. It was wrong, in a way that matters and that is worth understanding
+because the error was methodological rather than arithmetical: the learning
+rate schedules were not tuned per run. Redoing it properly gave a different
+answer — [for a fixed compute budget, parameters and tokens should grow at
+roughly the same rate]{.hl}, about 20 tokens per parameter
+[@hoffmann2022chinchilla]:
+
+| model | parameters | training tokens | tokens per parameter |
+|:--|--:|--:|--:|
+| Gopher | 280B | 300B | 1.1 |
+| Chinchilla | 70B | 1.4T | 20 |
+
+Chinchilla is a quarter of Gopher's size, used the same compute budget, and
+beat it broadly. A generation of models had been badly undertrained, and
+nobody knew because everyone was reading the same scaling law.
+
+Two honest qualifications, both of which you will need.
+
+**The laws predict loss, not capability.** Loss is average negative
+log-likelihood on held-out text. It is smooth and it is not what you care
+about. Whether a model can follow a multi-step instruction, or refuse a bad
+request, or do arithmetic reliably, is not a quantity these curves forecast —
+and the relationship between a smooth loss curve and a jagged capability curve
+remains genuinely disputed. Do not let a scaling plot tell you a model will be
+able to do your task.
+
+**Compute-optimal is not deployment-optimal.** Chinchilla optimises training
+compute for a given loss. If you are going to serve a model to millions of
+users, inference cost dominates its lifetime bill, and it is rational to train
+a *smaller* model on far more tokens than the law recommends — paying more up
+front to pay less forever. This is exactly what the Llama-family models do,
+and why "trained past Chinchilla-optimal" is a design decision rather than a
+mistake. We return to the full training pipeline in @sec-pretraining.
+
+## Lab: implement attention, then profile it {#sec-attention-lab}
+
+The point of this lab is to feel the quadratic term rather than read about it.
+Work in NumPy first; reach for a framework only in step 3.
+
+1. **Implement scaled dot-product attention** from the equation in
+   @sec-attention-worked — projections, scores, scaling, optional mask,
+   softmax, weighted sum. Write your own softmax and subtract the row maximum
+   before exponentiating. No attention library.
+2. **Reproduce this chapter's numbers exactly.** Use the same $E$, $W^Q$,
+   $W^K$, $W^V$, and check that `içti`'s attention row comes out
+   `[0.4230, 0.5012, 0.0759]`. If it does not, your bug is in the transpose or
+   in the axis you are normalising over — those are the only two candidates.
+3. **Verify against a reference.** Compare to
+   `torch.nn.functional.scaled_dot_product_attention` on random inputs at
+   several shapes and report the maximum absolute difference. Anything above
+   about $10^{-5}$ in fp32 is a real disagreement, not rounding.
+4. **Confirm permutation equivariance.** Shuffle the tokens, run again,
+   un-shuffle the outputs, and report the maximum difference. You should get
+   machine epsilon, as this chapter did. Then add a positional encoding and
+   report the number again. Explain the change to someone who has not read
+   this chapter.
+5. **Measure the exponent.** Time attention at $n = 128, 256, \dots, 4096$
+   with $d = 64$, holding everything else fixed. Plot on log-log axes and fit
+   a slope. State what exponent you measured and whether it is 2 — and if it
+   is well below 2 at small $n$, explain which fixed costs are hiding it.
+6. **Measure the memory.** Instrument the peak size of the score matrix and
+   compare it against the table in @sec-attention-cost. Find the $n$ at which
+   your machine refuses. Report it.
+7. **Add a causal mask**, then prove it works behaviourally rather than by
+   inspection: run on a sequence, append one token, run again, and confirm
+   the outputs for the original positions are unchanged. This invariant is
+   what makes the next step legal.
+8. **Build a KV cache.** Generate 512 tokens one at a time, first recomputing
+   everything each step, then caching K and V. Plot per-token latency for both
+   and report the speedup at token 512. Compute the cache's size in bytes from
+   the formula in @sec-attention-cost and check it against what your process
+   actually allocated.
+
+**Deliverable:** the log-log plot with your fitted exponent, the two per-token
+latency curves, and a short note on the largest sequence length your hardware
+could handle — with the specific resource that ran out named.
 
 ## Where to go deeper
 
@@ -200,6 +1885,24 @@ for step-by-step diagrams, Georgia Tech's
 [Transformer Explainer](https://poloclub.github.io/transformer-explainer/),
 which runs a live GPT-2 in your browser, and Brendan Bycroft's
 [3D LLM walkthrough](https://bbycroft.net/llm).
+
+The primary sources are unusually readable, and after this chapter you have
+enough to read them directly. Start with @vaswani2017attention — it is eight
+pages and you now know every equation in it. Then, roughly in the order the
+chapter needed them:
+
+| topic | paper |
+|:--|:--|
+| the architecture | @vaswani2017attention |
+| residual connections | @he2016deep |
+| layer norm, and moving it | @ba2016layer; @xiong2020layernorm |
+| what heads actually learn | @clark2019bert; @michel2019sixteen |
+| rotary positions | @su2024roformer |
+| position by distance penalty | @press2022alibi |
+| exact, IO-aware attention | @dao2022flashattention |
+| shrinking the KV cache | @shazeer2019fast; @ainslie2023gqa |
+| sparse experts | @shazeer2017outrageously; @fedus2022switch |
+| scaling laws, and their correction | @kaplan2020scaling; @hoffmann2022chinchilla |
 
 ## Exercises
 
@@ -213,5 +1916,36 @@ which runs a live GPT-2 in your browser, and Brendan Bycroft's
 3. A model with 32 layers, 32 heads, and head dimension 128 serves a 100,000
    token context. Compute the size of the KV cache in gigabytes at 16-bit
    precision. Then explain why grouped-query attention exists.
+4. In the worked example, the fourth embedding dimension is 0.5 for all three
+   tokens and it contributed nothing to any attention weight. Prove that this
+   must be true in general: show that a feature with the same value in every
+   token cannot change the softmax output of any row, whatever $W^Q$ and $W^K$
+   contain.
+5. Set $W^Q$ and $W^K$ back to a scale whose product is 1 instead of 3 and
+   recompute `içti`'s attention row. Report the weights, and explain what the
+   $1/\sqrt{d_k}$ term is protecting against in terms of what you observe.
+6. The chapter claims $h$ heads of width $d/h$ cost the same as one head of
+   width $d$. Verify this by counting parameters and multiplications for
+   $d = 512$ at $h = 1, 8, 64$. Then state what is genuinely lost as $h$ grows,
+   and at what point you would expect it to hurt.
+7. Take the relative-position table for sinusoidal encodings. The mean at
+   offset 32 is *higher* than at offset 16. Explain why from the formula
+   $\sum_i \cos(k\omega_i)$, and say what this means for the common claim that
+   sinusoidal encodings make nearby positions more similar.
+8. Reproduce the RoPE experiment: one fixed random query and key, scored at
+   offset 5 from absolute positions 0, 100, 1,000 and 5,000. Report the spread.
+   Then do it with a learned-style additive encoding and report that spread.
+   Use the two numbers to argue for or against RoPE in one paragraph.
+9. A 70B-class model has 80 layers, 64 KV heads, and head dimension 128. Using
+   the KV cache calculator, find the longest context you can serve to four
+   concurrent users on a single 80 GB accelerator, after reserving 140 GB for
+   fp16 weights. Explain what you had to change to make the answer non-zero.
+10. An announcement describes a model as "120B total parameters, 5B active".
+    A colleague concludes it will run on a 24 GB consumer GPU because 5B is
+    small. Write the two-sentence correction, with the arithmetic.
+11. Gopher used 1.1 tokens per parameter and Chinchilla used 20. Both claims
+    came from a scaling-law analysis. Explain what changed between them, and
+    state what you would need to see in a new scaling-law paper before you
+    reallocated a training budget on the strength of it.
 
 <!-- TODO: homework notebook link (Colab badge) once notebooks/ is added. -->
