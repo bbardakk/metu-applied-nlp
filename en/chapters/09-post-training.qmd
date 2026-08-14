@@ -1,67 +1,1736 @@
 # Post-Training: Adaptation and Alignment {#sec-post-training}
 
-::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
-:::
+@sec-pretraining ended with a model that had read the web and could
+not be spoken to. This chapter is about the second and third stages: the ones
+that are cheap, that you can actually run, and that decide almost everything a
+user will notice.
 
 **Learning objectives.** After this chapter you can:
 
-- choose between prompting, retrieval, and fine-tuning with an explicit decision rule;
-- run a LoRA fine-tune and explain what the adapter matrices actually change;
-- distinguish SFT, RLHF, DPO, and GRPO by the data each one needs;
-- detect catastrophic forgetting by evaluating the same model before and after.
+- explain why a base model answers a question with another question, and what
+  supervised fine-tuning changes so that it stops;
+- write a training example in chat-template form and say which tokens the loss
+  is computed on and why the rest are masked;
+- work out, from a model's `config.json` alone, how many parameters a LoRA
+  adapter adds and how much GPU memory the run will need;
+- distinguish SFT, RLHF, DPO, and GRPO by the data each one demands, not by
+  the acronym;
+- choose between prompting, retrieval, fine-tuning, and distillation with an
+  explicit decision rule;
+- detect catastrophic forgetting by evaluating the same model, on the same
+  held-out benchmark, before and after.
 
-## Supervised fine-tuning: data, format, pitfalls
+## The model that answers a different question {#sec-base-model-failure}
 
-<!-- TODO(draft): how many examples; formatting and chat templates; the
-    loss-masking detail that silently breaks runs; quality over quantity. -->
+Here is the entire problem in one exchange. You have a base model — the raw
+output of stage 1, nothing else done to it. You type:
 
-## Parameter-efficient tuning: LoRA, QLoRA, adapters
+```text
+What is the capital of Turkey?
+```
 
-<!-- TODO(draft): low-rank update as a re-parameterisation; rank and
-    alpha; memory arithmetic showing why a 7B model fits on one consumer
-    GPU. -->
+and it continues:
 
-## Preference optimization: RLHF, DPO, GRPO
+```text
+What is the capital of France?
+What is the capital of Germany?
+What is the largest city in Turkey?
+```
 
-<!-- TODO(draft): reward models and PPO; DPO as the closed-form shortcut;
-    GRPO and group-relative advantage. What each needs: preference pairs
-    vs. verifiable rewards. -->
+Nothing has gone wrong. [The model did exactly what it was trained to do, and
+that is the problem]{.hl}. It was trained on one objective — *given this text,
+what text usually comes next* — and on the open web, a line that looks like a
+quiz question is followed, far more often than not, by another quiz question.
+It is completing a worksheet. It has no idea that you wanted it to stop and
+turn around and address you.
 
-## RLAIF and constitutional approaches
+::: {.column-margin}
+Try this yourself: on the Hub, models named `Llama-3.1-8B` and
+`Llama-3.1-8B-Instruct` are the same pretraining run. The first is the base
+model. The second has been through the two stages in this chapter. The
+difference in behaviour is enormous; the difference in cost is about four
+orders of magnitude.
+:::
 
-<!-- TODO(draft): AI feedback replacing human labels; the principle set as
-    an artefact; where it degrades. -->
+Ask the same base model a factual question it certainly knows, and phrase it as
+a sentence to be finished — `The capital of Turkey is` — and it will answer
+correctly. So the knowledge is present. What is missing is not information. It
+is a *convention*: that a question addressed to you is a request for an answer
+from you.
 
-## Distillation into small, fast models
+This is worth being precise about, because it sets up everything that follows.
 
-<!-- TODO(draft): teacher-student on task outputs; when a distilled 1B
-    beats a prompted 70B on cost-per-correct-answer. -->
+::: {.callout-note appearance="simple"}
+**Four things you might be missing, and only one of them is fixed by training
+on more text.**
 
-## Continued pretraining for domain and language
+| what is missing | symptom | what fixes it |
+|:--|:--|:--|
+| **knowledge** | confidently wrong about your documents, your prices, last week | retrieval (@sec-rag) |
+| **format** | right content, wrong shape: prose where you needed JSON | prompting, constrained decoding |
+| **behaviour** | answers the wrong *kind* of question; wrong register; will not refuse | fine-tuning (this chapter) |
+| **cost** | correct, but too slow or too expensive per call | distillation, quantization |
 
-<!-- TODO(draft): the Turkish case: continued pretraining vs. fine-tuning
-    vs. a Turkish-native model. Tokenizer fertility as the hidden cost —
-    forward-reference @sec-turkish-nlp. -->
+Most fine-tuning projects that fail are attempts to fix row 1 with the
+technique from row 3.
+:::
 
-## When not to fine-tune: a decision tree
+We will come back to that table at the end and turn it into a decision tree.
+First, the machinery.
 
-<!-- TODO(draft): the chapter's centrepiece. A hand-drawn SVG decision
-    tree: is it knowledge (retrieve), format (prompt/constrain), behaviour
-    (fine-tune), or cost (distil)? -->
+## What the stages actually do {#sec-stage-anatomy}
 
-## Catastrophic forgetting and evaluation before/after
+@sec-pretraining drew the three stages by scale. Here is the same
+pipeline drawn by *mechanism*: what each stage puts in, what signal it
+optimizes, and which weights it is allowed to touch.
 
-<!-- TODO(draft): a fine-tune that wins on your task and loses everywhere
-    else; the held-out general benchmark as a guard. -->
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">The same three stages, drawn by what they optimize</div>
+<svg viewBox="0 0 764 470" style="max-width:744px" role="img"
+     aria-label="Three stacked panels. Panel one, pretraining: the input is raw web text, the signal is the next token in that text, all weights are updated, and the result is a model that continues text. Panel two, supervised fine-tuning: the input is a prompt paired with a written answer, the signal is the next token of the answer only with the prompt masked out, either all weights or a small adapter is updated, and the result is a model that answers. Panel three, preference tuning: the input is a prompt with two candidate answers and a label saying which is better, the signal is the relative ranking of the two, a small adapter or all weights are updated, and the result is a change of tone, refusal behaviour and helpfulness. A vertical note at the right of each panel gives the typical data volume: trillions of tokens, thousands to millions of examples, and tens of thousands of comparisons.">
+  <defs>
+    <marker id="pt-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
 
-## Lab: LoRA fine-tune on a Turkish task
+  <text x="96" y="24" class="t-xs t-b t-muted">STAGE</text>
+  <text x="250" y="24" class="t-xs t-b t-muted">WHAT GOES IN</text>
+  <text x="452" y="24" class="t-xs t-b t-muted">WHAT IT SCORES</text>
+  <text x="646" y="24" class="t-xs t-b t-muted">SCALE</text>
 
-<!-- TODO(draft): fine-tune a small open model on the Turkish reviews task
-    from @sec-bake-off; compare against the tf-idf baseline on macro-F1,
-    latency, and total cost. -->
+  <rect x="14" y="36" width="736" height="122" rx="10" class="box-accent"/>
+  <text x="30" y="62" class="t-sm t-b t-accent">Pretraining</text>
+  <text x="30" y="84" class="t-xs t-muted">every weight is updated</text>
+  <text x="30" y="104" class="t-xs t-muted">months, thousands of GPUs</text>
+  <text x="30" y="132" class="t-xs t-b">→ a model that continues text</text>
+  <line x1="232" y1="48" x2="232" y2="146" class="ln-thin"/>
+  <text x="248" y="70" class="t-xs t-mono">…the Bosphorus divides</text>
+  <text x="248" y="88" class="t-xs t-mono">Istanbul into two</text>
+  <text x="248" y="112" class="t-xs t-muted">raw text, unlabelled,</text>
+  <text x="248" y="128" class="t-xs t-muted">whatever the crawl found</text>
+  <line x1="436" y1="48" x2="436" y2="146" class="ln-thin"/>
+  <text x="452" y="70" class="t-xs">the next token,</text>
+  <text x="452" y="88" class="t-xs">at every position</text>
+  <text x="452" y="112" class="t-xs t-muted">loss on all tokens</text>
+  <line x1="620" y1="48" x2="620" y2="146" class="ln-thin"/>
+  <text x="636" y="82" class="t-sm t-b">15.6T</text>
+  <text x="636" y="100" class="t-xs t-muted">tokens</text>
+
+  <line x1="382" y1="158" x2="382" y2="176" class="ln" marker-end="url(#pt-a)"/>
+
+  <rect x="14" y="178" width="736" height="122" rx="10" class="box-warm"/>
+  <text x="30" y="204" class="t-sm t-b t-warm">Supervised fine-tuning</text>
+  <text x="30" y="226" class="t-xs t-muted">all weights, or 0.1% of them</text>
+  <text x="30" y="246" class="t-xs t-muted">hours, one node</text>
+  <text x="30" y="274" class="t-xs t-b">→ a model that answers</text>
+  <line x1="232" y1="190" x2="232" y2="288" class="ln-thin"/>
+  <text x="248" y="212" class="t-xs t-mono t-muted">user:</text>
+  <text x="248" y="228" class="t-xs t-mono">What is the capital…</text>
+  <text x="248" y="246" class="t-xs t-mono t-muted">assistant:</text>
+  <text x="248" y="262" class="t-xs t-mono">Ankara.</text>
+  <line x1="436" y1="190" x2="436" y2="288" class="ln-thin"/>
+  <text x="452" y="212" class="t-xs">the next token of</text>
+  <text x="452" y="230" class="t-xs t-b">the answer only</text>
+  <text x="452" y="254" class="t-xs t-muted">prompt tokens masked</text>
+  <text x="452" y="270" class="t-xs t-muted">out of the loss</text>
+  <line x1="620" y1="190" x2="620" y2="288" class="ln-thin"/>
+  <text x="636" y="224" class="t-sm t-b">10³–10⁶</text>
+  <text x="636" y="242" class="t-xs t-muted">examples</text>
+
+  <line x1="382" y1="300" x2="382" y2="318" class="ln" marker-end="url(#pt-a)"/>
+
+  <rect x="14" y="320" width="736" height="122" rx="10" class="box-rose"/>
+  <text x="30" y="346" class="t-sm t-b t-rose">Preference tuning</text>
+  <text x="30" y="368" class="t-xs t-muted">all weights, or an adapter</text>
+  <text x="30" y="388" class="t-xs t-muted">days, plus annotation</text>
+  <text x="30" y="416" class="t-xs t-b">→ tone, refusals, helpfulness</text>
+  <line x1="232" y1="332" x2="232" y2="430" class="ln-thin"/>
+  <text x="248" y="354" class="t-xs t-mono t-muted">prompt + two answers</text>
+  <text x="248" y="374" class="t-xs t-mono">A: “Ankara.”</text>
+  <text x="248" y="392" class="t-xs t-mono">B: “I cannot help.”</text>
+  <text x="248" y="414" class="t-xs t-muted">label: A is better</text>
+  <line x1="436" y1="332" x2="436" y2="430" class="ln-thin"/>
+  <text x="452" y="354" class="t-xs">not “is this right”</text>
+  <text x="452" y="372" class="t-xs t-b">but “is this better”</text>
+  <text x="452" y="396" class="t-xs t-muted">a ranking, never an</text>
+  <text x="452" y="412" class="t-xs t-muted">absolute target string</text>
+  <line x1="620" y1="332" x2="620" y2="430" class="ln-thin"/>
+  <text x="636" y="366" class="t-sm t-b">10⁴–10⁵</text>
+  <text x="636" y="384" class="t-xs t-muted">comparisons</text>
+
+  <text x="382" y="462" class="t-xs t-mid t-muted">Stages 2 and 3 use the same frozen knowledge. They change what the model does with it.</text>
+</svg>
+```
+::: {.fig-cap}
+The column that matters is the third one. Pretraining scores *what came next in
+the corpus*; SFT scores *what should come next in the answer*; preference
+tuning scores *which of two answers is better*. Only the last of those cannot
+be written down as a target string — which is exactly why it needs a different
+algorithm.
+:::
+::::
+
+Notice what stages 2 and 3 have in common: neither one is trying to teach the
+model anything about the world. The 15.6 trillion tokens already happened. A
+stage-2 run touching a few million tokens cannot meaningfully revise a world
+model built from four orders of magnitude more text — and [when people try to
+use it that way, that is precisely when fine-tuning disappoints]{.hl}.
+
+## Supervised fine-tuning {#sec-sft}
+
+### One example, in full
+
+A [supervised fine-tuning](#gloss-supervised-fine-tuning){#term-supervised-fine-tuning .term-ref}
+example is a prompt and the response you wish the model had given.
+That is the whole idea. The difficulty is entirely in the details of how it is
+written down, and two of those details break runs silently.
+
+::: {#gloss-supervised-fine-tuning .column-margin .term-gloss}
+**supervised fine-tuning** — training on prompt-and-answer pairs with the
+ordinary next-token loss, computed on the answer alone. The same objective as
+pretraining; a different choice of which text it is applied to.
+[↩](#term-supervised-fine-tuning){.term-back}
+:::
+
+Here is a single Turkish example as it exists in a JSONL file:
+
+```text
+{"messages": [
+  {"role": "user",      "content": "Bu yorum olumlu mu olumsuz mu? 'Kargo çok hızlı geldi, teşekkürler.'"},
+  {"role": "assistant", "content": "Olumlu."}
+]}
+```
+
+Before the model sees it, that structure is flattened into a single token
+sequence by the model's [chat template](#gloss-chat-template){#term-chat-template .term-ref} — a
+string template shipped with the tokenizer, different for every model family:
+
+::: {#gloss-chat-template .column-margin .term-gloss}
+**chat template** — the exact string format, including special marker tokens,
+that a chat model was fine-tuned on. It lives in the tokenizer, not the model,
+and using the wrong one degrades quality quietly rather than raising an error.
+[↩](#term-chat-template){.term-back}
+:::
+
+```text
+<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+
+Bu yorum olumlu mu olumsuz mu? 'Kargo çok hızlı geldi, teşekkürler.'<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Olumlu.<|eot_id|>
+```
+
+Those `<|...|>` markers are real tokens with real embeddings. They are how the
+model knows where its turn begins — and therefore how it knows to *answer*
+rather than continue. The behaviour change we are after is, mechanically,
+mostly the model learning what follows the assistant header token.
+
+::: {.callout-important appearance="simple"}
+**Never hand-write the template.** Call
+`tokenizer.apply_chat_template(messages, tokenize=False)` and print the result
+once. Every model family uses different markers, and a template mismatch
+between training and serving produces a model that is subtly, unfixably worse
+with no error message anywhere. This is the single most common way an
+otherwise correct fine-tune underperforms.
+:::
+
+### Loss masking: the detail that silently breaks runs
+
+Now the second detail. The sequence above is, say, 46 tokens long. Six of them
+are the answer. On which tokens do you compute the loss?
+
+If you say *all of them* — which is what you get if you naively reuse the
+pretraining objective — then 40 of your 46 gradient signals are teaching the
+model **to generate the prompt**. You are training a question generator that
+occasionally emits an answer.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Loss masking: which tokens the gradient is allowed to come from</div>
+<svg viewBox="0 0 764 268" style="max-width:744px" role="img"
+     aria-label="Two rows of token boxes over the same sequence. The top row, labelled wrong, shades every token including the user prompt, with a note saying forty of forty-six gradient signals teach the model to write the prompt. The bottom row, labelled right, shades only the six assistant response tokens and greys the rest, with a note saying only the response contributes to the loss. Both rows show the same token sequence: a header marker, the Turkish question, an assistant header marker, the word Olumlu, and an end-of-turn marker.">
+  <text x="14" y="22" class="t-xs t-b t-muted">THE SAME 46-TOKEN SEQUENCE, TWO CHOICES OF LOSS MASK</text>
+
+  <text x="14" y="60" class="t-xs t-b t-rose">✗ loss on everything</text>
+  <rect x="14" y="72" width="120" height="30" rx="5" class="box-rose"/>
+  <text x="74" y="92" class="t-xs t-mid t-mono">user header</text>
+  <rect x="140" y="72" width="330" height="30" rx="5" class="box-rose"/>
+  <text x="305" y="92" class="t-xs t-mid t-mono">Bu yorum olumlu mu olumsuz mu? …</text>
+  <rect x="476" y="72" width="136" height="30" rx="5" class="box-rose"/>
+  <text x="544" y="92" class="t-xs t-mid t-mono">assistant header</text>
+  <rect x="618" y="72" width="76" height="30" rx="5" class="box-rose"/>
+  <text x="656" y="92" class="t-xs t-mid t-mono">Olumlu.</text>
+  <rect x="700" y="72" width="50" height="30" rx="5" class="box-rose"/>
+  <text x="725" y="92" class="t-xs t-mid t-mono">eot</text>
+  <text x="14" y="122" class="t-xs t-rose">40 of 46 gradient signals teach the model to write the question.</text>
+
+  <text x="14" y="168" class="t-xs t-b t-accent">✓ loss on the response only</text>
+  <rect x="14" y="180" width="120" height="30" rx="5" class="box"/>
+  <text x="74" y="200" class="t-xs t-mid t-mono t-muted">user header</text>
+  <rect x="140" y="180" width="330" height="30" rx="5" class="box"/>
+  <text x="305" y="200" class="t-xs t-mid t-mono t-muted">Bu yorum olumlu mu olumsuz mu? …</text>
+  <rect x="476" y="180" width="136" height="30" rx="5" class="box"/>
+  <text x="544" y="200" class="t-xs t-mid t-mono t-muted">assistant header</text>
+  <rect x="618" y="180" width="76" height="30" rx="5" class="box-accent"/>
+  <text x="656" y="200" class="t-xs t-mid t-mono t-b">Olumlu.</text>
+  <rect x="700" y="180" width="50" height="30" rx="5" class="box-accent"/>
+  <text x="725" y="200" class="t-xs t-mid t-mono t-b">eot</text>
+  <text x="14" y="230" class="t-xs t-muted">Masked tokens are still read — they are the context. They just do not produce gradient.</text>
+  <text x="14" y="252" class="t-xs t-b">Set the label of every masked position to −100 and the loss function skips it.</text>
+</svg>
+```
+::: {.fig-cap}
+Masking is not about hiding the prompt from the model. The model still attends
+to every prompt token; that is what conditioning *means*. Masking only decides
+which positions are allowed to say “you should have predicted something else
+here”.
+:::
+::::
+
+In practice you build a `labels` tensor that is a copy of `input_ids` with
+every non-response position set to `-100`, the value PyTorch's cross-entropy
+treats as *ignore*. Modern SFT libraries do this for you if you tell them
+where the response starts; the failure mode is reaching for a plain causal-LM
+training loop and forgetting.
+
+::: {.column-margin}
+There is one legitimate reason to train on prompt tokens: if your prompts are
+themselves in a domain the base model has never seen, the extra signal helps
+the model model that domain. It is a deliberate choice, and it should be
+justified in your run notes rather than inherited from a copied script.
+:::
+
+### How many examples do you actually need?
+
+The honest answer is that the field's own numbers span three orders of
+magnitude, and the spread is informative rather than embarrassing.
+
+| project | SFT examples | what they were for |
+|:--|--:|:--|
+| LIMA [@zhou2023lima] | 1,000 | showing that a *little* is enough |
+| InstructGPT [@ouyang2022training] | 12,725 prompts | a general-purpose assistant |
+| Self-Instruct [@wang2023selfinstruct] | ~52,000 | synthetic data, no human writers |
+| Tülu 3 [@lambert2025tulu3] | 939,344 prompts | a competitive open recipe |
+
+That last row hides the real work. Tülu 3's team assembled **23,327,961**
+candidate prompts and kept 939,344 of them for supervised fine-tuning — under
+one in twenty-four — with a further 425,145 routed to preference tuning
+[@lambert2025tulu3]. The published artefact is a filtering decision far more
+than it is a collection effort.
+
+LIMA is the interesting entry. Its authors fine-tuned a 65B LLaMa on exactly
+1,000 curated prompt-response pairs — 750 harvested from Stack Exchange and
+wikiHow, 250 written by hand — with *no* reinforcement learning and *no*
+preference modelling at all. Against GPT-4, human raters judged LIMA's answers
+equal or better 43% of the time; against Bard 58%, against the RLHF-trained
+DaVinci003 65% [@zhou2023lima].
+
+There is a second reason a small set can go so far, established earlier: a
+model fine-tuned on a *collection* of instruction-phrased tasks improves on
+tasks it never saw during that fine-tune [@wei2022finetuned]. What SFT installs
+is not a list of answers but the habit of treating an instruction as one.
+
+The LIMA authors' explanation is what they call the **Superficial Alignment
+Hypothesis**: essentially all of a model's knowledge and capability is acquired
+during pretraining, and alignment mainly teaches it *which sub-distribution of
+formats to use* when interacting with users. If that is right, then a thousand
+examples is plenty to specify a format — and no amount of examples would be
+enough to install knowledge that pretraining did not.
+
+::: {.callout-tip appearance="simple"}
+**The practical reading.** Below roughly a thousand well-made examples, you are
+still buying format. Between one thousand and fifty thousand, you are buying
+coverage of the *variety* of inputs you will see. Above that you are buying
+robustness on the long tail, and the marginal example is worth much less than
+the marginal *hour of quality control* on the examples you already have.
+
+Both LIMA and Tülu 3 spent most of their effort on curation, not collection.
+:::
+
+## Parameter-efficient tuning {#sec-lora}
+
+Everything so far assumed you can run the training step at all. For anything
+above about a billion parameters, on the hardware you are likely to have, you
+cannot — and the reason is not the model.
+
+### Where the memory actually goes
+
+Count the bytes one parameter costs during mixed-precision AdamW training,
+which is what every mainstream stack does by default.
+
+| what is stored | bytes per parameter | why it exists |
+|:--|--:|:--|
+| bf16 weight | 2 | the model itself |
+| bf16 gradient | 2 | one per **trainable** parameter |
+| fp32 master weight | 4 | bf16 has too few mantissa bits to accumulate tiny updates |
+| fp32 Adam $m$ | 4 | running mean of the gradient |
+| fp32 Adam $v$ | 4 | running mean of the gradient *squared* |
+| **total, trainable** | **16** | |
+| **total, frozen** | **2** | a weight you never update only has to be read |
+
+::: {.column-margin}
+The fp32 master copy is the least obvious row and the one people try to delete
+first. Without it, an update of size $10^{-8}$ added to a weight of size $1$
+rounds straight back to $1$ in bf16 and the training silently stalls. Keeping
+one high-precision copy of the weights is what makes low-precision training
+work at all.
+:::
+
+Read the two totals against each other. [The model itself is one eighth of the
+bill. Optimizer state — the three fp32 rows — is three quarters of it, and the
+gradient is the remaining eighth.]{.hl} That ratio is the whole of
+parameter-efficient tuning: freeze a parameter and *seven* of its eight
+instalments disappear, leaving only the bf16 weight you still have to read.
+
+The arithmetic is checkable against a published figure. QLoRA states that
+16-bit fine-tuning of a 65B LLaMA "requires more than 780 GB of GPU memory"
+[@dettmers2023qlora]. Where does 780 come from?
+
+$$
+65 \times 10^9 \;\text{params} \times 12 \;\text{bytes} = 780 \;\text{GB}
+$$
+
+Twelve bytes per parameter — and the paper does not say which twelve. The
+natural reading against the table above is the three fp32 rows, master weight,
+$m$ and $v$, with the bf16 weight and gradient pushing the real requirement to
+$65 \times 16 = 1{,}040$ GB and so justifying "more than". A second reading
+fits the same twelve exactly: bf16 weight, bf16 gradient, fp32 $m$, fp32 $v$,
+no master copy, with "more than" absorbing activations instead. [Either
+decomposition lands on the same conclusion — the headline number is dominated
+by state that exists only because the parameter is being trained.]{.hl}
+
+::: {.column-margin}
+Reconstructing a published memory figure is worth doing precisely because it
+usually has more than one solution. Papers report totals, not itemisations; you
+infer the itemisation from the total, and honesty requires saying which one you
+assumed.
+:::
+
+The LoRA paper's figure moves in the other direction: on GPT-3 175B, training
+VRAM falls "from 1.2TB to 350GB" [@hu2022lora]. The endpoint is clean —
+
+$$
+175 \times 10^9 \times 2\;\text{bytes} = 350\;\text{GB}
+$$
+
+is the frozen bf16 weights *and nothing else*. The starting point is not.
+1.2 TB across 175B parameters is about 6.9 bytes each, well under the 16 the
+table predicts, so that figure was measured under a setup the paper does not
+spell out — 8-bit optimizer states, sharding across many cards, or activation
+checkpointing would each get you there. Quote the 350 GB as arithmetic you can
+reproduce, and the 1.2 TB as *their* measurement.
+
+### The low-rank hypothesis
+
+So we want to freeze the weights. But a frozen model does not learn. The
+question is what you can add on the side that is small enough to be cheap and
+expressive enough to be useful.
+
+[LoRA](#gloss-lora){#term-lora .term-ref}'s answer starts from an observation about what fine-tuning does. A
+pretrained weight matrix $W_0$ is a general-purpose feature map, built from
+trillions of tokens covering every domain at once. The change you need for
+*one* task is not general-purpose. It is a specific, narrow adjustment. The
+hypothesis [@hu2022lora] is that this adjustment $\Delta W$, while it is a
+full $d \times k$ matrix in shape, carries far less information than its shape
+suggests — it has **low intrinsic rank**.
+
+If that is true, you can write it as a product of two thin matrices:
+
+$$
+W_0 + \Delta W = W_0 + BA, \qquad B \in \mathbb{R}^{d \times r},\; A \in \mathbb{R}^{r \times k}, \qquad r \ll \min(d,k)
+$$
+
+::: {#gloss-lora .column-margin .term-gloss}
+**LoRA** — low-rank adaptation: freezing a pretrained weight matrix and
+learning a small pair of matrices whose product is added to it. The pair has
+$r(d+k)$ parameters instead of $dk$, and at inference it can be folded back
+into the original weight so nothing gets slower.
+[↩](#term-lora){.term-back}
+:::
+
+Count what that saves. For one of Llama 3.1 8B's $4096 \times 4096$ query
+projections, $\Delta W$ in full has $16{,}777{,}216$ parameters. At $r = 8$,
+$BA$ has $8 \times (4096 + 4096) = 65{,}536$ — **256 times fewer**, for the
+same output shape.
+
+### What $A$ and $B$ actually hold
+
+The two matrices are not symmetric in role, and the asymmetry is the part
+worth understanding.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">The frozen path and the trainable detour</div>
+<svg viewBox="0 0 764 396" style="max-width:744px" role="img"
+     aria-label="A diagram of a LoRA layer. An input vector x of dimension k splits into two paths. The left path passes through the frozen pretrained matrix W-zero of shape d by k, drawn as a large solid block labelled frozen, sixteen point eight million parameters. The right path passes first through matrix A of shape r by k, described as choosing which r directions of the input this task cares about, then through matrix B of shape d by r, described as deciding what to write into the output for each of those directions. The right path is scaled by alpha over r and the two paths are summed. Notes state that A is initialised random Gaussian and B is initialised to zero, so the product B times A starts at exactly zero and the adapted model starts identical to the pretrained one. A bottleneck of width r is marked in the middle of the right path.">
+  <defs>
+    <marker id="lo-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="188" class="t-sm t-b t-mono">x</text>
+  <text x="24" y="206" class="t-xs t-muted">dim k</text>
+  <circle cx="66" cy="182" r="5" class="chip"/>
+  <line x1="66" y1="182" x2="66" y2="96" class="ln-thin"/>
+  <line x1="66" y1="182" x2="66" y2="286" class="ln-thin"/>
+
+  <line x1="66" y1="96" x2="150" y2="96" class="ln" marker-end="url(#lo-a)"/>
+  <rect x="156" y="46" width="196" height="100" rx="8" class="box"/>
+  <text x="254" y="80" class="t-sm t-mid t-b t-mono">W₀</text>
+  <text x="254" y="102" class="t-xs t-mid t-muted">d × k, frozen</text>
+  <text x="254" y="122" class="t-xs t-mid t-muted">16,777,216 parameters</text>
+  <text x="254" y="140" class="t-xs t-mid t-muted">no gradient, no optimizer state</text>
+  <line x1="352" y1="96" x2="590" y2="96" class="ln"/>
+  <text x="470" y="34" class="t-xs t-mid t-b">the pretrained path — untouched</text>
+
+  <line x1="66" y1="286" x2="150" y2="286" class="ln" marker-end="url(#lo-a)"/>
+  <rect x="156" y="248" width="120" height="76" rx="8" class="box-accent"/>
+  <text x="216" y="278" class="t-sm t-mid t-b t-mono">A</text>
+  <text x="216" y="298" class="t-xs t-mid t-muted">r × k</text>
+  <text x="216" y="314" class="t-xs t-mid t-muted">random init</text>
+
+  <line x1="276" y1="286" x2="322" y2="286" class="ln" marker-end="url(#lo-a)"/>
+  <rect x="326" y="268" width="34" height="36" rx="5" class="box-warm"/>
+  <text x="343" y="292" class="t-xs t-mid t-b t-mono">r</text>
+  <text x="343" y="336" class="t-xs t-mid t-b t-warm">bottleneck</text>
+  <text x="343" y="352" class="t-xs t-mid t-muted">r = 8, not 4096</text>
+
+  <line x1="360" y1="286" x2="406" y2="286" class="ln" marker-end="url(#lo-a)"/>
+  <rect x="410" y="248" width="120" height="76" rx="8" class="box-accent"/>
+  <text x="470" y="278" class="t-sm t-mid t-b t-mono">B</text>
+  <text x="470" y="298" class="t-xs t-mid t-muted">d × r</text>
+  <text x="470" y="314" class="t-xs t-mid t-muted">zero init</text>
+
+  <line x1="530" y1="286" x2="590" y2="286" class="ln"/>
+  <text x="560" y="272" class="t-xs t-mid t-mono t-warm">× α/r</text>
+  <text x="343" y="228" class="t-xs t-mid t-b t-accent">the trainable detour — 65,536 parameters</text>
+
+  <circle cx="590" cy="191" r="14" class="box-warm"/>
+  <text x="590" y="197" class="t-sm t-mid t-b">+</text>
+  <line x1="590" y1="96" x2="590" y2="177" class="ln-thin"/>
+  <line x1="590" y1="286" x2="590" y2="205" class="ln-thin"/>
+  <line x1="604" y1="191" x2="672" y2="191" class="ln" marker-end="url(#lo-a)"/>
+  <text x="700" y="188" class="t-sm t-b t-mono">h</text>
+  <text x="700" y="206" class="t-xs t-muted">dim d</text>
+
+  <line x1="14" y1="366" x2="750" y2="366" class="ln-thin"/>
+  <text x="14" y="386" class="t-xs t-muted">B starts at zero, so BA = 0 and the adapted model is bit-identical to the pretrained one at step 0. A starts random, so the gradient is not.</text>
+</svg>
+```
+::: {.fig-cap}
+Read the detour right to left and the two matrices have distinct jobs: $A$
+projects the input down to $r$ numbers — it decides *which few directions of
+the input this task cares about*. $B$ projects those $r$ numbers back up — it
+decides *what to write into the output* for each direction $A$ found.
+:::
+::::
+
+That reading also explains the initialisation, which looks arbitrary until you
+ask what happens otherwise:
+
+| $A$ init | $B$ init | what happens |
+|:--|:--|:--|
+| zero | zero | $BA = 0$ forever: both gradients are proportional to the other matrix, so nothing ever leaves zero |
+| random | random | $BA \neq 0$ at step 0, so training *begins* by injecting noise into a carefully pretrained model |
+| **random** | **zero** | $BA = 0$ at step 0 but $\partial \mathcal{L} / \partial B \neq 0$: the run starts exactly at the pretrained model and moves from there |
+| zero | random | also $BA = 0$ at step 0, and $\partial \mathcal{L} / \partial A \neq 0$: this escapes too |
+
+Two of the four work, not one. Both of the bottom rows start the adapted model
+exactly at the pretrained model *and* have somewhere to go, because the
+gradient with respect to each matrix is proportional to the *other* one — so
+you only need one of the pair to be non-zero. [What matters is the product,
+not which factor carries the randomness.]{.hl}
+
+LoRA takes the third row: "a random Gaussian initialization for $A$ and zero
+for $B$" [@hu2022lora]. The paper states the convention and does not argue for
+it over the fourth row, and neither will this book. What the convention buys is
+the property that makes LoRA runs so forgiving of a bad learning rate compared
+to a full fine-tune: you always start from a model that already works.
+
+### Rank and alpha, and why there are two knobs
+
+The update is not added raw. It is scaled by $\alpha / r$, where $\alpha$ is a
+constant you choose [@hu2022lora]:
+
+$$
+h = W_0 x + \frac{\alpha}{r} B A x
+$$
+
+The stated purpose of the division is practical rather than theoretical. The
+authors write that the scaling "helps to reduce the need to retune
+hyperparameters when we vary $r$" [@hu2022lora] — that is, it is there so a
+rank sweep stays a rank sweep instead of silently becoming a learning-rate
+sweep at the same time. Without it, every change to $r$ would perturb the
+effective step size on the adapter path, and you could not tell which knob
+produced the change in your metric.
+
+Which leaves $\alpha$ doing one job, and the paper says exactly what that job
+is: "tuning $\alpha$ is roughly the same as tuning the learning rate"
+[@hu2022lora]. It is a fixed multiplier on the whole adapter path, so the
+widespread convention $\alpha = 2r$ means nothing more exotic than "scale the
+adapter by 2".
+
+That convention is the community's, not the authors'. They report setting
+$\alpha$ "to the first $r$ we try" and then leaving it alone — which is
+$\alpha = r$, a scale factor of exactly 1, and an admission that they never
+tuned it. [Treat $\alpha = 2r$ as a default someone else picked for you, not
+as a result.]{.hl}
+
+::: {.callout-tip appearance="simple"}
+**Two knobs, two questions.**
+
+- **$r$** asks *how much capacity does this adaptation need?* Raise it when
+  the task is far from anything in pretraining — a new language, a new
+  notation, a genuinely new output format.
+- **$\alpha$** asks *how hard should the adapter push?* Raise it when training
+  is underfitting and lowering it when the model has started producing
+  confident nonsense.
+
+They are commonly conflated because $\alpha = 2r$ makes them move together.
+Break the convention when you sweep, or you are sweeping one knob and calling
+it two.
+:::
+
+### The arithmetic of an adapter
+
+A LoRA adapter on a $d_{\text{in}} \times d_{\text{out}}$ matrix adds exactly
+$r(d_{\text{in}} + d_{\text{out}})$ parameters. Everything else is bookkeeping:
+which matrices you attach to, and how many layers there are.
+
+The three configurations below were computed from each model's own
+`config.json`, so they are what you would actually get:
+
+| model | targets | $r$ | trainable | share of model |
+|:--|:--|--:|--:|--:|
+| BERTurk base (110.6M, 12 layers) | query, value | 8 | 294,912 | 0.267% |
+| | + key, output | 8 | 589,824 | 0.533% |
+| | + the MLP | 8 | 1,327,104 | 1.200% |
+| Llama 3.1 8B (32 layers, $d$=4096) | q_proj, v_proj | 8 | 3,407,872 | 0.042% |
+| | all attention | 8 | 6,815,744 | 0.085% |
+| | attention + MLP | 8 | 20,971,520 | 0.261% |
+| Qwen 2.5 7B (28 layers, $d$=3584) | q_proj, v_proj | 8 | 2,523,136 | 0.033% |
+| | attention + MLP | 8 | 20,185,088 | 0.265% |
+
+::: {.column-margin}
+LoRA is not the only parameter-efficient method, only the one that won. Prompt
+tuning [@lester2021power] trains a handful of *virtual tokens* prepended to the
+input and touches no weight at all — it becomes competitive with full
+fine-tuning as the model grows, and it is worth knowing about as the extreme
+end of the same idea.
+:::
+
+::: {.column-margin}
+Qwen's `q_proj, v_proj` adapters come to 2.52M against Llama's 3.41M, and it is
+tempting to credit grouped-query attention (@sec-attention-cost) — Qwen 2.5 7B
+uses 4 key-value heads to Llama's 8, making `v_proj` a $3584 \times 512$ matrix
+rather than $4096 \times 1024$. Give Qwen 8 KV heads and the count rises to
+2.64M, so GQA is only about 13% of the 884,736-parameter gap. The rest is
+$d = 3584$ against 4096, over 28 layers against 32.
+:::
+
+Two things fall out. First, **the MLP is most of the model**, and adding it to
+an attention-only adapter is the single largest jump on the table: 2.25× on
+BERTurk, 3.08× on Llama. Measured from `q_proj, v_proj` alone the jump is
+larger still — 4.5× on BERTurk, 6.2× on Llama, 8.0× on Qwen. Second, even the
+most generous setting here is under 0.3% of an 8B model. Rank spans a wider
+range than targets do — $r$ from 1 to 128 is a factor of 128 — but it moves
+through a much smaller absolute band:
+
+| $r$ | 1 | 4 | 8 | 16 | 32 | 64 | 128 |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| trainable (q,v only) | 425,984 | 1.70M | 3.41M | 6.82M | 13.6M | 27.3M | 54.5M |
+| share of Llama 3.1 8B | 0.005% | 0.021% | 0.042% | 0.085% | 0.170% | 0.340% | 0.679% |
+
+Even at $r = 128$ you are training two thirds of one percent of the model.
+
+### Work out your own run
+
+```{ojs}
+//| echo: false
+viewof loraN = Inputs.range([0.1, 405], { value: 8.03, step: 0.01, label: "Model size (billions of parameters)" })
+```
+
+```{ojs}
+//| echo: false
+viewof loraShare = Inputs.range([0.005, 5], { value: 0.52, step: 0.005, label: "Adapter size (% of model)" })
+```
+
+```{ojs}
+//| echo: false
+viewof loraMode = Inputs.select(
+  ["full fine-tune", "LoRA (bf16 base)", "QLoRA (4-bit base)"],
+  { value: "LoRA (bf16 base)", label: "Method" }
+)
+```
+
+```{ojs}
+//| echo: false
+loraCalc = {
+  const N = loraN * 1e9;
+  const trainable = loraMode === "full fine-tune" ? N : N * loraShare / 100;
+  const frozen = N - trainable;
+  const baseBytes = loraMode.startsWith("QLoRA") ? 0.5 : 2;
+  const bytes = frozen * baseBytes + trainable * 16;
+  const gib = bytes / 2 ** 30;
+  const cards = [16, 24, 40, 48, 80, 141];
+  const fits = cards.find((g) => gib * 1.35 < g);
+  return { trainable, gib, fits, full: (N * 16) / 2 ** 30 };
+}
+```
+
+```{ojs}
+//| echo: false
+html`<table style="width:100%; border-collapse:collapse; font-size:0.95rem">
+  <tr><td style="padding:6px 10px">trainable parameters</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        loraCalc.trainable >= 1e9
+          ? (loraCalc.trainable / 1e9).toFixed(2) + "B"
+          : (loraCalc.trainable / 1e6).toFixed(1) + "M"
+      }</td></tr>
+  <tr><td style="padding:6px 10px">weights + gradients + optimizer</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${loraCalc.gib.toFixed(1)} GiB</td></tr>
+  <tr><td style="padding:6px 10px">smallest card it plausibly fits on</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        loraCalc.fits ? loraCalc.fits + " GB" : "more than 141 GB"
+      }</td></tr>
+  <tr><td style="padding:6px 10px">versus a full fine-tune</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        (loraCalc.full / loraCalc.gib).toFixed(1)
+      }× less</td></tr>
+</table>
+<p style="font-size:0.85rem; opacity:0.75; margin-top:8px">
+Activations and activation gradients are excluded, and at LoRA-sized adapter
+counts they are not a rounding error — see the caution below. The "fits on"
+column allows 35% headroom for them, which is a convention chosen for this
+widget, not a measured constant.</p>`
+```
+
+The defaults are Llama 3.1 8B (8.03B parameters) with an $r{=}16$ adapter on
+attention and MLP — 41,943,040 parameters, or 0.52% of the model. Full
+fine-tune: **119.7 GiB**, which does not fit on anything you can rent by the
+hour. LoRA: **15.5 GiB**, a 24 GB consumer card. QLoRA: **4.3 GiB**, a laptop.
+
+::: {.callout-warning appearance="simple"}
+**What this widget leaves out is the part that will surprise you.** It counts
+weights, gradients and optimizer state, because those are what LoRA removes.
+It does not count activations, and once the optimizer is gone they are what is
+left. QLoRA's authors measured it: for a 7B LLaMA at batch size 1, with an
+adapter at "commonly used 0.2% of the original model weights", the LoRA *input
+gradients* occupy 567 MB while the LoRA *parameters* occupy 26 MB
+[@dettmers2023qlora]. [Twenty-two times more memory goes to backpropagating
+through the frozen network than to the thing you are training.]{.hl}
+
+This is why gradient checkpointing appears in every serious LoRA recipe, and
+why the widget's numbers are a floor rather than an estimate. It is also why
+the lab at the end of this chapter measures a much less dramatic ratio than the
+arithmetic here predicts.
+:::
+
+### QLoRA: quantize the part you are not training
+
+That last step needs one more idea. In the LoRA row above, the 15.5 GiB is now
+almost entirely the frozen bf16 base — the adapter's optimizer state is a
+rounding error. So squeeze the base.
+
+QLoRA [@dettmers2023qlora] does exactly that, storing frozen weights in a
+4-bit format called **NF4** and dequantizing each block back to bf16 only for
+the moment it is needed in the forward and backward pass. Three pieces make it
+work:
+
+- **4-bit NormalFloat**, a data type whose 16 levels are placed at the
+  quantiles of a normal distribution — chosen because trained network weights
+  are close to normally distributed, so the levels land where the weights
+  actually are;
+- **double quantization**, which quantizes the per-block scaling constants
+  themselves, because at small block sizes those constants become a
+  non-trivial share of the total;
+- **paged optimizers**, which let optimizer state spill to CPU memory during
+  the gradient spikes that would otherwise kill a long run outright.
+
+The headline result: fine-tuning a 65B model goes from ">780 GB of GPU memory
+to &lt;48 GB without degrading the runtime or predictive performance compared to
+a 16-bit fully finetuned baseline" [@dettmers2023qlora]. Their Guanaco 65B,
+trained this way in 24 hours on a single GPU, reached 99.3% of ChatGPT's score
+on the Vicuna benchmark.
+
+::: {.callout-warning appearance="simple"}
+**"Without degrading" is a claim about final quality, not about speed.**
+Dequantizing every block on every forward and backward pass costs arithmetic.
+QLoRA buys you the ability to run at all on a small card; it does not make the
+step faster than plain LoRA on a card where plain LoRA already fits.
+:::
+
+### The payoff nobody mentions until they are on call
+
+LoRA has an operational property that matters more, in a company, than any of
+the training savings: an adapter can be **merged back into the base weights**.
+Since $h = W_0x + \frac{\alpha}{r}BAx = (W_0 + \frac{\alpha}{r}BA)x$, you can
+compute that sum once and ship an ordinary model. Serving is bit-for-bit the
+speed of the original — the paper's "no additional inference latency"
+[@hu2022lora], and the reason LoRA displaced the earlier bottleneck adapters
+[@houlsby2019parameter], which insert extra layers and therefore extra latency
+forever.
+
+Or you can *not* merge, keep the base shared in memory, and swap adapters per
+request:
+
+| tenants | one shared base + adapters | a separate 8B copy each | ratio |
+|--:|--:|--:|--:|
+| 10 | 15.7 GiB | 149.6 GiB | 9.5× |
+| 100 | 22.8 GiB | 1,495.7 GiB | 65.7× |
+| 1,000 | 93.1 GiB | 14,957.0 GiB | 160.7× |
+
+The adapter size those rows assume is an $r{=}16$ adapter on attention *and*
+MLP, saved in bf16: $41{,}943{,}040 \times 2$ bytes, exactly 80 MiB. Change
+either choice and the figure moves a long way — `q_proj, v_proj` only at the
+same rank is 6.82M parameters, 13 MiB, and `peft` will happily save the same
+adapter in fp32 and double whatever you expected. [Always state targets and
+dtype when you quote an adapter size]{.hl}; on its own the rank tells you
+almost nothing.
+
+Even at the generous end, a thousand customers with a thousand private
+fine-tunes fit, together, on one node. This is why "fine-tuning" is a product
+at all, rather than a research technique —
+and it is worth noticing that the paper made the same point about GPT-3 in
+2021: 100 adapted models cost 350 GB + 35 MB × 100 ≈ 354 GB, against 35 TB for
+100 separate copies [@hu2022lora].
+
+## Preference optimization {#sec-preference}
+
+### The thing supervised fine-tuning cannot do
+
+Take a question with no single right answer:
+
+```text
+Kredi kartı borcumu nasıl kapatabilirim?
+(How can I pay off my credit card debt?)
+```
+
+There is no target string. There are a thousand acceptable answers and they
+differ along axes you can *recognise* but cannot *write down*: too curt, too
+long, too confident about your finances, gives advice it should have refused
+to give, correct but reads like a pamphlet. Supervised fine-tuning needs a
+target string. Here you have none.
+
+But you can still do something: show two candidate answers to a person and ask
+which is better. The result is a
+[preference pair](#gloss-preference-pair){#term-preference-pair .term-ref}, and
+producing one is a much easier judgement than writing the ideal answer — it is
+a judgement you can collect at scale from people who could not have written
+either answer themselves.
+
+::: {#gloss-preference-pair .column-margin .term-gloss}
+**preference pair** — one prompt, two candidate answers, and a label saying
+which is better. It carries no information about how good either answer is in
+absolute terms, which is exactly why it is cheap to collect.
+[↩](#term-preference-pair){.term-back}
+:::
+
+[This is the whole reason preference tuning exists as a separate stage.]{.hl}
+It is not a better version of SFT. It optimizes a different kind of signal:
+one that only exists as a comparison [@christiano2017deep].
+
+### RLHF: the three-model dance
+
+The original recipe [@stiennon2020learning; @ouyang2022training] turns those
+comparisons into a training signal in two steps: fit a
+[reward model](#gloss-reward-model){#term-reward-model .term-ref} to the
+preferences, then optimize the language model against it.
+
+::: {#gloss-reward-model .column-margin .term-gloss}
+**reward model** — a model trained on human comparisons that reads a prompt and
+an answer and returns one number. It exists to turn *A is better than B* into
+something an optimizer can maximise.
+[↩](#term-reward-model){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">RLHF, and what has to be in memory at once</div>
+<svg viewBox="0 0 764 456" style="max-width:744px" role="img"
+     aria-label="A two-phase diagram. Phase one, on the left, shows a prompt producing two candidate answers, a human choosing the better one, and that comparison training a reward model that outputs a single scalar score. Phase two, on the right, shows a training loop with four models resident in memory at once: the policy being trained, a frozen reference copy of it used to compute a KL penalty, the frozen reward model that scores samples, and a value model that estimates expected return. The policy generates a sample, the reward model scores it, the KL term penalises drift from the reference, and PPO updates the policy. A note at the bottom states that four models of comparable size must be held simultaneously, which is the practical objection to RLHF.">
+  <defs>
+    <marker id="rl-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <text x="14" y="22" class="t-xs t-b t-muted">PHASE 1 — LEARN WHAT PEOPLE PREFER</text>
+  <rect x="14" y="34" width="336" height="182" rx="10" class="box-warm"/>
+  <text x="30" y="60" class="t-xs t-mono t-muted">prompt</text>
+  <rect x="30" y="70" width="140" height="34" rx="5" class="box"/>
+  <text x="100" y="91" class="t-xs t-mid t-mono">answer A</text>
+  <rect x="184" y="70" width="140" height="34" rx="5" class="box"/>
+  <text x="254" y="91" class="t-xs t-mid t-mono">answer B</text>
+  <text x="177" y="128" class="t-xs t-mid t-b">a person picks one</text>
+  <line x1="177" y1="136" x2="177" y2="154" class="ln" marker-end="url(#rl-a)"/>
+  <rect x="70" y="158" width="214" height="44" rx="8" class="box-rose"/>
+  <text x="177" y="177" class="t-xs t-mid t-b t-rose">REWARD MODEL</text>
+  <text x="177" y="194" class="t-xs t-mid t-muted">text in, one number out</text>
+
+  <line x1="352" y1="126" x2="376" y2="126" class="ln" marker-end="url(#rl-a)"/>
+
+  <text x="392" y="22" class="t-xs t-b t-muted">PHASE 2 — OPTIMIZE AGAINST IT</text>
+  <rect x="392" y="34" width="358" height="182" rx="10" class="box-accent"/>
+  <rect x="408" y="52" width="150" height="40" rx="6" class="box-accent"/>
+  <text x="483" y="70" class="t-xs t-mid t-b">POLICY</text>
+  <text x="483" y="85" class="t-xs t-mid t-muted">being trained</text>
+  <rect x="584" y="52" width="150" height="40" rx="6" class="box"/>
+  <text x="659" y="70" class="t-xs t-mid t-b t-muted">REFERENCE</text>
+  <text x="659" y="85" class="t-xs t-mid t-muted">frozen copy, for KL</text>
+  <rect x="408" y="104" width="150" height="40" rx="6" class="box-rose"/>
+  <text x="483" y="122" class="t-xs t-mid t-b t-rose">REWARD MODEL</text>
+  <text x="483" y="137" class="t-xs t-mid t-muted">frozen, scores samples</text>
+  <rect x="584" y="104" width="150" height="40" rx="6" class="box-warm"/>
+  <text x="659" y="122" class="t-xs t-mid t-b t-warm">VALUE MODEL</text>
+  <text x="659" y="137" class="t-xs t-mid t-muted">trained, gives a baseline</text>
+  <text x="571" y="172" class="t-xs t-mid t-b">PPO update on the policy only</text>
+  <text x="571" y="194" class="t-xs t-mid t-muted">reward − β · KL(policy ‖ reference)</text>
+
+  <line x1="14" y1="240" x2="750" y2="240" class="ln-thin"/>
+  <text x="14" y="266" class="t-xs t-b">Why the KL term is not optional</text>
+  <text x="14" y="288" class="t-xs t-muted">The reward model is a model. Optimize against it hard enough and the policy finds text that scores well and reads</text>
+  <text x="14" y="306" class="t-xs t-muted">like nothing a human would write — reward hacking. The KL penalty is a leash to the model you started from:</text>
+  <text x="14" y="324" class="t-xs t-muted">it makes “score higher” compete against “stay recognisable”.</text>
+
+  <text x="14" y="360" class="t-xs t-b t-rose">The practical objection</text>
+  <text x="14" y="382" class="t-xs t-muted">Four models of comparable size, resident at once, plus generation inside the training loop. For a 70B policy</text>
+  <text x="14" y="400" class="t-xs t-muted">that is a cluster, not a node — and the value model is trained, so it carries the full 16 bytes per parameter.</text>
+  <text x="14" y="428" class="t-xs t-b">Everything after this section is an attempt to delete one of those four boxes.</text>
+</svg>
+```
+::: {.fig-cap}
+The reward model is the interesting object: it converts an *ordering* — A beat
+B — into a *scalar*, which is what a reinforcement-learning algorithm needs.
+Everything expensive about RLHF follows from having built that converter and
+then needing to keep it, and a frozen reference, and a value estimator, all in
+memory while the policy generates. The optimizer in the middle is PPO
+[@schulman2017ppo], chosen for stability rather than for anything to do with
+language.
+:::
+::::
+
+The result was not marginal. InstructGPT's 1.3B model, put through this
+pipeline, produced outputs that human labellers preferred to those of the 175B
+GPT-3 — "despite having 100x fewer parameters" [@ouyang2022training]. And the
+stage that reversed a hundredfold difference in size was cheap. The authors
+report it: training the 175B SFT model took 4.9 petaflop/s-days and the 175B
+PPO-ptx model 60, "compared to 3,640 petaflops/s-days for GPT-3"
+[@ouyang2022training]. [The entire alignment pipeline cost about 1.6% of what
+pretraining cost.]{.hl}
+
+::: {.column-margin}
+That comparison is the strongest single argument in this chapter for taking
+post-training seriously. It is also the strongest argument for *not* believing
+that parameter count tells you what a model can do.
+:::
+
+### DPO: deriving the shortcut away
+
+Look again at the diagram and ask which box is doing indispensable work. The
+reward model exists only to score samples during PPO. If the policy's own
+probabilities could be read as a reward, the box would be redundant.
+
+They can. This is the
+[direct preference optimization](#gloss-direct-preference-optimization){#term-direct-preference-optimization .term-ref}
+result [@rafailov2023dpo], and the derivation is worth stating because it is
+short and the conclusion is otherwise mystifying.
+
+::: {#gloss-direct-preference-optimization .column-margin .term-gloss}
+**direct preference optimization** — training on preference pairs with an
+ordinary gradient step, having proved that the reward model in RLHF was never a
+separate object. Usually written *DPO*.
+[↩](#term-direct-preference-optimization){.term-back}
+:::
+
+The RLHF objective — maximise reward, penalised by KL divergence from the
+reference — has a known closed-form optimum:
+
+$$
+\pi^{*}(y \mid x) = \frac{1}{Z(x)} \, \pi_{\text{ref}}(y \mid x) \, \exp\!\left( \frac{1}{\beta} r(x, y) \right)
+$$
+
+Rearrange for $r$:
+
+$$
+r(x, y) = \beta \log \frac{\pi^{*}(y \mid x)}{\pi_{\text{ref}}(y \mid x)} + \beta \log Z(x)
+$$
+
+[The reward was never a separate object.]{.hl} Any policy already *is* a
+reward model, read as its log-ratio against the reference. And the awkward
+$Z(x)$ — a sum over every possible response, which is why nobody computes it —
+depends only on the prompt, so it cancels the moment you compare two responses
+to the *same* prompt. Which is precisely what preference data gives you.
+
+Substituting into the Bradley–Terry model of pairwise preference leaves an
+ordinary supervised loss over preference pairs $(x, y_w, y_l)$:
+
+$$
+\mathcal{L}_{\text{DPO}} = -\,\mathbb{E}\left[ \log \sigma\!\left( \beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)} \right) \right]
+$$
+
+Read it in words and it stops being intimidating: *raise the probability of
+the preferred answer and lower the probability of the rejected one — but
+measure both relative to where the reference model already had them, so you
+are rewarded for moving in the right direction rather than for agreeing with
+the reference.*
+
+Notice what $\pi_{\text{ref}}$ is doing, because it is the reason for the
+"never DPO a base model" rule you will meet later. The derivation assumed the
+preferences were sampled from the reference, so the paper sets
+$\pi_{\text{ref}} = \pi_{\text{SFT}}$ whenever an SFT model exists; when one
+does not, it recommends fine-tuning on the *preferred* completions first and
+using that, explicitly "to mitigate the distribution shift between the true
+reference distribution which is unavailable, and $\pi_{\text{ref}}$ used by
+DPO" [@rafailov2023dpo]. [The loss never samples anything — it is the
+mismatch between reference and data, not an inability to "rank", that breaks
+DPO on a base model.]{.hl}
+
+::: {.callout-note appearance="simple" icon="false"}
+**What the substitution actually bought.**
+
+| | RLHF (PPO) | DPO |
+|:--|:--|:--|
+| models in memory | 4 | 2 (policy + frozen reference) |
+| separate reward model | trained first, then kept | none |
+| sampling during training | yes, the policy generates every step | no, the pairs are fixed |
+| what a step is | a reinforcement-learning update | a gradient step on a classification loss |
+| tuning burden | PPO's clip range, value loss, GAE, plus $\beta$ | $\beta$, plus the learning rate |
+
+DPO removed the two things practitioners actually complained about — the
+reward model and the generation loop — which is why it went from paper to
+default in about a year.
+:::
+
+::: {.callout-warning appearance="simple"}
+**What DPO did not remove.** Preference pairs are still annotation, and they
+are still the expensive part. DPO makes the *algorithm* cheap; the *data* costs
+exactly what it did before. It also inherits a subtler problem: because the
+pairs are collected once, from some other model's outputs, they go stale as
+your policy moves away from whatever generated them. Tülu 3 found that
+on-policy preference data — generated by the model being trained — improves
+downstream results over reused off-policy pairs [@lambert2025tulu3].
+:::
+
+### GRPO: delete the value model instead
+
+DPO deletes the reward model. GRPO [@shao2024deepseekmath] takes the other
+route: keep reinforcement learning, but delete the *value* model.
+
+The value model exists to supply a baseline. In policy-gradient methods you do
+not want the raw reward — you want to know whether an action was better
+**than expected**, because a reward of 8 means something different when your
+usual score is 2 than when it is 9. Learning a network to predict that
+expectation is the standard answer, and it is expensive: a second trained
+model, at the full 16 bytes per parameter.
+
+GRPO's observation is that if you are going to sample from the policy anyway,
+you can get a baseline for free. Sample $G$ answers **to the same prompt**,
+score them all, and use the group's own mean as the expectation:
+
+$$
+A_i = \frac{r_i - \operatorname{mean}(r_1, \ldots, r_G)}{\operatorname{std}(r_1, \ldots, r_G)}
+$$
+
+The question stops being *how good is this answer in absolute terms* and
+becomes *was this attempt better than my other attempts at the same question*
+— which is both a more stable signal and a free one. In the paper's words,
+GRPO "foregoes the critic model, instead estimating the baseline from group
+scores, significantly reducing training resources" [@shao2024deepseekmath].
+On DeepSeekMath-Instruct 7B it moved GSM8K from 82.9% to 88.2% and MATH from
+46.8% to 51.7%, using only instruction-tuning data already in hand.
+
+### Where the reward comes from, and why that is the real question
+
+There is one more move, and it is the one that changed the field most
+recently. Everything above assumed the reward is *learned* — from human
+comparisons, so it inherits every flaw of a learned model, including being
+gameable.
+
+For some tasks it does not have to be. If the answer is a number, check the
+number. If it is code, run the tests. DeepSeek-R1-Zero — the variant trained by
+reinforcement learning with no supervised warm-up — uses "rule-based rewards"
+of exactly two kinds: **accuracy rewards**, which verify the final answer in a
+specified format, and **format rewards**, which check that the reasoning was
+placed where it was asked to be [@guo2025deepseekr1]. Tülu 3
+builds the same idea into an open recipe under the name **RLVR**, reinforcement
+learning with verifiable rewards [@lambert2025tulu3].
+
+::: {.column-margin}
+This is also the sharpest limitation. Verifiable rewards need a verifier, and
+most things people want from a language model — was this summary faithful, was
+this tone appropriate, was this refusal correct — have no verifier. Maths and
+code are unusually lucky domains. @sec-reasoning follows what happens
+when you push this idea as far as it goes.
+:::
+
+The trade is clean: a learned reward model covers any task but can be hacked;
+a verifier cannot be hacked but covers almost nothing. Which is why production
+recipes use both, on different subsets of the data.
+
+### Choosing, by what data you have
+
+Strip the acronyms and every method above is a claim about what you can
+collect.
+
+| you have | use | what it costs you |
+|:--|:--|:--|
+| prompts with ideal answers written out | **SFT** | writing the answers |
+| pairs of answers with a "which is better" label | **DPO** | annotation, but not writing |
+| the same, plus budget for an RL loop | **RLHF/PPO** | 4 models in memory, unstable, best ceiling on open-ended tasks |
+| prompts whose answers can be *checked* | **GRPO + verifiable rewards** | a verifier, and a lot of sampling |
+| a stronger model you are allowed to query | **distillation** (@sec-distillation) | inference bills, and a licence question |
+
+::: {.callout-tip appearance="simple"}
+**The order to try things in, for a team of one or two.** Start with SFT and
+stop there. Add DPO only when you have a *specific* complaint about the SFT
+model's behaviour that you can express as pairs — "it should have refused
+this", "it should have been shorter". Reach for an RL loop only when you have
+a verifier, because without one you have just signed up to maintain a reward
+model as well as a policy.
+:::
+
+## Constitutional AI and feedback that isn't human {#sec-rlaif}
+
+The bottleneck in everything above is annotation. Constitutional AI
+[@bai2022constitutional] asks whether the model can supply it.
+
+The method has two halves. In the supervised half, the model answers a
+red-team prompt, then **critiques its own answer** against a written
+principle, then **revises** it; the revision becomes the training target. In
+the RL half, the same principles are used to label preference pairs, replacing
+the human annotator entirely — reinforcement learning from AI feedback, RLAIF.
+
+::: {.column-margin}
+Anthropic's team wrote 16 principles for the harmlessness experiments and
+sampled one at random at each critique-and-revision step
+[@bai2022constitutional]. The randomisation was not for fairness: they found
+that ensembling over principles produced notably more robust preference-model
+behaviour than using one principle for every label.
+:::
+
+Two things about this are worth separating, because they are usually praised
+together and only one of them is unambiguous.
+
+**What is clearly good:** the principles are an *artefact*. They are a text
+file. You can read them, argue with them, version them, and hand them to a
+regulator. Compare that with the alternative, where the model's values are
+whatever a few hundred contractors happened to prefer on a Tuesday, recoverable
+only by probing the finished model. Moving the specification out of the labels
+and into a document is a real gain in accountability, independent of whether
+the technique works better.
+
+**What is not settled:** the feedback model has the same blind spots as the
+model being trained, because it usually *is* the same model. Where it cannot
+tell that an answer is subtly wrong, the training signal is confidently wrong,
+and no amount of scale fixes a bias shared by both sides of the loop. AI
+feedback is at its best on properties a model can check — is this rude, does
+this contain the requested section, does this refuse — and at its worst on
+properties it would need to be a domain expert to check.
+
+## Distillation into something you can afford {#sec-distillation}
+
+Everything so far has made a model *better*.
+[Knowledge distillation](#gloss-knowledge-distillation){#term-knowledge-distillation .term-ref}
+[@hinton2015distilling] makes a model *cheaper*, and it is the technique most
+often skipped by teams who then complain about their inference bill.
+
+::: {#gloss-knowledge-distillation .column-margin .term-gloss}
+**knowledge distillation** — training a small model to reproduce a large one's
+outputs. The small model inherits behaviour, not understanding: it cannot learn
+anything the teacher got wrong.
+[↩](#term-knowledge-distillation){.term-back}
+:::
+
+The setup: a large **teacher** produces outputs, a small **student** is trained
+to reproduce them. In the classical form the student matches the teacher's
+full output distribution — its "soft targets" — which carries far more
+information per example than a hard label does. Knowing that the teacher put
+70% on *positive*, 25% on *neutral*, and 5% on *negative* tells the student
+that this example is borderline; a one-hot label of *positive* does not.
+
+For generative models the modern form is blunter and works well: have the
+teacher answer a large set of prompts, filter the answers, and fine-tune the
+student on them as ordinary SFT data. DeepSeek-R1's authors did exactly this,
+using 800,000 curated samples from their large model to train small dense
+models [@guo2025deepseekr1].
+
+::: {.callout-note appearance="simple" icon="false"}
+**When a distilled 1B beats a prompted 70B.** Not on capability — on
+cost-per-correct-answer. A prompted 70B needs a long instruction prefix on
+every call, which it pays for in both latency and tokens; a distilled student
+has the instruction baked into its weights and answers from a short prompt. If
+your task is narrow and your volume is high, the small model is usually
+cheaper per *correct* answer even at a lower accuracy, because you can afford
+to run it twice and check.
+
+The condition is narrowness. Distil a general assistant into 1B parameters and
+you get a worse general assistant.
+:::
+
+::: {.callout-warning appearance="simple"}
+**Check the licence before you distil.** Many hosted models' terms of service
+prohibit using their outputs to train a competing model. This is a contract
+question, not a technical one, and it has ended projects late. Open-weight
+models differ: some licences explicitly permit it, some require attribution in
+the derived model's name.
+:::
+
+## Continued pretraining, and the Turkish case {#sec-continued-pretraining}
+
+There is one situation where the "post-training cannot add knowledge" rule
+genuinely bends: when what is missing is not a fact but a *distribution*. A
+model that has seen little Turkish is not missing a fact about Turkish. It is
+missing the language.
+
+The tool for that is **continued pretraining**: take the base model and keep
+running stage 1 on a domain corpus, with the same next-token objective and no
+instruction format at all [@gururangan2020dont]. It sits between the stages —
+pretraining's objective, fine-tuning's budget.
+
+::: {#gloss-continued-pretraining .column-margin .term-gloss}
+**continued pretraining** — running the pretraining objective again on a
+narrower corpus, starting from an existing base model. Used when the gap is a
+whole domain or language rather than a task or a format.
+[↩](#term-continued-pretraining){.term-back}
+:::
+
+For Turkish you have three options, and @sec-tokenizer-budget already priced
+one of them for you:
+
+| route | what you get | what it costs |
+|:--|:--|:--|
+| fine-tune a multilingual model | fastest path; the model already has some Turkish | you pay the tokenizer surcharge on every token, forever |
+| [continued pretraining](#gloss-continued-pretraining){#term-continued-pretraining .term-ref} on a Turkish corpus, then SFT | much better Turkish; keeps the base model's world knowledge | tens of billions of tokens; a real, if small, pretraining run |
+| start from a Turkish-native model | best fertility, best morphology | small models only; weaker world knowledge and reasoning |
+
+The surcharge in row one is measurable, and we measured it in
+@sec-pretraining: Llama 3's tokenizer needs **2.12** tokens per
+Turkish word against BERTurk's **1.59**. That is a **33%** longer sequence for
+the same text — on every training step, every evaluation, and every user
+request until the model is retired. It shows up as a bigger fine-tuning bill,
+a smaller effective context window, and higher latency per answer.
+
+::: {.callout-tip appearance="simple"}
+**The decision rule that survives contact with a budget.** If your task is
+classification or extraction and your texts are short, take the Turkish-native
+model — you need morphology, not world knowledge, and @sec-lora-lab shows a
+110M-parameter one doing very well. If your task needs reasoning or broad
+knowledge, take the multilingual model and pay the surcharge, because no
+Turkish-native model of the size you can afford has the world model you need.
+Continued pretraining is for when you will be running this for years and the
+surcharge has become the dominant line item.
+:::
+
+## When not to fine-tune {#sec-decision-tree}
+
+Most of this chapter has been about how. This section is about *whether*, and
+it is the part to remember if you remember one part.
+
+The failure mode is specific and common. A team has a model that gets things
+wrong about their business. Fine-tuning is the technique that sounds like
+"teach the model about our business". They collect examples, run a LoRA job,
+and the model comes back **more fluent and just as wrong** — because they
+taught it the *style* of their documentation while the *contents* of their
+documentation were never in the gradient in any retrievable form.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Which technique, and why — walk it top to bottom</div>
+<svg viewBox="0 0 764 636" style="max-width:744px" role="img"
+     aria-label="A decision tree with five questions asked in order. Question one: is the missing thing a fact the model could not have known, such as your documents, your prices, or this week's events? If yes, use retrieval, because fine-tuning on facts produces a model that is fluent and still wrong. Question two: have you actually tried a better prompt, few-shot examples, or a constrained output schema on twenty real inputs? If no, do that first, because it costs nothing and is often enough. Question three: do you have at least a few hundred examples of the behaviour you want, or can you write them? If no, collect the data, which is the honest answer most of the time. Question four: is the complaint about what the model says, or about which of two acceptable answers is better? If it is what it says, use supervised fine-tuning with LoRA. If it is which is better, do supervised fine-tuning first and then DPO on preference pairs. Question five, asked separately: is the model correct but too slow or too expensive? If so, distil it into a smaller model or quantize it. A closing note says that the first two branches account for most projects.">
+  <defs>
+    <marker id="dt-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="212" y="12" width="340" height="38" rx="19" class="box-warm"/>
+  <text x="382" y="36" class="t-sm t-mid t-b">the model is not doing what I need</text>
+  <line x1="382" y1="50" x2="382" y2="70" class="ln" marker-end="url(#dt-a)"/>
+
+  <rect x="152" y="74" width="460" height="52" rx="8" class="box"/>
+  <text x="382" y="96" class="t-xs t-mid t-b">1 · Is the missing thing a FACT it could not have known?</text>
+  <text x="382" y="114" class="t-xs t-mid t-muted">your documents, your prices, what happened this week</text>
+  <line x1="612" y1="100" x2="675" y2="100" class="ln"/>
+  <rect x="600" y="130" width="150" height="46" rx="8" class="box-accent"/>
+  <text x="675" y="150" class="t-xs t-mid t-b t-accent">RETRIEVAL</text>
+  <text x="675" y="167" class="t-xs t-mid t-muted">not fine-tuning</text>
+  <line x1="675" y1="100" x2="675" y2="126" class="ln" marker-end="url(#dt-a)"/>
+  <text x="640" y="92" class="t-xs t-b">yes</text>
+  <line x1="382" y1="126" x2="382" y2="150" class="ln" marker-end="url(#dt-a)"/>
+  <text x="396" y="144" class="t-xs t-muted">no</text>
+
+  <rect x="152" y="154" width="460" height="52" rx="8" class="box"/>
+  <text x="382" y="176" class="t-xs t-mid t-b">2 · Have you actually tried a better prompt?</text>
+  <text x="382" y="194" class="t-xs t-mid t-muted">few-shot examples, an output schema, on twenty real inputs</text>
+  <line x1="612" y1="180" x2="675" y2="180" class="ln"/>
+  <rect x="600" y="210" width="150" height="46" rx="8" class="box-accent"/>
+  <text x="675" y="230" class="t-xs t-mid t-b t-accent">PROMPT FIRST</text>
+  <text x="675" y="247" class="t-xs t-mid t-muted">it costs nothing</text>
+  <line x1="675" y1="180" x2="675" y2="206" class="ln" marker-end="url(#dt-a)"/>
+  <text x="640" y="172" class="t-xs t-b">no</text>
+  <line x1="382" y1="206" x2="382" y2="230" class="ln" marker-end="url(#dt-a)"/>
+  <text x="396" y="224" class="t-xs t-muted">yes</text>
+
+  <rect x="152" y="234" width="460" height="52" rx="8" class="box"/>
+  <text x="382" y="256" class="t-xs t-mid t-b">3 · Do you have a few hundred examples of the wanted behaviour?</text>
+  <text x="382" y="274" class="t-xs t-mid t-muted">written by someone who knows what a good answer looks like</text>
+  <line x1="612" y1="260" x2="675" y2="260" class="ln"/>
+  <rect x="600" y="290" width="150" height="46" rx="8" class="box-rose"/>
+  <text x="675" y="310" class="t-xs t-mid t-b t-rose">GET THE DATA</text>
+  <text x="675" y="327" class="t-xs t-mid t-muted">the usual answer</text>
+  <line x1="675" y1="260" x2="675" y2="286" class="ln" marker-end="url(#dt-a)"/>
+  <text x="640" y="252" class="t-xs t-b">no</text>
+  <line x1="382" y1="286" x2="382" y2="310" class="ln" marker-end="url(#dt-a)"/>
+  <text x="396" y="304" class="t-xs t-muted">yes</text>
+
+  <rect x="152" y="314" width="460" height="52" rx="8" class="box"/>
+  <text x="382" y="336" class="t-xs t-mid t-b">4 · Is the complaint about WHAT it says, or WHICH answer is better?</text>
+  <text x="382" y="354" class="t-xs t-mid t-muted">a target you can write down, versus a ranking you can only recognise</text>
+
+  <line x1="266" y1="366" x2="266" y2="396" class="ln" marker-end="url(#dt-a)"/>
+  <text x="200" y="386" class="t-xs t-b">what it says</text>
+  <rect x="152" y="400" width="228" height="60" rx="8" class="box-accent"/>
+  <text x="266" y="422" class="t-xs t-mid t-b t-accent">SFT, with LoRA</text>
+  <text x="266" y="440" class="t-xs t-mid t-muted">one target string per prompt</text>
+  <text x="266" y="454" class="t-xs t-mid t-muted">hours on one GPU</text>
+
+  <line x1="498" y1="366" x2="498" y2="396" class="ln" marker-end="url(#dt-a)"/>
+  <text x="516" y="386" class="t-xs t-b">which is better</text>
+  <rect x="384" y="400" width="228" height="60" rx="8" class="box-warm"/>
+  <text x="498" y="422" class="t-xs t-mid t-b t-warm">SFT, then DPO</text>
+  <text x="498" y="440" class="t-xs t-mid t-muted">preference pairs on top</text>
+  <text x="498" y="454" class="t-xs t-mid t-muted">never DPO on a base model</text>
+
+  <line x1="14" y1="492" x2="750" y2="492" class="ln-thin"/>
+
+  <rect x="14" y="510" width="360" height="60" rx="8" class="box"/>
+  <text x="194" y="532" class="t-xs t-mid t-b">5 · Correct, but too slow or too expensive?</text>
+  <text x="194" y="550" class="t-xs t-mid t-muted">this is a separate axis — ask it after the others</text>
+  <line x1="374" y1="540" x2="404" y2="540" class="ln" marker-end="url(#dt-a)"/>
+  <rect x="410" y="510" width="340" height="60" rx="8" class="box-accent"/>
+  <text x="580" y="532" class="t-xs t-mid t-b t-accent">DISTIL into a smaller model, or quantize</text>
+  <text x="580" y="550" class="t-xs t-mid t-muted">only once you know it is correct — you cannot distil correctness in</text>
+
+  <text x="382" y="602" class="t-xs t-mid t-b">Branches 1 and 2 account for most projects that reach for fine-tuning.</text>
+  <text x="382" y="622" class="t-xs t-mid t-muted">Branch 3 accounts for most of the rest. Very few teams are actually blocked on the algorithm.</text>
+</svg>
+```
+::: {.fig-cap}
+The tree is ordered by cost, cheapest first, and every branch above the line is
+a way of *not* running a training job. That ordering is the recommendation: a
+fine-tune is a maintenance commitment — a model to re-run, re-evaluate and
+re-deploy every time the base model updates — and the branches above it are
+not.
+:::
+::::
+
+::: {.column-margin}
+Branch 2 is not a formality. "Have you tried a better prompt" is a question
+with a large literature behind it — one survey catalogues 58 distinct
+text-only prompting techniques [@schulhoff2025prompt], and @sec-prompting works
+through the ones that matter. Most teams who reach for fine-tuning have tried
+two.
+:::
+
+::: {.callout-important appearance="simple"}
+**The two rules the tree encodes.**
+
+1. **Retrieval for knowledge, fine-tuning for behaviour.** They are not
+   alternatives; they compose. The strongest common architecture is a
+   fine-tuned model that has learned your *format and tone*, answering over
+   retrieved documents that supply your *facts*.
+2. **Never DPO a base model.** DPO's loss compares the policy against a frozen
+   reference on two *fixed* completions, and it assumes those completions came
+   from the reference. A base model is a bad reference for preference data
+   written by an instruction-following model, and the objective spends itself
+   on that mismatch instead of on the preference. SFT first, always.
+:::
+
+## Catastrophic forgetting {#sec-forgetting}
+
+There is one more cost, and it does not appear on any invoice.
+
+A fine-tune moves weights. Weights are shared: the same parameters that
+represent *how to classify a Turkish review* also represent *Turkish*. Push
+them far enough toward one task and the others degrade — the phenomenon called
+[catastrophic forgetting](#gloss-catastrophic-forgetting){#term-catastrophic-forgetting .term-ref}
+[@kirkpatrick2017overcoming], and in large language models it arrives
+routinely during continual fine-tuning [@luo2025empirical].
+
+::: {#gloss-catastrophic-forgetting .column-margin .term-gloss}
+**catastrophic forgetting** — when training on a new task degrades performance
+on tasks the model previously handled, because the same weights encoded both.
+It is invisible unless you evaluate the old task on purpose.
+[↩](#term-catastrophic-forgetting){.term-back}
+:::
+
+The reason it is dangerous is not that it happens. It is that **your evaluation
+will not show it**. You built a test set for your task. Your fine-tune improves
+on your test set. Every number you look at goes up. What went down is
+everything you were not measuring, and you find out from a user.
+
+### Measuring it on our own model
+
+We can do better than assert this. Take the same BERTurk model and the same
+Turkish reviews task from @sec-bake-off, fine-tune it two ways, and then ask a
+question that has nothing to do with sentiment: *how well does the encoder
+still model Turkish?*
+
+The probe is the original pretraining objective. Mask 15% of the tokens in
+held-out Turkish text and measure how surprised the model's own masked-language
+head is by the answers — the same measurement as @sec-language-models, applied
+before and after.
+
+One methodological point decides whether the numbers mean anything. The LoRA
+row is probed with the adapter **merged into the base weights**, not with the
+adapter deleted. Deleting it would recover the original model exactly and the
+measurement would be a tautology. What is being asked is: *when you deploy the
+LoRA-adapted model, has that model's grip on Turkish loosened?*
+
+Two probe sets, because they answer different questions. **General Turkish** is
+1,826 sentences of ordinary prose from a parallel corpus [@zhang2020improving] —
+nothing to do with reviews, nothing to do with sentiment. **Held-out reviews**
+is the test split from the lab above: same domain as the fine-tune, included so
+that nobody can dismiss the result as a domain-shift artefact. The masked
+tensors are generated once and reused for all three encoders, so every
+difference below is the weights and nothing else.
+
+| encoder | general TR loss | top-1 | reviews loss | top-1 |
+|:--|--:|--:|--:|--:|
+| pretrained, untouched | 2.523 | 50.7% | 2.660 | 48.3% |
+| after a full fine-tune | 2.837 *(+12.5%)* | 46.4% | 4.564 *(+71.6%)* | 28.9% |
+| after LoRA $r=8$, merged | 2.592 *(+2.7%)* | 49.6% | 3.276 *(+23.2%)* | 42.0% |
+
+::: {.column-margin}
+Loss is mean cross-entropy in nats over masked positions — 5,406 of them for
+general Turkish, 9,893 for the reviews — and top-1 is how often the model's
+single best guess is the token that was actually there. Lower loss and higher
+top-1 are both better, and the base row is the model as the Hub ships it.
+:::
+
+Three things in that table are worth more than the paragraph that introduced
+them.
+
+**Both fine-tunes forget, and the full one forgets about 4.6× more.** On text
+that has nothing to do with the task, a full fine-tune costs 12.5% of the
+model's masked-language loss and four points of top-1 accuracy. That is not
+catastrophic in the dramatic sense — the model still speaks Turkish — but it is
+a real, measurable loss of the thing you paid for during pretraining, bought
+with a task nobody will ever ask this model about again.
+
+**LoRA reduces the damage; it does not avoid it.** +2.7% is small, but it is not
+zero, and the merged model is genuinely worse at Turkish than the model it came
+from. Anyone who tells you parameter-efficient tuning cannot forget is quoting
+the reversibility argument and calling it the forgetting argument.
+
+**The damage is worst where the training data was.** This is the row that
+surprises people: the full fine-tune's loss rises 12.5% on general Turkish and
+**71.6%** on held-out reviews — nearly six times as much on the domain it was
+trained on. Forgetting is not the model drifting *away* from your data. It is
+the model repurposing, as hard as it can, exactly the representations your data
+touched most: review text got reshaped from *"everything a sentence can mean"*
+into *"which of two buttons to press"*, and the masked-language head can no
+longer read what is left. The corollary is uncomfortable — the most sensitive
+detector of forgetting was the in-domain probe, which is precisely the one no
+team builds, because it looks redundant next to the task test set.
+
+::: {.callout-important appearance="simple"}
+**Every number in this table went down while the number you were watching went
+up.** The full fine-tune is the best sentiment model in the lab — 83.90
+macro-F1, the top of that table — and it is the worst Turkish model here, on
+both probes. Neither fact is visible from the other's evaluation. This is the
+trap in its exact shape: not a model that got worse, but a model that got
+better at the one thing you measured.
+:::
+
+::: {.callout-note appearance="simple" icon="false"}
+**Two different advantages, often confused.** Keep them apart.
+
+The first is **reversibility**, and it is arithmetic rather than empirical.
+With LoRA the base weights are never written to; the adapter is a separate pair
+of matrices. Delete the adapter file and you have the original model back, bit
+for bit. A full fine-tune has no such undo — the only copy of the pretrained
+weights is the one you overwrote, or the one still on the Hub, which is why you
+should record the exact revision hash. This advantage is guaranteed.
+
+The second is **reduced forgetting in the merged model**, and it is not
+guaranteed by the first. $W_0 + \frac{\alpha}{r}BA$ is a genuinely different
+matrix from $W_0$; nothing stops it from being a *worse* Turkish model. What
+constrains it is that the update is confined to a rank-$r$ subspace of two
+projections per layer, so there is far less room to move than a full fine-tune
+has. That is a plausible mechanism, not a proof — which is exactly why the row
+above is measured rather than asserted.
+:::
+
+### What to do about it
+
+The field's standard answer is the one InstructGPT used. Having found
+"performance regressions on public NLP datasets" — the **alignment tax** —
+the authors mixed pretraining gradients back into the RLHF update, producing
+the variant they call PPO-ptx, and reported that this minimises the
+regressions [@ouyang2022training]. The principle generalises: *if you do not
+want the model to forget something, keep showing it to the model.*
+
+In practice, three habits catch almost everything:
+
+| habit | what it costs | what it catches |
+|:--|:--|:--|
+| pick a general benchmark **before** training and run it both times | one evaluation run | the existence of the problem |
+| mix 5–10% general data into your fine-tuning set | slightly slower convergence | most of the damage |
+| prefer LoRA at a modest rank over a full fine-tune | about a point of macro-F1, in our lab | roughly four fifths of the damage, measured above — plus an undo |
+
+::: {.column-margin}
+"Before training" is doing real work in row one. A benchmark chosen after you
+see the fine-tuned model's failures is a benchmark chosen to make the model
+look good on the failures you happened to notice.
+:::
+
+## Lab: LoRA on a Turkish task, measured {#sec-lora-lab}
+
+Everything above is either arithmetic or someone else's result. This section is
+neither: it is the same Turkish product-review task from @sec-bake-off, run
+seven ways on one laptop GPU, with the numbers reported as they came out.
+
+The setup is deliberately modest, because the point is that this is reachable.
+BERTurk base (`dbmdz/bert-base-turkish-cased`, 110.6M parameters), the
+@sec-bake-off split — 40,000 training reviews, 10,000 held out, seed 42 — two
+epochs, sequence length 128, batch size 32, on an Apple M-series GPU. LoRA
+adapters on `query` and `value` only, $\alpha = 2r$, dropout 0.05.
+
+| what we trained | trainable | share | macro-F1 | F1(neg) | accuracy | wall clock | peak GiB |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| head only (a linear probe) | 1,538 | 0.001% | 48.37 | 0.00 | 93.68 | 3m 35s | 0.41 |
+| full fine-tune | 110,618,882 | 100% | **83.90** | **70.16** | 95.62 | 11m 59s | 6.07 |
+| LoRA $r=1$ | 38,402 | 0.035% | 80.47 | 63.01 | 96.09 | 10m 01s | 4.32 |
+| LoRA $r=4$ | 148,994 | 0.135% | 80.50 | 62.97 | 96.26 | 9m 46s | 4.32 |
+| LoRA $r=8$ | 296,450 | 0.267% | 82.69 | 67.23 | 96.50 | 10m 04s | 4.32 |
+| LoRA $r=16$ | 591,362 | 0.532% | 82.59 | 66.99 | **96.58** | 10m 03s | 4.33 |
+| LoRA $r=64$ | 2,360,834 | 2.090% | 82.39 | 66.60 | 96.55 | 10m 30s | 4.37 |
+
+For reference, @sec-bake-off's best non-neural model on this same split — tf-idf
+over word 1-2 grams, no GPU — scored **76.21** macro-F1 and **56.47** F1(neg).
+
+::: {.column-margin}
+"Peak GiB" is the largest live allocation observed with the forward graph
+still resident, measured in a fresh process per row. It is not the number the
+operating system reports: the MPS driver's own high-water mark runs about
+0.7 GiB higher across every row, which shifts the column but changes none of
+the comparisons.
+:::
+
+### Reading the table
+
+**Row 1 is the control, and it fails.** Freezing the encoder and training only
+the classification head — 1,538 parameters — produces a model whose macro-F1 is
+48.37 and whose accuracy is 93.68. Those are not new numbers. They are exactly
+@sec-bake-off's majority-class baseline. The model learned to answer *positive*
+every time, which on a corpus that is 93.68% positive is a locally sensible
+thing to do. [A frozen encoder with a trainable head is not
+parameter-efficient fine-tuning; it is a linear probe, and on an imbalanced
+task it can collapse]{.hl}. The F1 on the negative class is 0.00.
+
+That row is in the table because the difference between it and the LoRA rows is
+the entire argument. LoRA does not train *fewer* weights in the sense of
+training a smaller *part* of the model. It trains a small number of weights
+*throughout* the model, and that distinction is the one doing the work.
+
+**Rank stops mattering almost immediately.** Going from $r=1$ to $r=8$ buys
+2.2 macro-F1 points. Going from $r=8$ to $r=64$ — eight times the parameters —
+*loses* 0.30. The curve rises once and then flattens, and the flat part is
+where you should be standing. This is the rank sweep the arithmetic in
+@sec-lora said would be an afterthought, and on this task it is.
+
+**The full fine-tune wins, and it wins on one class.** 83.90 against $r=8$'s
+82.69 is a real gap, and all of it is the minority class: F1(neg) 70.16 against
+67.23. But look at the accuracy column — [every single LoRA run is *more*
+accurate overall than the full fine-tune]{.hl} (96.09–96.58 against 95.62).
+Full fine-tuning had enough freedom to move the decision boundary toward the
+negatives, which is what macro-F1 rewards and what plain accuracy punishes.
+Which of those you want is a product decision, not a training one, and the
+table cannot make it for you.
+
+**Rank 1 is the result worth sitting with.** 36,864 adapter parameters — 0.035%
+of the model, a file you could email — take a frozen encoder from 48.37 to
+80.47 macro-F1, clearing @sec-bake-off's tf-idf baseline by more than four
+points. Whatever LoRA is doing, it is not doing it with capacity.
+
+**The wall-clock column is the honest disappointment.** $r=8$ trains 373× fewer
+parameters than the full fine-tune and runs 1.19× faster. That is the whole
+speedup. LoRA saves optimizer work, and on a 110M model with a batch of 32
+there is not much optimizer work to save.
+
+The head-only row explains why, by contrast. It finishes in 3m 35s — 3.3×
+faster than the full fine-tune — because with every encoder parameter frozen
+*and nothing trainable inside the encoder*, backpropagation stops at the last
+layer and never enters the network at all. LoRA's adapters sit inside every
+block, so the backward pass has to traverse the entire model to reach them.
+[LoRA buys you memory and portability. It does not buy you a shorter backward
+pass.]{.hl}
+
+**And the memory column is where the chapter's arithmetic meets the floor.**
+The 16-bytes-versus-2 table predicts LoRA should cut training memory roughly
+eightfold. Measured, it cuts it 1.40× — 6.07 GiB to 4.32 GiB. The missing
+saving is activations, which LoRA does not touch. Subtract the resident
+parameters — 0.41 GiB, measured before the first forward pass — from $r=8$'s
+4.32 GiB peak and 3.91 GiB is left over. [**About 90% of LoRA's peak memory
+here is activations**]{.hl}, and no choice of rank changes that. It is the same
+effect QLoRA's authors measured at 7B when they found 567 MB of input gradients
+against 26 MB of adapter parameters.
+
+Notice also that peak memory is essentially constant across ranks — 4.32 GiB at
+$r=1$ and 4.37 GiB at $r=64$ — for exactly the same reason. And notice the
+head-only row at 0.41 GiB: no backward pass through the encoder means no
+retained activations, an order of magnitude less memory, and a model that does
+not work.
+
+### What the numbers do not show
+
+Three honest caveats, because a lab that only produces good news is a
+demonstration, not an experiment.
+
+- **Neither the 1.40× memory ratio nor the 1.19× speedup generalises upward.**
+  Both are laptop numbers at 110M parameters with a batch of 32, and both are
+  small because activations dominate at this size. At 8B the balance inverts —
+  the parameter-linear terms grow with the model while the activation term
+  grows with your batch — which is how the same technique turns 119.7 GiB into
+  15.5 GiB. Quoting this table's ratios as general claims about LoRA would be
+  exactly the dishonesty the table exists to prevent.
+- **Peak memory is one number standing in for a distribution.** It is the
+  largest live allocation seen across 30 steps of a fixed-shape batch. Real
+  training has variable sequence lengths and therefore a memory profile with a
+  tail, and the tail is what actually kills a run at 3 a.m. Treat the column as
+  a comparison between rows, not as a provisioning figure.
+- **One seed, one dataset, one language.** These are two-epoch runs on a single
+  split. The 0.30 that separates $r=8$ from $r=64$, and the 0.03 separating
+  $r=1$ from $r=4$, are well inside the noise you would get from re-running
+  with a different seed — do not read a ranking into them. What is *not* inside
+  the noise is the gap between row 1 and everything else, the gap between the
+  parameter counts, and the accuracy-versus-macro-F1 split between the full
+  fine-tune and every LoRA row.
+
+### Your turn
+
+1. **Reproduce row 1's collapse, then fix it.** Run the head-only baseline and
+   confirm you get the majority-class result. Now fix it *without* unfreezing
+   anything: class weights in the loss, or resampling the training set. Report
+   how close you get to the LoRA rows, and say what that tells you about how
+   much of the LoRA gain was representation and how much was calibration.
+2. **Find the rank that stops paying.** Sweep $r \in \{1, 2, 4, 8, 16, 32\}$
+   with three seeds each. Plot macro-F1 against $\log_2 r$ with error bars.
+   State the rank at which the curve flattens, and — this is the part that
+   matters — state whether your error bars can distinguish it from the rank
+   below it.
+3. **Break the $\alpha = 2r$ convention on purpose.** Fix $r = 8$ and sweep
+   $\alpha \in \{2, 8, 16, 64\}$. You should be able to reproduce, from
+   @sec-lora, the prediction that $\alpha$ behaves like a learning-rate
+   multiplier on the adapter path. Say whether it did.
+4. **Change what you attach to.** Keep $r = 8$ and move the adapters from
+   `query, value` to the MLP (`intermediate.dense`, `output.dense`). Work out
+   the new parameter count from @sec-lora's formula *before* you run it — it is
+   2.5× the `query, value` figure, and you should be able to say why the factor
+   is 2.5 and not 2. Does the score follow the parameters?
+5. **Prove the undo.** Fine-tune with LoRA, save the adapter, then load the
+   base model and compare its weights to the original checkpoint tensor by
+   tensor. They should be identical. Then do the same after a full fine-tune
+   and report how many tensors differ. This is a three-line experiment that
+   makes @sec-forgetting's central claim concrete.
+6. **Measure your own forgetting.** Take your fine-tuned encoder and run the
+   masked-language probe from @sec-forgetting on Turkish text from a domain
+   neither you nor the fine-tune touched. Compare full fine-tuning against
+   LoRA. Then mix 10% general Turkish into your fine-tuning set and measure
+   again.
+7. **Go where the baseline cannot follow.** @sec-bake-off's tf-idf model
+   reached 76.21 macro-F1 with no GPU at all. Find an input where the
+   fine-tuned model is right and tf-idf is wrong, and one where the reverse
+   holds. The second is harder to find and more informative when you do.
+
+**Deliverable:** one table with the same columns as ours, your own numbers in
+it, and a paragraph naming the cheapest configuration you would actually deploy
+— including the case for deploying nothing and keeping the tf-idf baseline.
+
+## Where to go deeper
+
+Read one thing before any paper: open a chat model's tokenizer and print
+`tokenizer.apply_chat_template(messages, tokenize=False)` for a two-turn
+conversation. Half of everything that goes wrong in a first fine-tune is
+visible in that string, and it takes ten seconds.
+
+| topic | source |
+|:--|:--|
+| the technique this chapter is mostly about | @hu2022lora |
+| fitting it on one card | @dettmers2023qlora |
+| what LoRA replaced, and why latency mattered | @houlsby2019parameter; @lester2021power |
+| the recipe that made instruction-following standard | @ouyang2022training |
+| preferences, before the language models | @christiano2017deep; @stiennon2020learning |
+| the optimizer inside RLHF | @schulman2017ppo |
+| deriving the reward model away | @rafailov2023dpo |
+| deleting the value model instead | @shao2024deepseekmath |
+| verifiable rewards, at scale | @guo2025deepseekr1 |
+| an open recipe with every stage documented | @lambert2025tulu3 |
+| how little SFT data can be enough | @zhou2023lima |
+| generating the data instead of writing it | @wang2023selfinstruct |
+| instruction tuning generalising to unseen tasks | @wei2022finetuned |
+| principles instead of annotators | @bai2022constitutional |
+| making a model smaller | @hinton2015distilling |
+| adapting to a domain by pretraining more | @gururangan2020dont |
+| what fine-tuning costs you elsewhere | @kirkpatrick2017overcoming; @luo2025empirical |
+| the prompting you should try first | @schulhoff2025prompt |
 
 ## Exercises
 
-1. For a task at your work, walk the decision tree in this chapter and write down which branch you land on and why. Then argue the opposite case.
-2. Fine-tune with LoRA rank 4, 16, and 64. Plot task score against trainable parameters. Where does the curve flatten?
+1. Print `apply_chat_template` for a two-turn conversation on two different
+   model families. List every token that differs. Then explain, in terms of
+   what SFT actually optimizes, why serving with family A's template a model
+   trained with family B's degrades quality without raising an error.
+2. You have 46 tokens, 6 of them the answer. Write out the `labels` tensor for
+   both the masked and unmasked choice. Then compute, for each, what fraction
+   of the gradient signal is teaching the model to generate the prompt — and
+   say what behaviour you would expect to see at inference from the unmasked
+   model.
+3. @sec-lora gives two decompositions of QLoRA's ">780 GB" that both come to 12
+   bytes per parameter. Write down a third that also totals 12, and say what
+   evidence would let you decide between them. Then redo your preferred
+   decomposition for 8-bit Adam, which stores $m$ and $v$ in one byte each:
+   state the new total, the new ratio between a trained and a frozen parameter,
+   and one thing the reduced precision could plausibly cost you.
+4. Open the `config.json` of a model not in @sec-lora's table. From
+   `hidden_size`, `num_hidden_layers`, `num_attention_heads`,
+   `num_key_value_heads` and `intermediate_size` alone, compute the trainable
+   parameter count for LoRA $r=16$ on (a) `q_proj, v_proj` and (b) attention +
+   MLP. Then load the model with `peft` and check. Explain any discrepancy —
+   there usually is one, and it is usually the classifier head.
+5. LoRA initialises $A$ random and $B$ zero. Work out what happens for $A$
+   zero and $B$ random: write down $\partial\mathcal{L}/\partial A$ and
+   $\partial\mathcal{L}/\partial B$ at step 0 and say whether the run escapes.
+   Two of the four combinations start exactly at the pretrained model *and*
+   have a non-zero gradient — identify them and say what the gradients have in
+   common. Then propose an experiment that could distinguish the two in
+   practice, and predict its result before you run it.
+6. A team says their model "gives wrong prices for our products" and asks for
+   a fine-tune. Walk them down @sec-decision-tree, out loud, in five sentences.
+   Then construct the variant of their complaint for which fine-tuning *is* the
+   right answer, and say what data it would need.
+7. You have 4,000 prompts, one written answer each, and a complaint that the
+   model "is too verbose and too eager to agree". Decide between more SFT and
+   DPO. Say exactly what you would collect for each, how many items, and how
+   you would know within a week whether it worked.
+8. A colleague explains that DPO fails on a base model because "the model does
+   not answer yet, so there is nothing to rank". Look at
+   $\mathcal{L}_{\text{DPO}}$ and say precisely why that explanation is wrong —
+   what does the loss actually sample, and what does it hold fixed? Then give
+   the correct account in terms of $\pi_{\text{ref}}$, and say what you would
+   observe if someone ran it anyway.
+9. GRPO replaces the value model with the mean reward of $G$ samples from the
+   same prompt. State the condition on $G$ and on reward variance under which
+   this is a *worse* baseline than a learned value model, and describe a task
+   where that condition holds.
+10. Design the forgetting evaluation you would actually run for a Turkish
+    customer-support fine-tune. Name the benchmark, say why it is the right
+    one, and state the threshold at which you would refuse to ship. Then
+    explain why the threshold has to be written down before you see the
+    fine-tuned model's results.
