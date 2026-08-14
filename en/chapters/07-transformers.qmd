@@ -52,6 +52,270 @@ statistician's translation: for every token, the model runs a tiny,
 data-dependent regression over the whole sentence deciding *which other
 tokens are informative right now*.
 
+### The shape of the whole model
+
+Before opening anything up, it is worth seeing where attention actually sits.
+A transformer is a short pipeline with one part repeated:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Where attention sits in the whole model</div>
+<svg viewBox="0 0 764 340" style="max-width:744px" role="img"
+     aria-label="The full model drawn left to right. Tokens are looked up in an embedding table, position information is added, the result passes through a stack of L identical transformer blocks, then a final layer normalisation and an unembedding projection produce one score per vocabulary word. Each transformer block contains a multi-head attention sublayer and a feed-forward sublayer. The token count and the model width are unchanged from one end of the stack to the other.">
+  <defs>
+    <marker id="arc-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <text x="37" y="92" class="t-xs t-mid t-muted t-b">TOKENS</text>
+  <rect x="10" y="104" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="118" class="t-xs t-mid t-mono">kedi</text>
+  <rect x="10" y="128" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="142" class="t-xs t-mid t-mono">sütü</text>
+  <rect x="10" y="152" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="166" class="t-xs t-mid t-mono">içti</text>
+
+  <line x1="66" y1="138" x2="84" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="88" y="110" width="84" height="56" rx="9" class="box"/>
+  <text x="130" y="134" class="t-sm t-mid t-b">Embedding</text>
+  <text x="130" y="150" class="t-xs t-mid t-muted">table lookup</text>
+  <text x="130" y="206" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="172" y1="138" x2="190" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <circle cx="204" cy="138" r="13" class="chip"/>
+  <text x="204" y="143" class="t-sm t-mid t-b">+</text>
+  <rect x="166" y="214" width="78" height="40" rx="9" class="box-navy"/>
+  <text x="205" y="232" class="t-sm t-mid t-b">Position</text>
+  <text x="205" y="246" class="t-xs t-mid t-muted">injected once</text>
+  <path d="M205,214 L205,155" class="ln" fill="none" marker-end="url(#arc-a)"/>
+
+  <line x1="217" y1="138" x2="238" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <text x="347" y="70" class="t-xs t-mid t-b t-accent">× L BLOCKS</text>
+  <rect x="254" y="78" width="206" height="104" rx="10" class="box" opacity="0.45"/>
+  <rect x="249" y="83" width="206" height="104" rx="10" class="box" opacity="0.7"/>
+  <rect x="244" y="88" width="206" height="104" rx="10" class="box-navy"/>
+  <text x="347" y="107" class="t-sm t-mid t-b">Transformer block</text>
+  <rect x="256" y="118" width="86" height="56" rx="8" class="box-accent"/>
+  <text x="299" y="140" class="t-xs t-mid t-b">Multi-head</text>
+  <text x="299" y="154" class="t-xs t-mid t-b">attention</text>
+  <rect x="352" y="118" width="86" height="56" rx="8" class="box-warm"/>
+  <text x="395" y="140" class="t-xs t-mid t-b">Feed-</text>
+  <text x="395" y="154" class="t-xs t-mid t-b">forward</text>
+  <text x="347" y="206" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="450" y1="138" x2="470" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="476" y="110" width="58" height="56" rx="9" class="box"/>
+  <text x="505" y="134" class="t-xs t-mid t-b">Final</text>
+  <text x="505" y="150" class="t-xs t-mid t-b">LayerNorm</text>
+
+  <line x1="534" y1="138" x2="552" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="556" y="110" width="84" height="56" rx="9" class="box"/>
+  <text x="598" y="134" class="t-xs t-mid t-b">Unembedding</text>
+  <text x="598" y="150" class="t-xs t-mid t-muted">to vocab</text>
+  <text x="598" y="206" class="t-xs t-mid t-muted">n × |V|</text>
+
+  <line x1="640" y1="138" x2="658" y2="138" class="ln" marker-end="url(#arc-a)"/>
+  <text x="664" y="134" class="t-sm t-b">logits</text>
+  <text x="664" y="150" class="t-xs t-muted">p(next)</text>
+
+  <line x1="14" y1="276" x2="750" y2="276" class="ln-thin"/>
+  <text x="14" y="298" class="t-sm">The token count n and the width d are identical at every arrow: a block rewrites the</text>
+  <text x="14" y="316" class="t-sm">vectors, it never reshapes them. This chapter opens the navy box up, one part at a time.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The whole architecture. Everything that makes a transformer a transformer is
+inside the repeated block; the pieces on either side of it are a lookup table
+and a matrix multiply.
+:::
+::::
+
+Two properties of that picture are worth fixing in mind now, because
+everything later leans on them.
+
+**The shape never changes.** $n$ tokens enter a block as an $n \times d$ matrix
+and leave as an $n \times d$ matrix. [A block is a rewriting step, not a
+reshaping step]{.hl}, which is exactly why stacking is trivial: block 12
+presents the same interface as block 1, so depth is a free parameter.
+
+**Only one component ever looks sideways.** The feed-forward sublayer, the
+normalisations, and the unembedding all treat each token in isolation. Attention
+is the *only* place in the entire model where position $i$ can read position
+$j$. Every claim in this book about a model "connecting" two distant words
+cashes out, mechanically, as a number in an attention matrix.
+
+### Why three projections, and not one?
+
+Here is a fair objection to the equation above. If attention needs to know
+which tokens are related, why build $Q$, $K$ and $V$ at all? Why not compare
+the token vectors directly, $x_i \cdot x_j$, and save three matrix multiplies?
+
+It is worth taking seriously, because trying it is what makes the design
+obvious. Using the four-dimensional embeddings from the worked example below —
+`kedi` = `[0.9, 0.1, 0.0, 0.5]`, `sütü` = `[0.1, 0.9, 0.0, 0.5]`,
+`içti` = `[0.0, 0.1, 0.9, 0.5]` — the raw dot products are:
+
+$$
+XX^{\top} = \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & \mathbf{1.07} & 0.43 & 0.26\\
+\texttt{sütü} & 0.43 & \mathbf{1.07} & 0.34\\
+\texttt{içti} & 0.26 & 0.34 & \mathbf{1.07}
+\end{array}
+$$
+
+Two things go wrong, and each one alone is fatal.
+
+**Similarity is symmetric.** $x_i \cdot x_j = x_j \cdot x_i$, necessarily. So
+"the verb wants its object" and "the object wants its verb" are forced to be
+the *same statement with the same strength*. Grammar is full of relations that
+run one way and not the other, and a symmetric score cannot express a single
+one of them.
+
+**Every token is most similar to itself.** The diagonal is the largest entry in
+every row — it must be, since $x \cdot x$ is a squared length. Push that matrix
+through the softmax and `içti` puts its **largest** weight, 0.4235, on itself,
+and only 0.2825 on `kedi`. The verb reaches for nothing. The layer computes an
+expensive approximation to *leave every token alone*.
+
+Now the same sentence with the projections restored, which is the head you will
+build in a moment:
+
+| `içti` attends to | no projections | with $W^Q$, $W^K$ |
+|:--|--:|--:|
+| `kedi` (its agent) | 0.2825 | 0.4230 |
+| `sütü` (its object) | 0.2940 | **0.5012** |
+| `içti` (itself) | **0.4235** | 0.0759 |
+
+The verb now spends 92.41% of its attention on its two arguments instead of
+42.35% on itself. And the score matrix is no longer symmetric: `içti` scores
+`sütü` at 2.97, while `sütü` scores `içti` at 0.27 — an [11× asymmetry, which
+is the whole point]{.hl}. One projection could never have produced it.
+
+So the three matrices are not decoration. They exist to separate jobs that a
+single vector cannot hold at once:
+
+- $W^Q$ builds the **query** — *what am I looking for?* Read from the token
+  doing the looking.
+- $W^K$ builds the **key** — *what do I advertise to others?* Read from the
+  token being looked at.
+- $W^V$ builds the **value** — *what do I hand over if I am chosen?*
+
+The division of labour is the design. [$Q$ and $K$ together decide **where**
+information moves; $V$ alone decides **what** moves]{.hl}. Keeping them apart
+lets a token advertise one thing and deliver another — and lets two tokens that
+are not remotely similar still be strongly connected, which is what a verb and
+its subject need.
+
+The mechanism this produces is a *soft* version of something you already know:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">A dictionary looks up one key; attention looks up all of them</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="Two panels compared. On the left, a dictionary lookup: the query sütü matches exactly one key, and exactly that key's value, milk, is returned. On the right, attention: the query from içti is compared against all three keys at once, producing weights of 0.4230, 0.5012 and 0.0759, and the output is the sum of all three values each scaled by its weight. The dictionary returns one value; attention returns a blend of every value.">
+  <defs>
+    <marker id="sl-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="sl-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="14" y="22" class="t-xs t-b t-muted">A DICTIONARY — EXACT MATCH, ONE VALUE</text>
+  <text x="138" y="44" class="t-xs t-mid t-muted t-b">KEY</text>
+  <text x="248" y="44" class="t-xs t-mid t-muted t-b">VALUE</text>
+
+  <rect x="14" y="88" width="70" height="28" rx="7" class="chip"/>
+  <text x="49" y="106" class="t-xs t-mid t-mono">"sütü"</text>
+
+  <rect x="100" y="52" width="76" height="28" rx="7" class="box"/>
+  <text x="138" y="70" class="t-xs t-mid t-mono">kedi</text>
+  <rect x="100" y="88" width="76" height="28" rx="7" class="box-accent"/>
+  <text x="138" y="106" class="t-xs t-mid t-mono">sütü</text>
+  <rect x="100" y="124" width="76" height="28" rx="7" class="box"/>
+  <text x="138" y="142" class="t-xs t-mid t-mono">içti</text>
+
+  <rect x="210" y="52" width="76" height="28" rx="7" class="box"/>
+  <text x="248" y="70" class="t-xs t-mid t-mono">cat</text>
+  <rect x="210" y="88" width="76" height="28" rx="7" class="box-accent"/>
+  <text x="248" y="106" class="t-xs t-mid t-mono">milk</text>
+  <rect x="210" y="124" width="76" height="28" rx="7" class="box"/>
+  <text x="248" y="142" class="t-xs t-mid t-mono">drank</text>
+
+  <line x1="84" y1="102" x2="96" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <line x1="176" y1="102" x2="206" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <line x1="286" y1="102" x2="302" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <text x="308" y="106" class="t-sm t-b">milk</text>
+
+  <text x="14" y="180" class="t-xs t-muted">Two keys out of three are ignored completely.</text>
+  <text x="14" y="196" class="t-xs t-muted">Miss the key and there is no answer at all.</text>
+
+  <line x1="380" y1="14" x2="380" y2="200" class="ln-thin"/>
+
+  <text x="408" y="22" class="t-xs t-b t-accent">ATTENTION — PARTIAL MATCH, BLENDED VALUE</text>
+  <text x="540" y="44" class="t-xs t-mid t-muted t-b">KEY</text>
+  <text x="610" y="44" class="t-xs t-mid t-muted t-b">WEIGHT</text>
+  <text x="682" y="44" class="t-xs t-mid t-muted t-b">VALUE</text>
+
+  <rect x="408" y="88" width="76" height="28" rx="7" class="chip"/>
+  <text x="446" y="106" class="t-xs t-mid t-mono">q(içti)</text>
+
+  <rect x="506" y="52" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="70" class="t-xs t-mid t-mono">k(kedi)</text>
+  <rect x="506" y="88" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="106" class="t-xs t-mid t-mono">k(sütü)</text>
+  <rect x="506" y="124" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="142" class="t-xs t-mid t-mono">k(içti)</text>
+
+  <text x="610" y="70" class="t-xs t-mid t-mono t-accent">0.4230</text>
+  <text x="610" y="106" class="t-xs t-mid t-mono t-accent">0.5012</text>
+  <text x="610" y="142" class="t-xs t-mid t-mono t-muted">0.0759</text>
+
+  <rect x="648" y="52" width="68" height="28" rx="7" class="box-accent"/>
+  <text x="682" y="70" class="t-xs t-mid t-mono">v(kedi)</text>
+  <rect x="648" y="88" width="68" height="28" rx="7" class="box-accent"/>
+  <text x="682" y="106" class="t-xs t-mid t-mono">v(sütü)</text>
+  <rect x="648" y="124" width="68" height="28" rx="7" class="box"/>
+  <text x="682" y="142" class="t-xs t-mid t-mono">v(içti)</text>
+
+  <path d="M484,102 L495,102 L495,66 L502,66" class="ln-accent" fill="none" marker-end="url(#sl-b)"/>
+  <line x1="484" y1="102" x2="502" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <path d="M484,102 L495,102 L495,138 L502,138" class="ln-thin" fill="none" marker-end="url(#sl-a)"/>
+
+  <text x="408" y="180" class="t-xs t-muted">Every key is consulted, and every value contributes something.</text>
+  <text x="408" y="196" class="t-xs t-muted">Nothing is ignored; it is only weighted.</text>
+
+  <line x1="14" y1="216" x2="750" y2="216" class="ln-thin"/>
+  <text x="14" y="240" class="t-sm">Same three parts — query, key, value — but the match is graded instead of exact, so the</text>
+  <text x="14" y="258" class="t-sm">answer is a blend of every value. That is the one change, and it is what makes attention</text>
+  <text x="14" y="276" class="t-sm">differentiable: you cannot take a gradient through "which key matched", but you can</text>
+  <text x="14" y="294" class="t-sm">take one through a weight of 0.5012.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Attention is a differentiable dictionary. The weights on the right are the
+real ones for `içti` from the head built in @sec-attention-worked.
+:::
+::::
+
+That last point deserves its own sentence, because it explains why the softmax
+is there at all rather than some simpler normalisation. A hard lookup — take
+the single best-matching key — is a step function, and step functions have zero
+gradient almost everywhere, so nothing upstream could ever learn. [Softmax is
+the price of being able to train the thing]{.hl}: it keeps the "pick the best
+match" behaviour in spirit, while leaving a usable derivative with respect to
+every score.
+
 ### Explore: what is a head looking at?
 
 Different attention heads learn different, often interpretable, habits. The
@@ -672,6 +936,69 @@ $$
 \text{head}_h)\, W^O
 $$
 
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Split into heads, run them in parallel, glue the results back together</div>
+<svg viewBox="0 0 764 320" style="max-width:744px" role="img"
+     aria-label="The same input matrix is fed to two attention heads at once. Each head has its own query, key and value matrices and produces its own attention pattern, so head one reports argument structure while head two reports which verb governs each noun. Each head outputs a narrow vector of width d over h. The two outputs are concatenated back to the full model width and passed through a final output matrix W-O, which decides how much of each head's report is written back into the model.">
+  <defs>
+    <marker id="mh-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="mh-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="118" width="70" height="56" rx="9" class="box"/>
+  <text x="49" y="142" class="t-sm t-mid t-b">X</text>
+  <text x="49" y="158" class="t-xs t-mid t-muted">n × d</text>
+
+  <path d="M84,146 L106,146 L106,80 L126,80" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+  <path d="M84,146 L106,146 L106,212 L126,212" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+
+  <rect x="130" y="44" width="250" height="72" rx="9" class="box-accent"/>
+  <text x="140" y="63" class="t-xs t-b">HEAD 1 — ARGUMENT STRUCTURE</text>
+  <text x="140" y="81" class="t-xs t-muted">its own W_Q, W_K, W_V</text>
+  <text x="140" y="99" class="t-xs t-mono">içti → 0.4230 / 0.5012 / 0.0759</text>
+  <text x="370" y="63" class="t-xs t-end t-muted">n × d/h</text>
+
+  <rect x="130" y="176" width="250" height="72" rx="9" class="box-warm"/>
+  <text x="140" y="195" class="t-xs t-b">HEAD 2 — WHICH VERB GOVERNS ME</text>
+  <text x="140" y="213" class="t-xs t-muted">different W_Q, W_K, W_V</text>
+  <text x="140" y="231" class="t-xs t-mono">içti → 0.4675 / 0.4675 / 0.0650</text>
+  <text x="370" y="195" class="t-xs t-end t-muted">n × d/h</text>
+
+  <path d="M380,80 L410,80 L410,132 L430,132" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+  <path d="M380,212 L410,212 L410,160 L430,160" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+
+  <rect x="434" y="110" width="78" height="72" rx="9" class="box"/>
+  <text x="473" y="140" class="t-sm t-mid t-b">Concat</text>
+  <text x="473" y="158" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="512" y1="146" x2="534" y2="146" class="ln" marker-end="url(#mh-a)"/>
+
+  <rect x="538" y="118" width="76" height="56" rx="9" class="box-navy"/>
+  <text x="576" y="142" class="t-sm t-mid t-b">W_O</text>
+  <text x="576" y="158" class="t-xs t-mid t-muted">d × d</text>
+
+  <line x1="614" y1="146" x2="636" y2="146" class="ln" marker-end="url(#mh-a)"/>
+  <text x="642" y="142" class="t-sm t-b">output</text>
+  <text x="642" y="158" class="t-xs t-muted">n × d</text>
+
+  <line x1="14" y1="268" x2="750" y2="268" class="ln-thin"/>
+  <text x="14" y="290" class="t-sm">Because each head is only d/h wide, h heads cost exactly what one full-width head costs:</text>
+  <text x="14" y="308" class="t-sm">3d² for the projections plus d² for W_O, whatever h is. The extra patterns are free.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Two heads on `kedi sütü içti`. The rows shown are each head's real attention
+weights for `içti`, computed below — the same token, read two different ways
+at the same time.
+:::
+::::
+
 With two heads of width 2, the concatenation is exactly 4 wide — back to
 $d_{\text{model}}$, which is not a coincidence. [The head size is chosen as
 $d_k = d_{\text{model}} / h$ precisely so that concatenating them lands you
@@ -936,6 +1263,33 @@ block $L$ times — 12 for GPT-2 small, 80 for a 70B-class model — and you hav
 a transformer.
 :::
 ::::
+
+### Every part, and the problem it solves
+
+Nothing in that diagram is decorative. Each piece is a response to a specific
+failure, and the fastest way to understand a component is to ask what goes
+wrong when you delete it. This table is the chapter in one page — every row is
+argued for somewhere above or below.
+
+| component | the problem it exists to solve | what breaks without it |
+|:--|:--|:--|
+| separate $W^Q$, $W^K$ | raw similarity $x_i \cdot x_j$ is symmetric and largest on the diagonal | relations cannot be directed; every token attends mostly to itself |
+| separate $W^V$ | what a token *advertises* is not what it should *deliver* | routing and content are forced to be the same thing |
+| dot product | need one cheap comparable score for all $n^2$ pairs | no scalable way to compare every pair |
+| $\div\sqrt{d_k}$ | score spread grows like $\sqrt{d_k}$, and softmax reacts to absolute size | wide heads saturate the softmax and the gradient dies |
+| softmax | weights must be positive, sum to 1, and be differentiable | a hard "best match" has zero gradient; nothing upstream can learn |
+| multiple heads | one weighted average can track exactly one relation | the layer expresses one relation per position, not several |
+| $W^O$ | head outputs live in separate subspaces and must re-enter the stream | no way to combine or route what the heads found |
+| residual add | deep stacks lose gradient, and a layer must be able to do nothing | vanishing gradients; adding depth stops helping |
+| layer norm | the stream's magnitude grows with depth; softmax and ReLU are scale-sensitive | activations drift and training destabilises |
+| *pre*-norm placement | post-norm rescales the stream, so the identity path is not an identity | deep models need learning-rate warmup to train at all |
+| feed-forward | attention only *mixes*: its output is a convex combination of values | no private per-token nonlinear processing, and most capacity disappears |
+| positional signal | attention is permutation-equivariant — it cannot see order | the model reads every sentence as a bag of words |
+
+Read the middle column on its own and you have the design rationale for the
+entire architecture. [Every one of these is a patch on a concrete defect, not
+an aesthetic choice]{.hl} — which is why the shape has barely moved since 2017
+while almost everything around it has.
 
 ### Watch the representation change
 
@@ -1480,6 +1834,112 @@ because the remaining weights would no longer sum to 1.
 
 ### The three families
 
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Three families, one difference: which cells are allowed</div>
+<svg viewBox="0 0 764 262" style="max-width:744px" role="img"
+     aria-label="Three attention mask patterns side by side, each drawn as a four by four grid where a filled cell means that query row is allowed to read that key column. The encoder-only mask is completely filled, so every token sees every token. The decoder-only mask is lower triangular, so a token sees only itself and the tokens before it. The encoder-decoder family uses both: a fully filled mask over the source sequence and a lower triangular mask over the target sequence, joined by cross-attention.">
+  <defs>
+    <marker id="fam-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="132" y="24" class="t-xs t-mid t-b t-accent">ENCODER-ONLY</text>
+  <rect x="100" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <text x="132" y="142" class="t-xs t-mid">every token sees every token</text>
+  <text x="132" y="160" class="t-xs t-mid t-muted">trained to fill in blanks</text>
+  <text x="132" y="178" class="t-xs t-mid t-muted">BERT — classify, extract, embed</text>
+
+  <text x="382" y="24" class="t-xs t-mid t-b t-accent">DECODER-ONLY</text>
+  <rect x="350" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="382" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="398" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="398" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="398" y="76" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="398" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <text x="382" y="142" class="t-xs t-mid">a token sees only the past</text>
+  <text x="382" y="160" class="t-xs t-mid t-muted">trained to predict the next token</text>
+  <text x="382" y="178" class="t-xs t-mid t-muted">GPT, Llama, Qwen — generate</text>
+
+  <text x="622" y="24" class="t-xs t-mid t-b t-accent">ENCODER-DECODER</text>
+  <rect x="538" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <line x1="606" y1="76" x2="636" y2="76" class="ln-accent" marker-end="url(#fam-a)"/>
+  <text x="621" y="68" class="t-xs t-mid t-muted">cross</text>
+  <rect x="642" y="44" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="674" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="690" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="60" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="60" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="690" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="690" y="76" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="690" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <text x="570" y="124" class="t-xs t-mid t-muted">source</text>
+  <text x="674" y="124" class="t-xs t-mid t-muted">target</text>
+  <text x="622" y="142" class="t-xs t-mid">full input, causal output</text>
+  <text x="622" y="160" class="t-xs t-mid t-muted">trained to emit a target sequence</text>
+  <text x="622" y="178" class="t-xs t-mid t-muted">T5, BART — translate, summarize</text>
+
+  <line x1="14" y1="202" x2="750" y2="202" class="ln-thin"/>
+  <text x="14" y="224" class="t-sm">A filled cell means "this query row may read this key column". Nothing else about the</text>
+  <text x="14" y="242" class="t-sm">architecture changes between the three — same block, same maths, different mask.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Rows are queries, columns are keys, and the whole taxonomy of model families
+reduces to which cells are switched on.
+:::
+::::
+
 | family | mask | trained to | representative | good at |
 |:--|:--|:--|:--|:--|
 | encoder-only | bidirectional | fill in masked tokens | BERT [@devlin2019bert] | classification, extraction, retrieval embeddings |
@@ -1617,6 +2077,70 @@ linear-per-token.
 ::: {#gloss-kv-cache .column-margin .term-gloss}
 **KV cache** — stored keys and values from earlier tokens, so generation does not recompute them. Its size, not the model's, usually decides how many users a GPU can serve. [↩](#term-kv-cache){.term-back}
 :::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">What the cache saves, and what it costs</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="Two rows compare generating the sixth token. Without a cache, the keys and values of all six tokens are recomputed from scratch at every step. With a cache, the keys and values of the first five tokens are read back from memory unchanged and only the sixth is computed. The saving in arithmetic is paid for in memory, which grows linearly with context length and is duplicated for every concurrent request.">
+  <text x="14" y="34" class="t-xs t-b t-muted">GENERATING TOKEN 6 — NO CACHE</text>
+  <text x="14" y="76" class="t-xs">recompute</text>
+  <text x="14" y="92" class="t-xs t-b">all 6</text>
+  <rect x="120" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="158" y="72" class="t-xs t-mid t-b">tok 1</text>
+  <text x="158" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="204" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="242" y="72" class="t-xs t-mid t-b">tok 2</text>
+  <text x="242" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="288" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="326" y="72" class="t-xs t-mid t-b">tok 3</text>
+  <text x="326" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="372" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="410" y="72" class="t-xs t-mid t-b">tok 4</text>
+  <text x="410" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="456" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="494" y="72" class="t-xs t-mid t-b">tok 5</text>
+  <text x="494" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="540" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="578" y="72" class="t-xs t-mid t-b">tok 6</text>
+  <text x="578" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <text x="632" y="78" class="t-sm t-b t-rose">6 × work</text>
+
+  <text x="14" y="154" class="t-xs t-b t-accent">GENERATING TOKEN 6 — WITH A CACHE</text>
+  <text x="14" y="196" class="t-xs">reuse 5,</text>
+  <text x="14" y="212" class="t-xs t-b">compute 1</text>
+  <rect x="120" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="158" y="192" class="t-xs t-mid t-muted">tok 1</text>
+  <text x="158" y="208" class="t-xs t-mid t-muted">cached</text>
+  <rect x="204" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="242" y="192" class="t-xs t-mid t-muted">tok 2</text>
+  <text x="242" y="208" class="t-xs t-mid t-muted">cached</text>
+  <rect x="288" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="326" y="192" class="t-xs t-mid t-muted">tok 3</text>
+  <text x="326" y="208" class="t-xs t-mid t-muted">cached</text>
+  <rect x="372" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="410" y="192" class="t-xs t-mid t-muted">tok 4</text>
+  <text x="410" y="208" class="t-xs t-mid t-muted">cached</text>
+  <rect x="456" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="494" y="192" class="t-xs t-mid t-muted">tok 5</text>
+  <text x="494" y="208" class="t-xs t-mid t-muted">cached</text>
+  <rect x="540" y="172" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="578" y="192" class="t-xs t-mid t-b">tok 6</text>
+  <text x="578" y="208" class="t-xs t-mid t-b">NEW</text>
+  <text x="632" y="198" class="t-sm t-b t-accent">1 × work</text>
+
+  <line x1="14" y1="244" x2="750" y2="244" class="ln-thin"/>
+  <text x="14" y="266" class="t-sm">The causal mask is what makes this legal: token 3's key can never depend on token 6, so it</text>
+  <text x="14" y="284" class="t-sm">never needs recomputing. The arithmetic you save comes back as memory you must budget.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The cache is the reason generation is affordable and the reason long context
+is not. It trades $O(n^2)$ recomputation per step for $O(n)$ storage — held
+separately for every concurrent request.
+:::
+::::
 
 It also eats your GPU:
 
@@ -1758,6 +2282,82 @@ sentence may take a different pair.
 ::: {#gloss-mixture-of-experts .column-margin .term-gloss}
 **mixture of experts** — replaces one feed-forward network with many, routing each token to a few of them, so total parameters and per-token compute stop being the same number. [↩](#term-mixture-of-experts){.term-back}
 :::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">One token, eight experts, two of them run</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="A single token enters a router, which scores eight expert feed-forward networks. Only the two highest-scoring experts run for this token; the other six stay idle. Their outputs are combined by the router's weights into one output vector. All eight experts must still be held in memory, so total parameters set the hardware requirement while the two active experts set the latency.">
+  <defs>
+    <marker id="moe-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+    <marker id="moe-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="126" width="62" height="32" rx="7" class="chip"/>
+  <text x="45" y="146" class="t-xs t-mid t-mono">token</text>
+  <line x1="76" y1="142" x2="96" y2="142" class="ln" marker-end="url(#moe-b)"/>
+
+  <rect x="100" y="114" width="76" height="56" rx="9" class="box-navy"/>
+  <text x="138" y="138" class="t-sm t-mid t-b">Router</text>
+  <text x="138" y="154" class="t-xs t-mid t-muted">scores 8</text>
+
+  <path d="M176,142 L198,142 L198,42 L216,42" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,70 L216,70" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M176,142 L198,142 L198,98 L216,98" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,126 L216,126" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,154 L216,154" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,182 L216,182" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M176,142 L198,142 L198,210 L216,210" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,238 L216,238" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+
+  <rect x="220" y="30" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="46" class="t-xs t-muted">expert 1</text>
+  <rect x="220" y="58" width="104" height="24" rx="6" class="box-accent"/>
+  <text x="228" y="74" class="t-xs t-b">expert 2</text>
+  <text x="318" y="74" class="t-xs t-end t-mono">0.62</text>
+  <rect x="220" y="86" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="102" class="t-xs t-muted">expert 3</text>
+  <rect x="220" y="114" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="130" class="t-xs t-muted">expert 4</text>
+  <rect x="220" y="142" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="158" class="t-xs t-muted">expert 5</text>
+  <rect x="220" y="170" width="104" height="24" rx="6" class="box-accent"/>
+  <text x="228" y="186" class="t-xs t-b">expert 6</text>
+  <text x="318" y="186" class="t-xs t-end t-mono">0.38</text>
+  <rect x="220" y="198" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="214" class="t-xs t-muted">expert 7</text>
+  <rect x="220" y="226" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="242" class="t-xs t-muted">expert 8</text>
+
+  <path d="M324,70 L370,70 L370,124" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M324,182 L370,182 L370,160" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <circle cx="370" cy="142" r="14" class="chip"/>
+  <text x="370" y="147" class="t-sm t-mid t-b">+</text>
+  <line x1="384" y1="142" x2="406" y2="142" class="ln" marker-end="url(#moe-b)"/>
+  <text x="412" y="139" class="t-sm t-b">output</text>
+  <text x="412" y="154" class="t-xs t-muted">n × d</text>
+
+  <rect x="480" y="86" width="270" height="112" rx="10" class="box-navy"/>
+  <text x="494" y="110" class="t-xs t-b">8 EXPERTS, TOP-2 ROUTING, d = 4096</text>
+  <text x="494" y="136" class="t-sm">TOTAL 36.5B — all of it must be resident</text>
+  <text x="494" y="158" class="t-sm">ACTIVE 10.7B — this is what sets latency</text>
+  <text x="494" y="182" class="t-xs t-muted">You rent the GPU for the first number.</text>
+
+  <line x1="14" y1="266" x2="750" y2="266" class="ln-thin"/>
+  <text x="14" y="288" class="t-sm">Every token picks its own pair, so a different word in the same sentence takes a different route.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The router is a small learned layer that scores the experts and normalises the
+top $k$. Six of the eight boxes do no arithmetic for this token — but all eight
+still occupy memory.
+:::
+::::
 
 [This severs a link that had held since the beginning: total parameters and
 per-token compute stop being the same number.]{.hl} Take $d = 4096$, 32
