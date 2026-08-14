@@ -89,7 +89,8 @@ A transformer is a short pipeline with one part repeated:
   <text x="204" y="143" class="t-sm t-mid t-b">+</text>
   <rect x="166" y="214" width="78" height="40" rx="9" class="box-navy"/>
   <text x="205" y="232" class="t-sm t-mid t-b">Position</text>
-  <text x="205" y="246" class="t-xs t-mid t-muted">injected once</text>
+  <text x="205" y="246" class="t-xs t-mid t-muted">added here, or</text>
+  <text x="205" y="258" class="t-xs t-mid t-muted">inside every block</text>
   <path d="M205,214 L205,155" class="ln" fill="none" marker-end="url(#arc-a)"/>
 
   <line x1="217" y1="138" x2="238" y2="138" class="ln" marker-end="url(#arc-a)"/>
@@ -179,14 +180,25 @@ the *same statement with the same strength*. Grammar is full of relations that
 run one way and not the other, and a symmetric score cannot express a single
 one of them.
 
-**Every token is most similar to itself.** The diagonal is the largest entry in
-every row — it must be, since $x \cdot x$ is a squared length. Push that matrix
-through the softmax and `içti` puts its **largest** weight, 0.4235, on itself,
-and only 0.2825 on `kedi`. The verb reaches for nothing. The layer computes an
-expensive approximation to *leave every token alone*.
+**Self-similarity swamps everything else.** A token's score against itself is
+$x \cdot x$, its squared length, and here that is the largest entry in every
+row. Push the matrix through a softmax and `içti` puts its **largest** weight,
+0.4235, on itself, and only 0.2825 on `kedi`. The verb reaches for nothing. The
+layer computes an expensive approximation to *leave every token alone*.
+
+::: {.callout-note appearance="simple" icon="false"}
+Strictly, $x_i \cdot x_i$ is only guaranteed to beat $x_i \cdot x_j$ when
+$\|x_j\| \le \|x_i\|$ — a longer neighbour can outscore you. Our three toy
+vectors all happen to have $\|x\|^2 = 1.07$, so the diagonal wins outright. The
+general statement is weaker but still fatal: [an unprojected score inflates
+self-similarity by construction]{.hl}, and the inflation has nothing to do with
+whether the two tokens are actually related.
+:::
 
 Now the same sentence with the projections restored, which is the head you will
-build in a moment:
+build in a moment. Both columns are softmax rows, each scaled by the square
+root of its own width — $\sqrt{4}$ on the left, $\sqrt{2}$ on the right — so
+they are comparable:
 
 | `içti` attends to | no projections | with $W^Q$, $W^K$ |
 |:--|--:|--:|
@@ -197,7 +209,7 @@ build in a moment:
 The verb now spends 92.41% of its attention on its two arguments instead of
 42.35% on itself. And the score matrix is no longer symmetric: `içti` scores
 `sütü` at 2.97, while `sütü` scores `içti` at 0.27 — an [11× asymmetry, which
-is the whole point]{.hl}. One projection could never have produced it.
+is the whole point]{.hl}. No unprojected score could have produced it.
 
 So the three matrices are not decoration. They exist to separate jobs that a
 single vector cannot hold at once:
@@ -213,6 +225,42 @@ information moves; $V$ alone decides **what** moves]{.hl}. Keeping them apart
 lets a token advertise one thing and deliver another — and lets two tokens that
 are not remotely similar still be strongly connected, which is what a verb and
 its subject need.
+
+#### Two matrices, or one? {.unnumbered}
+
+Be careful about what that argument proves. Write the score out and the
+projections collapse:
+
+$$
+q_i \cdot k_j \;=\; (x_i W^Q)(x_j W^K)^{\top} \;=\; x_i^{\top}\,\underbrace{W^Q
+W^{K\top}}_{M,\;\; d \times d}\, x_j
+$$
+
+Only the **product** $M$ ever touches the score. A single learned $d \times d$
+matrix would give the same scores — still asymmetric, still free of the
+self-similarity trap, because nothing forces $M$ to be symmetric. So the honest
+claim is not "two matrices are necessary"; it is [two matrices are necessary
+*once you also want the model to be cheap*]{.hl}. Three concrete reasons:
+
+- **Parameters.** In GPT-3-scale terms, $d = 4096$ and $d_k = 128$: the pair
+  $W^Q, W^K$ costs $2 \times 4096 \times 128 = 1{,}048{,}576$ numbers, while a
+  full $M$ costs $4096^2 = 16{,}777{,}216$ — **16× more**, per head, per layer.
+  The factorisation is a deliberate low-rank constraint: $M$ is forced to rank
+  $\le d_k$, and that is a feature, not a loss.
+- **Arithmetic.** Scoring through $Q$ and $K$ costs $O(n^2 d_k)$. Scoring
+  through $M$ costs $O(n^2 d)$ — you would pay $d/d_k = 32\times$ more for the
+  same numbers.
+- **Caching.** This is the one that decides the design. $Q$ and $K$ give every
+  token a *materialised* key vector of its own, computed once and reusable
+  forever. Fold them into $M$ and there is no key to store — every new token
+  would have to re-score against every raw embedding from scratch. The KV
+  cache, which is what makes generation affordable at all, exists precisely
+  because $W^Q$ and $W^K$ were kept apart.
+
+The same non-identifiability applies on the value path: a head's output enters
+the residual stream as $x W^V W^O_{\text{head}}$, another product of two
+matrices that only ever appears together. Factoring is an engineering decision
+about rank and cost, taken twice, for the same reasons.
 
 The mechanism this produces is a *soft* version of something you already know:
 
@@ -357,7 +405,11 @@ attnData = {
     for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] = 1 / n;
   } else {
     // Pronoun (coreference-flavored) head
-    for (let i = 0; i < n; i++) { M[i][i] = 0.62; if (i > 0) M[i][i - 1] = 0.38; }
+    // every row is a softmax row and must sum to 1; token 0 has only itself
+    for (let i = 0; i < n; i++) {
+      if (i === 0) { M[i][i] = 1; }
+      else { M[i][i] = 0.62; M[i][i - 1] = 0.38; }
+    }
     const it = tokens.indexOf("it");
     M[it] = new Array(n).fill(0);
     M[it][tokens.indexOf("robot")]  = 0.46;  // is “it” the robot…
@@ -395,10 +447,16 @@ Plot.plot({
 
 ::: {.callout-tip appearance="simple" icon="false"}
 The ambiguity in the pronoun head is real, and it is the classic
-*Winograd* setup: in "…because it was **ready**", `it` is probably the
-coffee; swap in "…because it was **empty**" and `it` flips to the pot.
-Resolving that takes world knowledge — which is exactly what large-scale
-pretraining buys.
+*Winograd* setup. Only one word changes between these two sentences, and the
+referent of `it` moves from one noun to the other:
+
+- "The robot poured coffee because it was **ready**." → `it` is the **coffee**.
+- "The robot poured coffee because it was **instructed to**." → `it` is the
+  **robot**.
+
+Nothing in the syntax distinguishes them; the grammar is identical. Resolving
+the pronoun takes world knowledge — coffee can be ready, robots take
+instructions — which is exactly what large-scale pretraining buys.
 :::
 :::
 
@@ -520,14 +578,18 @@ $\sqrt{d_k}$, so without the division the scores get systematically larger as
 heads get wider — and softmax reacts to *absolute* size. Measured over 20,000
 random pairs:
 
-| $d_k$ | std. dev. of $q\cdot k$ | after dividing by $\sqrt{d_k}$ |
-|--:|--:|--:|
-| 2 | 1.414 | 1.000 |
-| 8 | 2.859 | 1.011 |
-| 64 | 8.029 | 1.004 |
-| 512 | 22.746 | 1.005 |
+| $d_k$ | std. dev. of $q\cdot k$ | $\sqrt{d_k}$ | after dividing by $\sqrt{d_k}$ |
+|--:|--:|--:|--:|
+| 2 | 1.414 | 1.414 | 1.000 |
+| 8 | 2.859 | 2.828 | 1.011 |
+| 64 | 8.029 | 8.000 | 1.004 |
+| 512 | 22.746 | 22.627 | 1.005 |
 
-The left column is $\sqrt{d_k}$ to three digits, which is the whole point. The
+The middle two columns agree to about half a percent — the residual is
+sampling noise from a 20,000-pair estimate, not a systematic gap. That is the
+whole point: the measured spread of raw scores really does grow as
+$\sqrt{d_k}$, so dividing by $\sqrt{d_k}$ really does flatten it to a constant,
+which the last column confirms across a 256× range of widths. The
 consequence shows up when one token competes against 64 others — here is the
 average weight the *winning* key receives:
 
@@ -987,8 +1049,8 @@ $$
   <text x="642" y="158" class="t-xs t-muted">n × d</text>
 
   <line x1="14" y1="268" x2="750" y2="268" class="ln-thin"/>
-  <text x="14" y="290" class="t-sm">Because each head is only d/h wide, h heads cost exactly what one full-width head costs:</text>
-  <text x="14" y="308" class="t-sm">3d² for the projections plus d² for W_O, whatever h is. The extra patterns are free.</text>
+  <text x="14" y="290" class="t-sm">Because each head is only d/h wide, h heads cost the same weights as one full-width head:</text>
+  <text x="14" y="308" class="t-sm">3d² for the projections plus d² for W_O, whatever h is. What grows is the score tensor, h·n².</text>
 </svg>
 ```
 
@@ -1027,13 +1089,24 @@ W^O=\begin{bmatrix}1&0&0&0\\0&1&0&0\\0&0&1&0\\0.2&0.2&0&0\end{bmatrix}
 $$
 
 ::: {.callout-important appearance="simple" icon="false"}
-**Multi-head attention is not more expensive than single-head attention.**
-$h$ heads of width $d_{\text{model}}/h$ have the same total parameter count
-and the same FLOP count as one head of width $d_{\text{model}}$: the $W^Q$,
-$W^K$, $W^V$ projections are $3d^2$ either way, and $W^O$ adds $d^2$, for
-$4d^2$ in total. Splitting into heads buys you several independent attention
-patterns for free. This is a rare thing in machine learning and it is why the
-design stuck.
+**Multi-head attention costs almost nothing extra.** $h$ heads of width
+$d_{\text{model}}/h$ have the same total parameter count and the same
+*matrix-multiply* FLOP count as one head of width $d_{\text{model}}$: the
+$W^Q$, $W^K$, $W^V$ projections are $3d^2$ either way, $W^O$ adds $d^2$, and
+scoring costs $h \cdot n^2 \cdot (d/h) = n^2 d$ regardless of $h$. Splitting
+into heads buys several independent attention patterns for very close to
+nothing, which is why the design stuck.
+
+Two costs do move, and they matter later in this chapter:
+
+- **The score tensor grows.** One head stores $n^2$ scores; $h$ heads store
+  $h \cdot n^2$. At $n = 1024$, $h = 32$ that is 33.5M entries instead of
+  1.05M — a 32× increase in the memory that @sec-attention-cost is about, and
+  in the softmax work, which is not a matrix multiply.
+- **Each head gets narrower.** A head of width $d/h$ can only express an
+  attention pattern of rank $\le d/h$. At $d = 4096$ that is 128 per head
+  instead of 4096. You are trading one high-rank relation for 32 low-rank
+  ones — usually a good trade, and always a trade.
 :::
 
 ### The payoff, in numbers
@@ -1055,9 +1128,15 @@ difference between the static vectors of @sec-embeddings, where `içti` has one
 vector forever, and a transformer, where its vector is rebuilt from its
 neighbours at every layer.
 
-The `bias` column gained exactly zero, in every row. The constant dimension
-was useless in step 2 and it is still useless now — a feature that never
-varies can neither ask a question nor answer one.
+The `bias` column gained exactly zero, in every row — an artefact of this
+$W^O$, whose bottom row happens to send nothing back to that dimension. Be
+careful about the general lesson. The constant dimension is useless *for
+routing*: a feature that never varies cannot ask a question or answer one,
+because it contributes the same amount to every score in the matrix. It is not
+useless for **content**. Our $W^V$ gives it a weight of 0.2, so it adds a
+constant $+0.1$ to both components of every value vector — the value path's
+version of a bias term. [A never-varying feature carries no information about
+*which* tokens to connect, but it can still shift *what* they deliver.]{.hl}
 
 ### Residual connections: adding, not replacing
 
@@ -1080,12 +1159,22 @@ a transformer starts from "do no harm" rather than from scratch.
 **residual connection** — a shortcut that adds a sublayer's input to its output, so the layer only has to learn a correction rather than a whole new representation. [↩](#term-residual-connection){.term-back}
 :::
 
-It also fixes the gradient. Differentiating $x + f(x)$ with respect to $x$
+It also helps the gradient. Differentiating $x + f(x)$ with respect to $x$
 gives $1 + f'(x)$: there is a path from the loss back to every earlier layer
-whose derivative is exactly 1, no matter how small $f'$ becomes. Without it,
-gradients through dozens of stacked sublayers shrink multiplicatively and the
-early layers stop learning — the same vanishing-gradient wall that limited
-depth before @he2016deep.
+whose derivative is exactly 1, no matter how small $f'$ becomes.
+
+::: {.callout-note appearance="simple" icon="false"}
+Residual connections are often introduced as a cure for vanishing gradients.
+@he2016deep are explicit that this is *not* what they were solving. The
+problem they named is **degradation**: a 56-layer plain network scored worse
+than a 20-layer one on *training* error, so it was not overfitting — and the
+networks were already trained with batch normalisation, so the gradients were
+verified healthy. The deeper net simply could not learn to imitate the
+shallower one, because making a stack of layers compute the identity is hard.
+The residual path hands it that identity for free. Better gradient flow is a
+real and useful side effect; the motivating disease was optimisation
+difficulty, not gradient magnitude.
+:::
 
 ### Layer normalisation, and why it moved to the front
 
@@ -1107,7 +1196,17 @@ $$
 **layer normalization** — rescaling each token's feature vector to zero mean and unit variance, computed across that token's own features rather than across the batch. [↩](#term-layer-normalization){.term-back}
 :::
 
-Applied to our post-attention vectors, with $\gamma = 1$ and $\beta = 0$:
+Apply it in the block's real order — [normalise the residual *sum*, not the
+sublayer output]{.hl}. So first do the addition of the previous section,
+$x + \operatorname{Attn}(x)$:
+
+| token | animate | liquid | action | bias |
+|:--|--:|--:|--:|--:|
+| `kedi` | 1.6646 | 0.4635 | 0.8310 | 0.5000 |
+| `sütü` | 0.4458 | 1.6646 | 0.8310 | 0.5000 |
+| `içti` | 0.6438 | 0.8139 | 0.9585 | 0.5000 |
+
+and only then normalise those rows, with $\gamma = 1$ and $\beta = 0$:
 
 | token | animate | liquid | action | bias |
 |:--|--:|--:|--:|--:|
@@ -1129,8 +1228,8 @@ token's own numbers and nothing else, so it behaves identically at batch size
 512 and batch size 1.
 
 **Where it goes matters.** The original Transformer put the normalisation
-*after* the residual add, $\operatorname{LN}(x + f(x))$ — post-norm. Every
-model of consequence since GPT-2 puts it *before* the sublayer,
+*after* the residual add, $\operatorname{LN}(x + f(x))$ — post-norm. Since
+GPT-2, the standard has been to put it *before* the sublayer,
 $x + f(\operatorname{LN}(x))$ — pre-norm. The difference is that pre-norm
 leaves the residual path completely clean: there is an unbroken identity
 connection from the input embedding to the final layer, with nothing sitting
@@ -1138,12 +1237,27 @@ on it. Post-norm rescales the stream at every block, so the identity path
 is no longer an identity, and deep post-norm models need a learning-rate
 warmup to train at all [@xiong2020layernorm]. Everything below is pre-norm.
 
+::: {.callout-note appearance="simple" icon="false"}
+"Standard" is not "universal", and the placement is quietly drifting back.
+Gemma 2, Grok-1 and OLMo 2 all use variants of **sandwich norm** — a
+normalisation before *and* after each sublayer — for training stability at
+scale. The residual path is no longer perfectly clean in those models, and
+their authors judged the trade worth it. Pre-norm is the right default to
+learn and the right thing to assume when reading a diagram; check the config
+before you assume it of a specific checkpoint.
+:::
+
 ### The feed-forward sublayer
 
-Attention moves information *between* tokens. It cannot do anything else: an
-attention output is a weighted average of value vectors, and averaging is
-linear. Something has to supply the nonlinearity, and something has to give
-each token a chance to process what it just received, privately.
+Attention moves information *between* tokens, and that is close to all it can
+do. Be precise about why. Attention is not a linear function of $x$ — the
+softmax of a quadratic form is thoroughly nonlinear. But *given* the weights,
+the output is a convex combination of the value vectors: it can only ever
+produce points inside the convex hull of the values it was handed. It can
+reweight and blend; it cannot compute a new feature that none of its inputs
+carried. Something has to supply a nonlinearity that acts on the *content* of
+a vector, and something has to give each token a chance to process what it
+just received, privately.
 
 That is the second sublayer — a two-layer MLP applied to each position
 separately and identically:
@@ -1154,33 +1268,72 @@ $$
 \qquad W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}
 $$
 
-with $d_{\text{ff}} = 4d$ by convention. [The words *separately and
-identically* carry the weight: `kedi`'s FFN computation does not see `sütü` at
-all.]{.hl} Every cross-token interaction in a transformer happens in
-attention, and nowhere else. This is worth remembering when you are debugging
-a model that mixes up two entities in a long document — the mixing can only
-have come from an attention pattern.
+[The words *separately and identically* carry the weight: `kedi`'s FFN
+computation does not see `sütü` at all.]{.hl} Every cross-token interaction in
+a transformer happens in attention, and nowhere else. This is worth
+remembering when you are debugging a model that mixes up two entities in a
+long document — the mixing can only have come from an attention pattern.
 
-To watch it work, take $d_{\text{ff}} = 8$ (a real model would use 16 here;
-this is shrunk to fit on a page) and hand-set the columns of $W_1$ so each
-neuron is a recognisable detector, with the bias as its firing threshold:
+#### Why $d_{\text{ff}} = 4d$? {.unnumbered}
 
-| detector | fires on | `kedi` | `sütü` | `içti` |
+The short answer is that @vaswani2017attention picked 4 and it worked, and a
+decade of models kept it. There is no derivation. But there is a reading that
+makes the shape make sense: the FFN behaves like a **key–value memory**
+[@geva2021transformer]. Each of the $d_{\text{ff}}$ rows of $W_1$ is a pattern
+detector, and the matching row of $W_2$ is what gets written to the residual
+stream when that detector fires. Under that reading $d_{\text{ff}}$ is simply
+*how many things this layer can know*, and the expand-then-contract shape is
+the point: you need room wider than $d$ to hold more distinct patterns than
+you have dimensions.
+
+Watch what happens when the surrounding design changes and the "4" turns out
+to be negotiable. Modern models replace the single $W_1$ with a **gated**
+unit — SwiGLU — which uses *three* matrices instead of two. To keep the
+parameter count at the same $8d^2$, $d_{\text{ff}}$ has to shrink from $4d$ to
+$\tfrac{8}{3}d \approx 2.67d$, and that is exactly what Llama and its
+descendants use. The constant that survived was never 4; it was $8d^2$.
+
+#### Watching it fire {.unnumbered}
+
+Take $d_{\text{ff}} = 8$ (a real model at $d=4$ would use 16; this is shrunk
+to fit on a page) and hand-set the rows of $W_1$ so each neuron is a
+recognisable detector, with the bias as its firing threshold. Reading the four
+input dimensions in the order *animate, liquid, action, bias*:
+
+$$
+W_1^{\top}=\begin{bmatrix}
+1&0&1&0\\ 0&1&1&0\\ 1&1&0&0\\ 1&0&0&0\\ 0&1&0&0\\ 0&0&1&0\\
+0.5&0.5&0&0\\ 0&0&0&1
+\end{bmatrix},
+\qquad
+b_1=\begin{bmatrix}-0.9\\-0.9\\-0.9\\-0.5\\-0.5\\-0.5\\-0.5\\-0.5\end{bmatrix}
+$$
+
+Each row is a question and each bias is how convinced the neuron has to be
+before it answers. Feed it the normalised vectors from the previous section:
+
+| detector | its row of $W_1$ asks | `kedi` | `sütü` | `içti` |
 |:--|:--|--:|--:|--:|
-| animate + action | a verb-bearing agent | **0.6845** | 0 | 0 |
-| liquid + action | a verb-bearing object | 0 | **0.6906** | **0.9176** |
-| animate + liquid | two nouns at once | 0 | 0 | 0 |
-| animate only | | **1.1543** | 0 | 0 |
-| liquid only | | 0 | **1.1508** | 0 |
-| action only | | 0 | 0 | **0.8268** |
-| any noun | | 0 | 0 | 0 |
-| constant | | 0 | 0 | 0 |
+| animate + action | is this an animate thing attached to a verb? | **0.6845** | 0 | 0 |
+| liquid + action | is this a liquid attached to a verb? | 0 | **0.6906** | **0.9176** |
+| animate + liquid | is this animate *and* liquid at once? | 0 | 0 | 0 |
+| animate only | is this animate, verb or no verb? | **1.1543** | 0 | 0 |
+| liquid only | is this a liquid, verb or no verb? | 0 | **1.1508** | 0 |
+| action only | is this an action? | 0 | 0 | **0.8268** |
+| any noun | is this animate *or* liquid, weakly? | 0 | 0 | 0 |
+| constant | is the always-on dimension large? | 0 | 0 | 0 |
 
 Read the columns. `kedi` fires *animate + action* — after attention it is no
 longer just an animate thing, it is an animate thing attached to a verb.
 `içti` fires *liquid + action*, having absorbed its object. The ReLU zeroes
 everything below threshold, which is how a linear layer becomes a set of
-switches.
+switches. Note which rows do the interesting work. The three single-feature
+detectors would have fired on the raw embeddings too — they tell you nothing
+new. The two *composite* detectors could not have: before attention ran,
+`kedi` had exactly 0.0 action content and `sütü` had 0.0, so nothing could
+have answered "animate **and** attached to a verb". [The FFN is reading
+features that attention created one sublayer earlier — which is the whole
+reason the two sublayers alternate.]{.hl}
 
 Two honest observations. First, `içti` misses the *animate + action* detector
 by 0.066 — it has the agent content, but layer normalisation pushed that
@@ -1256,7 +1409,7 @@ concept across many neurons instead of one.
 ```
 
 ::: {.fig-cap}
-The pre-norm arrangement used by essentially every model since GPT-2: the
+The pre-norm arrangement, the default since GPT-2: the
 normalisation sits on the branch, never on the stream, so there is an
 unbroken identity path from the input embedding to the output. Stack this
 block $L$ times — 12 for GPT-2 small, 80 for a 70B-class model — and you have
@@ -1280,11 +1433,11 @@ argued for somewhere above or below.
 | softmax | weights must be positive, sum to 1, and be differentiable | a hard "best match" has zero gradient; nothing upstream can learn |
 | multiple heads | one weighted average can track exactly one relation | the layer expresses one relation per position, not several |
 | $W^O$ | head outputs live in separate subspaces and must re-enter the stream | no way to combine or route what the heads found |
-| residual add | deep stacks lose gradient, and a layer must be able to do nothing | vanishing gradients; adding depth stops helping |
+| residual add | a layer must be able to do nothing, and deep stacks degrade without that option | adding depth stops helping, then actively hurts |
 | layer norm | the stream's magnitude grows with depth; softmax and ReLU are scale-sensitive | activations drift and training destabilises |
 | *pre*-norm placement | post-norm rescales the stream, so the identity path is not an identity | deep models need learning-rate warmup to train at all |
 | feed-forward | attention only *mixes*: its output is a convex combination of values | no private per-token nonlinear processing, and most capacity disappears |
-| positional signal | attention is permutation-equivariant — it cannot see order | the model reads every sentence as a bag of words |
+| positional signal | unmasked attention is permutation-equivariant — it cannot see order | an encoder reads every sentence as a bag of words |
 
 Read the middle column on its own and you have the design rationale for the
 entire architecture. [Every one of these is a patch on a concrete defect, not
@@ -1416,9 +1569,16 @@ Biases and layer-norm parameters are $O(d)$ and round to nothing. So:
 | 4,096 | 67,108,864 | 134,217,728 | 201,326,592 |
 | 8,192 | 268,435,456 | 536,870,912 | 805,306,368 |
 
-[Two thirds of every transformer is the feed-forward half.]{.hl} People say
-"attention is all you need" and then build models in which attention is a
+[Two thirds of every transformer *block* is the feed-forward half.]{.hl} People
+say "attention is all you need" and then build blocks in which attention is a
 third of the weights.
+
+Say *block*, not *model*. The ratio holds inside a block; across a whole model
+the embeddings dilute it, and how much depends on the size. In GPT-2 small
+below, the 12 blocks are only 68% of the parameters, so the feed-forward share
+of the *model* is about 46%. At $d = 8192$ the embeddings are a rounding error
+and the model ratio converges back on two thirds. Small models are mostly
+vocabulary; large models are mostly feed-forward.
 
 A rule of thumb is only worth having if it reproduces a number you can look
 up. GPT-2 small is public: vocabulary 50,257, $d = 768$, 12 layers, context
@@ -1431,9 +1591,21 @@ up. GPT-2 small is public: vocabulary 50,257, $d = 768$, 12 layers, context
 | 12 blocks | $12 \times 12 \times 768^2$ | 84,934,656 |
 | **total** | | **124,318,464** |
 
-The published size is ~124M. The rule lands within 0.26%, which is close
-enough to trust it for capacity planning and not close enough to quote to four
-digits.
+The published size is ~124M, and the rule lands within **0.098%** of it. The
+residual is not mysterious — it is exactly the $O(d)$ terms the rule throws
+away. Restore them and the count closes completely:
+
+| dropped term | arithmetic | parameters |
+|:--|:--|--:|
+| attention biases | $12 \times (3d + d)$ | 36,864 |
+| feed-forward biases | $12 \times (4d + d)$ | 46,080 |
+| layer-norm $\gamma, \beta$ | $12 \times 2 \times 2d + 2d$ | 38,400 |
+| **exact total** | 124,318,464 + 121,344 | **124,439,808** |
+
+So the rule is not an approximation with unexplained slop; it is an exact
+count with three named terms deleted. Trust it for capacity planning, and
+remember which terms you dropped when someone asks why your number and the
+model card differ in the last five digits.
 
 ::: {.column-margin}
 Notice what the table does *not* contain: an output projection back to the
@@ -1462,15 +1634,27 @@ kedi sütü`, run attention again, then un-shuffle the outputs and compare:
 | `içti` | `[0.5308, 0.6009]` | `[0.5308, 0.6009]` |
 
 Largest disagreement anywhere in the table: $1.11 \times 10^{-16}$, which is
-floating-point noise and not a difference. [Self-attention is *permutation
-equivariant*: shuffle the inputs and the outputs shuffle with them, otherwise
-untouched.]{.hl}
+floating-point noise and not a difference. [Unmasked self-attention is
+*permutation equivariant*: shuffle the inputs and the outputs shuffle with
+them, otherwise untouched.]{.hl}
 
 This is not a bug that someone forgot to fix; it follows from the definition.
 Every token's output is a weighted sum over all tokens, and a sum does not
 care what order you add things in. Nothing anywhere in $QK^{\top}$, softmax,
 or $AV$ can see an index. A bag of words with a very clever averaging scheme
 is still a bag of words.
+
+::: {.callout-note appearance="simple" icon="false"}
+**"Unmasked" is doing real work in that sentence.** Add the causal mask of
+@sec-model-families and the symmetry breaks: token 1 may attend to one position,
+token 5 to five, so the *number of visible tokens* already encodes an index.
+Decoder-only models can therefore learn position with no positional encoding
+at all — the so-called **NoPE** result [@kazemnejad2023impact], which at small
+scale even extrapolates to longer sequences better than some explicit schemes.
+In practice everyone still adds an explicit signal, because a count is a weak
+and indirect way to learn order. But the honest statement is that the mask
+leaks position, not that a decoder is blind without an encoding.
+:::
 
 ### Adding a position signal
 
@@ -1686,8 +1870,12 @@ The most economical answer is to encode nothing and simply subtract a penalty
 proportional to distance, directly on the attention scores [@press2022alibi]:
 
 $$
-\text{score}(i, j) = q_i \cdot k_j - m\,(i - j)
+\text{score}(i, j) = \frac{q_i \cdot k_j}{\sqrt{d_k}} - m\,(i - j)
 $$
+
+The penalty is subtracted *after* the $\sqrt{d_k}$ scaling, not before — which
+matters, because it is what makes the slopes $m$ transferable across models of
+different width.
 
 Each head gets its own fixed slope $m$, on a geometric schedule. With eight
 heads the slopes are $\tfrac12, \tfrac14, \tfrac18, \dots, \tfrac{1}{256}$, so
@@ -1719,8 +1907,21 @@ result the paper's title advertises.
 |:--|:--|:--|:--|
 | sinusoidal | added to embeddings | none | defined, but quality degrades |
 | learned absolute | added to embeddings | $n_{\text{ctx}} \times d$ | **undefined** — no row exists |
-| RoPE | rotates Q and K per head | none | degrades gracefully; extendable by rescaling $\theta$ |
+| RoPE | rotates Q and K per head | none | defined, but degrades sharply; usable only after rescaling $\theta$ |
 | ALiBi | subtracted from scores | none | degrades gracefully by design |
+
+::: {.callout-warning appearance="simple" icon="false"}
+**RoPE does not extrapolate on its own.** Because it is a formula over $i - j$,
+RoPE is *defined* at any distance — but a model trained at 4k typically falls
+apart well before 8k, because the rotation angles it sees past the training
+length are ones it never encountered. That failure is exactly why the
+long-context toolkit exists: **Position Interpolation** squeezes unseen
+positions back into the trained range [@chen2023extending], and **NTK-aware
+scaling** and **YaRN** [@peng2024yarn] rescale $\theta$ frequency-by-frequency
+instead of uniformly. Every "extended to 128k" announcement about a RoPE model
+is announcing one of these plus continued training — not a free property of
+RoPE.
+:::
 
 [The column that matters in practice is the last one.]{.hl} When a vendor
 announces a context window, they are describing a property of the position
@@ -2058,12 +2259,14 @@ accumulates the output directly.
 
 ::: {.callout-important appearance="simple" icon="false"}
 **FlashAttention is exact.** It is not a sparse approximation, a low-rank
-factorisation, or a windowed heuristic. It computes precisely the same
-numbers as the naive implementation, in the same order of arithmetic
-operations, and differs only in what it stores. You never trade quality for
-it — which is why it went from a paper to a default in about eighteen months,
-and why memory use in attention is now linear in $n$ even though the
-computation is still quadratic.
+factorisation, or a windowed heuristic. It computes the same function as the
+naive implementation and differs only in what it stores. Exact is not the same
+as *bit-identical*: the online softmax re-associates the sums, and
+floating-point addition is not associative, so the last digits can move — the
+same way any two matrix-multiply kernels disagree in the last digits. What you
+never trade is quality, which is why it went from a paper to a default in
+about eighteen months, and why memory use in attention is now linear in $n$
+even though the computation is still quadratic.
 :::
 
 ### The KV cache: the number that decides deployment
@@ -2137,8 +2340,8 @@ linear-per-token.
 
 ::: {.fig-cap}
 The cache is the reason generation is affordable and the reason long context
-is not. It trades $O(n^2)$ recomputation per step for $O(n)$ storage — held
-separately for every concurrent request.
+is not. It trades $O(n)$ recomputation per step — $O(n^2)$ over a whole
+generation — for $O(n)$ storage, held separately for every concurrent request.
 :::
 ::::
 
@@ -2157,7 +2360,7 @@ tokens, linearly, and **per concurrent request**.
 |:--|--:|--:|--:|--:|--:|
 | 7B-class | 32 | 32 | 128 | 4,096 | 2.1 GB |
 | 7B-class | 32 | 32 | 128 | 32,768 | 17.2 GB |
-| 70B-class | 80 | 64 | 128 | 32,768 | 85.9 GB |
+| 70B-class, *hypothetical* MHA | 80 | 64 | 128 | 32,768 | 85.9 GB |
 | 7B-class | 32 | 32 | 128 | 100,000 | 52.4 GB |
 
 A 7B model in fp16 is 14 GB of weights. At 100,000 tokens of context its KV
@@ -2165,6 +2368,14 @@ cache is 52 GB — [nearly four times the model itself, for one
 conversation.]{.hl} This is the arithmetic behind every "why is long context
 so expensive?" question, and it is why serving systems care so much about how
 that memory is partitioned and reused (@sec-serving).
+
+The third row is marked *hypothetical* on purpose: **no 70B-class model you
+can download actually has 64 KV heads.** Llama 2 70B, Llama 3, Mistral and
+their descendants all use 8, and the next section explains why. Redo the
+arithmetic with $h_{\text{kv}} = 8$ and the 85.9 GB becomes **10.7 GB**. That
+one substitution is the difference between a model that needs a node and a
+model that fits on a card, and it is the single most consequential number in
+this chapter.
 
 ::: {.anlp-widget}
 ```{=html}
@@ -2263,15 +2474,19 @@ and nearly everything since ship with it. [It is a rare case where the
 efficiency trick has almost no accuracy cost, which is exactly why it became
 universal.]{.hl}
 
-Notice, finally, that these are decisions frozen at training time. You cannot
-convert an MHA checkpoint to GQA at deployment without retraining — which is
-why "how big is the KV cache" belongs in your model-selection checklist, not
-in your optimisation backlog.
+Notice, finally, that this is a decision you inherit rather than tune. You
+cannot flip an MHA checkpoint to GQA in your serving config. You *can* convert
+one — the GQA paper's own recipe mean-pools the key and value heads of each
+group and then **uptrains** on roughly 5% of the original pretraining compute
+[@ainslie2023gqa] — but 5% of a pretraining run is still a training run, with a
+cluster and a budget and a week. For every practical purpose, "how big is the
+KV cache" belongs in your model-selection checklist, not in your optimisation
+backlog.
 
 ## Mixture of Experts {#sec-moe}
 
-Two thirds of a transformer is the feed-forward sublayer, and every token goes
-through all of it. A [mixture of experts](#gloss-mixture-of-experts){#term-mixture-of-experts .term-ref} asks whether it has to.
+Two thirds of every transformer block is the feed-forward sublayer, and every
+token goes through all of it. A [mixture of experts](#gloss-mixture-of-experts){#term-mixture-of-experts .term-ref} asks whether it has to.
 
 Replace the single feed-forward network in a block with $E$ copies — the
 *experts* — plus a small learned **router** that scores the experts for each
@@ -2451,11 +2666,13 @@ Work in NumPy first; reach for a framework only in step 3.
    `torch.nn.functional.scaled_dot_product_attention` on random inputs at
    several shapes and report the maximum absolute difference. Anything above
    about $10^{-5}$ in fp32 is a real disagreement, not rounding.
-4. **Confirm permutation equivariance.** Shuffle the tokens, run again,
-   un-shuffle the outputs, and report the maximum difference. You should get
-   machine epsilon, as this chapter did. Then add a positional encoding and
-   report the number again. Explain the change to someone who has not read
-   this chapter.
+4. **Confirm permutation equivariance.** With *no* mask, shuffle the tokens,
+   run again, un-shuffle the outputs, and report the maximum difference. You
+   should get machine epsilon, as this chapter did. Then add a positional
+   encoding and report the number again. Finally repeat the whole test with a
+   causal mask and no positional encoding: equivariance breaks even though you
+   added no position signal. Explain why to someone who has not read this
+   chapter.
 5. **Measure the exponent.** Time attention at $n = 128, 256, \dots, 4096$
    with $d = 64$, holding everything else fixed. Plot on log-log axes and fit
    a slope. State what exponent you measured and whether it is 2 — and if it
@@ -2536,10 +2753,12 @@ chapter needed them:
    offset 5 from absolute positions 0, 100, 1,000 and 5,000. Report the spread.
    Then do it with a learned-style additive encoding and report that spread.
    Use the two numbers to argue for or against RoPE in one paragraph.
-9. A 70B-class model has 80 layers, 64 KV heads, and head dimension 128. Using
-   the KV cache calculator, find the longest context you can serve to four
-   concurrent users on a single 80 GB accelerator, after reserving 140 GB for
-   fp16 weights. Explain what you had to change to make the answer non-zero.
+9. A 70B-class model has 80 layers, 64 query heads, and head dimension 128.
+   Using the KV cache calculator, find the longest context you can serve to
+   four concurrent users on a single 80 GB accelerator, after reserving 140 GB
+   for fp16 weights. Note that the answer is zero before you change anything.
+   Now set the KV heads to 8, as every shipped 70B actually does, and answer
+   again. Name every quantity that changed and every one that did not.
 10. An announcement describes a model as "120B total parameters, 5B active".
     A colleague concludes it will run on a 24 GB consumer GPU because 5B is
     small. Write the two-sentence correction, with the arithmetic.
