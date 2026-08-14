@@ -242,20 +242,25 @@ self-similarity trap, because nothing forces $M$ to be symmetric. So the honest
 claim is not "two matrices are necessary"; it is [two matrices are necessary
 *once you also want the model to be cheap*]{.hl}. Three concrete reasons:
 
-- **Parameters.** In GPT-3-scale terms, $d = 4096$ and $d_k = 128$: the pair
-  $W^Q, W^K$ costs $2 \times 4096 \times 128 = 1{,}048{,}576$ numbers, while a
-  full $M$ costs $4096^2 = 16{,}777{,}216$ — **16× more**, per head, per layer.
+- **Parameters.** In GPT-3-scale terms, $d = 4096$ and $d_k = 128$: one head's
+  $W^Q, W^K$ pair costs $2 \times 4096 \times 128 = 1{,}048{,}576$ numbers,
+  while a full $M$ costs $4096^2 = 16{,}777{,}216$ — **16× more**. The ratio
+  is the same for a whole layer, since you would need one $M$ per head:
+  $32$ heads cost $2d^2 = 33.5$M factored against $32d^2 = 537$M unfactored.
   The factorisation is a deliberate low-rank constraint: $M$ is forced to rank
   $\le d_k$, and that is a feature, not a loss.
 - **Arithmetic.** Scoring through $Q$ and $K$ costs $O(n^2 d_k)$. Scoring
   through $M$ costs $O(n^2 d)$ — you would pay $d/d_k = 32\times$ more for the
   same numbers.
-- **Caching.** This is the one that decides the design. $Q$ and $K$ give every
-  token a *materialised* key vector of its own, computed once and reusable
-  forever. Fold them into $M$ and there is no key to store — every new token
-  would have to re-score against every raw embedding from scratch. The KV
-  cache, which is what makes generation affordable at all, exists precisely
-  because $W^Q$ and $W^K$ were kept apart.
+- **Cache width.** This is the one that decides the design. With $M$ you can
+  still cache — you just store $x_j$ itself, since
+  $x_i^{\top} M x_j = (M^{\top} x_i) \cdot x_j$ — but what you store is stuck
+  at the full width $d$. Factoring puts keys in a $d_k$-wide space of their
+  own, and once they live there you can *shrink that space*: sharing one key
+  head across many query heads takes the cache from $4096$ numbers per token
+  per layer to $1024$. That trick is called GQA, it is the subject of
+  @sec-attention-cost, and it is impossible to even state without a separate
+  $W^K$.
 
 The same non-identifiability applies on the value path: a head's output enters
 the residual stream as $x W^V W^O_{\text{head}}$, another product of two
@@ -412,8 +417,9 @@ attnData = {
     }
     const it = tokens.indexOf("it");
     M[it] = new Array(n).fill(0);
-    M[it][tokens.indexOf("robot")]  = 0.46;  // is “it” the robot…
-    M[it][tokens.indexOf("coffee")] = 0.34;  // …or the coffee?
+    // "…because it was ready" -> "it" is the coffee, but not overwhelmingly
+    M[it][tokens.indexOf("coffee")] = 0.46;
+    M[it][tokens.indexOf("robot")]  = 0.34;
     M[it][it] = 0.12;
     M[it][tokens.indexOf("ready")]  = 0.08;
   }
@@ -494,9 +500,10 @@ big?" always has an answer:
 | `içti` | drank | 0.0 | 0.1 | 0.9 | 0.5 |
 
 The fourth dimension is the same for all three tokens. Watch what happens to
-it: because it never varies, it cannot help one token tell another apart, and
-it will drop out of every comparison below. A constant feature is worth
-exactly nothing to attention.
+it: because it never varies, it cannot help one token *advertise* anything
+that distinguishes it, and it will drop out of every comparison below. Keep
+your eye on it — we will come back at the end of the section and ask whether
+"a constant feature is worth nothing" is really true.
 
 ### Step 1 — project each token three ways
 
@@ -1129,14 +1136,39 @@ vector forever, and a transformer, where its vector is rebuilt from its
 neighbours at every layer.
 
 The `bias` column gained exactly zero, in every row — an artefact of this
-$W^O$, whose bottom row happens to send nothing back to that dimension. Be
-careful about the general lesson. The constant dimension is useless *for
-routing*: a feature that never varies cannot ask a question or answer one,
-because it contributes the same amount to every score in the matrix. It is not
-useless for **content**. Our $W^V$ gives it a weight of 0.2, so it adds a
-constant $+0.1$ to both components of every value vector — the value path's
-version of a bias term. [A never-varying feature carries no information about
-*which* tokens to connect, but it can still shift *what* they deliver.]{.hl}
+$W^O$, whose bottom row happens to send nothing back to that dimension.
+
+Now that promised return to the constant dimension, because the tidy story
+about it is only two-thirds true. Split the score into the pieces the constant
+$c$ contributes, writing each token as $x_i = [z_i, c]$:
+
+$$
+q_i \cdot k_j = \underbrace{z_i A \cdot z_j B}_{\text{the real content}}
+\;+\; \underbrace{c\,(z_i A \cdot b)}_{\text{same for all } j}
+\;+\; \underbrace{c\,(a \cdot z_j B)}_{\textbf{varies with } j}
+\;+\; \underbrace{c^2 (a \cdot b)}_{\text{same for all } j}
+$$
+
+where $a$ and $b$ are the rows of $W^Q$ and $W^K$ that read the constant
+feature. Softmax is invariant to adding the same number to a whole row, so the
+second and fourth terms genuinely vanish. Three conclusions, and only the
+first two are what you would guess:
+
+- **On the key side it is useless.** A constant cannot advertise. Whatever
+  $b$ is, its contribution is identical across $j$ and cancels.
+- **On the value side it is a bias term.** Our $W^V$ gives it a weight of 0.2,
+  so it adds a constant $+0.1$ to both components of every value vector.
+- **On the query side it is not useless at all.** The third term depends on
+  $j$, and it does *not* cancel. It is a fixed preference over keys that every
+  token asks for regardless of what it is — a learned global prior. In our
+  example it disappears only because this $W^Q$ has a zero row for that
+  feature; set that row to $[0.9, -0.7]$ instead and the attention weights
+  move by as much as **0.1592**.
+
+[A constant feature can never answer a question, but it can ask one.]{.hl}
+That third term is not a curiosity: it is essentially how a model builds an
+*attention sink*, a position that every token dumps leftover weight onto when
+it has nothing in particular to look at.
 
 ### Residual connections: adding, not replacing
 
@@ -1196,9 +1228,18 @@ $$
 **layer normalization** — rescaling each token's feature vector to zero mean and unit variance, computed across that token's own features rather than across the batch. [↩](#term-layer-normalization){.term-back}
 :::
 
-Apply it in the block's real order — [normalise the residual *sum*, not the
-sublayer output]{.hl}. So first do the addition of the previous section,
-$x + \operatorname{Attn}(x)$:
+Apply it in the block's real order. In a pre-norm block the normalisation
+before the *feed-forward* sublayer sees $x + \operatorname{Attn}(\cdot)$, so
+[normalise the residual sum, not the sublayer output]{.hl}. First do the
+addition of the previous section:
+
+::: {.column-margin}
+One simplification to declare. A real pre-norm block normalises *before*
+attention too — the worked example fed raw embeddings straight to $W^Q$,
+$W^K$, $W^V$ so the numbers stayed legible. Everything downstream inherits
+that choice. The normalisation you are watching here is the block's second
+one, in its correct position.
+:::
 
 | token | animate | liquid | action | bias |
 |:--|--:|--:|--:|--:|
@@ -1238,13 +1279,16 @@ is no longer an identity, and deep post-norm models need a learning-rate
 warmup to train at all [@xiong2020layernorm]. Everything below is pre-norm.
 
 ::: {.callout-note appearance="simple" icon="false"}
-"Standard" is not "universal", and the placement is quietly drifting back.
-Gemma 2, Grok-1 and OLMo 2 all use variants of **sandwich norm** — a
-normalisation before *and* after each sublayer — for training stability at
-scale. The residual path is no longer perfectly clean in those models, and
-their authors judged the trade worth it. Pre-norm is the right default to
-learn and the right thing to assume when reading a diagram; check the config
-before you assume it of a specific checkpoint.
+"Standard" is not "universal", and the placement is still being tuned. Gemma 2
+uses **sandwich norm** — a normalisation before *and* after each sublayer,
+$x + \operatorname{N}_2(f(\operatorname{N}_1(x)))$. OLMo 2 goes the other way
+and drops the input norm entirely, keeping only an output one,
+$x + \operatorname{N}(f(x))$. Both were adopted for training stability at
+scale, and note that in both the normalisation still sits on the *branch*, so
+the identity path stays unbroken — that property is the one nobody gives up.
+Pre-norm is the right default to learn and the right thing to assume when
+reading a diagram; check the config before you assume it of a specific
+checkpoint.
 :::
 
 ### The feed-forward sublayer
@@ -1286,12 +1330,27 @@ stream when that detector fires. Under that reading $d_{\text{ff}}$ is simply
 the point: you need room wider than $d$ to hold more distinct patterns than
 you have dimensions.
 
-Watch what happens when the surrounding design changes and the "4" turns out
-to be negotiable. Modern models replace the single $W_1$ with a **gated**
-unit — SwiGLU — which uses *three* matrices instead of two. To keep the
-parameter count at the same $8d^2$, $d_{\text{ff}}$ has to shrink from $4d$ to
-$\tfrac{8}{3}d \approx 2.67d$, and that is exactly what Llama and its
-descendants use. The constant that survived was never 4; it was $8d^2$.
+Watch what happens when the surrounding design changes, because the "4" turns
+out to be entirely negotiable. Modern models replace the single $W_1$ with a
+**gated** unit — SwiGLU — which uses *three* matrices instead of two, so the
+sublayer costs $3\,d\,d_{\text{ff}}$ rather than $2\,d\,d_{\text{ff}}$. What
+did the field do with that?
+
+| model | $d$ | $d_{\text{ff}}$ | ratio | FFN parameters |
+|:--|--:|--:|--:|--:|
+| GPT-2, ReLU | 768 | 3,072 | 4.00 | $8d^2$ |
+| Llama 2 7B, SwiGLU | 4,096 | 11,008 | 2.69 | $8.1d^2$ |
+| Llama 3 8B, SwiGLU | 4,096 | 14,336 | 3.50 | $10.5d^2$ |
+| Llama 3 70B, SwiGLU | 8,192 | 28,672 | 3.50 | $10.5d^2$ |
+| Mistral 7B, SwiGLU | 4,096 | 14,336 | 3.50 | $10.5d^2$ |
+
+Llama 2 picked $\tfrac{8}{3}d \approx 2.67d$, which is exactly the width that
+holds the parameter count at $8d^2$ despite the third matrix. Llama 3 and
+Mistral then abandoned that discipline and simply spent 31% more. [So neither
+the 4 nor the $8d^2$ is a law.]{.hl} What survived is the *shape* —
+expand well past $d$, apply a nonlinearity, contract back — and the fact that
+this sublayer is where most of a model's parameters go. Treat any specific
+constant as a hyperparameter someone tuned, not a result someone derived.
 
 #### Watching it fire {.unnumbered}
 
@@ -1329,11 +1388,15 @@ longer just an animate thing, it is an animate thing attached to a verb.
 everything below threshold, which is how a linear layer becomes a set of
 switches. Note which rows do the interesting work. The three single-feature
 detectors would have fired on the raw embeddings too — they tell you nothing
-new. The two *composite* detectors could not have: before attention ran,
-`kedi` had exactly 0.0 action content and `sütü` had 0.0, so nothing could
-have answered "animate **and** attached to a verb". [The FFN is reading
-features that attention created one sublayer earlier — which is the whole
-reason the two sublayers alternate.]{.hl}
+attention did not already know. The composite detectors are the interesting
+ones, and specifically for the two nouns: before attention ran, `kedi` and
+`sütü` both had exactly 0.0 action content, so nothing could have answered
+"animate **and** attached to a verb". (`içti` is the exception that proves the
+rule — it started with a little liquid content of its own, so its
+*liquid + action* detector would have fired weakly anyway; attention raised it
+from 0.1 to 0.9176.) [The FFN is reading features that attention created one
+sublayer earlier, which is the whole reason the two sublayers
+alternate.]{.hl}
 
 Two honest observations. First, `içti` misses the *animate + action* detector
 by 0.066 — it has the agent content, but layer normalisation pushed that
@@ -1426,7 +1489,8 @@ argued for somewhere above or below.
 
 | component | the problem it exists to solve | what breaks without it |
 |:--|:--|:--|
-| separate $W^Q$, $W^K$ | raw similarity $x_i \cdot x_j$ is symmetric and largest on the diagonal | relations cannot be directed; every token attends mostly to itself |
+| *any* learned score matrix | raw similarity $x_i \cdot x_j$ is symmetric and inflates the diagonal | relations cannot be directed; every token attends mostly to itself |
+| *factoring* it into $W^Q$, $W^K$ | one $d \times d$ matrix per head is 16× the parameters, and pins the cache at width $d$ | training cost balloons and GQA becomes inexpressible |
 | separate $W^V$ | what a token *advertises* is not what it should *deliver* | routing and content are forced to be the same thing |
 | dot product | need one cheap comparable score for all $n^2$ pairs | no scalable way to compare every pair |
 | $\div\sqrt{d_k}$ | score spread grows like $\sqrt{d_k}$, and softmax reacts to absolute size | wide heads saturate the softmax and the gradient dies |
@@ -1579,6 +1643,12 @@ below, the 12 blocks are only 68% of the parameters, so the feed-forward share
 of the *model* is about 46%. At $d = 8192$ the embeddings are a rounding error
 and the model ratio converges back on two thirds. Small models are mostly
 vocabulary; large models are mostly feed-forward.
+
+And two thirds is the *floor*. It assumes the GPT-2 shape, $8d^2$ of
+feed-forward against $4d^2$ of attention. A Llama-3 block spends $10.5d^2$ on
+its SwiGLU feed-forward, which pushes the share to 72%. Every architectural
+change of the last few years has moved weight *into* this sublayer, never out
+of it.
 
 A rule of thumb is only worth having if it reproduces a number you can look
 up. GPT-2 small is public: vocabulary 50,257, $d = 768$, 12 layers, context
@@ -2724,8 +2794,12 @@ chapter needed them:
 ## Exercises
 
 1. In the attention explorer, the pronoun head splits its weight roughly
-   46/34 between *robot* and *coffee*. Rewrite the sentence so a good model
-   should flip that ratio, and justify your edit.
+   46/34 between *coffee* and *robot* — leaning to the coffee, but only just.
+   Write **three** one-word substitutions for *ready* that should push the
+   ratio decisively one way or the other, and for each one state the fact
+   about the world, not about grammar, that forces the reading. Then say what
+   this implies about how much of a language model's competence can come from
+   the attention pattern alone.
 2. Attention is order-blind on its own. Take the word-order pair from
    @sec-bake-off that scored cosine 1.0000 under averaging, and explain
    precisely which component of a transformer block makes the two sentences
@@ -2734,10 +2808,14 @@ chapter needed them:
    token context. Compute the size of the KV cache in gigabytes at 16-bit
    precision. Then explain why grouped-query attention exists.
 4. In the worked example, the fourth embedding dimension is 0.5 for all three
-   tokens and it contributed nothing to any attention weight. Prove that this
-   must be true in general: show that a feature with the same value in every
-   token cannot change the softmax output of any row, whatever $W^Q$ and $W^K$
-   contain.
+   tokens and it contributed nothing to any attention weight. Work out how far
+   that generalises, in two parts. **(a)** Prove that the *key* side always
+   cancels: show that whatever row $W^K$ assigns to a constant feature, its
+   contribution is the same for every key $j$ and therefore vanishes in the
+   softmax. **(b)** Then show by counterexample that the *query* side does
+   not. Give $W^Q$ a non-zero row for the constant feature, recompute `içti`'s
+   attention weights, and report how far they moved. Explain in one sentence
+   why the same feature can matter in one projection and not the other.
 5. Set $W^Q$ and $W^K$ back to a scale whose product is 1 instead of 3 and
    recompute `içti`'s attention row. Report the weights, and explain what the
    $1/\sqrt{d_k}$ term is protecting against in terms of what you observe.
@@ -2754,11 +2832,12 @@ chapter needed them:
    Then do it with a learned-style additive encoding and report that spread.
    Use the two numbers to argue for or against RoPE in one paragraph.
 9. A 70B-class model has 80 layers, 64 query heads, and head dimension 128.
-   Using the KV cache calculator, find the longest context you can serve to
-   four concurrent users on a single 80 GB accelerator, after reserving 140 GB
-   for fp16 weights. Note that the answer is zero before you change anything.
-   Now set the KV heads to 8, as every shipped 70B actually does, and answer
-   again. Name every quantity that changed and every one that did not.
+   Its fp16 weights are 140 GB, so it is served on a node of four 80 GB
+   accelerators — 320 GB total. Using the KV cache calculator, find the
+   longest context you can serve to four concurrent users, first with 64 KV
+   heads and then with 8, as every shipped 70B actually has. Report both
+   lengths and the ratio between them. Then name every quantity in the cache
+   formula that changed and every one that did not.
 10. An announcement describes a model as "120B total parameters, 5B active".
     A colleague concludes it will run on a 24 GB consumer GPU because 5B is
     small. Write the two-sentence correction, with the arithmetic.

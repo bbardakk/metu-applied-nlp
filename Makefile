@@ -1,7 +1,8 @@
 # Applied NLP book — local workflow
-# Requires: quarto (https://quarto.org), python deps from requirements.txt
+# Requires: quarto (https://quarto.org), python deps from requirements.txt,
+# node (for check-ojs)
 
-.PHONY: preview preview-tr render serve glossary glossary-check check-links check-glossary-use readability check clean
+.PHONY: preview preview-tr render serve glossary glossary-check check-links check-glossary-use check-ojs readability check clean
 
 ## Rebuild the glossary tables from en/appendices/glossary.csv
 glossary:
@@ -19,12 +20,16 @@ check-links:
 check-glossary-use:
 	python3 scripts/check-glossary-use.py
 
+## Fail on an ojs widget that does not parse, or two cells sharing a name
+check-ojs:
+	node scripts/check-ojs.mjs
+
 ## Report prose difficulty per chapter (advisory — never fails the build)
 readability:
 	python3 scripts/check-readability.py
 
 ## Every fast check CI runs, without the full render
-check: glossary-check check-links check-glossary-use
+check: glossary-check check-links check-glossary-use check-ojs
 
 ## Live-preview the English edition (auto-reloads on save)
 preview:
