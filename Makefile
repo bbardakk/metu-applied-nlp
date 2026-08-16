@@ -2,7 +2,7 @@
 # Requires: quarto (https://quarto.org), python deps from requirements.txt,
 # node (for check-ojs)
 
-.PHONY: preview preview-tr render serve glossary glossary-check check-links check-glossary-use check-ojs readability check clean
+.PHONY: preview preview-tr render serve glossary glossary-check check-links check-glossary-use check-ojs check-numbering renumber readability check clean
 
 ## Rebuild the glossary tables from en/appendices/glossary.csv
 glossary:
@@ -24,12 +24,22 @@ check-glossary-use:
 check-ojs:
 	node scripts/check-ojs.mjs
 
+## Fail if a chapter's NN- prefix disagrees with its position in _quarto.yml
+check-numbering:
+	python3 scripts/renumber-chapters.py --check
+
+## Renumber chapters to match _quarto.yml, fixing links in both editions
+renumber:
+	python3 scripts/renumber-chapters.py
+
 ## Report prose difficulty per chapter (advisory — never fails the build)
 readability:
 	python3 scripts/check-readability.py
 
-## Every fast check CI runs, without the full render
-check: glossary-check check-links check-glossary-use check-ojs
+## Every fast check CI runs, without the full render.
+## Numbering runs before links: bad numbers cause dead links, so reporting
+## the root cause first saves chasing the symptom.
+check: glossary-check check-numbering check-links check-glossary-use check-ojs
 
 ## Live-preview the English edition (auto-reloads on save)
 preview:

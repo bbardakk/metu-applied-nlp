@@ -14,7 +14,7 @@ kod bölümleri Python + Jupyter engine + `freeze`.
 ├── en/                      # İngilizce kitap (tam Quarto projesi)
 │   ├── _quarto.yml          # bölüm listesi, tema, footer — ana kontrol dosyası
 │   ├── index.qmd            # landing page (BPE-chip hero)
-│   ├── chapters/            # 36 bölüm / 7 part (01-04 dolu, kalanı iskelet)
+│   ├── chapters/            # 39 bölüm / 7 part (01-10 dolu, kalanı iskelet)
 │   ├── appendices/          # setup, math refresher, EN↔TR sözlük
 │   │                        #   glossary.csv = sözlüğün tek doğruluk kaynağı
 │   ├── theme/               # custom-light.scss / custom-dark.scss
@@ -43,10 +43,22 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
 - **Metin düzenleme:** ilgili `.qmd` dosyasını aç, yaz, kaydet — önizleme
   anında yenilenir. Bölümlerdeki `<!-- TODO(draft): ... -->` blokları yazım
   planıdır; render'da görünmez.
-- **Bölüm ekleme:** `en/_templates/chapter-template.qmd` dosyasını
-  `en/chapters/NN-isim.qmd` olarak kopyala → `en/_quarto.yml` içindeki
-  `chapters:` listesine doğru part altına ekle. Silme/sıralama da aynı
-  listeden.
+- **Bölüm ekleme / silme / sıralama:** `en/_quarto.yml` içindeki `chapters:`
+  listesi tek doğruluk kaynağıdır; dosya adındaki `NN-` numarası oradaki
+  sıradan türetilir. Yeni bölüm için template'i `en/chapters/NN-isim.qmd`
+  olarak kopyala — `NN` yerine boşta olan herhangi bir numara (90, 91, …)
+  yeter, doğrusunu script atayacak. Listede istediğin yere ekle, sonra:
+
+  ```bash
+  python3 scripts/renumber-chapters.py --dry-run   # planı gör
+  python3 scripts/renumber-chapters.py             # uygula
+  ```
+
+  Script dosyaları `git mv` ile yeniden adlandırır ve her iki dildeki tüm
+  bağlantıları düzeltir — bağlantı metnine yazılmış `[17. bölümde](...)`
+  gibi numaralar dahil. `@sec-` çapraz referanslarına dokunmaz; numara
+  değil çapa oldukları için zaten kırılmazlar. `make check` numara ile
+  sıra uyuşmazsa build'i düşürür.
 - **Sözlüğe terim ekleme:** `en/appendices/glossary.csv`'yi düzenle (grup
   sırası korunur, grup içinde alfabetik), sonra `make glossary`.
   `c-glossary.qmd`'deki tablolar üretilmiştir — elle düzenleme.
@@ -61,7 +73,7 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
 ## 3) İnteraktifler (OJS)
 
 Örnekler: `en/chapters/07-transformers.qmd` içinde attention-head explorer,
-`en/chapters/15-decoding-structured-output.qmd` içinde temperature/top-k/top-p
+`en/chapters/18-decoding-structured-output.qmd` içinde temperature/top-k/top-p
 sampling explorer. Desen: `viewof x =
 Inputs.range(...)` girdileri → hesap hücresi → `Plot.plot(...)`. Tamamı
 tarayıcıda çalışır; build sırasında Python gerekmez. Yeni widget için bu
