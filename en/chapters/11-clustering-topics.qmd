@@ -60,9 +60,12 @@ distinct word forms   86,245
 ```
 
 ::: {.column-margin}
-Everything down to `distinct word forms` is the identical pipeline
-@sec-bake-off ran, re-executed here so that the two chapters are provably
-talking about the same documents rather than approximately the same ones.
+Same source, same seed, same de-duplication as @sec-bake-off — but *not* the
+same tokenizer. That chapter used a Turkish-aware `tr_lower` and the pattern
+`[a-zçğıöşü]+`; this one deliberately uses stock `str.lower()` and a bare `\w+`,
+which is what you get if you do not think about it. That single
+difference is why the form counts here (86,245) and there (74,317) are not
+comparable — and it is the whole subject of @sec-dotted-i.
 :::
 
 The labels exist. They are used exactly once, in @sec-clustering-payoff, to
@@ -117,17 +120,30 @@ measures the angle and ignores the length. That is usually what you
 want for text, because a 300-word review and a 30-word review about the same
 thing should be similar, and their raw count vectors differ in magnitude by a
 factor of ten. **Euclidean** distance takes length seriously, which makes it
-the honest choice when magnitude carries meaning — and note that on
-$\ell_2$-normalised vectors the two are monotonically related, so on unit
-vectors the distinction disappears entirely.[^normeq] **Jaccard** works on
+the honest choice when magnitude carries meaning — and note that *between two
+unit vectors* the two rank pairs identically, so for ranking purposes the
+distinction disappears.[^normeq] **Jaccard** works on
 *sets* rather than vectors, which is what makes it the basis of the
 near-duplicate machinery in @sec-near-dupes.
 
 [^normeq]: If $\lVert a \rVert = \lVert b \rVert = 1$ then
 $d_{\text{euc}}(a,b)^2 = 2 - 2\cos(a,b)$, so ranking by one ranks by the other.
-This is why "we used Euclidean k-means on normalised embeddings" and "we used
-spherical k-means" describe nearly the same procedure, and why arguing about
-which to use is often arguing about nothing.
+Do not over-extend this. It licenses "the same nearest neighbours", not "the
+same algorithm": Lloyd's k-means replaces each centre with the arithmetic mean
+of its members, and a mean of unit vectors is not itself a unit vector, so from
+the second iteration onward Euclidean k-means on normalised embeddings and
+spherical k-means are genuinely different procedures. They usually land in
+similar places on text. "Usually" is doing real work in that sentence. Every
+embedding in this chapter is $\ell_2$-normalised before clustering and every
+silhouette is computed with `metric="cosine"`, so the assignment step agrees
+with the scoring step and the silhouette numbers are comparable across
+representations. One exception, small but worth knowing about: 51 of the 49,849
+LSA rows are exactly zero, because `min_df=3, max_df=0.5` deleted every token
+those 51 documents contained, and a zero vector cannot be normalised. They sit
+at the origin, get swept into whichever cluster is nearest it, and are counted
+in every table in this chapter. Fifty-one out of fifty thousand does not move a
+number, but "my vectors are all unit length" was still false, and I only knew
+that because I checked.
 
 ::: {#gloss-cosine-similarity .column-margin .term-gloss}
 **cosine similarity** — the cosine of the angle between two vectors; 1 means
@@ -218,10 +234,13 @@ is a property of how the encoder was trained — its
 embedding geometry @sec-embeddings measured for contextual vectors — and not a
 property of your documents at all.
 
-Notice also that the *usable range* is not the same as the nominal range. E5
-nominally reports a number in $[-1, 1]$; in practice it uses 0.13 of that
-interval. tf-idf uses 0.13 as well, but starting from zero, so its scores at
-least behave like the fractions they resemble.
+Notice also that the *usable range* is not the same as the nominal range. Both
+E5 and tf-idf put 98% of their random pairs inside a window about 0.13 wide —
+but E5's window is nominally an interval of length 2, of which it uses 6.7%,
+and it sits bunched up at the far right. tf-idf's window starts at zero, so a
+score of 0.13 really is near the top of what that space produces. Same width,
+completely different meaning, and only one of them behaves like the fraction it
+resembles.
 
 ::: {.callout-important appearance="simple"}
 **Calibrate before you threshold.** Before choosing any similarity cutoff,
@@ -254,6 +273,15 @@ a raw cosine, and as a $z$-score against that model's own random-pair
 distribution from the table above, which is the only way to compare across
 models whose scales differ this much.
 
+::: {.column-margin}
+A **$z$-score** restates a raw number as "how many standard deviations above
+average is this?": $z = (x - \mu)/\sigma$. Here $\mu$ and $\sigma$ are the mean
+and spread of the random-pair cosines in the table above. So $z = 4$ means the
+pair is far more similar than two documents picked at random, whatever the
+model's raw scale happens to be. E5's 0.9894 and tf-idf's 1.0000 look alike as
+cosines and are worlds apart as $z$-scores.
+:::
+
 | pair | | tf-idf | | MiniLM | | E5 | |
 |:--|:--|--:|--:|--:|--:|--:|--:|
 | | | cos | $z$ | cos | $z$ | cos | $z$ |
@@ -280,26 +308,36 @@ behaviour:
    the contradiction pair 0.9894. The problem was never sparsity, and it was
    never vocabulary. Word order still carries the meaning and the pooled
    sentence vector still mostly does not.
-2. **MiniLM separates polarity better than E5 does.** On the flip and negation
-   rows MiniLM sits 2.0 $z$ below its paraphrase score; E5 sits 1.1 $z$ below.
-   The larger, better-benchmarked model is *less* sensitive to the distinction
-   this corpus is labelled for. Bigger is not automatically better for a
-   specific axis.
+2. **On these five pairs, MiniLM separates polarity more sharply than E5.**
+   MiniLM drops 2.0 $z$ from its paraphrase score to the polarity flip and 1.5
+   $z$ to the negation; E5 drops 1.1 $z$ to both. Resist the obvious conclusion.
+   Five pairs cannot rank two models, and @sec-clustering-payoff measures the
+   *opposite* at corpus scale: E5 concentrates negative reviews 4.23× against
+   MiniLM's 2.79×. This is the chapter's own rule biting the chapter — when a
+   probe and a measurement disagree, believe the measurement. What survives is
+   the weaker, more useful claim: a model can be better overall and worse on
+   the one axis you happen to care about, so the axis is worth measuring
+   separately.
 3. **tf-idf ranks the polarity flip above the paraphrase** (0.5687 against
    0.5349) and is the only representation to get that pair backwards, which is
    exactly what a method with no notion of word meaning should do: *kargo çok
    hızlı geldi* and *kargo çok yavaş geldi* share three words out of four.
 
 Hold on to point 1. It predicts, before we run a single clustering algorithm,
-that no method on this page is going to recover a sentiment label from this
-geometry — and @sec-kmeans is where that prediction gets tested.
+that sentiment is not the direction any of these geometries will split on
+first — and @sec-kmeans is where that prediction gets tested.
 
 ::: {.callout-note appearance="simple"}
 **On the honesty of this table.** Five pairs written by one person to make a
 point is the weakest kind of evidence in this book, and it is here because it
-*explains* a corpus-scale result rather than replacing it. The corpus-scale
-version, on all 49,849 documents, is in @sec-kmeans and it agrees. When a
-probe and a measurement disagree, believe the measurement.
+*explains* a corpus-scale result rather than replacing it. Of the three
+observations above, only the first survives contact with the corpus-scale
+numbers: @sec-kmeans confirms that none of the three geometries splits on
+sentiment, while @sec-clustering-payoff directly contradicts the model ranking
+in observation 2. That is the correct outcome for a probe. It generates
+hypotheses; it does not settle them. **When a probe and a measurement disagree,
+believe the measurement** — including when the probe is one you wrote yourself
+and like.
 :::
 
 ## Near-duplicates: the cheapest win available {#sec-near-dupes}
@@ -312,7 +350,7 @@ boilerplate.
 
 ### Shingling, MinHash, and why you do not compare every pair
 
-Comparing all pairs of 50,000 documents means $1.2 \times 10^9$ comparisons.
+Comparing all pairs of 50,000 documents means $1.25 \times 10^9$ comparisons.
 The standard escape has three steps [@broder1997resemblance]:
 
 1. **Shingle.** Turn each document into a *set* of overlapping $k$-grams. We
@@ -337,9 +375,9 @@ sets. Lets you estimate overlap without keeping the sets.
 
 :::: {.anlp-fig}
 ```{=html}
-<div class="fig-title">Why 1.2 billion comparisons never happen</div>
+<div class="fig-title">Why 1.25 billion comparisons never happen</div>
 <svg viewBox="0 0 764 316" style="max-width:744px" role="img"
-     aria-label="A left-to-right pipeline in five stages. Stage one, a review text reading kargo çok hızlı geldi. Stage two, shingling, turns it into a set of overlapping character 5-grams such as kargo, argo space, rgo space ç. Stage three, MinHash, hashes that set 128 times and keeps the minimum under each hash, producing a signature of 128 integers; the caption notes that the chance two signatures agree in a given position equals the Jaccard similarity of the original sets. Stage four, banding, splits the 128 values into bands, hashes each band, and drops documents into buckets, so that only documents colliding in at least one band become candidate pairs. Stage five, verification, computes exact Jaccard on the surviving candidates and then runs union-find so a chain of near copies is counted as one group. Below the pipeline a comparison bar shows all-pairs comparison at 1.2 times 10 to the 9 comparisons against the LSH path, which touched a small fraction of that and finished in 27.4 seconds.">
+     aria-label="A left-to-right pipeline in five stages. Stage one, a review text reading kargo çok hızlı geldi. Stage two, shingling, turns it into a set of overlapping character 5-grams such as kargo, argo space, rgo space ç. Stage three, MinHash, hashes that set 128 times and keeps the minimum under each hash, producing a signature of 128 integers; the caption notes that the chance two signatures agree in a given position equals the Jaccard similarity of the original sets. Stage four, banding, splits the 128 values into bands, hashes each band, and drops documents into buckets, so that only documents colliding in at least one band become candidate pairs. Stage five, verification, computes exact Jaccard on the surviving candidates and then runs union-find so a chain of near copies is counted as one group. Below the pipeline a comparison bar shows all-pairs comparison at 1.25 times 10 to the 9 comparisons against the LSH path, which touched a small fraction of that and finished in 27.4 seconds.">
   <defs>
     <marker id="lsh-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
       <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
@@ -350,7 +388,7 @@ sets. Lets you estimate overlap without keeping the sets.
   <text x="76" y="56" class="t-xs t-mid t-b">1 · document</text>
   <text x="76" y="82" class="t-xs t-mid t-mono">kargo çok</text>
   <text x="76" y="98" class="t-xs t-mid t-mono">hızlı geldi</text>
-  <text x="76" y="120" class="t-xs t-mid t-muted">49,849 of these</text>
+  <text x="76" y="120" class="t-xs t-mid t-muted">50,000 of these</text>
 
   <line x1="146" y1="82" x2="168" y2="82" class="ln" marker-end="url(#lsh-a)"/>
 
@@ -388,7 +426,7 @@ sets. Lets you estimate overlap without keeping the sets.
 
   <text x="14" y="216" class="t-xs t-b">all pairs</text>
   <rect x="140" y="202" width="600" height="20" rx="4" class="box-rose"/>
-  <text x="440" y="217" class="t-xs t-mid t-b t-rose">1.2 × 10⁹ pairs</text>
+  <text x="440" y="217" class="t-xs t-mid t-b t-rose">1.25 × 10⁹ pairs</text>
 
   <text x="14" y="256" class="t-xs t-b">LSH candidates</text>
   <rect x="140" y="242" width="7" height="20" rx="3" class="box-accent"/>
@@ -399,14 +437,42 @@ sets. Lets you estimate overlap without keeping the sets.
 ```
 ::: {.fig-cap}
 Stages 2 and 3 turn a set of unknown size into a fixed 128 numbers, which is
-what makes stage 4 possible. Nothing here is approximate in a way that matters:
-stage 5 computes the exact Jaccard on the survivors, so LSH only ever changes
-*which pairs you look at*, never what you conclude about the ones you do.
+what makes stage 4 possible. Stage 5 computes the exact Jaccard on the
+survivors, so LSH never changes what you conclude about a pair it hands you — it
+changes *which pairs it hands you*.
 :::
 ::::
 
+::: {.callout-warning appearance="simple"}
+**Where the approximation actually lives, and it is not where you would guess.**
+Stage 4 produces no false positives that survive stage 5, but it does produce
+**false negatives**: a genuinely similar pair can fail to collide in every band
+and is then never scored at all. How often? `datasketch` splits our 128 hashes
+into $b$ bands of $r$ rows to balance the two error types at the threshold you
+asked for, and a pair of Jaccard similarity $J$ collides with probability
+$1 - (1 - J^{r})^{b}$. At `threshold=0.8` it picks $b=9$, $r=13$:
+
+```text
+   J     P(pair is even looked at)
+  0.9              0.93
+  0.8              0.40
+  0.7              0.08
+```
+
+A pair sitting *exactly* at the threshold has a 40% chance of being found. That
+is not a bug — it is the deliberate design point, the steepest part of the
+S-curve, where the method trades recall for the speed that makes it possible at
+all. But it means the counts in the next table are **lower bounds**, and they
+are loosest precisely at the boundary you nominated. Report near-duplicate
+counts as "at least", never as "exactly".
+:::
+
 We then ran union-find over the surviving candidate pairs, so a chain of near
-copies counts as one group rather than several pairs.
+copies counts as one group rather than several pairs. **Union-find** is the
+standard bookkeeping for "these things are all connected": every document
+starts in its own group, each surviving pair merges two groups into one, and a
+chain $a \sim b \sim c$ ends as a single group of three even though $a$ and $c$
+were never compared with each other.
 
 ### The count depends on the threshold, and not gently
 
@@ -471,7 +537,7 @@ chosen to span what a practitioner actually picks between in 2026.
 
 | representation | dims | build time | notes |
 |:--|--:|--:|:--|
-| tf-idf → LSA | 256 | 2.6s | the @sec-bake-off winner, SVD to 256; no GPU, fully deterministic |
+| tf-idf → LSA | 256 | 2.6s | word tf-idf, SVD to 256; no GPU, fully deterministic |
 | MiniLM | 384 | 40s | `paraphrase-multilingual-MiniLM-L12-v2`, 117.7M params, 1,247 docs/s |
 | multilingual-E5 | 768 | 104s | `intfloat/multilingual-e5-base`, 278.0M params, 478 docs/s |
 
@@ -480,13 +546,35 @@ chosen to span what a practitioner actually picks between in 2026.
 Two details worth stating because they change results and are easy to skip.
 
 **The SVD is not optional.** Raw tf-idf here is 23,971 dimensions with 19.3
-non-zero entries per document. Running k-means directly on that is the textbook
-curse-of-dimensionality failure: in the table above, tf-idf's *entire* 1st-to-99th
-percentile band is 0.130 wide, so almost every pair of documents is almost
-exactly as far from every other. Reducing to 256 dimensions with truncated SVD
-recovers 29.9% of the variance and makes the distances mean something. That
-reduction is itself a topic model, and it has a name — latent semantic analysis
-[@deerwester1990indexing] — which is why @sec-topic-models can reuse it for free.
+non-zero entries per document. The diagnostic that matters is *relative
+contrast* — for a given document, how much further away its farthest neighbour
+is than its nearest one, $(d_{\max} - d_{\min}) / d_{\min}$. If that number is
+near zero, "nearest" is not meaningfully different from "farthest" and every
+distance-based method is running on noise. Measured over 300 query documents:
+
+```text
+                 median relative contrast
+tf-idf                   0.539
+LSA (256)                2.116
+MiniLM                   4.911
+E5                       3.009
+```
+
+For 0.6% of tf-idf queries some *other* document sits at cosine distance
+exactly 0 — no shared terms is the common case on 19-word reviews, and a tie at
+zero makes the ratio infinite. Those are excluded from the median rather than
+patched with an epsilon, because they are a real property of the space.
+Reducing to 256 dimensions with truncated SVD recovers 29.9% of the variance
+and multiplies the contrast by four. That reduction is itself a topic model,
+and it has a name — latent semantic analysis [@deerwester1990indexing] — which
+is why @sec-topic-models can reuse it for free.
+
+::: {.column-margin}
+Note that E5 needs no such repair despite its 1st-to-99th band being 0.134
+wide, about the same as tf-idf's 0.131. Band width alone does not diagnose the
+problem; contrast does. E5's band sits far from zero, so a small absolute
+spread is still a large *relative* one.
+:::
 
 **E5 needs its prefix.** The multilingual-E5 models are trained with `query: `
 and `passage: ` markers and behave measurably differently without them
@@ -715,9 +803,15 @@ at 0.0416. [Across 42 clusterings and three representations, none of them
 recovered the sentiment label.]{.hl}
 
 @sec-what-similar-means predicted this. If a representation scores a
-contradiction pair above a paraphrase, no algorithm downstream can partition it
-by polarity — the information is not in the geometry to be found. The
-clustering did not fail; it faithfully reported the structure it was given.
+contradiction pair above a paraphrase, polarity is not the *dominant axis of
+variation* in that geometry — and $k$-means partitions along dominant axes, so
+it will cut on something else. Note the exact strength of the claim: polarity
+has not vanished from the geometry. @sec-clustering-payoff extracts a 4.23×
+signal from these same E5 vectors, and @sec-bake-off got 76.21 macro-F1 out of
+a bag of words. A *supervised* method can go looking for a minor direction
+because the labels tell it which one to find. An unsupervised one cannot, and
+so it reports the major direction instead. The clustering did not fail; it
+faithfully reported the structure it was given.
 
 **The internal indices do not agree with each other, or with themselves.**
 This is the more troubling result, because internal indices are all you have on
@@ -727,16 +821,26 @@ a genuinely unlabelled corpus:
 |:--|--:|--:|--:|
 | LSA | [50, and still rising]{.con} | 2 | 50 |
 | MiniLM | 4 | 2 | 40 |
-| E5 | 2 | 2 | 2 |
+| E5 | 2 | 2 | 4 |
 
 : Where each internal index puts its optimum, over $k \in [2, 50]$
 {tbl-colwidths="[28,26,24,22]"}
 
 Calinski-Harabasz picks $k=2$ every time because it is a variance ratio that
 falls monotonically as $k$ grows on data with no strong cluster structure.
-Davies-Bouldin picks the largest $k$ available for the mirror-image reason.
-Silhouette is the only one that produces an interior maximum, and it does so
-for exactly one of the three representations.
+Davies-Bouldin drifts the other way, toward large $k$, for the mirror-image
+reason — but only where it moves at all. Read its actual values rather than its
+argmin: on E5 the whole sweep from $k=2$ to $k=50$ lies between 4.44 and 4.77,
+so the "optimum" at $k=4$ is a 7% wobble on a flat line, and on MiniLM
+everything from $k=20$ upward sits between 3.23 and 3.28. [Two of these three
+optima are noise dressed as a decision.]{.hl} Only LSA shows a genuine trend,
+falling steadily from 6.38 to 4.105 without ever turning around.
+
+That is the real lesson of the table, and it is worse than mere disagreement:
+the three indices do not just pick different $k$, they pick numbers that in two
+cases out of three are not distinguishable from the neighbouring values. An
+index that reports an argmin will always report one. It is on you to check
+whether the surface it is minimising over has any shape.
 
 **Every silhouette in this table is small.** The scale runs to 1.0; the best
 value anywhere in the sweep is 0.1042. A silhouette near zero means the average
@@ -764,10 +868,13 @@ $$
 The [**silhouette**](#gloss-silhouette){#term-silhouette .term-ref} of point $i$
 compares $a(i)$, its mean distance to points in its own cluster, against $b(i)$, its mean distance to points in the nearest
 *other* cluster [@rousseeuw1987silhouettes]. It runs from $-1$ to $1$, and the
-score for a clustering is the mean over all points. It is $O(n^2)$, so on 49,849
-documents we computed it on a fixed random sample of 10,000 — which is standard
-practice and is worth stating, because a silhouette on a sample is an estimate
-with its own error bar.
+score for a clustering is the mean over all points. Two implementation details
+that change the number and are almost never reported: it is $O(n^2)$, so on
+49,849 documents we computed it on a fixed random sample of 10,000 (seed 42),
+which makes every silhouette here an estimate with its own error bar; and
+"distance" is `metric="cosine"` throughout, matching the geometry the
+clustering was actually done in. A silhouette quoted without its metric and its
+sample size is not a reproducible number.
 
 ::: {#gloss-silhouette .column-margin .term-gloss}
 **silhouette** — for each point, how much closer it is to its own cluster than
@@ -785,9 +892,13 @@ monotone in $k$ on data without real cluster structure, which makes their
 
 ### The elbow method deserves its reputation
 
-The oldest recipe is to plot inertia against $k$ and look for the bend. It is
+The oldest recipe is to plot **inertia** against $k$ and look for the bend.
+Inertia is just the k-means objective from @sec-kmeans evaluated at the
+solution — $\sum_i \sum_{x \in C_i} \lVert x - \mu_i \rVert^2$, the total
+squared distance from every point to its own centre. It is
 popular because it always produces an answer, which is also the problem:
-inertia decreases monotonically by construction, so there is always *a* bend,
+inertia decreases monotonically by construction — more centres can only bring
+every point closer to the nearest one — so there is always *a* bend,
 and where you see it depends on your axis limits. @schubert2023stop makes the
 case at length and the summary is blunt — the elbow criterion should not be
 used, and the reason it survives is that it is easy to draw rather than that it
@@ -958,9 +1069,13 @@ $$
 where $\operatorname{tf}_{t,c}$ is term $t$'s frequency in cluster $c$, $A$ the
 average number of words per cluster, and $\operatorname{tf}_t$ the term's
 frequency across the whole corpus. This is **c-TF-IDF**, the trick at the centre
-of BERTopic [@grootendorst2022bertopic]. The words it returns are the ones that
-are common in this cluster *and* rare in the others, which is exactly the
-question "what makes this group different?"
+of BERTopic [@grootendorst2022bertopic]. The words it ranks highest are those
+frequent in this cluster and infrequent corpus-wide — which is *nearly* but not
+exactly "common here and rare elsewhere", since $\operatorname{tf}_t$ includes
+cluster $c$'s own contribution. For a small cluster the difference is
+negligible. For a cluster holding half the corpus it is not, and its
+characteristic words get penalised for being characteristic of it. Worth
+knowing before you wonder why your largest cluster's label is so bland.
 
 It is worth being clear about what has happened here. c-TF-IDF is not a topic
 model; it is a labelling procedure applied to somebody else's clustering. All
@@ -982,9 +1097,18 @@ $$
 
 averaged over all word pairs in a topic's top-10 list, then over topics. It runs
 from $-1$ to $1$; positive means the words appear together more than chance.
-We computed all probabilities on the corpus itself over a fixed 8,651-term
-vocabulary, with a hand-written Turkish stop-word list, so the five methods are
-scored on exactly the same footing.
+
+The formula is not computable until you say what "together" means, and the
+answer changes the numbers substantially, so state it: **co-occurrence here is
+at the document level.** $P(w_i)$ is the fraction of the 49,849 reviews
+containing $w_i$ at least once, and $P(w_i, w_j)$ the fraction containing both
+— a review is one context, and repeats inside it do not count twice. The
+alternative convention, a sliding window of 10 or 20 tokens, is standard for
+long documents and makes no sense on a 19-word review. Pairs that never
+co-occur are $\varepsilon$-smoothed to $-1$ rather than allowed to diverge. All
+probabilities come from the corpus itself over a fixed 8,651-term vocabulary
+with a hand-written Turkish stop-word list, so the five methods are scored on
+exactly the same footing.
 
 | method | NPMI | fit time | what it needs |
 |:--|--:|--:|:--|
@@ -1092,9 +1216,9 @@ The third link is the tokenizer. scikit-learn's default token pattern is
 ['tavsiye']
 ```
 
-The single most common word in a corpus of Turkish product reviews —
-*tavsiye*, "recommendation" — silently splits in two, but only in the documents
-where somebody typed it in capitals.
+*Tavsiye*, "recommendation" — a word that appears in 19.8% of the documents in
+this corpus, the single most frequent review-specific word in it — silently
+splits in two, but only in the documents where somebody typed it in capitals.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -1191,27 +1315,55 @@ a systematic text defect *is* a real axis of variation in the data, and the
 clustering's job is to find real axes of variation.
 
 The invented vocabulary is 1,607 types that no Turkish speaker ever wrote:
-`alişveri`, `acti`, `alternati`, `alabi`. Net of the merges the fix creates, the
-vocabulary shrinks by 972 types. That is 1,607 rows of a tf-idf matrix spent on
-nothing, and every one of them dilutes the document frequency of the real word
-it was cut from.
+`alişveri`, `acti`, `alternati`, `alabi`. That is 1,607 rows of a tf-idf matrix
+spent on nothing, and every one of them dilutes the document frequency of the
+real word it was cut from.
+
+The net change is smaller than 1,607, and the gap is worth a sentence because
+it is easy to get backwards. Repairing the text removes those 1,607 fragments
+and *creates* 635 types that had never appeared in one piece before —
+`alişverişim`, `acemiliğini`, `admin` — words that existed in this corpus only
+in broken form. So the vocabulary goes 86,196 → 85,224, a net shrink of 972,
+which is 1,607 removed minus 635 restored. The fix does not merely delete; it
+gives you back words you did not know you were missing.
 
 ::: {.callout-important appearance="simple"}
 **This is the argument for clustering, stated honestly.** The clustering scored
 ARI ≈ 0 against the labels. By the metric of @sec-how-many-clusters it found
-nothing. It also found a real, shipping bug in the pipeline that produced this
-corpus, in a language with 80 million speakers, that had survived every earlier
-chapter's supervised evaluation because a classifier can happily learn around a
-consistent tokenisation defect. **Unsupervised methods are how you find out what
-is in your data, including the parts you did not put there on purpose.**
+nothing. It also isolated a real defect in the text — in a language with 80
+million speakers — from 256 numbers per document and no instruction to look for
+one. **Unsupervised methods are how you find out what is in your data,
+including the parts you did not put there on purpose.**
 :::
+
+Be precise about what is impressive here, because the tempting version of this
+story is false. @sec-bake-off did **not** miss this bug. It documents the
+`"İYİ".lower()` failure explicitly, defines `tr_lower` to fix it, and sets an
+exercise asking you to measure the damage. That chapter knew, because a human
+who speaks Turkish knew and wrote it down.
+
+What is worth noticing is that the clustering *rediscovered* it. Chapter 4
+needed a Turkish speaker; $k$-means needed nothing but the vectors, and it will
+do the same on a corpus in a language nobody on your team reads. That is the
+transferable claim, and it is the smaller of the two — which is exactly why it
+is the one to keep. A method that only finds bugs you already knew about is
+worthless; a method that finds them without being told what a bug looks like is
+a tool you can point at anything.
 
 And it is a clean demonstration of the @chang2009reading finding on our own
 numbers rather than by citation. The topic with the best coherence in the entire
-chapter was the topic with no meaning at all. Drop it and recompute: LSA's
-c-TF-IDF coherence falls from **+0.1340 to +0.0925**, which moves it from first
-place to last among the three c-TF-IDF rows. The metric did not merely fail to
-notice the garbage — it ranked the method *first because of it*.
+chapter was the topic with no meaning at all. Drop it and average the nine that
+remain: LSA's c-TF-IDF coherence falls from **+0.1340 to +0.0925**, below both
+MiniLM (+0.1002) and E5 (+0.1064), which moves it from first place to last
+among the three c-TF-IDF rows. The metric did not merely fail to notice the
+garbage — it ranked the method *first because of it*.
+
+::: {.column-margin}
+Strictly, +0.0925 is a nine-topic mean being compared against ten-topic means,
+so it is not a like-for-like swap. It does not need to be: the point is the
+*size* of the move. One topic out of ten, and one that a human would reject in
+two seconds, was carrying enough of the average to reverse the ranking.
+:::
 
 ## The payoff: what a "failed" clustering is worth {#sec-clustering-payoff}
 
@@ -1228,6 +1380,12 @@ The corpus is 93.66% positive, so 6.34% negative. Read at random and 6.34% of
 what you read is a complaint. Now unhide the labels and measure the positive
 rate *inside each cluster* at $k=10$ — a diagnostic we could only run because
 this corpus happens to have labels; the clustering never saw them.
+
+The number in the last column is **lift**: the negative rate inside a cluster
+divided by the negative rate in the corpus as a whole. Lift 1.0 means the
+cluster is no better than reading at random; lift 4.0 means a document drawn
+from it is four times as likely to be a complaint. It is the direct answer to
+"where should I spend my reading budget", which is why we want it and not ARI.
 
 | representation | positive rate, lowest cluster → highest | negative lift in the worst cluster |
 |:--|:--|--:|
@@ -1371,11 +1529,19 @@ The single number to take away:
 That is a 4.2× improvement in the return on a fixed reading budget, from an
 unsupervised method, on a corpus whose labels it never saw. If your actual job
 is "find the complaints so we can fix the product", this clustering did the job,
-and the ARI of 0.0031 that it scored on the way is irrelevant to that job.
+and the ARI of 0.0075 that it scored on the way is irrelevant to that job.
 
-The ranking holds along the whole curve, not just at the first point. E5
-dominates MiniLM everywhere, and MiniLM dominates LSA everywhere. LSA needs to
-read 26.6% of the corpus to reach the recall E5 reaches at 13.3%.
+The ranking mostly holds along the whole curve, not just at the first point.
+MiniLM is above LSA at every budget, and E5 is above both over the entire range
+that anyone would actually operate in. LSA has to read **35.6%** of the corpus
+to reach the recall E5 reaches at 13.3% — two and a half times the reading for
+the same result.
+
+The honest caveat is in the tail: between roughly 76% and 85% read, MiniLM
+creeps above E5 by about 0.1 percentage points of recall. That is a real
+crossing in the data and not worth a decision, because by then both have found
+97% of the negatives and you are choosing between reading three-quarters of the
+corpus and reading four-fifths of it. Triage curves are for the left-hand end.
 
 ### What the cluster actually contains
 
@@ -1516,8 +1682,10 @@ binary property you care about (complaint / not, urgent / not, off-topic / not)
 that you can label on a *sample*, not on all of it. Labelling 300 documents is
 enough and is the whole point: the lab simulates having a small budget.
 
-`scikit-learn` and `sentence-transformers` do everything. No GPU required; the
-E5 pass on 50k documents took 104 seconds on a laptop, so 5k will take ten.
+`scikit-learn` and `sentence-transformers` do everything. The E5 pass on 50k
+documents took 104 seconds on a laptop GPU (Apple Silicon, `mps`); on CPU
+expect roughly an order of magnitude more, so budget a few minutes for 5k
+documents and start it before you read the rest of this section.
 
 ### Step 1 — deduplicate first, and count what you removed
 
@@ -1603,12 +1771,14 @@ finding, cost you an afternoon, and has saved you from building a pipeline on it
    quantity would make their conclusion reasonable.
 
 3. **The tokenizer test you do not have.** @sec-dotted-i found a defect that
-   survived exact deduplication, NFC and NFKC normalisation, and every
-   supervised evaluation in the preceding chapters. (a) Explain why a classifier
-   trained and tested on the *same* defective pipeline shows no accuracy loss.
-   (b) Name the deployment change that would suddenly make it visible.
-   (c) Write the three-line property test you would add to a CI suite to catch
-   this class of bug in a language you do not speak.
+   survives exact deduplication and both NFC and NFKC normalisation.
+   @sec-bake-off avoided it only because a Turkish speaker knew to write
+   `tr_lower`. (a) Explain why a classifier trained and tested on the *same*
+   defective pipeline shows no accuracy loss. (b) Name the deployment change
+   that would suddenly make it visible. (c) Write the three-line property test
+   you would add to a CI suite to catch this class of bug in a language you do
+   not speak — noting that `assert tokenize(s.upper()) == tokenize(s)` is the
+   wrong answer, and saying why.
 
 4. **Density, honestly.** HDBSCAN called 97% of the corpus noise on LSA and
    99.5% on E5. A teammate proposes running UMAP to 5 dimensions first, "because
@@ -1644,14 +1814,15 @@ finding, cost you an afternoon, and has saved you from building a pipeline on it
 - **Deduplicate before you do anything else.** It is cheap, it is the highest
   return per line of code in the chapter, and the count you get is a diagnostic
   of your collection pipeline. At $J \geq 0.8$ we removed 151 documents in 27
-  seconds without comparing all 1.2 billion pairs.
+  seconds without comparing all 1.25 billion pairs.
 - **k-means makes four assumptions on your behalf** — spherical clusters,
   similar extent, no outliers, and a known $k$ — and on text corpora it is
   numbers 2 and 3 that hurt, not the one everybody worries about.
 - **A flat silhouette curve is a finding.** Ours never exceeded 0.1042 across
-  42 runs, and HDBSCAN independently called 97–99.5% of the same corpus noise.
-  Two methods with different assumptions agreeing that there are no boundaries
-  is stronger evidence than either alone.
+  42 runs, and HDBSCAN independently called 53–100% of the same corpus noise
+  depending on `min_cluster_size`, reaching 97–100% at every setting large
+  enough to be useful. Two methods with different assumptions agreeing that
+  there are no boundaries is stronger evidence than either alone.
 - **Do not use the elbow method.** There is always a bend, its position depends
   on your axis limits, and @schubert2023stop sets out the case at length.
 - **Short documents break LDA.** On 19-word reviews it was 133× slower than NMF
@@ -1667,11 +1838,15 @@ finding, cost you an afternoon, and has saved you from building a pipeline on it
 - **Unsupervised methods find what is actually in your data, including the parts
   you did not put there.** k-means assembled a cluster that was 94.7% affected
   by a Unicode defect against a 6.0% background, having been told nothing about
-  Unicode. Supervised evaluation had missed it for eight chapters.
+  Unicode. @sec-bake-off knew about that defect because a Turkish speaker did;
+  the clustering found it without one.
 - **`str.lower()` is not Turkish-aware, and NFKC will not save you.**
-  `"TAVSİYE".lower()` tokenises to `['tavsi', 'ye']`. Keep
-  `assert tokenize(s.upper()) == tokenize(s)` in your test suite for any
-  language whose casing rules you have not personally checked.
+  `"TAVSİYE".lower()` tokenises to `['tavsi', 'ye']`. Pin the cases you care
+  about — `assert tokenize("TAVSİYE") == tokenize("tavsiye")` — rather than
+  asserting a general round-trip. `tokenize(s.upper()) == tokenize(s)` looks
+  tidier and fails on correct code, because Python's `str.upper()` is not
+  Turkish-aware either: it sends `i` to `I` instead of `İ`, so `iyi` comes back
+  as `ıyı` no matter how good your lowercaser is.
 - **Measure the decision, not the partition.** ARI could not distinguish our
   three representations; the triage curve ranked them cleanly and in the
   expected order. Reading 13.3% of the corpus found 56.0% of its complaints —
