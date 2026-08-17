@@ -1653,6 +1653,184 @@ demonstration, not an experiment.
 it, and a paragraph naming the cheapest configuration you would actually deploy
 — including the case for deploying nothing and keeping the tf-idf baseline.
 
+## Intuition checks {#sec-post-training-intuition}
+
+Answer before expanding. Every one of these is a place where a plausible mental
+model of fine-tuning produces the wrong engineering decision.
+
+::: {.callout-note collapse="true"}
+## 1. LoRA trains 0.035% of the weights. Does it use 0.035% of the memory, and run ~3,000× faster?
+
+Neither, and the gap between those expectations and the measurements is the
+most useful thing in this chapter.
+
+On memory: freezing a parameter removes seven of its eight instalments —
+optimizer state is three quarters of the training bill, the gradient an eighth,
+the weight itself an eighth. So LoRA removes most of the *optimizer* memory,
+but [what dominates at small model sizes is activations]{.hl}, and no choice of
+rank touches those.
+
+On speed: $r = 8$ trains **373× fewer parameters** and runs **1.19× faster**.
+That is the whole speedup. LoRA saves optimizer work, and on a 110M model with
+a batch of 32 there is not much optimizer work to save. The technique pays off
+on large models and on serving many adapters, not on wall-clock for a small
+fine-tune.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Freezing the encoder and training just the classifier head — is that parameter-efficient fine-tuning?
+
+No. It is a linear probe, and on this task it collapses completely.
+
+Training 1,538 parameters on a frozen encoder produced macro-F1 **48.37** and
+accuracy **93.68** — exactly @sec-bake-off's majority-class baseline, with F1 on
+the negative class of **0.00**. The model learned to answer *positive* every
+time.
+
+[LoRA does not train a small *part* of the model; it trains a small number of
+weights *throughout* it]{.hl}, and that distinction is the entire argument. Rank
+1 — 36,864 parameters, 0.035% of the model, a file you could email — takes the
+same frozen encoder from 48.37 to **80.47**, clearing the tf-idf baseline by
+four points.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Higher LoRA rank means more capacity. Should you use the highest rank you can afford?
+
+No — the curve flattens almost immediately and then goes slightly backwards.
+
+Measured: $r=1 \to r=8$ buys **2.2** macro-F1 points. $r=8 \to r=64$, eight
+times the parameters, *loses* **0.30**. Stand on the flat part.
+
+The caveat that makes this honest: 0.30 is well inside single-seed noise, so do
+not read a ranking into it. What is *outside* the noise is the shape — [the
+curve rises once and then stops]{.hl}. Rank is an afterthought on this task, and
+the arithmetic in @sec-lora predicted it would be.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your full fine-tune beats LoRA on macro-F1 but loses on accuracy. Which is broken?
+
+Neither. You are looking at a product decision wearing the costume of a
+training result.
+
+Full fine-tuning scored 83.90 macro-F1 against $r=8$'s 82.69, and all of the
+gap is the minority class (F1(neg) 70.16 against 67.23). But [every single LoRA
+run is *more* accurate overall]{.hl} — 96.09–96.58 against 95.62.
+
+Full fine-tuning had enough freedom to move the decision boundary toward the
+negatives. Macro-F1 rewards that; plain accuracy punishes it. Which you want
+depends on what a missed complaint costs relative to a false alarm, which is
+@sec-classification-costs' question, and no training table can answer it for
+you.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. A 65B model needs "more than 780 GB" to fine-tune. Where does that number come from?
+
+$65 \times 10^9$ parameters × **12 bytes**. The instructive part is that the
+paper does not say which twelve, and two readings both fit.
+
+Reading one: the three fp32 rows — master weight, Adam's $m$, Adam's $v$ — with
+the bf16 weight and gradient pushing the real figure to $65 \times 16 = 1{,}040$
+GB, which is what "more than" absorbs. Reading two: bf16 weight, bf16 gradient,
+fp32 $m$, fp32 $v$, no master copy, with "more than" absorbing activations
+instead.
+
+[Either decomposition lands on the same conclusion: the headline is dominated
+by state that exists only because the parameter is being trained.]{.hl} Freeze
+it and that state evaporates — which is the one-sentence case for PEFT.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your fine-tuned model got worse at things it used to do. What happened, and is it avoidable?
+
+Catastrophic forgetting, and it is a *consequence* of the thing you wanted
+rather than a bug you can patch out.
+
+Gradient descent on a narrow objective moves weights that other capabilities
+depended on. The mitigations are all versions of *move less*: lower learning
+rate, fewer epochs, PEFT (the frozen weights literally cannot drift), or mixing
+some general data back into the fine-tuning set.
+
+The reason this matters more than it sounds: [it is measured against whatever
+you thought to evaluate]{.hl}. If your eval suite only covers the new task, the
+model can lose a capability you never tested and you will ship it. Build the
+regression suite before the fine-tune, not after.
+:::
+
+## Interview questions {#sec-post-training-interview}
+
+Fine-tuning is where candidates most often confuse a technique with a decision.
+Every answer below has a measurement or a piece of arithmetic behind it.
+
+::: {.column-margin}
+The strongest signal in this area is a candidate who volunteers *when not to
+fine-tune*. Prompting, retrieval and a better schema fix more production
+problems than fine-tuning does, and @sec-decision-tree exists because the
+default answer to "should we fine-tune?" is usually no.
+:::
+
+1. **What does fine-tuning actually fix, and what does it not?** It fixes
+   *behaviour* — format, style, task framing, refusal patterns, domain register.
+   It does not reliably install *facts*; retrieval does that, and a fact injected
+   by fine-tuning is expensive to update and hard to attribute. The framing that
+   makes this land: a base model is not broken, it is answering a different
+   question — given this text, what comes next — and [whenever you use it as
+   though it were a chat model, that is precisely when fine-tuning
+   disappoints]{.hl}. Then say the uncomfortable half: most fine-tuning requests
+   that arrive in a real team are better served by a better prompt, retrieval, or
+   a fixed label schema.
+
+2. **Explain LoRA to someone who knows linear algebra.** Freeze $W$ and learn
+   $\Delta W = BA$ where $B$ is $d \times r$ and $A$ is $r \times k$ with $r \ll
+   \min(d,k)$. Forward becomes $Wx + BAx$, and at serving time you can fold $BA$
+   into $W$ so inference costs nothing extra. Two details that show you have used
+   it: $A$ is randomly initialised and $B$ is zeroed, so the adapter starts as an
+   exact no-op and training cannot destabilise the pretrained model at step 0;
+   and $\alpha$ behaves as a learning-rate multiplier on the adapter path, which
+   is why $\alpha = 2r$ is a convention rather than a law.
+
+3. **How much memory does fine-tuning need?** Decompose it rather than guessing.
+   Per trainable parameter with mixed-precision Adam: bf16 weight, bf16 gradient,
+   fp32 master weight, fp32 $m$, fp32 $v$ — roughly 16 bytes, of which
+   [the model itself is one eighth, the optimizer state three quarters, and the
+   gradient the remaining eighth]{.hl}. Then name the term that decomposition
+   omits and that dominates at small scale: activations, which grow with batch
+   and sequence length and which no amount of parameter freezing reduces. That
+   last sentence is what separates someone who has read about LoRA from someone
+   who has watched it fail to fit.
+
+4. **SFT or DPO, and why did preference tuning become a separate stage?**
+   SFT teaches "here is a good answer" from one target per prompt. It cannot
+   express *this answer is better than that one*, and for qualities like
+   helpfulness or tone the judgement is comparative — which is exactly why
+   preference optimization exists as a separate stage. DPO's contribution is
+   showing you can optimise the same objective RLHF targets without training a
+   separate reward model: [the reward was never a separate object]{.hl}, it is
+   recoverable from the policy. Practical note worth adding: DPO expects a model
+   that has already been through SFT, and running it on a base model is a common
+   and disappointing mistake.
+
+5. **When would you *not* fine-tune?** When the problem is knowledge (use
+   retrieval), when the problem is format (try the prompt and a schema first),
+   when you have fewer than a few hundred examples, when the target behaviour
+   will change monthly, or when you cannot build a regression suite for what you
+   might break. Add the deployment argument: one base model serving many LoRA
+   adapters is operationally far simpler than many full fine-tunes, so if you
+   *are* going to fine-tune, the adapter form has an ops advantage that has
+   nothing to do with training cost.
+
+6. **You fine-tuned and the score got worse. How do you debug it?** In this
+   order, because it is roughly the order of frequency: check the chat template
+   — training with the wrong one teaches a format the server will never send;
+   check whether the model collapsed to the majority class, which on an
+   imbalanced task looks like a plausible accuracy (ours read 93.68% while
+   scoring 0.00 F1 on the minority class); check the learning rate, since too
+   high destroys pretrained structure and too low does nothing; and check
+   whether your eval moved at all, because a frozen number usually means the
+   trainable parameters were not the ones you thought.
+
 ## Where to go deeper
 
 Read one thing before any paper: open a chat model's tokenizer and print

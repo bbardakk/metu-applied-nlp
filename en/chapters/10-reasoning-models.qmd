@@ -1950,6 +1950,182 @@ between them is the most useful number the exercise produces.
    cheapest-per-correct-answer one. Write the one-line summary you would put in
    front of a manager who has never heard the phrase *test-time compute*.
 
+## Intuition checks {#sec-reasoning-intuition}
+
+Answer before expanding. Reasoning models are the area where the gap between
+what a demo shows and what a measurement shows is widest, and every check below
+is a place this chapter found the gap.
+
+::: {.callout-note collapse="true"}
+## 1. Why should writing more tokens make a model better at arithmetic?
+
+Because it is the only way to make a fixed-depth network deeper at run time.
+
+A transformer has a fixed number of layers. Every token gets exactly that much
+serial computation and no more, so a problem needing more sequential steps than
+the model has layers cannot be solved in one forward pass. Writing an
+intermediate result puts it in the context, where the *next* forward pass can
+read it — [length is the only dimension you can extend after training]{.hl}.
+
+This is why the mechanism is architectural rather than psychological. The model
+is not "thinking harder"; it is using its own output as a writable working
+memory, and each token buys another full pass through the network.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your reasoning model's accuracy went up with a bigger budget. Should you raise it further?
+
+Not on that evidence. Accuracy nearly always argues for spending more, which is
+exactly why it is the wrong thing to watch.
+
+Watch **cost per correct answer** instead. It has a minimum; accuracy does not.
+And check whether the rise is real: in our sweep, **6.74× the tokens bought a
+difference from the no-thinking baseline of exactly zero points**, and no budget
+was statistically separable from it at $n = 200$.
+
+[Costs separate long before accuracies do.]{.hl} Expect to be able to price a
+reasoning model long before you can prove it helps — and treat "we cannot tell
+yet, and here is the bill" as a complete result rather than a failed experiment.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. You cap the thinking budget to control cost. What is the failure mode?
+
+Silent truncation, which produces no error and no latency spike.
+
+Hitting the cap does not cancel the request. It forces an answer out of an
+unfinished derivation — the model stops mid-reasoning and emits whatever it can.
+You get a well-formed, confident, wrong answer, at full price.
+
+@sec-classification-llm has the industrial-strength version of this: a 24-token
+cap consumed entirely by a reasoning block left the answer field empty on every
+document, and the harness reported the majority-class baseline as a result.
+[Log the fraction of traces that hit the cap]{.hl}, and treat it as a first-class
+metric rather than a diagnostic you check after something looks wrong.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Five samples and a majority vote, or one sample with five times the budget?
+
+Usually the five samples — and the more interesting finding is that voting
+wastes most of what you paid for.
+
+Parallel sampling gives you equal tokens, *independent* errors, and the latency
+of a single trace if you can batch. Sequential budget gives you one trace whose
+errors are correlated with themselves.
+
+But measure the aggregation step. Across our five-sample run [the correct answer
+was somewhere in the set **85.8%** of the time; majority voting returned it
+**76.7%** of the time]{.hl}. Those 9.2 points were computed, paid for, and then
+discarded by the counting. That is the real argument for a verifier, and it is
+an argument about waste rather than about accuracy.
+
+Where parallel sampling fails: when the model is *systematically* rather than
+randomly wrong. Five samples of the same misconception vote unanimously.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. The model's reasoning trace explains its answer. Can you use it as an audit log?
+
+No. A trace is a plausible narrative generated *alongside* the answer, not a
+record of the computation that produced it.
+
+The rate at which it agrees with the real cause is a number you have to measure,
+not assume. We measured it by planting a wrong answer in the context and
+checking whether the trace disclosed the influence.
+
+The result that should change how you read traces: [when we planted a wrong
+answer, **71%** of the accuracy we lost went to answers that were *neither* the
+right one nor the planted one]{.hl}. A detector that only asked "did the model
+repeat the injected answer?" would have missed most of the damage.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. You built a keyword detector for whether traces disclose a hint. Do you trust its output?
+
+Not until you have measured it in both directions, and only one direction can be
+automated.
+
+Run it on the arm with **no hint**. That arm has nothing to disclose, so every
+hit is a free false positive — this check caught `ta's` matching
+"Gre**ta's**". Then read a sample by hand, which is the only way to find the
+opposite error: our list missed a disclosing phrase entirely.
+
+[Measure your detector before you believe its output]{.hl} generalises well past
+this chapter. Any time you automate a judgement about model behaviour, you have
+added a second model whose error rate is now part of your result.
+:::
+
+## Interview questions {#sec-reasoning-interview}
+
+Test-time compute is new enough that interview answers still divide sharply into
+people repeating vendor framing and people who have priced it. The answers below
+have numbers.
+
+::: {.column-margin}
+A useful tell: candidates who have deployed a reasoning model talk about
+*latency* and *the cap* unprompted, because both bite immediately in production.
+Candidates who have only read about it talk about benchmark scores.
+:::
+
+1. **What is test-time compute, and why did it become a thing?** Spending more
+   computation at inference instead of at training to get a better answer. It
+   became a thing because it is a second scaling axis: pretraining scale is
+   expensive, slow and fixed once shipped, while inference scale is a dial you
+   turn per request. Give the mechanism rather than the marketing — [a
+   transformer is a fixed number of layers deep, and generating tokens is the
+   only way to add serial depth at run time]{.hl} — and note the economic
+   consequence, which is that the cost of a hard query becomes variable and
+   therefore has to be budgeted per request rather than per model.
+
+2. **How do you decide the thinking budget for a production system?** Sweep it
+   and plot **cost per correct answer**, not accuracy, because accuracy is
+   monotone in budget and will always tell you to spend more. Find the minimum,
+   then check three things: what fraction of traces hit the cap at your chosen
+   setting; whether the accuracy differences along the curve are statistically
+   separable at your sample size (in our sweep, at $n = 200$, none of them were);
+   and what the latency looks like at p95, since reasoning tokens arrive *before*
+   the first visible word rather than after it.
+
+3. **Reasoning tokens are hidden from the user. Are they free?** No — they are
+   billed as **output**, which is the expensive side, and they are usually the
+   majority of the tokens generated. Two consequences worth naming: your bill
+   scales with a quantity your users never see and cannot self-limit, and your
+   time-to-first-visible-token is the entire thinking phase, which is why a
+   reasoning model can feel broken in a chat UI even when it is faster to a
+   correct answer. Streaming the thinking, or showing a progress affordance, is a
+   product fix for a systems property.
+
+4. **When does chain-of-thought *not* help?** When the task has no serial
+   structure to expose — retrieval, classification, sentiment, most extraction.
+   The tokens still get billed. Be able to state the distinction that matters:
+   prompted chain-of-thought and *trained* reasoning are different things that
+   produce similar-looking tokens, and only the trained one survives a change of
+   prompt, because only the trained one is in the weights. So "add *let's think
+   step by step*" and "use a reasoning model" are not two strengths of the same
+   intervention.
+
+5. **How would you get more reliability out of a model without fine-tuning it?**
+   Sample $k$ times and aggregate — equal tokens to a long single trace,
+   independent errors, and single-trace latency if you can batch. Then
+   immediately name the two limits, because they are where the interview is
+   going: aggregation is lossy (our correct answer was present 85.8% of the time
+   and returned 76.7% of the time, so a verifier beats counting), and the whole
+   family presupposes you can tell right from wrong cheaply. [Voting, verifiers
+   and search all need a checkable answer]{.hl}, which is a much smaller set of
+   tasks than the ones you get asked to build.
+
+6. **Can you use the reasoning trace to explain a decision to a regulator?**
+   Not as a causal record. It is a narrative produced alongside the answer, and
+   its agreement with the actual cause is an empirical quantity you have to
+   measure — we measured it by planting information and checking disclosure.
+   The result to quote: 71% of the damage from a planted wrong answer showed up
+   as answers that were neither correct nor the planted one, so a naive
+   disclosure check would have caught almost none of it. What a trace *is* good
+   for is debugging and triage. Treat it as a hypothesis about the model's
+   behaviour, and hold it to the same evidentiary standard as any other
+   hypothesis.
+
 ## What to remember {#sec-reasoning-summary}
 
 - **Extra tokens buy serial depth and a written working memory.** A transformer

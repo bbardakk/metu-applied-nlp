@@ -1610,6 +1610,198 @@ product, with the fertility table, the compute budget, and the break-even
 month as its three pieces of evidence. State the assumption that, if wrong,
 would flip your recommendation.
 
+## Intuition checks {#sec-pretraining-intuition}
+
+Answer before expanding. Each is a place where the intuitive answer is wrong in
+a direction that costs money — which is the recurring theme of pretraining
+decisions you inherit and cannot undo.
+
+::: {.callout-note collapse="true"}
+## 1. Turkish needs 1.59 tokens per word and English needs 1.28. Does Turkish cost more?
+
+Not with that tokenizer, and the comparison is invalid as posed.
+
+Tokens-per-word compares units of different size. Turkish is agglutinative:
+*evlerinizden* is one word meaning "from your houses". [The honest measurement
+is tokens for the *same content*]{.hl} — tokenize a sentence and its
+professional translation and divide.
+
+Do that on 1,157 aligned pairs and BERTurk costs **0.58×** what English costs;
+the Turkish-native tokenizers are the only ones where Turkish is *cheaper*.
+GPT-2 costs **1.98×**, Llama 3 and multilingual BERT **1.23×**.
+
+The same corpus is 8,058 Turkish words against 10,862 English words of matched
+content — the agglutination is visible in the raw counts before any tokenizer
+touches it.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your model tokenizes Turkish badly. Can you fine-tune your way out of it?
+
+No, and this is the reason the tokenizer belongs in a pretraining chapter
+rather than a preprocessing one.
+
+Changing the tokenizer changes the embedding table, which changes every weight
+downstream. [The tokenizer is how the compute budget gets divided between
+languages, and the division is permanent.]{.hl} A user of a 1.98× tokenizer
+pays that surcharge in context window, in latency, and on every API invoice,
+for the entire life of the model.
+
+Llama 3 shows the decision being made deliberately: 100,000 tokens from
+`tiktoken` plus **28,000 added specifically for non-English languages**,
+reported as improving compression for those languages with no cost to English.
+That is a design choice with a price tag, made once, before the first gradient
+step.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. A vendor quotes 40% MFU. Is that good?
+
+Unanswerable until you ask what went in the denominator, and asking is the
+whole point of the question.
+
+The same GPU has a dense peak and a much higher sparsity peak, and quoting
+against the second makes any run look twice as efficient. Llama 3's Table 4
+reports 430 TFLOP/s per GPU; $430/989 = 43.5\%$, which confirms they used the
+dense figure. Not everyone does.
+
+The second trap is the numerator. Reconstructing Llama 3.1 405B from $6ND$
+alone gives 34.5%; adding the attention term gives **36.0–37.1%**, and the
+paper's own figure is **36.9%**. [$6ND$ omits attention, which is fine for a
+budget estimate and not fine for a utilization comparison.]{.hl}
+
+Two numbers that look comparable and are not is the most common way engineering
+conversations about efficiency go wrong.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Where does the 6 in $C = 6ND$ come from?
+
+Three twos, each with a cause, and knowing them is what lets you adapt the
+formula instead of reciting it.
+
+Two FLOPs per parameter in the **forward** pass, because each weight
+participates in one multiply and one add. Two more for the **backward pass
+through the inputs**, because the error has to keep travelling to earlier
+layers. Two more for the **backward pass through the weights**, because the
+optimiser needs to know what to change.
+
+So the forward pass is $2ND$ and is only a third of the bill — which
+immediately tells you that inference costs roughly $2ND$ per token, not $6ND$,
+and that is the number that decides whether serving or training dominates your
+budget. It also tells you why $6ND$ is a *pretraining* law and does not
+transfer unchanged to fine-tuning with frozen weights.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. You have more compute. Should you train a bigger model or use more data?
+
+Both, in roughly equal measure — and the interesting part is that this was the
+field's mistake for two years.
+
+Chinchilla's finding is that parameters and tokens should scale together;
+earlier models were badly undertrained for their size. But the compute-optimal
+answer is not the answer you want if you are going to *serve* the model:
+[a smaller model trained longer costs more to train and less to run
+forever]{.hl}, which is why production models are routinely trained well past
+the compute-optimal point.
+
+The lab's break-even question is the practical form: if your model serves for
+more than a few months, inference-optimal and compute-optimal are different
+objectives and you should be optimising the second one.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Can you just train on the same data twice instead of collecting more?
+
+Up to a point that is measurable and then not.
+
+Muennighoff et al. found repeated data "yields negligible changes to loss
+compared to having unique data" for the first few epochs, and degrades sharply
+after. Roughly four epochs is the region where a repeated token is still worth
+close to a fresh one; past that you are spending compute to memorise.
+
+The practical reading for a language like Turkish: [the constraint on a
+Turkish pretraining run is the corpus, not the GPUs]{.hl}, and repetition buys
+you a small multiple rather than an escape. That is also why the data-filtering
+decisions in @sec-pretraining-data get so much attention — when you cannot get
+more text, what you keep matters much more.
+:::
+
+## Interview questions {#sec-pretraining-interview}
+
+Pretraining questions are rarely about whether you would run one. They are
+about whether you can reason quantitatively about a system you inherited, which
+is the actual job.
+
+::: {.column-margin}
+Almost nobody being interviewed has pretrained a model, and the interviewer
+knows it. What separates answers is whether you can do the arithmetic that
+decides *build, fine-tune, or buy* — and whether you know which pretraining
+decisions you are stuck with afterwards.
+:::
+
+1. **Estimate the compute for a 7B model on 2 trillion tokens.** $C \approx 6ND
+   = 6 \times 7\times10^9 \times 2\times10^{12} \approx 8.4\times10^{22}$
+   FLOPs. Then convert to something a budget-holder understands: divide by the
+   per-GPU throughput you actually expect — not peak, roughly 40% of dense peak
+   — times 3,600 seconds, and you have GPU-hours. Say out loud that $6ND$
+   ignores attention, which is a few percent at short context and much more at
+   long, and that [the thing that actually blows up a pretraining schedule is
+   almost never the FLOPs, it is the calendar]{.hl}: interruptions, restarts and
+   checkpoint reloads.
+
+2. **What is the single pretraining decision you cannot undo later?** The
+   tokenizer. Everything else — instruction behaviour, safety, domain
+   knowledge, even a good deal of factual content — can be moved by
+   post-training (@sec-post-training). The tokenizer cannot, because changing it
+   invalidates the embedding table and every weight after it. Quantify the
+   stakes with the fertility table: a Turkish user on GPT-2's tokenizer pays
+   **1.98×** the tokens of an English user for the same content, and on BERTurk
+   **0.58×**. Same language, same text, a 3.4× spread driven entirely by a
+   decision made before training started.
+
+3. **How would you decide whether to pretrain, fine-tune, or use an API for a
+   Turkish product?** Three numbers, in this order. Fertility, because it sets
+   your per-token cost forever and may by itself justify a Turkish-native model.
+   The $6ND$ budget for the smallest model that could work, which is almost
+   always large enough to end the conversation. And the break-even month: the
+   point where API spend at your projected traffic exceeds training plus
+   serving. If break-even is under a year, you have discovered that
+   inference-optimal and compute-optimal are different objectives. The answer
+   for nearly every product is *fine-tune or buy* — being able to show *why*
+   with arithmetic is the skill.
+
+4. **Where does pretraining data actually come from, and what is thrown away?**
+   Common Crawl or a cleaned derivative such as FineWeb, and the honest headline
+   is how much is discarded: filtering, deduplication and quality classification
+   remove the large majority of raw crawl. Name the specific steps — boilerplate
+   removal, language identification, deduplication across crawls, quality
+   classifiers — and the counter-intuitive finding that FineWeb's authors hit:
+   aggressive deduplication across *all* crawls made things worse, because it
+   preferentially kept the low-quality text that had not been repeated.
+   [Deduplication is not monotonically good]{.hl}, which is the kind of detail
+   that shows you read the report rather than the summary.
+
+5. **A model claims a 128K context window. What should you be sceptical about?**
+   That the quality is uniform across it, and that you can afford it. On
+   quality, training rarely happens at full length throughout — the context is
+   usually extended in stages near the end — so the last 100K tokens have seen
+   far less training than the first 8K. On cost, take @sec-attention-cost's
+   arithmetic: a 7B model's KV cache at 100,000 tokens is 52.4 GB, per
+   concurrent request, against 14 GB of weights. The window being *advertised*
+   and the window being *usable at your budget* are different numbers.
+
+6. **Why do small pretraining runs look so much less efficient than large
+   ones?** Because efficiency here is mostly about keeping an accelerator busy,
+   and small models give it less to work with: less arithmetic per unit of
+   communication, less work to hide latency behind. Reconstructed MFU for
+   Llama 3.1 goes 15.8–17.2% at 8B, 27.4–29.0% at 70B, 36.0–37.1% at 405B. Then
+   add the caveat that makes the answer honest: published GPU-hours are
+   *allocated* hours including evaluation, checkpointing and idle time, and only
+   the 405B has a published MFU to check against — so treat the 8B figure as an
+   upper bound on waste rather than a measurement of kernel quality.
+
 ## Where to go deeper
 
 Two things are worth doing before reading any of the papers. Open
