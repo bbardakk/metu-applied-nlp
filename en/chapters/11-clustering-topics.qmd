@@ -1641,6 +1641,201 @@ every label against 20 documents you sampled yourself before any of them reaches
 a slide.
 :::
 
+## Intuition checks {#sec-clustering-intuition}
+
+Answer each one before you open it. All six are questions this chapter settled
+with a measurement rather than an argument, so the answers carry numbers you
+can check.
+
+::: {.callout-note collapse="true"}
+## 1. Two documents score a cosine of 0.91. Are they near-duplicates?
+
+Nobody can tell you yet, including you, until the random-pair background is on
+the table. Under tf-idf two *unrelated* reviews in this corpus average 0.0182
+and the 99th percentile of 4.5 million random pairs is 0.1300 — so 0.91 is far
+off the end of the scale and "near-duplicate" is the right reading. Under E5 the
+same corpus has a random-pair mean of **0.8547** with a standard deviation of
+0.0278 and a 99th percentile of 0.9155. There, 0.91 sits about two standard
+deviations above the mean of documents that have nothing to do with each other,
+and a duplicate detector thresholded at 0.90 would flag a large fraction of
+every pair in the corpus.
+
+Same number, opposite conclusions. The only thing separating them is four lines
+of code, run once, before you look at a single similarity.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your silhouette never exceeds 0.10 and your ARI is zero. Did the clustering fail?
+
+Those two numbers say the partition is not well separated and is not the label
+partition. Neither of them says it is worthless, and treating them as if they
+did is the most common way people talk themselves out of a usable result.
+
+The same $k=10$ E5 clustering that scored ARI **+0.0075** has a cluster that is
+26.8% negative against a 6.34% base rate — a **4.23× lift** — and reading 13.3%
+of the corpus in cluster order finds 56.0% of its complaints. The clustering did
+not change between those two sentences; the question did.
+
+So the honest diagnosis is rarely "the clustering failed". It is "I scored it
+against a question nobody was asking". Write down the decision the clustering
+was supposed to support, measure *that*, and only then decide.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Why deduplicate before clustering rather than after?
+
+Because k-means moves each centre to the **mean** of its members, so sixty
+copies of one sentence cast sixty votes on where that centre lands. A duplicate
+group is a weight, not a row. The same argument applies to every idf you fit and
+every topic model you run downstream.
+
+The second reason is that the count is a free diagnostic of your collection
+pipeline. Ours came back at 151 redundant documents at $J \geq 0.8$, in 27
+seconds, without performing any meaningful share of the $1.25 \times 10^9$
+pairwise comparisons. Had it come back at 20% you would have stopped and gone to
+read the scraper, and that would have been a better use of the afternoon than
+any clustering.
+
+One caveat to state whenever you report the number: it is a lower bound. At
+`threshold=0.8`, `datasketch` bands the 128 hashes so that a pair sitting
+*exactly* at 0.8 is examined with probability 0.40. "At least 151", never
+"exactly 151".
+:::
+
+::: {.callout-note collapse="true"}
+## 4. HDBSCAN calls 97% of your corpus noise. A colleague proposes running UMAP to five dimensions first, "because then it finds clusters." What do you say?
+
+That the sentence is true and that it is not evidence. UMAP optimises a
+low-dimensional layout to preserve a $k$-nearest-neighbour graph, and squeezing
+a corpus into five dimensions manufactures density contrast whether or not the
+original space had any. Clusters appearing after UMAP is the expected outcome of
+running UMAP, not a discovery about your data.
+
+What would turn it into a finding is a check UMAP never saw: do the groups
+predict something held out, do they survive a change of `n_neighbors` and
+`random_state`, do they survive on a random half of the corpus. Our own evidence
+points the other way — E5's random-pair cosine is 0.8547 with a standard
+deviation of 0.0278, so every document sits at nearly the same distance from
+every other, and a space that uniform has no density variation to be revealed.
+
+None of which forbids shipping the UMAP pipeline. Ship it on the strength of the
+downstream number, not on the strength of the picture.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your best topic scores three times the coherence of the next best. What do you do first?
+
+Read it. Ours was `bi ye fi tavsi çi ederi si ni li yi` — ten tokenizer
+fragments, all manufactured by the same Unicode defect in the same documents,
+which is precisely why they co-occur almost perfectly and why NPMI scored them
+**+0.5075**, the highest per-topic coherence anywhere in the chapter. Coherence
+rewards co-occurrence, and a systematic bug is the most reliable co-occurrence
+in any corpus.
+
+The damage was not confined to that one topic either. Dropping it takes LSA's
+mean from +0.1340 to +0.0925 — from first place to last among the three c-TF-IDF
+rows. One topic in ten, of a kind a human rejects in two seconds, was carrying
+the ranking. @chang2009reading published the general form of this result in
+2009; this is just our own numbers agreeing with it.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. You could label 500 documents and train a classifier. When is clustering still the right tool?
+
+When you do not yet know what the classes are. That is the core of it: a
+classifier needs a label set, and clustering is one of the few honest ways to
+discover what that set should be. "Run k-means, read 20 documents per cluster,
+draft the guidelines from what you read" is a real and cheap way to open an
+annotation project — @sec-data-annotation is the chapter that then tells you how
+to check the guidelines hold up.
+
+Three other cases: you have far more documents than anyone will ever read and
+must choose which to read (@sec-clustering-payoff); you must describe a corpus to
+somebody who will not read it either (@sec-topic-models); or you want to know
+what is actually in your data, including the parts nobody put there on purpose
+(@sec-dotted-i).
+
+And the converse, which matters just as much: if you already know the classes
+and can afford to label, label. Clustering is not a cheaper classifier and it
+will not become one.
+:::
+
+## Interview questions {#sec-clustering-interview}
+
+::: {.callout-warning appearance="simple"}
+**On attribution — the same caution as @sec-text-as-data.** These are questions
+that recur across the two credible public sources, both free:
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+by Chip Huyen [@huyen2021interviews] and
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews).
+Treat any page claiming to list "the questions company X asks" as marketing.
+:::
+
+1. **How do you choose the number of clusters?** The answer interviewers are
+   listening for begins by refusing the premise. Internal indices disagree —
+   ours put the optimum at 50, 2 and 50 on one representation and 2, 2 and 4 on
+   another — and in two of three cases the "optimum" was a 1–7% wobble on a flat
+   line. Say what you would do instead: cluster at three or four values of $k$,
+   read 20 documents per cluster, and keep the $k$ whose clusters you can each
+   describe in one line. Then mention the elbow method only to say you do not
+   use it, and why — inertia falls monotonically by construction, so there is
+   always a bend and its position depends on your axis limits [@schubert2023stop].
+
+2. **k-means or HDBSCAN?** k-means assumes spherical clusters of similar extent,
+   no outliers, and a known $k$; on text it is assumptions 2 and 3 that hurt, not
+   the one everybody names. HDBSCAN drops all four and adds a noise class, which
+   is the right shape for a corpus where most documents belong to nothing in
+   particular. The catch is that it can decline to answer, and on this corpus it
+   did: 53–100% noise depending on `min_cluster_size`, never more than three
+   clusters at any setting, and where it kept most of the documents it kept them
+   in a single lump holding 47% of everything. A strong answer says "run both,
+   because they disagree in informative ways" — two methods with different
+   assumptions both reporting no structure is much stronger evidence than either
+   alone.
+
+3. **Why cosine and not Euclidean on text?** Because raw length carries document
+   length rather than topic, and you almost never want to cluster by length. The
+   part worth knowing beyond that: on $\ell_2$-normalised vectors the two are
+   monotonically related, $d^2 = 2 - 2\cos$, so they induce the same nearest
+   neighbours — but *not* the same k-means, because the arithmetic mean of unit
+   vectors is not a unit vector, so from the second iteration the two procedures
+   diverge. The practical rule is to normalise, then keep the metric consistent
+   between the algorithm and every score you report. A silhouette computed with
+   Euclidean distance on a clustering fitted with cosine is not measuring your
+   clustering.
+
+4. **Find the near-duplicates in a billion documents.** Shingle, MinHash, band,
+   bucket, verify — and then say what the approximation actually costs, which is
+   where most answers stop short. LSH produces no false positives that survive
+   exact verification, but it does produce false negatives: with 128 hashes in 9
+   bands of 13 at a 0.8 threshold, a pair at $J = 0.9$ is examined with
+   probability 0.93, one at $J = 0.8$ with probability 0.40, and one at $J = 0.7$
+   with probability 0.08. That is the deliberate design point, not a defect, and
+   it is why duplicate counts are reported as lower bounds. Mention SimHash
+   [@charikar2002similarity] as the alternative when you need to check new
+   documents against a standing index rather than audit a fixed corpus.
+
+5. **How do you evaluate a clustering when you have no labels?** Start with the
+   internal indices and their limits, then get to the real answer: evaluate the
+   decision, not the partition. Sample and read; check that a human can name each
+   cluster; and where a downstream use exists, measure it directly. Our own
+   numbers are the argument — ARI could not separate three representations, all
+   ≈ 0, while lift in the worst cluster ranked them 1.67× / 2.79× / 4.23× from
+   the identical assignments. If you have any labelled subset at all, however
+   small, it buys you more than every internal index combined.
+
+6. **LDA, or something newer?** State the assumption that decides it: LDA is a
+   bag-of-words mixture model that needs enough words per document to estimate a
+   mixture from. On our 19-word median reviews it was **133× slower than NMF and
+   less coherent** (+0.0737 against +0.1183). For short text, NMF on tf-idf is
+   the better classical default, and the modern default is cluster-then-describe
+   — embed, cluster, and label with c-TF-IDF [@grootendorst2022bertopic], which
+   costs nothing once the clustering exists. The trade to name out loud: c-TF-IDF
+   inherits all of the embedding's semantics and all of the clustering's
+   mistakes, and it is a labelling procedure rather than a topic model. LDA is
+   still the right answer when documents are long and you genuinely need a
+   per-document mixture rather than an assignment.
+
 ## The 2026 toolbox {#sec-clustering-tools}
 
 Everything in this chapter ran on one laptop with the versions below. Pinning
