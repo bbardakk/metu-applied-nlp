@@ -1,78 +1,1681 @@
 # Similarity, Clustering and Topic Discovery {#sec-clustering}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Every number on this page was measured on the
+same Turkish product-review corpus and the same seed as @sec-bake-off, with
+the sentiment labels held back until the final section. Software:
+`scikit-learn` 1.9.0, `sentence-transformers` 5.7.0, `datasketch` 2.0.0,
+`umap-learn` 0.5.12, PyTorch 2.13.0 on Python 3.14.5, encoders on an Apple
+M-series GPU. One result — the five-pair probe in @sec-what-similar-means —
+is a hand-written diagnostic rather than a benchmark, and is labelled as such
+where it appears.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- choose a distance that matches what your vectors actually encode;
-- find near-duplicates in a corpus too large to read;
-- cluster documents without labels, and say honestly how good the clustering is;
-- discover topics and name them, with a check that the name is not invented.
+- choose a distance that matches what your vectors actually encode, and
+  calibrate it against the similarity of two *random* documents before
+  reading anything into it;
+- find near-duplicates in a corpus too large to read, and say how the count
+  depends on the threshold you picked;
+- run k-means and name the four assumptions it makes on your behalf;
+- read silhouette, Calinski-Harabasz and Davies-Bouldin, and recognise the
+  cases where all three are useless;
+- use a density-based method that is allowed to answer "this document belongs
+  to no cluster";
+- compare LDA, NMF and cluster-then-describe on coherence *and* on the thing
+  coherence fails to measure;
+- report an honest verdict when the clustering does not recover the structure
+  you hoped for — including the case where it found something better;
+- measure a clustering against the decision it is supposed to support, rather
+  than against a label set it was never given.
 
-## The question this chapter answers: 50,000 documents and no labels
+## The corpus you cannot read {#sec-clustering-setup}
 
-<!-- TODO(draft): the bridge @sec-data-annotation leaves open. Labelling
-    costs money, so the first honest move on a new corpus is to look at its
-    structure before deciding what is worth labelling at all. Everything
-    here runs before @sec-classification, not after. -->
+@sec-bake-off competed seven representations on 40,000 labelled Turkish
+reviews and produced a leaderboard. @sec-data-annotation then asked where
+those labels came from and found that a 2% wobble in them reverses the
+leaderboard. Both chapters had labels. This one asks the question that comes
+*before* both: [you have the documents, you have no labels at all, and
+somebody has to decide what is worth labelling]{.hl}.
 
-## From vectors to distances: cosine, Euclidean, and what each assumes
+That is the ordinary situation. A support inbox, a year of survey free-text, a
+scrape of product reviews — the documents arrive without a `sentiment` column,
+and the budget conversation from @sec-data-annotation ("1,000 clean labels beat
+40,000 noisy ones") cannot even begin until somebody knows what is in there.
 
-<!-- TODO(draft): reuse the representations built in @sec-text-as-data and
-    @sec-embeddings. Why cosine dominates for text (length invariance),
-    where Euclidean is the honest choice, and what the triangle inequality
-    buys you when you need speed. -->
+So the setup is deliberately the same corpus, the same seed, and the labels
+locked in a drawer:
 
-## Near-duplicate detection: MinHash, SimHash, and why deduplication pays
+```text
+rows as downloaded   235,165
+after de-duplication 233,508   (1,657 exact duplicates)
+label 1 (positive)   218,747   93.7%
+label 0 (negative)    14,761    6.3%
 
-<!-- TODO(draft): exact hashing finds nothing; shingling plus MinHash finds
-    the boilerplate. Connect to @sec-pretraining-data, where deduplication
-    is a measured quality lever rather than housekeeping. -->
+stratified subsample  50,000   46,839 positive   3,161 negative
+length, words         median 19   mean 22.1   p95 55   max 305
+length, characters    median 132  mean 157.3  p95 393
+distinct word forms   86,245
+```
 
-## Flat clustering: k-means and the assumptions it smuggles in
+::: {.column-margin}
+Everything down to `distinct word forms` is the identical pipeline
+@sec-bake-off ran, re-executed here so that the two chapters are provably
+talking about the same documents rather than approximately the same ones.
+:::
 
-<!-- TODO(draft): spherical, equal-variance, all-points-assigned. State
-    each assumption and show a text corpus that violates it. -->
+The labels exist. They are used exactly once, in @sec-clustering-payoff, to
+score what the clustering found. Until then they do not appear in any input to
+any algorithm on this page. That discipline is the whole experiment: it is very
+easy to tune an "unsupervised" pipeline until it reproduces a label you have
+been peeking at, and the result is a number that will not survive contact with
+a corpus that has no labels.
 
-## Hierarchical and density-based clustering
+Here is what the chapter will end up reporting, so you can read the middle
+knowing where it goes:
 
-<!-- TODO(draft): HDBSCAN's outlier class is the feature — most real
-    corpora have documents that belong to no cluster, and k-means cannot
-    say so. -->
+| what we asked | what came back |
+|:--|:--|
+| How many near-duplicates survive exact de-duplication? | 0.30% of documents, but 1.06% if you move the threshold by 0.1 |
+| Does clustering recover the sentiment labels? | [No. Best ARI anywhere: 0.0083]{.con} |
+| Do the internal validity indices agree on how many clusters there are? | [No. Three representations gave 50, 4 and 2]{.con} |
+| Does a density-based method find clusters? | [No. It called 97–100% of the corpus noise]{.con} |
+| Does the best topic-coherence score mark the best topic? | [No. The top-scoring topic was tokenizer debris]{.con} |
+| So the clustering was worthless? | [No — and that is the interesting part]{.pro} |
+| What did it actually find? | [A shipping Unicode bug, and 56% of the complaints for 13% of the reading]{.pro} |
 
-## How many clusters? Internal and external validation
+: What this chapter measured {tbl-colwidths="[52,48]"}
 
-<!-- TODO(draft): silhouette and its failure modes; when a labelled subset
-    exists, use it. The honest answer is often "the number a human can
-    act on", and that is a legitimate criterion worth defending. -->
+The last two rows are not a rhetorical trick. Five of this chapter's seven
+headline measurements are negative, and the chapter still ends with a
+clustering pipeline that does real work. Getting from one to the other requires
+changing the question, and learning to notice when the question is wrong is
+more transferable than any of the algorithms below.
 
-## Classical topic models: LSA, NMF, LDA
+## What "similar" has to mean before you can cluster {#sec-what-similar-means}
 
-<!-- TODO(draft): LDA as a generative story, not an algorithm. Reuse the
-    SVD machinery already built by hand in @sec-embeddings so LSA costs
-    the reader nothing new. -->
+Every algorithm in this chapter is a way of grouping points that are close
+together. None of them defines "close". You do, when you pick a representation
+and a distance, and [that choice determines the answer far more than the choice
+of clustering algorithm does]{.hl}.
 
-## Embedding-based topic discovery
+### Three distances, and what each one assumes
 
-<!-- TODO(draft): embed, reduce, cluster, label — the modern pipeline.
-    What it gains over LDA on short text, and the reproducibility cost of
-    a stochastic dimensionality reduction in the middle of it. -->
+For documents represented as vectors, three measures cover almost all practice.
 
-## Naming clusters with an LLM, and checking it did not invent the name
+$$
+\operatorname{cos}(a, b) = \frac{a \cdot b}{\lVert a \rVert \, \lVert b \rVert}
+\qquad
+d_{\text{euc}}(a, b) = \lVert a - b \rVert_2
+\qquad
+J(A, B) = \frac{|A \cap B|}{|A \cup B|}
+$$
 
-<!-- TODO(draft): the labelling step is generation, so it can hallucinate a
-    theme that no document supports. Forward-reference @sec-prompting for
-    the mechanics and @sec-llm-eval for the check. -->
+[**Cosine**](#gloss-cosine-similarity){#term-cosine-similarity .term-ref}
+measures the angle and ignores the length. That is usually what you
+want for text, because a 300-word review and a 30-word review about the same
+thing should be similar, and their raw count vectors differ in magnitude by a
+factor of ten. **Euclidean** distance takes length seriously, which makes it
+the honest choice when magnitude carries meaning — and note that on
+$\ell_2$-normalised vectors the two are monotonically related, so on unit
+vectors the distinction disappears entirely.[^normeq] **Jaccard** works on
+*sets* rather than vectors, which is what makes it the basis of the
+near-duplicate machinery in @sec-near-dupes.
 
-## Lab: map an unlabelled corpus and defend the map
+[^normeq]: If $\lVert a \rVert = \lVert b \rVert = 1$ then
+$d_{\text{euc}}(a,b)^2 = 2 - 2\cos(a,b)$, so ranking by one ranks by the other.
+This is why "we used Euclidean k-means on normalised embeddings" and "we used
+spherical k-means" describe nearly the same procedure, and why arguing about
+which to use is often arguing about nothing.
 
-<!-- TODO(draft): cluster a corpus, name the clusters, then have a second
-    reader assign held-out documents to your names. Report agreement —
-    a topic model nobody else can apply is a picture, not a result. -->
+::: {#gloss-cosine-similarity .column-margin .term-gloss}
+**cosine similarity** — the cosine of the angle between two vectors; 1 means
+the same direction, 0 means perpendicular. Ignores how long the vectors are,
+which is usually a feature for text and occasionally a bug.
+[↩](#term-cosine-similarity){.term-back}
+:::
 
-## Exercises
+### A cosine of 0.98 does not mean what you think
 
-1. Cluster the same corpus with k-means and HDBSCAN. Report how many documents HDBSCAN refuses to assign, and read ten of them. Were they noise, or a topic you missed?
-2. Take a labelled dataset, hide the labels, cluster it, then compare. Report how much of the label structure the clustering recovered and name one distinction it could not have found without supervision.
+Here is the trap that costs the most time in practice. [The raw value of a
+cosine similarity is not interpretable on its own]{.hl}. It is only
+interpretable against the distribution of similarities that the *same model*
+produces for *unrelated* documents.
+
+We took 3,000 random reviews and scored all 4,498,500 pairs among them, in
+each of four spaces:
+
+| space | dims | mean cosine | sd | 1st–99th percentile |
+|:--|--:|--:|--:|:--:|
+| tf-idf (sparse) | 23,971 | 0.0182 | 0.0287 | 0.000 – 0.130 |
+| LSA (SVD to 256) | 256 | 0.0654 | 0.0794 | −0.026 – 0.330 |
+| MiniLM | 384 | 0.3051 | 0.1503 | −0.009 – 0.669 |
+| multilingual-E5 | 768 | [0.8547]{.con} | 0.0278 | [0.783 – 0.916]{.con} |
+
+: Two *unrelated* Turkish reviews, scored by four representations
+{tbl-colwidths="[28,12,15,15,30]"}
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">The same cosine means four different things</div>
+<svg viewBox="0 0 764 372" style="max-width:744px" role="img"
+     aria-label="Four horizontal number lines, one per representation, all on the same cosine scale from 0 to 1. Each line carries a shaded band covering the 1st to 99th percentile of similarities between two random unrelated reviews, with a tick at the mean. For tf-idf the band runs from 0.000 to 0.130 with a mean of 0.0182, a narrow band at the far left. For LSA the band runs from minus 0.026 to 0.330 with a mean of 0.0654. For MiniLM the band runs from minus 0.009 to 0.669 with a mean of 0.3051, a wide band covering most of the middle of the scale. For multilingual E5 the band runs from 0.783 to 0.916 with a mean of 0.8547, a narrow band at the far right, so that unrelated documents already score above 0.78. A vertical dashed line is drawn at cosine 0.8, marked as a typical dashboard threshold for flagging similar documents. It falls far to the right of the tf-idf, LSA and MiniLM bands but cuts through the middle of the E5 band, showing that the same threshold would flag almost the entire corpus under E5 and almost nothing under the others.">
+  <text x="14" y="24" class="t-xs t-b t-muted">SPACE</text>
+  <text x="140" y="24" class="t-xs t-b t-muted">WHERE TWO UNRELATED REVIEWS LAND</text>
+
+  <line x1="140" y1="300" x2="660" y2="300" class="ln-thin"/>
+  <text x="140" y="322" class="t-xs t-mid t-muted">0.0</text>
+  <text x="270" y="322" class="t-xs t-mid t-muted">0.25</text>
+  <text x="400" y="322" class="t-xs t-mid t-muted">0.50</text>
+  <text x="530" y="322" class="t-xs t-mid t-muted">0.75</text>
+  <text x="660" y="322" class="t-xs t-mid t-muted">1.0</text>
+  <text x="400" y="344" class="t-xs t-mid t-muted">cosine similarity</text>
+
+  <line x1="556" y1="52" x2="556" y2="292" class="ln-thin ln-dash"/>
+  <text x="556" y="42" class="t-xs t-mid t-b t-rose">0.8 “similar” threshold</text>
+
+  <text x="14" y="76" class="t-xs t-b">tf-idf</text>
+  <text x="14" y="92" class="t-xs t-muted">23,971 dims</text>
+  <rect x="140" y="62" width="68" height="20" rx="4" class="box-accent"/>
+  <line x1="149" y1="58" x2="149" y2="86" class="ln"/>
+  <text x="218" y="77" class="t-xs t-muted">mean 0.018</text>
+
+  <text x="14" y="140" class="t-xs t-b">LSA</text>
+  <text x="14" y="156" class="t-xs t-muted">256 dims</text>
+  <rect x="126" y="126" width="186" height="20" rx="4" class="box-accent"/>
+  <line x1="174" y1="122" x2="174" y2="150" class="ln"/>
+  <text x="322" y="141" class="t-xs t-muted">mean 0.065</text>
+
+  <text x="14" y="204" class="t-xs t-b">MiniLM</text>
+  <text x="14" y="220" class="t-xs t-muted">384 dims</text>
+  <rect x="135" y="190" width="353" height="20" rx="4" class="box-warm"/>
+  <line x1="299" y1="186" x2="299" y2="214" class="ln"/>
+  <text x="498" y="205" class="t-xs t-muted">mean 0.305</text>
+
+  <text x="14" y="268" class="t-xs t-b t-rose">E5</text>
+  <text x="14" y="284" class="t-xs t-muted">768 dims</text>
+  <rect x="547" y="254" width="69" height="20" rx="4" class="box-rose"/>
+  <line x1="584" y1="250" x2="584" y2="278" class="ln"/>
+  <text x="626" y="268" class="t-xs t-b t-rose">mean 0.855</text>
+
+  <text x="140" y="366" class="t-xs t-muted">Bands cover the 1st–99th percentile of 4,498,500 random pairs. Tick = mean.</text>
+</svg>
+```
+::: {.fig-cap}
+Read the dashed line. A dashboard that flags document pairs above 0.8 as
+"similar" flags **nothing** under tf-idf, LSA or MiniLM, and **almost the entire
+corpus** under E5 — where two unrelated reviews already score 0.855. The
+threshold did not change. The geometry did.
+:::
+::::
+
+Two reviews with nothing in common score **0.855** under E5, and 98% of all
+random pairs land between 0.78 and 0.92. A dashboard that flags "similar
+documents" above 0.8 would flag almost the entire corpus. The absolute number
+is a property of how the encoder was trained — its
+*anisotropy*, the same cone-shaped
+embedding geometry @sec-embeddings measured for contextual vectors — and not a
+property of your documents at all.
+
+Notice also that the *usable range* is not the same as the nominal range. E5
+nominally reports a number in $[-1, 1]$; in practice it uses 0.13 of that
+interval. tf-idf uses 0.13 as well, but starting from zero, so its scores at
+least behave like the fractions they resemble.
+
+::: {.callout-important appearance="simple"}
+**Calibrate before you threshold.** Before choosing any similarity cutoff,
+score a few thousand *random* pairs from your own corpus with your own encoder
+and look at the distribution. If you skip this, you are picking a threshold
+against a scale you have not measured. @steck2024cosine makes the stronger
+version of this argument: for some models the cosine similarity does not
+correspond to any meaningful notion of similarity at all, and the fact that it
+is bounded in $[-1, 1]$ lends it a false air of being a percentage.
+:::
+
+### The pair that has now defeated three chapters
+
+@sec-bake-off ended on a failure. Two Turkish reviews, four words each,
+opposite meanings, and every bag-of-words representation scored them identical:
+
+```text
+a = "kalite iyi fiyat kötü"      (quality good, price bad)
+b = "kalite kötü fiyat iyi"      (quality bad, price good)
+```
+
+@sec-language-models fixed it, because an n-gram model reads order and a bag of
+words does not. The obvious expectation is that sentence embeddings — trained
+on meaning, on hundreds of languages, with attention over the whole sentence —
+also fix it.
+
+They do not. We measured five hand-written pairs designed to separate the
+things a clustering pipeline needs separated. Each score is reported twice: as
+a raw cosine, and as a $z$-score against that model's own random-pair
+distribution from the table above, which is the only way to compare across
+models whose scales differ this much.
+
+| pair | | tf-idf | | MiniLM | | E5 | |
+|:--|:--|--:|--:|--:|--:|--:|--:|
+| | | cos | $z$ | cos | $z$ | cos | $z$ |
+| **contradiction** | *same words, opposite claims* | 1.0000 | 34.2 | 0.9649 | 4.4 | 0.9894 | 4.8 |
+| paraphrase | *same claim, different words* | 0.5349 | 18.0 | 0.9479 | 4.3 | 0.9827 | 4.6 |
+| polarity flip | *one word changes the verdict* | 0.5687 | 19.2 | 0.6518 | 2.3 | 0.9525 | 3.5 |
+| negation | *one suffix changes the verdict* | 0.4999 | 16.8 | 0.7201 | 2.8 | 0.9528 | 3.5 |
+| unrelated | *different subject, same sentiment* | 0.1626 | 5.0 | 0.1871 | −0.8 | 0.8785 | 0.9 |
+
+: A five-pair diagnostic. Five hand-written pairs are a probe, not a
+benchmark — read the direction, not the decimals.
+{tbl-colwidths="[16,26,10,8,10,8,10,12]"}
+
+Read the first row against the second. [In all three representations the
+contradiction pair scores **higher** than the genuine paraphrase.]{.hl} Two
+sentences that assert opposite things are judged more similar than two
+sentences that assert the same thing in different words — by tf-idf, by
+MiniLM, and by E5.
+
+Three observations, in increasing order of how much they should change your
+behaviour:
+
+1. **Sentence embeddings did not repair the @sec-bake-off failure.** E5 scores
+   the contradiction pair 0.9894. The problem was never sparsity, and it was
+   never vocabulary. Word order still carries the meaning and the pooled
+   sentence vector still mostly does not.
+2. **MiniLM separates polarity better than E5 does.** On the flip and negation
+   rows MiniLM sits 2.0 $z$ below its paraphrase score; E5 sits 1.1 $z$ below.
+   The larger, better-benchmarked model is *less* sensitive to the distinction
+   this corpus is labelled for. Bigger is not automatically better for a
+   specific axis.
+3. **tf-idf ranks the polarity flip above the paraphrase** (0.5687 against
+   0.5349) and is the only representation to get that pair backwards, which is
+   exactly what a method with no notion of word meaning should do: *kargo çok
+   hızlı geldi* and *kargo çok yavaş geldi* share three words out of four.
+
+Hold on to point 1. It predicts, before we run a single clustering algorithm,
+that no method on this page is going to recover a sentiment label from this
+geometry — and @sec-kmeans is where that prediction gets tested.
+
+::: {.callout-note appearance="simple"}
+**On the honesty of this table.** Five pairs written by one person to make a
+point is the weakest kind of evidence in this book, and it is here because it
+*explains* a corpus-scale result rather than replacing it. The corpus-scale
+version, on all 49,849 documents, is in @sec-kmeans and it agrees. When a
+probe and a measurement disagree, believe the measurement.
+:::
+
+## Near-duplicates: the cheapest win available {#sec-near-dupes}
+
+Before clustering anything, remove the documents that are already copies of
+each other. @sec-clustering-setup removed 1,657 **exact** duplicates by
+comparing strings. Exact matching is a weak test — one changed character
+defeats it — and a cluster built on repeated boilerplate is measuring the
+boilerplate.
+
+### Shingling, MinHash, and why you do not compare every pair
+
+Comparing all pairs of 50,000 documents means $1.2 \times 10^9$ comparisons.
+The standard escape has three steps [@broder1997resemblance]:
+
+1. **Shingle.** Turn each document into a *set* of overlapping $k$-grams. We
+   used character 5-grams rather than word shingles on purpose: Turkish
+   agglutination means two near-identical reviews can differ in several word
+   forms while sharing nearly every character run.
+2. [**MinHash.**](#gloss-minhash){#term-minhash .term-ref} Hash the set 128
+   times and keep the minimum under each hash.
+   The probability that two documents share a given minimum equals their
+   Jaccard similarity, so 128 numbers estimate $J$ without storing the sets.
+3. **Band and bucket (LSH).** Split the 128 values into bands, hash each band,
+   and only compare documents that collide in at least one band. Pairs below
+   the threshold almost never collide, so almost all of the $10^9$ comparisons
+   never happen.
+
+::: {#gloss-minhash .column-margin .term-gloss}
+**MinHash** — a fixed-length sketch of a set, built so that the chance two
+sketches agree in a position equals the Jaccard similarity of the original
+sets. Lets you estimate overlap without keeping the sets.
+[↩](#term-minhash){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Why 1.2 billion comparisons never happen</div>
+<svg viewBox="0 0 764 316" style="max-width:744px" role="img"
+     aria-label="A left-to-right pipeline in five stages. Stage one, a review text reading kargo çok hızlı geldi. Stage two, shingling, turns it into a set of overlapping character 5-grams such as kargo, argo space, rgo space ç. Stage three, MinHash, hashes that set 128 times and keeps the minimum under each hash, producing a signature of 128 integers; the caption notes that the chance two signatures agree in a given position equals the Jaccard similarity of the original sets. Stage four, banding, splits the 128 values into bands, hashes each band, and drops documents into buckets, so that only documents colliding in at least one band become candidate pairs. Stage five, verification, computes exact Jaccard on the surviving candidates and then runs union-find so a chain of near copies is counted as one group. Below the pipeline a comparison bar shows all-pairs comparison at 1.2 times 10 to the 9 comparisons against the LSH path, which touched a small fraction of that and finished in 27.4 seconds.">
+  <defs>
+    <marker id="lsh-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="10" y="34" width="132" height="96" rx="8" class="box"/>
+  <text x="76" y="56" class="t-xs t-mid t-b">1 · document</text>
+  <text x="76" y="82" class="t-xs t-mid t-mono">kargo çok</text>
+  <text x="76" y="98" class="t-xs t-mid t-mono">hızlı geldi</text>
+  <text x="76" y="120" class="t-xs t-mid t-muted">49,849 of these</text>
+
+  <line x1="146" y1="82" x2="168" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="172" y="34" width="132" height="96" rx="8" class="box-accent"/>
+  <text x="238" y="56" class="t-xs t-mid t-b t-accent">2 · shingle</text>
+  <text x="238" y="80" class="t-xs t-mid t-mono">{“kargo”,</text>
+  <text x="238" y="96" class="t-xs t-mid t-mono">“argo ”, …}</text>
+  <text x="238" y="120" class="t-xs t-mid t-muted">character 5-grams</text>
+
+  <line x1="308" y1="82" x2="330" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="334" y="34" width="132" height="96" rx="8" class="box-accent"/>
+  <text x="400" y="56" class="t-xs t-mid t-b t-accent">3 · MinHash</text>
+  <text x="400" y="80" class="t-xs t-mid t-mono">[17, 4, 92, …]</text>
+  <text x="400" y="102" class="t-xs t-mid t-muted">128 integers,</text>
+  <text x="400" y="118" class="t-xs t-mid t-muted">P(agree) = J</text>
+
+  <line x1="470" y1="82" x2="492" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="496" y="34" width="132" height="96" rx="8" class="box-warm"/>
+  <text x="562" y="56" class="t-xs t-mid t-b t-warm">4 · band + bucket</text>
+  <text x="562" y="80" class="t-xs t-mid t-muted">hash each band,</text>
+  <text x="562" y="96" class="t-xs t-mid t-muted">compare only</text>
+  <text x="562" y="112" class="t-xs t-mid t-b">colliding pairs</text>
+
+  <line x1="632" y1="82" x2="654" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="646" y="34" width="108" height="96" rx="8" class="box-rose"/>
+  <text x="700" y="56" class="t-xs t-mid t-b t-rose">5 · verify</text>
+  <text x="700" y="80" class="t-xs t-mid t-muted">exact Jaccard,</text>
+  <text x="700" y="96" class="t-xs t-mid t-muted">then union-find</text>
+  <text x="700" y="118" class="t-xs t-mid t-b">131 groups</text>
+
+  <text x="14" y="184" class="t-xs t-b t-muted">COMPARISONS ACTUALLY PERFORMED</text>
+
+  <text x="14" y="216" class="t-xs t-b">all pairs</text>
+  <rect x="140" y="202" width="600" height="20" rx="4" class="box-rose"/>
+  <text x="440" y="217" class="t-xs t-mid t-b t-rose">1.2 × 10⁹ pairs</text>
+
+  <text x="14" y="256" class="t-xs t-b">LSH candidates</text>
+  <rect x="140" y="242" width="7" height="20" rx="3" class="box-accent"/>
+  <text x="160" y="257" class="t-xs t-b t-accent">a sliver of that — 27.4 seconds, single core</text>
+
+  <text x="14" y="296" class="t-xs t-muted">The bands are the whole trick: pairs below the threshold almost never collide, so they are never scored.</text>
+</svg>
+```
+::: {.fig-cap}
+Stages 2 and 3 turn a set of unknown size into a fixed 128 numbers, which is
+what makes stage 4 possible. Nothing here is approximate in a way that matters:
+stage 5 computes the exact Jaccard on the survivors, so LSH only ever changes
+*which pairs you look at*, never what you conclude about the ones you do.
+:::
+::::
+
+We then ran union-find over the surviving candidate pairs, so a chain of near
+copies counts as one group rather than several pairs.
+
+### The count depends on the threshold, and not gently
+
+| Jaccard threshold | groups | redundant docs | share of corpus | largest group | time |
+|--:|--:|--:|--:|--:|--:|
+| ≥ 0.9 | 57 | 60 | 0.12% | 3 | 28.0s |
+| ≥ 0.8 | 131 | 151 | 0.30% | 6 | 27.4s |
+| ≥ 0.7 | 265 | 529 | [1.06%]{.con} | [61]{.con} | 28.4s |
+
+: Near-duplicates surviving exact de-duplication, 50,000 documents
+{tbl-colwidths="[22,14,18,18,16,12]"}
+
+Moving the threshold from 0.8 to 0.7 multiplies the redundant-document count by
+3.5 and the largest group by ten. That is not a bug in the method; it is what
+the corpus looks like. Here are three groups at $J \ge 0.8$:
+
+```text
+group 1   "teşekkürler hepsiburada.com ;)"
+          "teşekkürler hepsiburada!"
+          "teşekkürler hepsiburada....."
+
+group 2   "güzel tavsiye ederim"
+          "ürün çok güzel tavsiye ederim."
+          "isıtması çok güzel tavsiye ederim"
+
+group 3   "herkese tavsiye ederim"
+          "herkese tavsiye ederim,fiy"
+          "herkese tavsiye ederim :)"
+```
+
+Group 1 is boilerplate and should go. Group 2 is three *different* people
+saying a generic thing about three different products, and deleting two of them
+throws away real data. [At a low enough threshold, "near-duplicate" and "short
+and generic" become the same category]{.hl}, which is why the largest group
+jumps to 61 at $J \ge 0.7$.
+
+::: {.callout-tip appearance="simple"}
+**A defensible default.** Deduplicate at $J \ge 0.8$, then *read* the largest
+five groups before accepting the result. If the largest group is short generic
+text rather than boilerplate, raise the threshold. This chapter kept
+$J \ge 0.8$, leaving **49,849** documents, and every number after this point is
+computed on that set.
+:::
+
+@sec-pretraining-data treats deduplication as a measured quality lever for
+pretraining corpora, where the stakes are much higher and where
+@lee2022deduplicating found real gains — and where @penedo2024fineweb found
+that the most aggressive deduplication made the data *worse*. The same tension
+appears here in miniature at a corpus five orders of magnitude smaller.
+
+SimHash [@charikar2002similarity] solves the same problem with a different
+sketch: it produces one bit-vector per document and measures Hamming distance,
+which makes it cheaper to store and a natural fit when you need to check a new
+document against a large existing index. @manku2007detecting is the account of
+running it at web scale. For a one-off corpus audit, MinHash with LSH is easier
+to reason about and `datasketch` implements it in a dozen lines.
+
+## Three representations, and what they cost {#sec-clustering-reps}
+
+Everything from here runs on the same 49,849 documents in three geometries,
+chosen to span what a practitioner actually picks between in 2026.
+
+| representation | dims | build time | notes |
+|:--|--:|--:|:--|
+| tf-idf → LSA | 256 | 2.6s | the @sec-bake-off winner, SVD to 256; no GPU, fully deterministic |
+| MiniLM | 384 | 40s | `paraphrase-multilingual-MiniLM-L12-v2`, 117.7M params, 1,247 docs/s |
+| multilingual-E5 | 768 | 104s | `intfloat/multilingual-e5-base`, 278.0M params, 478 docs/s |
+
+: The three geometries, on one laptop GPU {tbl-colwidths="[26,10,14,50]"}
+
+Two details worth stating because they change results and are easy to skip.
+
+**The SVD is not optional.** Raw tf-idf here is 23,971 dimensions with 19.3
+non-zero entries per document. Running k-means directly on that is the textbook
+curse-of-dimensionality failure: in the table above, tf-idf's *entire* 1st-to-99th
+percentile band is 0.130 wide, so almost every pair of documents is almost
+exactly as far from every other. Reducing to 256 dimensions with truncated SVD
+recovers 29.9% of the variance and makes the distances mean something. That
+reduction is itself a topic model, and it has a name — latent semantic analysis
+[@deerwester1990indexing] — which is why @sec-topic-models can reuse it for free.
+
+**E5 needs its prefix.** The multilingual-E5 models are trained with `query: `
+and `passage: ` markers and behave measurably differently without them
+[@wang2024multilingual]. For a symmetric task like clustering, the model card
+prescribes `query: ` on both sides, which is what we used. Forgetting this is
+one of the most common silent errors in embedding pipelines: nothing crashes,
+the numbers are simply worse.
+
+## k-means, and the four assumptions it makes for you {#sec-kmeans}
+
+[k-means](#gloss-k-means){#term-k-means .term-ref} is the default for a reason:
+it is simple, it is fast, and Lloyd's
+algorithm [@lloyd1982least] converges in a handful of passes. Pick $k$ centres,
+assign every point to its nearest centre, move each centre to the mean of its
+assigned points, repeat.
+
+Writing down its objective makes the assumptions visible. k-means minimises
+
+$$
+\sum_{i=1}^{k} \sum_{x \in C_i} \lVert x - \mu_i \rVert^2
+$$
+
+and in doing so commits you to four things, none of which anyone chose:
+
+1. **Clusters are spherical.** The objective only measures distance to a
+   centre, so it cannot represent an elongated or curved group.
+2. **Clusters have similar extent.** A tight cluster and a diffuse one are
+   scored on the same scale, so the diffuse one gets torn up and its pieces
+   handed to its neighbours.
+3. **Every point belongs to a cluster.** There is no outlier class. A document
+   that resembles nothing gets assigned anyway, to whichever centre is least
+   wrong.
+4. **You already know $k$.** It is an input, not an output.
+
+::: {#gloss-k-means .column-margin .term-gloss}
+**k-means** — partitions points into $k$ groups by repeatedly assigning each
+point to the nearest group centre and recomputing the centres. Fast, and
+commits you to spherical, similarly-sized, all-inclusive groups.
+[↩](#term-k-means){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">The four assumptions, drawn</div>
+<svg viewBox="0 0 764 268" style="max-width:744px" role="img"
+     aria-label="Four panels, each showing a data shape and what k-means does to it. Panel one, spherical: an elongated diagonal band of points that is genuinely one group; k-means cuts it in half with a straight boundary and places two centres, because its objective only measures distance to a centre and cannot represent an elongated shape. Panel two, similar extent: a tight dense blob on the left and a wide diffuse cloud on the right; k-means keeps the tight blob whole but tears the diffuse cloud into pieces, because both are scored on the same distance scale. Panel three, no outliers: a single cluster with one far-away point; an arrow shows the outlier being assigned to the cluster anyway, since k-means has no noise label. Panel four, k is an input: a dial marked with question marks and the values 2, 10 and 50, showing that the number of clusters is supplied by the user rather than discovered.">
+  <defs>
+    <marker id="km-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="8" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="97" y="52" class="t-xs t-mid t-b">1 · spherical</text>
+  <circle cx="46" cy="160" r="4" class="box-accent"/>
+  <circle cx="62" cy="148" r="4" class="box-accent"/>
+  <circle cx="76" cy="139" r="4" class="box-accent"/>
+  <circle cx="90" cy="128" r="4" class="box-accent"/>
+  <circle cx="106" cy="118" r="4" class="box-rose"/>
+  <circle cx="120" cy="107" r="4" class="box-rose"/>
+  <circle cx="136" cy="96" r="4" class="box-rose"/>
+  <circle cx="150" cy="86" r="4" class="box-rose"/>
+  <line x1="128" y1="72" x2="72" y2="150" class="ln-thin ln-dash"/>
+  <text x="97" y="192" class="t-xs t-mid t-muted">one group, cut in two</text>
+
+  <rect x="198" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="287" y="52" class="t-xs t-mid t-b">2 · similar extent</text>
+  <circle cx="232" cy="120" r="4" class="box-accent"/>
+  <circle cx="240" cy="128" r="4" class="box-accent"/>
+  <circle cx="237" cy="112" r="4" class="box-accent"/>
+  <circle cx="246" cy="118" r="4" class="box-accent"/>
+  <circle cx="296" cy="92" r="4" class="box-warm"/>
+  <circle cx="330" cy="112" r="4" class="box-warm"/>
+  <circle cx="310" cy="146" r="4" class="box-rose"/>
+  <circle cx="348" cy="150" r="4" class="box-rose"/>
+  <circle cx="286" cy="132" r="4" class="box-warm"/>
+  <circle cx="342" cy="80" r="4" class="box-warm"/>
+  <line x1="320" y1="66" x2="300" y2="168" class="ln-thin ln-dash"/>
+  <text x="287" y="192" class="t-xs t-mid t-muted">the diffuse one gets torn up</text>
+
+  <rect x="388" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="477" y="52" class="t-xs t-mid t-b">3 · no outliers</text>
+  <circle cx="452" cy="140" r="4" class="box-accent"/>
+  <circle cx="464" cy="130" r="4" class="box-accent"/>
+  <circle cx="446" cy="126" r="4" class="box-accent"/>
+  <circle cx="462" cy="146" r="4" class="box-accent"/>
+  <circle cx="474" cy="138" r="4" class="box-accent"/>
+  <circle cx="534" cy="80" r="5" class="box-rose"/>
+  <line x1="528" y1="88" x2="482" y2="126" class="ln" marker-end="url(#km-a)"/>
+  <text x="477" y="192" class="t-xs t-mid t-muted">assigned anyway, no noise label</text>
+
+  <rect x="578" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="667" y="52" class="t-xs t-mid t-b">4 · you know k</text>
+  <text x="667" y="122" class="t-sm t-mid t-b t-warm">k = ?</text>
+  <text x="667" y="150" class="t-xs t-mid t-mono t-muted">2 · 10 · 50</text>
+  <text x="667" y="192" class="t-xs t-mid t-muted">an input, not an output</text>
+
+  <text x="382" y="242" class="t-xs t-mid t-muted">Everyone worries about panel 4. On text corpora it is panels 2 and 3 that do the damage.</text>
+</svg>
+```
+::: {.fig-cap}
+None of these are bugs — they are the objective working correctly. Minimising
+squared distance to a centre *is* the assumption that groups are round, equally
+spread, and exhaustive. If your data disagrees, the algorithm will not tell you;
+it will simply return a partition.
+:::
+::::
+
+Assumption 4 is the one everybody worries about; assumptions 2 and 3 are the
+ones that actually break text corpora. Use `k-means++` initialisation
+[@arthur2007kmeanspp] — it is scikit-learn's default and it removes the worst
+of the random-restart lottery — but note that it addresses none of the four.
+
+### The sweep
+
+We ran $k$ from 2 to 50 on all three representations, scoring each partition
+four ways. Three of the scores are **internal**: they use only the vectors, so
+you can compute them on a corpus with no labels, which is the situation this
+chapter is about. The fourth is **external**: it compares the partition against
+the hidden sentiment labels, and it is the answer key.
+
+```{ojs}
+//| echo: false
+kmRows = [
+  {rep: "lsa", k: 2, silh: 0.0174, ch: 728, db: 6.381, ari: -0.0471, nmi: 0.0118, big: 81.1},
+  {rep: "lsa", k: 3, silh: 0.0236, ch: 629, db: 6.533, ari: -0.0507, nmi: 0.0185, big: 67.6},
+  {rep: "lsa", k: 4, silh: 0.0246, ch: 566, db: 7.174, ari: -0.0243, nmi: 0.0153, big: 46.6},
+  {rep: "lsa", k: 5, silh: 0.0288, ch: 534, db: 6.410, ari: -0.0229, nmi: 0.0117, big: 50.1},
+  {rep: "lsa", k: 6, silh: 0.0262, ch: 491, db: 6.523, ari: -0.0171, nmi: 0.0117, big: 39.0},
+  {rep: "lsa", k: 8, silh: 0.0344, ch: 454, db: 5.873, ari: -0.0160, nmi: 0.0102, big: 35.8},
+  {rep: "lsa", k: 10, silh: 0.0391, ch: 423, db: 5.747, ari: -0.0094, nmi: 0.0100, big: 26.6},
+  {rep: "lsa", k: 12, silh: 0.0420, ch: 396, db: 5.565, ari: -0.0096, nmi: 0.0102, big: 22.9},
+  {rep: "lsa", k: 15, silh: 0.0440, ch: 360, db: 5.229, ari: -0.0083, nmi: 0.0099, big: 23.8},
+  {rep: "lsa", k: 20, silh: 0.0528, ch: 325, db: 4.921, ari: -0.0057, nmi: 0.0091, big: 16.4},
+  {rep: "lsa", k: 25, silh: 0.0560, ch: 288, db: 4.731, ari: -0.0052, nmi: 0.0101, big: 17.2},
+  {rep: "lsa", k: 30, silh: 0.0605, ch: 269, db: 4.554, ari: -0.0033, nmi: 0.0099, big: 12.7},
+  {rep: "lsa", k: 40, silh: 0.0647, ch: 241, db: 4.276, ari: -0.0014, nmi: 0.0081, big: 9.5},
+  {rep: "lsa", k: 50, silh: 0.0696, ch: 215, db: 4.105, ari: -0.0005, nmi: 0.0121, big: 8.7},
+  {rep: "minilm", k: 2, silh: 0.0977, ch: 2724, db: 4.240, ari: 0.0042, nmi: 0.0392, big: 51.2},
+  {rep: "minilm", k: 3, silh: 0.1018, ch: 2428, db: 3.741, ari: 0.0083, nmi: 0.0223, big: 42.7},
+  {rep: "minilm", k: 4, silh: 0.1042, ch: 2217, db: 3.583, ari: 0.0058, nmi: 0.0275, big: 34.9},
+  {rep: "minilm", k: 5, silh: 0.0770, ch: 1949, db: 3.603, ari: 0.0007, nmi: 0.0236, big: 25.7},
+  {rep: "minilm", k: 6, silh: 0.0808, ch: 1745, db: 3.563, ari: 0.0036, nmi: 0.0220, big: 24.4},
+  {rep: "minilm", k: 8, silh: 0.0621, ch: 1475, db: 3.553, ari: 0.0029, nmi: 0.0251, big: 17.3},
+  {rep: "minilm", k: 10, silh: 0.0736, ch: 1327, db: 3.331, ari: -0.0007, nmi: 0.0197, big: 16.0},
+  {rep: "minilm", k: 12, silh: 0.0744, ch: 1196, db: 3.427, ari: 0.0013, nmi: 0.0171, big: 12.7},
+  {rep: "minilm", k: 15, silh: 0.0720, ch: 1036, db: 3.401, ari: 0.0014, nmi: 0.0155, big: 9.7},
+  {rep: "minilm", k: 20, silh: 0.0704, ch: 867, db: 3.276, ari: 0.0013, nmi: 0.0159, big: 8.6},
+  {rep: "minilm", k: 25, silh: 0.0714, ch: 751, db: 3.242, ari: 0.0009, nmi: 0.0148, big: 5.8},
+  {rep: "minilm", k: 30, silh: 0.0718, ch: 667, db: 3.254, ari: 0.0010, nmi: 0.0152, big: 5.6},
+  {rep: "minilm", k: 40, silh: 0.0678, ch: 547, db: 3.233, ari: 0.0007, nmi: 0.0142, big: 4.9},
+  {rep: "minilm", k: 50, silh: 0.0605, ch: 468, db: 3.260, ari: 0.0007, nmi: 0.0142, big: 3.9},
+  {rep: "e5", k: 2, silh: 0.0936, ch: 2041, db: 4.757, ari: -0.0079, nmi: 0.0014, big: 63.8},
+  {rep: "e5", k: 3, silh: 0.0445, ch: 1679, db: 4.642, ari: -0.0000, nmi: 0.0327, big: 44.3},
+  {rep: "e5", k: 4, silh: 0.0438, ch: 1415, db: 4.439, ari: -0.0019, nmi: 0.0265, big: 40.1},
+  {rep: "e5", k: 5, silh: 0.0415, ch: 1220, db: 4.698, ari: 0.0007, nmi: 0.0183, big: 33.3},
+  {rep: "e5", k: 6, silh: 0.0223, ch: 1094, db: 4.765, ari: 0.0049, nmi: 0.0416, big: 29.6},
+  {rep: "e5", k: 8, silh: 0.0320, ch: 926, db: 4.479, ari: 0.0047, nmi: 0.0341, big: 24.2},
+  {rep: "e5", k: 10, silh: 0.0261, ch: 794, db: 4.566, ari: 0.0075, nmi: 0.0396, big: 19.4},
+  {rep: "e5", k: 12, silh: 0.0256, ch: 706, db: 4.598, ari: 0.0057, nmi: 0.0363, big: 16.0},
+  {rep: "e5", k: 15, silh: 0.0263, ch: 607, db: 4.670, ari: 0.0031, nmi: 0.0293, big: 12.5},
+  {rep: "e5", k: 20, silh: 0.0255, ch: 494, db: 4.651, ari: 0.0027, nmi: 0.0326, big: 9.4},
+  {rep: "e5", k: 25, silh: 0.0207, ch: 419, db: 4.703, ari: 0.0013, nmi: 0.0269, big: 8.2},
+  {rep: "e5", k: 30, silh: 0.0189, ch: 366, db: 4.663, ari: 0.0015, nmi: 0.0278, big: 5.5},
+  {rep: "e5", k: 40, silh: 0.0141, ch: 296, db: 4.584, ari: 0.0014, nmi: 0.0274, big: 4.4},
+  {rep: "e5", k: 50, silh: 0.0130, ch: 250, db: 4.572, ari: 0.0014, nmi: 0.0287, big: 4.6}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof kmMetric = Inputs.radio(
+  new Map([
+    ["Silhouette — higher is better (internal)", "silh"],
+    ["Calinski-Harabasz — higher is better (internal)", "ch"],
+    ["Davies-Bouldin — lower is better (internal)", "db"],
+    ["Adjusted Rand Index vs. the hidden labels (external)", "ari"],
+    ["Largest cluster, % of corpus", "big"]
+  ]),
+  { value: "silh", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+kmLabels = ({
+  silh: "silhouette (cosine)", ch: "Calinski-Harabasz",
+  db: "Davies-Bouldin", ari: "adjusted Rand index",
+  big: "largest cluster, % of corpus"
+})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700,
+  height: 330,
+  marginLeft: 70,
+  marginBottom: 46,
+  x: { label: "number of clusters k", type: "log", ticks: [2,3,5,10,20,50], tickFormat: d => d, grid: true },
+  y: { label: kmLabels[kmMetric], grid: true },
+  color: { legend: true, domain: ["lsa", "minilm", "e5"],
+           range: ["#1F4E79", "#2E7D6F", "#B3453E"] },
+  marks: [
+    kmMetric === "ari" ? Plot.ruleY([0], { stroke: "#9AA3AE", strokeDasharray: "4 3" }) : null,
+    Plot.line(kmRows, { x: "k", y: kmMetric, stroke: "rep", strokeWidth: 2 }),
+    Plot.dot(kmRows, { x: "k", y: kmMetric, fill: "rep", r: 3.5,
+      title: d => `${d.rep}, k=${d.k}\n${kmLabels[kmMetric]}: ${d[kmMetric]}` })
+  ].filter(d => d)
+})
+```
+
+::: {.column-margin}
+Switch the radio to **adjusted Rand index** and note the dashed line at zero.
+ARI is corrected for chance, so 0 is what a *random* partition scores. All
+three curves sit on it.
+:::
+
+### Reading the sweep
+
+**The external verdict first, because it is unambiguous.** The best adjusted
+Rand index anywhere in the sweep is **0.0083**, at MiniLM with $k=3$. ARI is
+chance-corrected, so 0.0 is what random assignment scores and 1.0 is a perfect
+match. Several entries are *negative*. Normalised mutual information tops out
+at 0.0416. [Across 42 clusterings and three representations, none of them
+recovered the sentiment label.]{.hl}
+
+@sec-what-similar-means predicted this. If a representation scores a
+contradiction pair above a paraphrase, no algorithm downstream can partition it
+by polarity — the information is not in the geometry to be found. The
+clustering did not fail; it faithfully reported the structure it was given.
+
+**The internal indices do not agree with each other, or with themselves.**
+This is the more troubling result, because internal indices are all you have on
+a genuinely unlabelled corpus:
+
+| representation | silhouette says $k$ = | Calinski-Harabasz says | Davies-Bouldin says |
+|:--|--:|--:|--:|
+| LSA | [50, and still rising]{.con} | 2 | 50 |
+| MiniLM | 4 | 2 | 40 |
+| E5 | 2 | 2 | 2 |
+
+: Where each internal index puts its optimum, over $k \in [2, 50]$
+{tbl-colwidths="[28,26,24,22]"}
+
+Calinski-Harabasz picks $k=2$ every time because it is a variance ratio that
+falls monotonically as $k$ grows on data with no strong cluster structure.
+Davies-Bouldin picks the largest $k$ available for the mirror-image reason.
+Silhouette is the only one that produces an interior maximum, and it does so
+for exactly one of the three representations.
+
+**Every silhouette in this table is small.** The scale runs to 1.0; the best
+value anywhere in the sweep is 0.1042. A silhouette near zero means the average
+point is about as close to its neighbouring cluster as to its own. That is not
+a mediocre clustering, it is [a corpus with no well-separated clusters in this
+geometry]{.hl} — and the number is telling you so.
+
+**Watch the largest-cluster column.** At $k=2$ on LSA, one cluster holds 81.1%
+of the corpus. That is the classic degenerate outcome: k-means, forbidden from
+declaring outliers, produces one enormous bag and a handful of crumbs. The
+partition is technically valid and completely useless.
+
+## How many clusters? {#sec-how-many-clusters}
+
+Given the table above, the honest answer to "what is the right $k$" for this
+corpus is *there isn't one*, and the rest of this section is about how to tell
+that apart from "I have not looked hard enough".
+
+### What the indices actually measure
+
+$$
+s(i) = \frac{b(i) - a(i)}{\max\{a(i),\, b(i)\}}
+$$
+
+The [**silhouette**](#gloss-silhouette){#term-silhouette .term-ref} of point $i$
+compares $a(i)$, its mean distance to points in its own cluster, against $b(i)$, its mean distance to points in the nearest
+*other* cluster [@rousseeuw1987silhouettes]. It runs from $-1$ to $1$, and the
+score for a clustering is the mean over all points. It is $O(n^2)$, so on 49,849
+documents we computed it on a fixed random sample of 10,000 — which is standard
+practice and is worth stating, because a silhouette on a sample is an estimate
+with its own error bar.
+
+::: {#gloss-silhouette .column-margin .term-gloss}
+**silhouette** — for each point, how much closer it is to its own cluster than
+to the next-nearest one, scaled to $[-1, 1]$. Near 0 means the point sits on a
+boundary; a whole corpus near 0 means there are no boundaries.
+[↩](#term-silhouette){.term-back}
+:::
+
+**Calinski-Harabasz** is the ratio of between-cluster to within-cluster
+dispersion; **Davies-Bouldin** averages, over clusters, the worst-case ratio of
+within-cluster spread to between-cluster separation. Both are cheap, both are
+$O(n)$ in the number of points, and — as the sweep shows — both are close to
+monotone in $k$ on data without real cluster structure, which makes their
+"optimum" an artefact of the range you happened to search.
+
+### The elbow method deserves its reputation
+
+The oldest recipe is to plot inertia against $k$ and look for the bend. It is
+popular because it always produces an answer, which is also the problem:
+inertia decreases monotonically by construction, so there is always *a* bend,
+and where you see it depends on your axis limits. @schubert2023stop makes the
+case at length and the summary is blunt — the elbow criterion should not be
+used, and the reason it survives is that it is easy to draw rather than that it
+is informative.
+
+::: {.callout-tip appearance="simple"}
+**A better default than any index.** Cluster at three or four values of $k$,
+sample 20 documents from each cluster, and read them. If you cannot write a
+one-line description of a cluster that a colleague could then use to sort new
+documents, that cluster is not real, whatever the silhouette says. The
+criterion "the number of groups a human can act on" is not a cop-out — it is
+the only criterion that is connected to why you are clustering at all.
+:::
+
+### When you do have labels, use them
+
+If some labelled subset exists, external validation is far more informative
+than any internal index. Two standard measures:
+
+- **Adjusted Rand index** [@hubert1985comparing] counts pairs of documents that
+  the two partitions agree about, corrected so that random agreement scores 0.
+  A negative ARI means the partitions agree *less* than chance.
+- **Normalised mutual information** and its symmetric cousin V-measure
+  [@rosenberg2007vmeasure] ask how much knowing the cluster tells you about the
+  label. NMI is not chance-corrected, so it drifts upward with $k$ — visible in
+  the sweep, where E5's NMI rises while its ARI falls.
+
+Both answer the question *is this partition the label partition?* Keep that
+phrasing in mind, because @sec-clustering-payoff is going to show it is the
+wrong question.
+
+## When the shape is wrong: density-based clustering {#sec-density}
+
+Every k-means result above is subject to assumption 3: *every point belongs to
+a cluster*. On a corpus of product reviews that is plainly false. Most reviews
+are three words of generic praise and belong to nothing in particular. A method
+that is allowed to say **noise** should therefore do better — and it is worth
+running precisely because the way it fails is more informative than the way
+k-means fails.
+
+[HDBSCAN](#gloss-hdbscan){#term-hdbscan .term-ref} builds a hierarchy of
+density levels and then extracts the clusters that persist longest across that
+hierarchy [@campello2013density; @mcinnes2017hdbscan]. It has no $k$. Its main
+knob is `min_cluster_size`: the smallest group you are willing to call a
+cluster. Everything not dense enough to qualify is labelled $-1$ and left out.
+
+::: {#gloss-hdbscan .column-margin .term-gloss}
+**HDBSCAN** — finds clusters as regions denser than their surroundings, at
+whatever density each region happens to have, and labels the rest *noise*. No
+$k$ required, and no obligation to assign every point.
+[↩](#term-hdbscan){.term-back}
+:::
+
+We ran it at three values of `min_cluster_size` on each representation. The
+result is the same in every cell, and it is not a subtle one.
+
+| representation | `min_cluster_size` | clusters | noise | largest cluster | time |
+|:--|--:|--:|--:|--:|--:|
+| LSA | 25 | 2 | 52.9% | 47.0% | 674s |
+| LSA | 100 | 2 | 97.1% | 2.4% | 219s |
+| LSA | 500 | 0 | 100.0% | — | 198s |
+| MiniLM | 25 | 2 | 55.1% | 44.8% | 285s |
+| MiniLM | 100 | 3 | 90.0% | 9.2% | 248s |
+| MiniLM | 500 | 0 | 100.0% | — | 1495s |
+| E5 | 25 | 2 | 99.5% | 0.3% | 612s |
+| E5 | 100 | 0 | 100.0% | — | 1530s |
+| E5 | 500 | 0 | 100.0% | — | 2631s |
+
+: HDBSCAN on 49,849 documents. Every setting either swallows half the corpus in
+one blob or throws almost all of it away {tbl-colwidths="[22,18,12,14,18,16]"}
+
+Read the rows in pairs. At `min_cluster_size = 25` the algorithm finds *two*
+clusters, one of which holds roughly half of everything and the other of which
+is a rounding error; the remaining half is noise. That is not a discovery of
+structure, it is a description of one big lump. Raise the threshold to 100 and
+the lump stops qualifying as dense, so 90–97% of the corpus becomes noise.
+Raise it to 500 and there is no cluster anywhere in 49,849 documents at any
+density level.
+
+E5 is the extreme case and the most instructive one. Even at
+`min_cluster_size = 25` — the most permissive setting we tried — it calls
+**99.5%** of the corpus noise and returns a largest cluster of 0.3%. Raise the
+threshold at all and it finds nothing whatsoever — zero clusters, 100% noise,
+after 44 minutes of work at `min_cluster_size = 500`.
+
+That is exactly what @sec-what-similar-means predicted: E5's random-pair cosine
+is 0.8547 with a standard deviation of 0.0278, so every document sits at very
+nearly the same distance from every other. A space that uniform has no density
+variation for HDBSCAN to find, however good it is at ranking neighbours. Note
+the irony worth sitting with: **E5 is the representation that performed *best*
+in @sec-clustering-payoff and the one where density-based clustering fails most
+completely.** Those are not in tension — they measure different things — but a
+practitioner who tried only HDBSCAN would have discarded the winning model.
+
+::: {.callout-important appearance="simple"}
+**A 97% noise rate is a measurement, not a failure.** HDBSCAN is telling you
+something true and specific: at the scale of hundreds of documents, this corpus
+has no regions that are meaningfully denser than their surroundings. It is one
+cloud with gradients, not a set of islands. k-means could not tell you that,
+because k-means is required to return $k$ clusters whether or not any exist.
+:::
+
+That is the honest reading, and it also explains the k-means sweep. The
+silhouette never rose above 0.1042 not because we searched the wrong $k$ but
+because there are no boundaries to find. Two methods with completely different
+assumptions agree, which is worth more than either result alone.
+
+Note also the cost. The `min_cluster_size = 500` run on MiniLM took 1,495
+seconds — 25 minutes — to conclude that there is nothing there. Density-based
+clustering on high-dimensional data is not cheap, and its running time is not
+monotone in the setting you would expect, because the size of the extracted
+hierarchy depends on the data rather than on the parameter.
+
+::: {.callout-tip appearance="simple"}
+**The standard workaround, and its cost.** The usual advice is to run UMAP
+[@mcinnes2018umap] down to 5–15 dimensions first, then HDBSCAN on the
+projection. This is what BERTopic does by default [@grootendorst2022bertopic],
+and it does produce clusters. Be clear about why: UMAP is a non-linear method
+that *manufactures* local density by pulling neighbours together and pushing
+everything else apart. Clusters found in a UMAP projection are partly a
+property of UMAP. They can still be useful — but "HDBSCAN found clusters after
+UMAP" is not evidence that the original space had them, and the numbers above
+are what the original space actually looks like.
+:::
+
+## Classical and embedding-era topic models {#sec-topic-models}
+
+Clustering gives you a label per document. A **topic model** gives you a list of
+words per group, which is what you actually show a stakeholder. The two are not
+competitors so much as two halves of the same deliverable, and in 2026 there are
+three families worth knowing, in increasing order of how much they cheat.
+
+### LDA: the generative story
+
+Latent Dirichlet allocation [@blei2003latent] posits that each document is a
+mixture over $K$ topics and each topic is a distribution over the vocabulary,
+both drawn from Dirichlet priors, and then asks which topics best explain the
+words you observed. It is genuinely probabilistic: a document is 60% topic 3
+and 30% topic 7, not assigned to one bucket. It dominated topic modelling for
+fifteen years and it is still the thing people mean when they say "topic model".
+
+Its assumptions are also worth stating, because they fit our corpus badly. LDA
+is a bag-of-words model over *documents*, and it needs each document to contain
+enough words to estimate a mixture from. The median review here is 19 words.
+Estimating a ten-way mixture from 19 tokens is asking a lot.
+
+### NMF: the same shape, without the priors
+
+Non-negative matrix factorisation [@lee1999learning] factors the document-term
+matrix $V \approx WH$ under the single constraint that $W$ and $H$ have no
+negative entries. Because nothing can cancel, the parts it finds are additive,
+and on text that tends to produce readable word lists. It has no generative
+story and no priors — it is a matrix decomposition — which turns out not to
+matter much in practice, and it runs on tf-idf rather than raw counts, which
+suits short documents better.
+
+### Cluster, then describe: c-TF-IDF
+
+The third family skips the modelling entirely. You already have clusters from
+@sec-kmeans. Treat each cluster as one long document, concatenate everything in
+it, and score its words by term frequency within the cluster against inverse
+frequency across clusters:
+
+$$
+W_{t,c} = \operatorname{tf}_{t,c} \times \log\!\left(1 + \frac{A}{\operatorname{tf}_t}\right)
+$$
+
+where $\operatorname{tf}_{t,c}$ is term $t$'s frequency in cluster $c$, $A$ the
+average number of words per cluster, and $\operatorname{tf}_t$ the term's
+frequency across the whole corpus. This is **c-TF-IDF**, the trick at the centre
+of BERTopic [@grootendorst2022bertopic]. The words it returns are the ones that
+are common in this cluster *and* rare in the others, which is exactly the
+question "what makes this group different?"
+
+It is worth being clear about what has happened here. c-TF-IDF is not a topic
+model; it is a labelling procedure applied to somebody else's clustering. All
+the modelling was done by the embedding and by k-means. That is a feature — it
+means the semantic work is done by a model trained on far more text than your
+corpus contains — but it also means the topics inherit every flaw of the
+clustering, as @sec-dotted-i is about to demonstrate at our expense.
+
+### Scoring them
+
+To compare, we need a number. **Topic coherence** measures whether a topic's
+top words actually co-occur in real documents. The standard variant is NPMI
+[@bouma2009normalized]:
+
+$$
+\operatorname{NPMI}(w_i, w_j) =
+\frac{\log \dfrac{P(w_i, w_j)}{P(w_i)\,P(w_j)}}{-\log P(w_i, w_j)}
+$$
+
+averaged over all word pairs in a topic's top-10 list, then over topics. It runs
+from $-1$ to $1$; positive means the words appear together more than chance.
+We computed all probabilities on the corpus itself over a fixed 8,651-term
+vocabulary, with a hand-written Turkish stop-word list, so the five methods are
+scored on exactly the same footing.
+
+| method | NPMI | fit time | what it needs |
+|:--|--:|--:|:--|
+| LDA, $K=10$ | +0.0737 | 133.1s | raw counts |
+| NMF, $K=10$ | +0.1183 | 1.0s | tf-idf |
+| c-TF-IDF on LSA $k$=10 | +0.1340 | 0.03s | an existing clustering |
+| c-TF-IDF on MiniLM $k$=10 | +0.1002 | 0.02s | an existing clustering |
+| c-TF-IDF on E5 $k$=10 | +0.1064 | 0.02s | an existing clustering |
+
+: Ten topics, one corpus, one coherence measure. LDA is both the slowest and
+the least coherent {tbl-colwidths="[34,14,14,38]"}
+
+The headline is uncomfortable for the classical method. **LDA is 133× slower
+than NMF and scores lower on coherence.** That is not a subtle margin, and it is
+consistent with what people have reported on short-text corpora for years: if
+your documents are short, the Dirichlet mixture has nothing to estimate from,
+and a plain matrix factorisation on tf-idf beats it at a fraction of the cost.
+If you have inherited an LDA pipeline on short text, running NMF beside it takes
+an afternoon and will probably end the argument.
+
+The three c-TF-IDF rows cost effectively nothing, because the clustering was
+already paid for. And they produce recognisably different word lists. Here is
+what E5 plus c-TF-IDF returns for three of its ten clusters:
+
+``` text
+topic 2  koku  kokusu  parfüm  kalıcı  güzel  tavsiye  parfümü  aldım
+topic 3  kitap kitabı  tavsiye  güzel  ederim  sürükleyici  okudum  akıcı
+topic 9  telefon  iyi  şarj  yok  güzel  telefonu  gayet  ürün  var
+```
+
+Perfume, books, phones. Nobody told the model these categories exist. This is
+the thing clustering is genuinely good at, and note that it is a *product
+category* structure — not the sentiment structure we were secretly hoping for
+in @sec-kmeans, which is why the ARI was zero.
+
+::: {.callout-warning appearance="simple"}
+**Coherence is a proxy, and it is a weak one.** @chang2009reading ran the
+experiment everybody should have run first: they asked humans to spot the
+intruder word in a topic's word list, and found that the models with the best
+held-out likelihood produced the *least* interpretable topics. Automatic topic
+metrics are convenient, not trustworthy. The next section is a case where our
+own coherence number was not merely imprecise but pointed in exactly the wrong
+direction.
+:::
+
+## The bug the clustering found {#sec-dotted-i}
+
+Look again at the scoreboard. c-TF-IDF on LSA scored **+0.1340**, the best of the
+five. Coherence is supposed to reward topics whose words genuinely go together,
+so the natural next step is to read the topic that earned it. Here are the
+per-topic scores for that run:
+
+``` text
+topic    0       1       2       3       4       5       6       7       8       9
+NPMI  .1095   .0654   .0566   .0591   .1059   .0933   .1022   .5075   .1879   .0523
+```
+
+Topic 7 scores **+0.5075** — nearly three times the next best, and the single
+highest per-topic coherence anywhere in the experiment. Its words:
+
+``` text
+topic 7   bi  ye  fi  tavsi  çi  ederi  si  ni  li  yi
+```
+
+Those are not words. They are fragments. And the method scored them as the most
+coherent topic in the chapter, because they *are* extremely coherent — they
+co-occur almost perfectly, since they are all produced by the same defect in the
+same documents.
+
+### Tracing it
+
+The chain is short and every link is checkable in a REPL:
+
+``` text
+>>> "TAVSİYE".lower()
+'t a v s i ̇ y e'                     # 8 codepoints, not 7
+>>> [f"U+{ord(c):04X}" for c in "TAVSİYE".lower()]
+['U+0074','U+0061','U+0076','U+0073','U+0069','U+0307','U+0079','U+0065']
+```
+
+`İ` is U+0130, LATIN CAPITAL LETTER I WITH DOT ABOVE — a normal letter in
+Turkish, where dotted and dotless `i` are different letters. Python's
+`str.lower()` is not locale-aware. It lowercases U+0130 to `i` (U+0069) followed
+by **U+0307, COMBINING DOT ABOVE**, because a plain `i` already carries a dot and
+Unicode has no precomposed "i with an extra dot above" to fold into.
+
+Now the second link. Normalisation does not save you:
+
+``` text
+>>> "̇" in unicodedata.normalize("NFC",  "TAVSİYE".lower())    # True
+>>> "̇" in unicodedata.normalize("NFKC", "TAVSİYE".lower())    # True
+```
+
+Both NFC and NFKC leave the sequence intact, for the reason above: there is no
+composed form to normalise *to*. The habit of "just NFKC everything" is exactly
+what lets this survive to production.
+
+The third link is the tokenizer. scikit-learn's default token pattern is
+`(?u)\b\w\w+\b`, and a combining mark is not a word character, so:
+
+``` text
+>>> re.findall(r"(?u)\b\w\w+\b", "TAVSİYE".lower())
+['tavsi', 'ye']
+>>> re.findall(r"(?u)\b\w\w+\b", "tavsiye")
+['tavsiye']
+```
+
+The single most common word in a corpus of Turkish product reviews —
+*tavsiye*, "recommendation" — silently splits in two, but only in the documents
+where somebody typed it in capitals.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Four steps from a capital letter to a broken vocabulary</div>
+<svg viewBox="0 0 764 348" style="max-width:744px" role="img"
+     aria-label="A four-step chain shown left to right. Step one, the source word TAVSIYE written with a Turkish dotted capital I, codepoint U+0130. Step two, Python's str.lower is applied; it is not locale aware, and the dotted capital I becomes a plain i, codepoint U+0069, followed by a separate combining dot above, codepoint U+0307, so the word is now eight codepoints instead of seven. Step three, Unicode normalisation is applied and does not help: both NFC and NFKC leave the combining mark in place, because there is no precomposed i with an extra dot above to normalise to. Step four, the tokenizer's default word pattern, backslash w backslash w plus, does not treat a combining mark as a word character, so the token splits into two fragments, tavsi and ye. Below the chain, two horizontal bars compare how often documents containing the combining dot appear inside k-means cluster 7 of the LSA representation, at 94.7 percent of its 1,365 documents, against everywhere else in the corpus at 6.0 percent, an enrichment of 15.8 times.">
+  <defs>
+    <marker id="dot-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="8" y="30" width="170" height="112" rx="8" class="box"/>
+  <text x="93" y="52" class="t-xs t-mid t-b">1 · the source</text>
+  <text x="93" y="84" class="t-sm t-mid t-b t-mono">TAVSİYE</text>
+  <text x="93" y="108" class="t-xs t-mid t-muted">İ = U+0130</text>
+  <text x="93" y="126" class="t-xs t-mid t-muted">7 codepoints</text>
+
+  <line x1="182" y1="86" x2="200" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="204" y="30" width="170" height="112" rx="8" class="box-warm"/>
+  <text x="289" y="52" class="t-xs t-mid t-b t-warm">2 · .lower()</text>
+  <text x="289" y="80" class="t-xs t-mid t-mono">t a v s i</text>
+  <text x="289" y="100" class="t-xs t-mid t-b t-rose">+ U+0307</text>
+  <text x="289" y="126" class="t-xs t-mid t-muted">8 codepoints, not 7</text>
+
+  <line x1="378" y1="86" x2="396" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="400" y="30" width="170" height="112" rx="8" class="box-warm"/>
+  <text x="485" y="52" class="t-xs t-mid t-b t-warm">3 · normalise</text>
+  <text x="485" y="80" class="t-xs t-mid t-mono">NFC → unchanged</text>
+  <text x="485" y="100" class="t-xs t-mid t-mono">NFKC → unchanged</text>
+  <text x="485" y="126" class="t-xs t-mid t-muted">nothing to compose to</text>
+
+  <line x1="574" y1="86" x2="592" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="596" y="30" width="158" height="112" rx="8" class="box-rose"/>
+  <text x="675" y="52" class="t-xs t-mid t-b t-rose">4 · tokenize</text>
+  <text x="675" y="78" class="t-xs t-mid t-mono t-muted">\w\w+</text>
+  <text x="675" y="102" class="t-xs t-mid t-b t-mono">['tavsi','ye']</text>
+  <text x="675" y="126" class="t-xs t-mid t-muted">one word became two</text>
+
+  <text x="14" y="196" class="t-xs t-b t-muted">AND k-MEANS FOUND IT WITHOUT BEING TOLD</text>
+
+  <text x="14" y="230" class="t-xs t-b">LSA cluster 7</text>
+  <text x="14" y="246" class="t-xs t-muted">1,365 docs</text>
+  <rect x="150" y="216" width="568" height="20" rx="4" class="box-rose"/>
+  <text x="434" y="231" class="t-xs t-mid t-b t-rose">94.7% contain U+0307</text>
+
+  <text x="14" y="282" class="t-xs t-b">everywhere else</text>
+  <text x="14" y="298" class="t-xs t-muted">48,484 docs</text>
+  <rect x="150" y="268" width="36" height="20" rx="4" class="box-accent"/>
+  <text x="198" y="283" class="t-xs t-b t-accent">6.0%  →  15.8× enrichment</text>
+
+  <text x="14" y="336" class="t-xs t-muted">The clustering was given 256 LSA dimensions and no information about Unicode whatsoever.</text>
+</svg>
+```
+::: {.fig-cap}
+Step 3 is the one that catches people. "We normalise everything to NFKC" feels
+like it should cover this, and it does not — there is no precomposed character
+for an `i` carrying an extra dot, so normalisation has nothing to do and reports
+success.
+:::
+::::
+
+::: {.callout-note appearance="simple"}
+**The one-line fix, and why it is not `.lower()`.** Deleting U+0307 after
+lowercasing (`s.replace("i̇", "i")`) restores `['tavsiye']`. The better fix
+is not to create the problem: use a Turkish-aware casefold, or normalise
+`İ → i` and `I → ı` explicitly before lowercasing. Whatever you choose, the test
+to keep in your suite is `assert tokenize("TAVSİYE") == tokenize("tavsiye")`.
+:::
+
+### What it cost
+
+| measurement | value |
+|:--|--:|
+| documents containing U+0307 | 4,183 (8.39% of corpus) |
+| share of those inside LSA cluster 7 | 30.9% |
+| cluster 7 size | 1,365 documents |
+| cluster 7 documents affected | 94.7% |
+| affected everywhere else | 6.0% |
+| enrichment inside the cluster | 15.8× |
+| vocabulary types that exist only because of the bug | 1,607 |
+| net vocabulary change once fixed | 86,196 → 85,224 |
+
+: The damage, measured {tbl-colwidths="[62,38]"}
+
+Read the middle rows carefully, because they are the point of this section.
+k-means was given no information about Unicode. It was given 256 LSA dimensions.
+It nevertheless assembled a cluster that is **94.7% affected against a 6.0%
+background** — it found the bug, precisely and unprompted, and it did so because
+a systematic text defect *is* a real axis of variation in the data, and the
+clustering's job is to find real axes of variation.
+
+The invented vocabulary is 1,607 types that no Turkish speaker ever wrote:
+`alişveri`, `acti`, `alternati`, `alabi`. Net of the merges the fix creates, the
+vocabulary shrinks by 972 types. That is 1,607 rows of a tf-idf matrix spent on
+nothing, and every one of them dilutes the document frequency of the real word
+it was cut from.
+
+::: {.callout-important appearance="simple"}
+**This is the argument for clustering, stated honestly.** The clustering scored
+ARI ≈ 0 against the labels. By the metric of @sec-how-many-clusters it found
+nothing. It also found a real, shipping bug in the pipeline that produced this
+corpus, in a language with 80 million speakers, that had survived every earlier
+chapter's supervised evaluation because a classifier can happily learn around a
+consistent tokenisation defect. **Unsupervised methods are how you find out what
+is in your data, including the parts you did not put there on purpose.**
+:::
+
+And it is a clean demonstration of the @chang2009reading finding on our own
+numbers rather than by citation. The topic with the best coherence in the entire
+chapter was the topic with no meaning at all. Drop it and recompute: LSA's
+c-TF-IDF coherence falls from **+0.1340 to +0.0925**, which moves it from first
+place to last among the three c-TF-IDF rows. The metric did not merely fail to
+notice the garbage — it ranked the method *first because of it*.
+
+## The payoff: what a "failed" clustering is worth {#sec-clustering-payoff}
+
+Time to answer the question the chapter has deferred twice. ARI ≈ 0 says the
+partition is not the label partition. It does not say the partition is useless,
+and conflating those two is the most common way people talk themselves out of a
+result that would have helped them.
+
+So ask a question a practitioner actually has. **You have a labelling budget.
+You can read 5,000 of these 49,849 reviews. Does knowing a document's cluster
+change which 5,000 you should read?**
+
+The corpus is 93.66% positive, so 6.34% negative. Read at random and 6.34% of
+what you read is a complaint. Now unhide the labels and measure the positive
+rate *inside each cluster* at $k=10$ — a diagnostic we could only run because
+this corpus happens to have labels; the clustering never saw them.
+
+| representation | positive rate, lowest cluster → highest | negative lift in the worst cluster |
+|:--|:--|--:|
+| LSA | 89.4% → 98.9% | 1.67× |
+| MiniLM | 82.3% → 99.4% | 2.79× |
+| E5 | 73.2% → 99.5% | 4.23× |
+
+: Clusters are far from label-pure — and far from uninformative
+{tbl-colwidths="[22,46,32]"}
+
+E5's worst cluster is **26.8% negative against a 6.34% base rate**. Every
+document you pull from it is 4.23× more likely to be a complaint than one drawn
+at random. That is a large effect, and ARI could not see any of it, because ARI
+asks whether the whole partition reproduces the whole labelling and the answer
+to that is no.
+
+::: {.callout-note appearance="simple"}
+**Notice what just happened to the model ranking.** Under ARI the three
+representations were indistinguishable — all ≈ 0, best 0.0083. Under the
+decision-relevant measure they separate cleanly and in the order you would
+expect: 1.67× / 2.79× / 4.23×. The metric was not measuring nothing; it was
+measuring the wrong thing.
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Same three clusterings, two questions, opposite answers</div>
+<svg viewBox="0 0 764 316" style="max-width:744px" role="img"
+     aria-label="Two side-by-side panels scoring the identical three k-means clusterings at k equals 10. The left panel asks, is this partition the label partition, and answers with the adjusted Rand index: LSA scores minus 0.0094, MiniLM minus 0.0007, and E5 plus 0.0075, all essentially zero, with a verdict that the three representations are indistinguishable and all three look like random partitions. The right panel asks, does knowing the cluster change where I should read, and answers with negative lift in the worst cluster: LSA 1.67 times, MiniLM 2.79 times, and E5 4.23 times, drawn as bars of increasing length, with a verdict that the three separate cleanly and rank in the expected order. A note beneath states that both columns are computed from exactly the same cluster assignments.">
+  <rect x="8" y="28" width="366" height="212" rx="10" class="box"/>
+  <text x="191" y="54" class="t-xs t-mid t-b t-muted">THE QUESTION ARI ASKS</text>
+  <text x="191" y="78" class="t-sm t-mid t-b">“is this the label partition?”</text>
+
+  <text x="34" y="118" class="t-xs t-b">LSA</text>
+  <text x="34" y="152" class="t-xs t-b">MiniLM</text>
+  <text x="34" y="186" class="t-xs t-b">E5</text>
+  <line x1="196" y1="96" x2="196" y2="200" class="ln-thin ln-dash"/>
+  <text x="196" y="214" class="t-xs t-mid t-muted">0</text>
+  <rect x="184" y="106" width="12" height="16" rx="3" class="box-rose"/>
+  <rect x="195" y="140" width="2" height="16" rx="1" class="box-rose"/>
+  <rect x="196" y="174" width="10" height="16" rx="3" class="box-accent"/>
+  <text x="252" y="118" class="t-xs t-mono t-muted">−0.0094</text>
+  <text x="252" y="152" class="t-xs t-mono t-muted">−0.0007</text>
+  <text x="252" y="186" class="t-xs t-mono t-muted">+0.0075</text>
+
+  <text x="191" y="232" class="t-xs t-mid t-b t-rose">verdict: indistinguishable</text>
+
+  <rect x="390" y="28" width="366" height="212" rx="10" class="box-accent"/>
+  <text x="573" y="54" class="t-xs t-mid t-b t-muted">THE QUESTION A PRACTITIONER ASKS</text>
+  <text x="573" y="78" class="t-sm t-mid t-b">“where should I spend my reading?”</text>
+
+  <text x="416" y="118" class="t-xs t-b">LSA</text>
+  <text x="416" y="152" class="t-xs t-b">MiniLM</text>
+  <text x="416" y="186" class="t-xs t-b">E5</text>
+  <rect x="494" y="106" width="72" height="16" rx="3" class="box-warm"/>
+  <rect x="494" y="140" width="120" height="16" rx="3" class="box-warm"/>
+  <rect x="494" y="174" width="182" height="16" rx="3" class="box-rose"/>
+  <text x="576" y="118" class="t-xs t-b">1.67×</text>
+  <text x="624" y="152" class="t-xs t-b">2.79×</text>
+  <text x="686" y="186" class="t-xs t-b t-rose">4.23×</text>
+
+  <text x="573" y="232" class="t-xs t-mid t-b t-accent">verdict: a clean ranking</text>
+
+  <text x="382" y="276" class="t-xs t-mid t-muted">Both columns are computed from exactly the same cluster assignments. Nothing was re-run.</text>
+  <text x="382" y="300" class="t-xs t-mid t-muted">Left: adjusted Rand index at k = 10.  Right: how much denser negatives are in the worst cluster.</text>
+</svg>
+```
+::: {.fig-cap}
+This is the figure to remember from the chapter. A single set of cluster
+assignments can be simultaneously worthless by the standard evaluation and
+valuable by the one attached to your actual decision. Which of the two you
+report is a choice you make, and most people make it without noticing.
+:::
+::::
+
+### The whole curve, not just its first point
+
+One cluster is one point on a curve. The real question is what happens if you
+sort *all ten* clusters by their negative rate and read them worst-first: at
+every stopping point, what fraction of the corpus have you read, and what
+fraction of its complaints have you found?
+
+```{ojs}
+//| echo: false
+triageRows = [
+  {rep: "lsa", read: 0.0, found: 0.0}, {rep: "lsa", read: 26.55, found: 44.41},
+  {rep: "lsa", read: 42.97, found: 65.46}, {rep: "lsa", read: 55.93, found: 79.90},
+  {rep: "lsa", read: 58.67, found: 82.46}, {rep: "lsa", read: 63.45, found: 86.67},
+  {rep: "lsa", read: 67.05, found: 89.84}, {rep: "lsa", read: 74.98, found: 93.80},
+  {rep: "lsa", read: 87.22, found: 97.25}, {rep: "lsa", read: 93.18, found: 98.80},
+  {rep: "lsa", read: 100.0, found: 100.0},
+  {rep: "minilm", read: 0.0, found: 0.0}, {rep: "minilm", read: 16.01, found: 44.70},
+  {rep: "minilm", read: 20.02, found: 50.71}, {rep: "minilm", read: 31.56, found: 64.42},
+  {rep: "minilm", read: 42.89, found: 75.63}, {rep: "minilm", read: 50.56, found: 82.59},
+  {rep: "minilm", read: 53.20, found: 84.49}, {rep: "minilm", read: 64.52, found: 91.01},
+  {rep: "minilm", read: 75.99, found: 96.90}, {rep: "minilm", read: 90.29, found: 99.02},
+  {rep: "minilm", read: 100.0, found: 100.0},
+  {rep: "e5", read: 0.0, found: 0.0}, {rep: "e5", read: 13.25, found: 56.03},
+  {rep: "e5", read: 21.20, found: 68.57}, {rep: "e5", read: 24.64, found: 73.31},
+  {rep: "e5", read: 32.39, found: 81.04}, {rep: "e5", read: 42.61, found: 88.79},
+  {rep: "e5", read: 45.18, found: 90.41}, {rep: "e5", read: 64.59, found: 94.81},
+  {rep: "e5", read: 77.67, found: 97.09}, {rep: "e5", read: 92.67, found: 99.43},
+  {rep: "e5", read: 100.0, found: 100.0}
+]
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700,
+  height: 380,
+  marginLeft: 62,
+  marginBottom: 46,
+  x: { label: "% of the corpus read", domain: [0, 100], grid: true },
+  y: { label: "% of all negative reviews found", domain: [0, 100], grid: true },
+  color: { legend: true, domain: ["lsa", "minilm", "e5"],
+           range: ["#1F4E79", "#2E7D6F", "#B3453E"] },
+  marks: [
+    Plot.line([{x: 0, y: 0}, {x: 100, y: 100}],
+      { x: "x", y: "y", stroke: "#9AA3AE", strokeDasharray: "4 3" }),
+    Plot.text([{x: 72, y: 63}], { x: "x", y: "y", text: ["reading at random"],
+      fill: "#6B7280", fontSize: 12, rotate: -32 }),
+    Plot.line(triageRows, { x: "read", y: "found", stroke: "rep", strokeWidth: 2 }),
+    Plot.dot(triageRows, { x: "read", y: "found", fill: "rep", r: 3.5,
+      title: d => `${d.rep}\nread ${d.read}% → found ${d.found}%` })
+  ]
+})
+```
+
+::: {.column-margin}
+The dashed diagonal is what reading in random order gets you: read 40% of the
+corpus, find 40% of the complaints. Every curve above it is value the clustering
+created.
+:::
+
+The single number to take away:
+
+> Reading **13.3%** of the corpus — the one E5 cluster with the worst positive
+> rate — surfaces **56.0%** of every negative review in it.
+
+That is a 4.2× improvement in the return on a fixed reading budget, from an
+unsupervised method, on a corpus whose labels it never saw. If your actual job
+is "find the complaints so we can fix the product", this clustering did the job,
+and the ARI of 0.0031 that it scored on the way is irrelevant to that job.
+
+The ranking holds along the whole curve, not just at the first point. E5
+dominates MiniLM everywhere, and MiniLM dominates LSA everywhere. LSA needs to
+read 26.6% of the corpus to reach the recall E5 reaches at 13.3%.
+
+### What the cluster actually contains
+
+Metrics are cheap; read the documents. Five negative reviews drawn at random
+from E5's worst cluster, with translations:
+
+``` text
+ürün paslandı. almanızı tavsiye etmem
+  "The product rusted. I would not recommend buying it."
+
+hiçbir işe yaramıyor. hatta dahada kötü hale getiriyor. kesinlikle alınmaz.
+  "It does nothing. It actually makes things worse. Absolutely do not buy."
+
+ürün çok çabuk ısınıyor ve çok yavaş
+  "The product overheats very quickly and is very slow."
+
+kalitesiz, arka plaka fotoğraftaki gibi tek parça değil, montajı zor.
+  "Poor quality, the back plate is not one piece like in the photo,
+   hard to assemble."
+
+hiç beklediğim gibi değildi, yorumlardaki tüm olumsuzluklar aynen çıktı.
+  "Not at all what I expected; every negative thing in the reviews
+   turned out to be true."
+```
+
+These are not subtle. They are the reviews a product manager needs on Monday
+morning, and the clustering put a disproportionate share of them in one bucket
+without being told that "complaint" is a category.
+
+::: {.callout-tip appearance="simple"}
+**The transferable lesson.** Before you report that a clustering "failed",
+write down the decision the clustering was supposed to support and measure
+*that*. Purity, ARI and NMI answer "did you recover my labels". Lift, recall at
+a budget, and time-to-first-insight answer "did you help". They are different
+questions and they can have opposite answers on the same run.
+:::
+
+## Naming clusters with a language model {#sec-naming-clusters}
+
+c-TF-IDF gives you ten words. A stakeholder wants a phrase. This is the one
+place in the pipeline where an LLM is unambiguously the right tool, and it is
+worth being precise about why: naming is a *low-stakes, high-volume, verifiable*
+task. Ten labels, each checkable in thirty seconds against the documents.
+
+The pattern is the same one from @sec-prompting — give it the evidence, not the
+task description alone:
+
+``` text
+Below are the 10 most distinctive words for a cluster of Turkish product
+reviews, and 8 reviews sampled from it.
+
+Distinctive words: koku, kokusu, parfüm, kalıcı, güzel, tavsiye, parfümü,
+aldım, ederim, var
+
+Reviews:
+1. ...
+2. ...
+
+Give a 2-5 word English label naming what this cluster is about. If the
+reviews do not share a coherent subject, answer exactly: NO COHERENT THEME.
+```
+
+Three details make the difference between this being useful and being a
+liability:
+
+1. **Sample the documents, do not only pass the words.** The words are already
+   a lossy summary; an LLM given only `bi ye fi tavsi çi` will confabulate a
+   theme for it, which is precisely the failure @sec-dotted-i is about.
+2. **Give it an escape hatch.** The `NO COHERENT THEME` option is what turns
+   the model from a label generator into a weak detector of junk clusters. A
+   cluster the model refuses to name is a cluster you should look at yourself.
+3. **Sample from the whole cluster, not just near the centroid.** Centroid
+   documents are the most typical, so a centroid-only sample makes every cluster
+   look tidier than it is, and hides exactly the heterogeneity you want to know
+   about before you name it.
+
+::: {.callout-warning appearance="simple"}
+**A generated label is a hypothesis, not a finding.** The model has seen ten
+words and eight documents out of five thousand. It will produce a fluent,
+plausible name for a cluster that is actually three unrelated things stuck
+together, because producing fluent plausible names is what it does. Spot-check
+every label against 20 documents you sampled yourself before any of them reaches
+a slide.
+:::
+
+## The 2026 toolbox {#sec-clustering-tools}
+
+Everything in this chapter ran on one laptop with the versions below. Pinning
+versions in a book is a hostage to fortune, but not pinning them is worse — the
+numbers here are only reproducible against a stated stack.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `scikit-learn` | 1.9.0 | `TfidfVectorizer`, `TruncatedSVD`, `KMeans`, `HDBSCAN`, `LatentDirichletAllocation`, `NMF`, and every metric |
+| `sentence-transformers` | 5.7.0 | loading and batching MiniLM and E5 |
+| `torch` | 2.13.0 | the MPS backend the embeddings ran on |
+| `numpy` / `scipy` | 2.5.2 / 1.18.0 | dense and sparse linear algebra |
+| `pandas` | 3.0.5 | corpus handling, Parquet round-trip |
+| `datasketch` | 2.0.0 | MinHash and the LSH index for @sec-near-dupes |
+| `umap-learn` | 0.5.12 | the projection discussed in @sec-density |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[26,16,58]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `bertopic` | 0.17.4 | the whole embed → UMAP → HDBSCAN → c-TF-IDF pipeline as one object, with topic merging, hierarchies and LLM naming built in. The fastest way to a demo; read @sec-density before trusting the clusters |
+| `faiss-cpu` | 1.15.0 | approximate nearest neighbours when the corpus stops fitting in a dense similarity matrix — roughly past a million documents |
+| `usearch` | 2.26.0 | a lighter, newer alternative to FAISS with the same job |
+| `gensim` | 4.4.0 | the classical topic-model toolkit; still the reference implementation for LDA variants and `CoherenceModel` |
+| `top2vec` | 1.0.36 | joint document/word embeddings with automatic topic count; conceptually close to BERTopic and predates it |
+| `chromadb` | 1.5.9 | when the vectors need to persist and be queried by an application rather than a script — the bridge to @sec-rag |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[16,14,70]"}
+
+::: {.callout-note appearance="simple"}
+**Choosing, in one line each.** Under ~100k documents, scikit-learn does
+everything in this chapter and you should write the twenty lines yourself so you
+can see what each step did. Over that, add FAISS or `usearch` for the
+neighbour search. Reach for BERTopic when you want the polished artefact rather
+than the understanding — and having read @sec-dotted-i, you now know which of
+its defaults to distrust.
+:::
+
+## Lab: build a triage curve for a corpus you own {#sec-clustering-lab}
+
+The deliverable is one sentence of the form *"reading X% of the corpus finds Y%
+of the Z"*, plus the curve that justifies it. That sentence is what makes
+clustering fundable, and it is worth far more than a silhouette score.
+
+### What you need
+
+Any corpus of a few thousand short documents in a domain you understand —
+support tickets, survey free-text, issue titles, exam answers. It needs one
+binary property you care about (complaint / not, urgent / not, off-topic / not)
+that you can label on a *sample*, not on all of it. Labelling 300 documents is
+enough and is the whole point: the lab simulates having a small budget.
+
+`scikit-learn` and `sentence-transformers` do everything. No GPU required; the
+E5 pass on 50k documents took 104 seconds on a laptop, so 5k will take ten.
+
+### Step 1 — deduplicate first, and count what you removed
+
+Run MinHash + LSH at $J \geq 0.8$ before anything else, exactly as in
+@sec-near-dupes. Report the number of groups and the largest group. If more than
+about 5% of your corpus is near-duplicate, stop and find out why — you have
+probably discovered a data-collection bug, and that is already a result worth
+reporting.
+
+### Step 2 — embed twice, deliberately
+
+Build both a tf-idf → SVD(256) representation and a sentence-embedding one.
+Two representations is the minimum that lets you say anything comparative, and
+the comparison is the interesting part. Before clustering, compute the
+**random-pair background**: sample 2,000 documents, take all pairwise cosines,
+and record the mean and standard deviation for each space. You will need these
+to interpret every similarity you look at afterwards, and computing them takes
+four lines.
+
+### Step 3 — sweep $k$, and expect to be disappointed
+
+Run k-means at $k \in \{2, 5, 10, 20, 50\}$ on both representations. Record
+silhouette (on a fixed sample if the corpus is large), the size of the largest
+cluster, and the fit time. Plot silhouette against $k$.
+
+If your curve is flat and low, you have reproduced our result and you should
+**not** conclude that you did it wrong. Note the largest-cluster column: a
+"clustering" whose biggest group holds 60% of the corpus is one lump and a
+scattering, whatever $k$ you asked for.
+
+### Step 4 — label 300 documents, stratified by cluster
+
+This is the step people skip. At your chosen $k$, sample **30 documents from
+each of 10 clusters** rather than 300 at random, and label your binary property
+by hand. Stratifying is what makes the next step possible at this budget:
+a random sample of 300 would put only a handful of documents in your rarest
+cluster and give you a per-cluster rate you cannot trust.
+
+Write down the per-cluster positive rate and a 95% interval for each. At $n=30$
+those intervals are wide — roughly $\pm 17$ points near 50% — so treat them as
+"is this cluster different from the corpus at all?" rather than as point
+estimates.
+
+### Step 5 — the curve, and the sentence
+
+Sort the clusters by their measured rate, worst first. Walk down the list
+accumulating the share of the corpus read against the share of your property
+found, using the cluster sizes you know exactly and the rates you estimated.
+Plot it against the diagonal, as in @sec-clustering-payoff.
+
+Then write the sentence. If your curve lies on the diagonal, the honest sentence
+is *"clustering does not help triage this property in this corpus"* — which is a
+finding, cost you an afternoon, and has saved you from building a pipeline on it.
+
+### Going further
+
+- **Rerun step 5 with the other representation.** Our two differed by 2.5× in
+  lift while being indistinguishable under ARI. Yours may too, and if so you
+  have just chosen your embedding model on evidence.
+- **Run the Unicode check from @sec-dotted-i on your own text**, whatever
+  language it is in: assert that lowercasing then tokenising is idempotent, and
+  count the vocabulary types that vanish when you normalise properly.
+- **Name your clusters with an LLM using the recipe in @sec-naming-clusters**,
+  then check every label against 20 documents you sampled yourself. Count how
+  many labels survive. That ratio is your calibration for trusting the next
+  batch.
+
+## Exercises {#sec-clustering-exercises}
+
+1. **The metric that was measuring nothing.** In @sec-kmeans the best adjusted
+   Rand index anywhere in the sweep was 0.0083, and in @sec-clustering-payoff
+   the same clusterings separated cleanly at 1.67×, 2.79× and 4.23×. Both
+   numbers are correct. Explain, in terms of what ARI counts, how a partition
+   can carry that much decision-relevant signal and still score zero. Then
+   construct a small worked example — ten documents, two labels, two clusters —
+   where ARI is exactly 0 and the lift in one cluster is 2×.
+
+2. **A background you have not computed.** A colleague reports that two
+   documents in their corpus have a cosine similarity of 0.91 under E5 and
+   concludes they are near-duplicates. Using the numbers in
+   @sec-what-similar-means, say what is wrong with the inference, what single
+   quantity they should compute before making it, and what value of that
+   quantity would make their conclusion reasonable.
+
+3. **The tokenizer test you do not have.** @sec-dotted-i found a defect that
+   survived exact deduplication, NFC and NFKC normalisation, and every
+   supervised evaluation in the preceding chapters. (a) Explain why a classifier
+   trained and tested on the *same* defective pipeline shows no accuracy loss.
+   (b) Name the deployment change that would suddenly make it visible.
+   (c) Write the three-line property test you would add to a CI suite to catch
+   this class of bug in a language you do not speak.
+
+4. **Density, honestly.** HDBSCAN called 97% of the corpus noise on LSA and
+   99.5% on E5. A teammate proposes running UMAP to 5 dimensions first, "because
+   then it finds clusters". (a) Explain what UMAP changes about the input that
+   makes clusters appear. (b) Design an experiment that would distinguish
+   "UMAP revealed structure that was there" from "UMAP created structure that
+   was not". (c) Say which result would make you willing to ship the UMAP
+   pipeline anyway.
+
+5. **The coherence trap, in your own data.** Take the highest-coherence topic
+   from any topic model you have run and read 20 documents that scored highest
+   on it. If the topic is real, write the one-line description a colleague could
+   use to sort new documents into it. If it is not, identify what the model
+   actually latched onto. Report which happened — and note that in this chapter
+   the highest-coherence topic in the entire run was the second case.
+
+6. **Choosing $k$ without an index.** You have 40,000 support tickets and a
+   support team of six people who will each own one category. Argue for a value
+   of $k$ using no internal validation index at all. State what would make you
+   revise it, and explain why this reasoning is *better* founded than an elbow
+   plot rather than merely more convenient.
+
+## What to remember {#sec-clustering-summary}
+
+- **Clustering is what you do when you cannot read the corpus and do not have
+  labels.** It is not a weaker form of classification; it answers a different
+  question, and the metrics that judge classifiers judge it badly.
+- **Similarity is a property of the geometry, not of the documents.** A cosine
+  of 0.98 means nothing until you know what two random documents score. In our
+  four spaces the random-pair mean ranged from 0.018 to 0.855, so the same
+  number means "near-duplicate" in one space and "unremarkable" in another.
+  Always compute the background.
+- **Deduplicate before you do anything else.** It is cheap, it is the highest
+  return per line of code in the chapter, and the count you get is a diagnostic
+  of your collection pipeline. At $J \geq 0.8$ we removed 151 documents in 27
+  seconds without comparing all 1.2 billion pairs.
+- **k-means makes four assumptions on your behalf** — spherical clusters,
+  similar extent, no outliers, and a known $k$ — and on text corpora it is
+  numbers 2 and 3 that hurt, not the one everybody worries about.
+- **A flat silhouette curve is a finding.** Ours never exceeded 0.1042 across
+  42 runs, and HDBSCAN independently called 97–99.5% of the same corpus noise.
+  Two methods with different assumptions agreeing that there are no boundaries
+  is stronger evidence than either alone.
+- **Do not use the elbow method.** There is always a bend, its position depends
+  on your axis limits, and @schubert2023stop sets out the case at length.
+- **Short documents break LDA.** On 19-word reviews it was 133× slower than NMF
+  and less coherent. If you have inherited an LDA pipeline on short text, run
+  NMF beside it before defending the incumbent.
+- **Cluster-then-describe is the modern default.** c-TF-IDF costs nothing once
+  you have clusters, it inherits all of the embedding's semantics, and it
+  inherits all of the clustering's mistakes.
+- **Topic coherence can be maximised by garbage.** Our highest-scoring topic in
+  the whole chapter, at +0.5075, was ten tokenizer fragments. Removing it moved
+  its method from first place to last. @chang2009reading made this point in
+  2009 and it has not stopped being true.
+- **Unsupervised methods find what is actually in your data, including the parts
+  you did not put there.** k-means assembled a cluster that was 94.7% affected
+  by a Unicode defect against a 6.0% background, having been told nothing about
+  Unicode. Supervised evaluation had missed it for eight chapters.
+- **`str.lower()` is not Turkish-aware, and NFKC will not save you.**
+  `"TAVSİYE".lower()` tokenises to `['tavsi', 'ye']`. Keep
+  `assert tokenize(s.upper()) == tokenize(s)` in your test suite for any
+  language whose casing rules you have not personally checked.
+- **Measure the decision, not the partition.** ARI could not distinguish our
+  three representations; the triage curve ranked them cleanly and in the
+  expected order. Reading 13.3% of the corpus found 56.0% of its complaints —
+  a 4.2× return on a fixed budget from a clustering that scored zero on every
+  external index.
+- **"The clustering failed" is almost always premature.** Write down the
+  decision it was supposed to support, measure that, and only then decide.
