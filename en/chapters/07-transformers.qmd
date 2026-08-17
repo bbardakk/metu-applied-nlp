@@ -2793,6 +2793,184 @@ Work in NumPy first; reach for a framework only in step 3.
 latency curves, and a short note on the largest sequence length your hardware
 could handle — with the specific resource that ran out named.
 
+## Intuition checks {#sec-transformers-intuition}
+
+Answer each before you open it. These are the six places where the standard
+mental model of a transformer is wrong in a way that costs money.
+
+::: {.callout-note collapse="true"}
+## 1. Attention is quadratic, so it dominates the cost of running a transformer. True?
+
+Usually false, and believing it sends you optimising the wrong thing.
+
+Per layer the two terms are $24nd^2$ for the projections and feed-forward
+against $4n^2d$ for attention. They are equal at $n = 6d$ — so for a
+4,096-wide model the crossover is at **24,576 tokens**. At the 4,096-token
+context most applications actually run, [attention is 14% of the arithmetic
+and the feed-forward and projection matrices are 86%]{.hl}.
+
+The quadratic term is a wall you hit at long context, not a tax you pay at
+every length. Before optimising attention, work out which regime you are in;
+if $n < 6d$ you should be looking at the feed-forward half instead.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. If Q, K and V all come from the same input, why not use one matrix instead of three?
+
+Because they answer three different questions, and collapsing them removes the
+model's ability to ask.
+
+$Q$ is what a token is looking *for*; $K$ is what it offers to be found *by*;
+$V$ is what it actually contributes once found. [$Q$ and $K$ together decide
+**where** information moves; $V$ alone decides **what** moves.]{.hl} Tie them
+and a token's advert becomes identical to its query, which forces every token
+to attend most strongly to itself and makes asymmetric relations —
+*which verb governs me* — inexpressible.
+
+The worked example in @sec-attention-worked shows this concretely: the score
+that makes the example work could not have been produced by any unprojected
+dot product of the inputs.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your model has 100,000 tokens of context. What is the first resource to run out?
+
+Memory, and not the model's. A 7B model in fp16 is 14 GB of weights. Its KV
+cache at 100,000 tokens is **52.4 GB** — [nearly four times the model itself,
+for one conversation]{.hl} — and that figure is *per concurrent request*,
+while the weights are shared across all of them.
+
+This is why the KV cache, not the parameter count, usually decides how many
+users a GPU can serve, and why GQA became universal: dropping from 32 KV heads
+to 8 takes the same cache from 52.4 GB to **13.1 GB**, a 4× saving with
+essentially no quality cost.
+
+If you answered "the $n \times n$ score matrix", that was the right answer
+before FlashAttention, which never materialises it.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. A mixture-of-experts model has 36B parameters. How much GPU memory do you need, and how fast is it?
+
+Those are two different questions with two different answers, which is the
+entire point of the architecture.
+
+You must hold **all** 36B parameters in memory, because any token might route
+to any expert. But only the top-$k$ experts run per token — about 3B active —
+so latency tracks the small number. [Total parameters set your hardware bill;
+active parameters set your latency.]{.hl}
+
+@sec-classification-crossover measured exactly this: `qwen3.6:35b-a3b`
+classifies a document in 0.353 s against 0.365 s for a *dense* 9.7B model and
+0.592 s for a dense 27.4B — faster than both, while scoring higher than both,
+and needing 23.9 GB on disk to do it.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your model was trained with 1,024-position embeddings. What happens at token 1,025?
+
+With learned absolute positions, nothing good: there is no row 1,025 in the
+table, so the model has no vector to add. GPT-2 cannot process a longer
+sequence at all — the failure is a lookup error, not a degradation.
+
+This is the concrete reason the field moved to RoPE and ALiBi. RoPE encodes
+position as a *rotation*, so the score between two tokens depends only on
+their offset. Measured in @sec-position: the same query-key pair at a fixed
+offset, evaluated at absolute positions 0, 100, 1000 and 5000, gives scores
+that vary by **$2 \times 10^{-13}$** — against a spread of 26 for the raw
+scores. [A constant feature can never answer a question, but it can ask
+one.]{.hl}
+
+Note what this does *not* buy: extrapolating far beyond the training length
+still degrades quality. It removes a hard failure and replaces it with a soft
+one.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Why does the residual stream matter more than any individual sublayer?
+
+Because it is the only thing every sublayer reads from and writes to, and its
+width never changes.
+
+Attention and the feed-forward network both take the residual stream in and
+add a correction back. That is why [stacking blocks is trivial — block 12
+looks exactly like block 1]{.hl} — and it is why pre-norm normalises the
+residual sum rather than the sublayer output.
+
+The practical consequence: when you inspect what a transformer "knows" at some
+depth, you are reading the residual stream, not any one layer's output. So does
+every technique that extracts a vector from a mid-network layer — including the
+frozen-encoder embeddings @sec-classification-finetune compares against.
+:::
+
+## Interview questions {#sec-transformers-interview}
+
+Transformer questions in interviews are usually a test of whether you can do
+arithmetic about a system, not whether you can recite an architecture diagram.
+The answers below are the ones with numbers attached.
+
+::: {.column-margin}
+If you get asked to "explain attention", resist the temptation to start with
+the softmax formula. Start with what it is *for* — every token can look at
+every other token and learn how much each one matters — then derive the
+formula. Interviewers are listening for whether you understand it or memorised
+it, and the order gives you away.
+:::
+
+1. **Explain self-attention to someone who knows regression.** It is a learned
+   weighted average. Each token proposes a query, every token advertises a key,
+   the dot products become weights through a softmax, and the output is those
+   weights applied to the values. The only unusual part is that the weights are
+   *computed from the data at inference time* rather than fitted once — which is
+   exactly what makes the same word get a different vector in a different
+   sentence. Then name the scaling: divide by $\sqrt{d_k}$, because dot products
+   of $d_k$-dimensional vectors grow like $\sqrt{d_k}$ and an unscaled softmax
+   saturates.
+
+2. **Why is there a feed-forward network after attention?** Because attention is
+   the only place tokens *mix*, and it is entirely linear in the values — mixing
+   without a non-linearity would collapse. The feed-forward half applies
+   per-token depth: $W_1$ is a bank of detectors and $W_2$ is what each
+   broadcasts when it fires. Get the proportion right, because most candidates
+   have it backwards: [two thirds of every transformer block's parameters are
+   the feed-forward sublayer]{.hl}, not attention.
+
+3. **How do you estimate whether a model fits on your GPU?** Two numbers, added.
+   Weights: parameters × bytes per parameter (7B at fp16 = 14 GB). KV cache:
+   $2 \times \text{layers} \times \text{KV heads} \times \text{head dim} \times
+   \text{tokens} \times \text{bytes}$, **per concurrent request**. Give the
+   worked case: a 7B model at 32,768 tokens needs 14 GB of weights and 17.2 GB
+   of cache, so context has already cost more than the model. The senior version
+   of the answer names the lever — GQA, quantisation, or a shorter context — and
+   says which one you would pull first.
+
+4. **What does FlashAttention actually change?** Not the mathematics — the
+   output is identical. It changes *what gets written to memory*: the $n \times
+   n$ score matrix is never materialised, computed instead in tiles that stay in
+   fast on-chip memory. That turns attention from memory-bandwidth-bound to
+   compute-bound. The number that motivates it: at 100,000 tokens one score
+   matrix for **one head at one layer** is 18.63 GiB in fp16. Multiply by 32
+   heads and 32 layers and the naive version is not slow, it is impossible.
+
+5. **Encoder-only, decoder-only, or encoder-decoder?** The distinction is
+   entirely which entries of the attention matrix are allowed to be non-zero.
+   Encoder-only sees everything both ways and is the right choice when you need
+   a representation of a complete text — classification, retrieval, and every
+   result in @sec-classification. Decoder-only is causally masked and is what
+   you need to generate. Encoder-decoder keeps both and lets the decoder attend
+   to the encoder, which is why it persists in translation. Say the practical
+   version: [for classification with labels, an encoder is still the default in
+   2026]{.hl}, and @sec-classification-crossover has the measurement.
+
+6. **Why did transformers replace RNNs?** Not because they are more expressive —
+   because they are parallelisable in training. An RNN must process token $t$
+   before token $t+1$; a transformer computes all positions at once, which
+   converts a sequential dependency into a matrix multiplication and lets you
+   use a GPU properly. The cost is the quadratic term and the loss of unbounded
+   context. Be precise that this was an *engineering* win that unlocked scale,
+   and that scale is what produced the capabilities — the argument
+   @sec-scaling-laws makes quantitatively.
+
 ## Where to go deeper
 
 Three outside visualizations pair beautifully with this chapter: the
