@@ -4,29 +4,29 @@
 **Bölüm durumu: çevrildi.** Kaynak metin:
 [İngilizce 2. bölüm](../../en/chapters/02-text-as-data.html). Bu sayfadaki
 her sayı ve her kod çıktısı, gösterilen kodun `scikit-learn` 1.9 ve
-`tiktoken` 0.13 ile çalıştırılmasıyla üretildi. Bölütleme, Zipf ve vektör
+`tiktoken` 0.13 ile çalıştırılmasıyla üretildi. Tokenization, Zipf ve vektör
 uzayı gezginleri tamamen etkileşimlidir.
 :::
 
 **Öğrenme hedefleri.** Bu bölümün sonunda:
 
 - ham metni modele hazır birimlere dönüştürebilir ve her ön işleme kararını savunabilirsiniz;
-- byte-pair encoding'i, bir bölütleyicinin hiç görmediği bir kelimeyi nasıl parçalayacağını tahmin edecek kadar iyi anlatabilirsiniz;
+- byte-pair encoding'i, bir tokenizer'ın hiç görmediği bir kelimeyi nasıl parçalayacağını tahmin edecek kadar iyi anlatabilirsiniz;
 - Zipf yasasını ve pratikteki sonucunu — sözlük problemini — açıklayabilirsiniz;
 - bir TF-IDF vektörünü elle türetip `scikit-learn` ile aynı sayıları elde edebilirsiniz;
-- kelime torbasının neyi temsil edip neyi edemediğini kesin olarak söyleyebilir, bunu bir mülakatta savunabilirsiniz;
-- çok dillilik acısının — Türkçe morfolojisi dâhil — neden tam olarak bölütlemede başladığını açıklayabilirsiniz.
+- bag-of-words modelinin neyi temsil edip neyi edemediğini kesin olarak söyleyebilir, bunu bir mülakatta savunabilirsiniz;
+- çok dillilik acısının — Türkçe morfolojisi dâhil — neden tam olarak tokenization'da başladığını açıklayabilirsiniz.
 
 ## Problem, tek cümlede
 
 Model, sayılar üzerinde aritmetik yapan bir fonksiyondur. Bakım kaydı ise
 bir karakter dizisidir. Bu bölümdeki her şey bu boşluğu kapatmak için var
 ve köprünün tam olarak iki ayağı var: [birimlerin ne olduğuna karar
-vermek]{.hl} (bölütleme) ve [her birimin hangi sayıyla katkı vereceğine
+vermek]{.hl} (tokenization) ve [her birimin hangi ağırlıkla katkı vereceğine
 karar vermek]{.hl} (ağırlıklandırma).
 
 Bütün bölüm bundan ibaret. Bunu baştan söylemekte fayda var, çünkü aşağıda
-göreceğiniz teknikler — kelime torbası, TF-IDF — zaman zaman "tarihe
+göreceğiniz teknikler — bag-of-words, TF-IDF — zaman zaman "tarihe
 karıştı" diye geçiştiriliyor. Karışmadılar. Yoğun yarısıyla
 [3. bölümde](../../en/chapters/03-embeddings.html) tanışacağınız bir alanın
 seyrek yarısıdırlar; küçük veride hâlâ kazanırlar, üretimdeki aramayı hâlâ
@@ -44,8 +44,23 @@ bölümüne aittir.
 
 ## Karakterlerden token'lara
 
+::: {#gloss-tokenization .column-margin .term-gloss}
+**tokenization** (bölütleme) — bir metin akışını, modelin sayacağı parçalara
+bölmek. Neyin bir parça sayılacağı, dile ait bir olgu değil, sizin verdiğiniz
+bir tasarım kararıdır. [↩](#term-tokenization){.term-back}
+:::
+
+::: {#gloss-token .column-margin .term-gloss}
+**token** (birim) — o parçalardan biri. Çoğu zaman bir kelime, bazen bir kelimenin
+parçası, bazen bir noktalama işareti. Bir satıcı sizden "token başına" ücret
+aldığında, saydığı şey budur. [↩](#term-token){.term-back}
+:::
+
 Akla gelen ilk hamle boşluklardan bölmektir. Anında başarısız olur ve
-başarısız olma biçimleri bölütlemenin bütün tasarım uzayını verir.
+başarısız olma biçimleri
+[**tokenization**](#gloss-tokenization){#term-tokenization .term-ref}'ın bütün
+tasarım uzayını verir — yani metnin hangi
+[**token**](#gloss-token){#term-token .term-ref}'lara ayrılacağının.
 
 ```python
 text = "The pump P-101 didn't fail; it's the seal (again!)."
@@ -63,7 +78,21 @@ gerekenleri ayırır.
 
 ### Normalleştirme merdiveni
 
-Standart sıralama aşağıda — insanların genelde uyguladığı düzende ve her
+::: {#gloss-stop-word .column-margin .term-gloss}
+**stop word** (etkisiz kelime) — o kadar sık geçen bir kelime ki, bazı iş
+akışları hiçbir şey saymadan önce onu atar. *The*, *of*, *is*. Bunun bir
+kazanç mı yoksa bir kayıp mı olduğu tamamen göreve bağlıdır.
+[↩](#term-stop-word){.term-back}
+:::
+
+::: {#gloss-normalization .column-margin .term-gloss}
+**normalization** (normalleştirme) — umursamamaya karar verdiğiniz farkları
+bilerek silmek; böylece *Pompa*, *pompa* ve *pompalar* üç ayrı şey olarak
+sayılmayı bırakır. [↩](#term-normalization){.term-back}
+:::
+
+[**Normalization**](#gloss-normalization){#term-normalization .term-ref}
+için standart sıralama aşağıda — insanların genelde uyguladığı düzende ve her
 adımın *aleyhindeki* argümanla birlikte. Çünkü mülakatlarda asıl sorulan,
 aleyhteki argümanlardır.
 
@@ -71,7 +100,7 @@ aleyhteki argümanlardır.
 |---|---|---|
 | Küçük harfe çevirme | `Pump` = `pump` | `US` → `us`, `Apple` → `apple`. Özel isimleri ve kısaltmaları kaybedersiniz. |
 | Noktalama temizleme | `fail;` = `fail` | `P-101`'i, ondalıkları, URL'leri, kimyasal formülleri bozar. |
-| Etkisiz kelime atma | `the`, `is`, `of` düşer | Olumsuzlamayı (`not`) ve *to be or not to be* gibi ifadeleri yok eder. |
+| [**Stop word**](#gloss-stop-word){#term-stop-word .term-ref} atma | `the`, `is`, `of` düşer | Olumsuzlamayı (`not`) ve *to be or not to be* gibi ifadeleri yok eder. |
 | Gövdeleme (stemming) | `replaced` → `replac` | Kaba ek kırpma. `university` → `univers` = `universe`. |
 | Kök bulma (lemmatization) | `replaced` → `replace` | Doğru sonuç verir, ama sözlük ve sözcük türü etiketleme ister, üstelik yavaştır. |
 
@@ -85,14 +114,14 @@ ve İngilizcede `left` kelimesinin bir cümlede `leave` fiilinin geçmiş
 zamanı, diğerinde bir yön olduğunu bilmek zorundadır.
 
 "Hangisini kullanayım?" sorusunun dürüst modern cevabı *muhtemelen hiçbiri*.
-Gövdeleme, seyrek sözlükler için bulunmuş bir çareydi; alt kelime
-bölütlemesi (aşağıda) aynı problemi daha iyi çözüyor. Yine de aradaki farkı
+Gövdeleme (stemming), seyrek sözlükler için bulunmuş bir çareydi; alt kelime
+tokenization'ı (aşağıda) aynı problemi daha iyi çözüyor. Yine de aradaki farkı
 anlatabilmelisiniz, çünkü alanın en güvenilir biçimde sorulan
 sorularından biridir.
 
 ::: {.callout-warning appearance="simple"}
-**Etkisiz kelimeleri atmak bedava değildir.** Bu bölümün ilerisinde
-kullanılan derlemde `scikit-learn`'ün İngilizce etkisiz kelime listesi 318
+**Stop word'leri atmak bedava değildir.** Bu bölümün ilerisinde
+kullanılan derlemde `scikit-learn`'ün İngilizce stop word listesi 318
 madde içeriyor. Bu 318 kelime **sözlüğün %0,4'ü**, ama **bütün token'ların
 %43,9'u**. Metninizin neredeyse yarısını siliyorsunuz. Seyrek bir model
 için bu gerçek bir sıkıştırma kazancıdır — ve aradığınız sinyal *not*
@@ -100,7 +129,7 @@ kelimesindeyse tam bir felakettir.
 :::
 
 ::: {.column-margin}
-Türkçe için hazır etkisiz kelime listelerine iki kat şüpheyle yaklaşın.
+Türkçe için hazır stop word listelerine iki kat şüpheyle yaklaşın.
 Çoğu, çekim eki almış biçimleri değil yalın biçimleri içerir; `değil`,
 `yok`, `hiç` gibi olumsuzluk taşıyıcıları bazı listelerde vardır. Listeyi
 kullanmadan önce açıp okuyun.
@@ -108,11 +137,25 @@ kullanmadan önce açıp okuyun.
 
 ### Alt kelimeler: kazanan uzlaşma
 
-Kelime düzeyinde bölütlemenin tamiri olmayan bir sorunu var: sözlük asla
-kapanmaz. Karakter düzeyinde bölütlemenin sorunu ise tam tersi: diziler
-çok uzar ve her birim neredeyse hiçbir şey ifade etmez.
-[Byte-pair encoding]{.hl} (BPE) aradaki farkı, birimlerini veriden
-*öğrenerek* böler [@sennrich2016neural].
+::: {#gloss-vocabulary .column-margin .term-gloss}
+**vocabulary** (sözlük) — modelin bilmesine izin verilen sabit token listesi.
+Bunun dışında kalan her şey, ne kadar açık yazmış olursanız olun, model için
+görünmezdir. [↩](#term-vocabulary){.term-back}
+:::
+
+::: {#gloss-byte-pair-encoding .column-margin .term-gloss}
+**byte-pair encoding (BPE)** — token listesini metnin kendisinden öğrenmenin
+bir yolu: tek karakterlerden başlayın ve en sık yan yana gelen çiftleri
+birleştirmeye devam edin. [↩](#term-byte-pair-encoding){.term-back}
+:::
+
+Kelime düzeyinde tokenization'ın tamiri olmayan bir sorunu var:
+[**vocabulary**](#gloss-vocabulary){#term-vocabulary .term-ref} asla kapanmaz.
+Karakter düzeyinde tokenization'ın sorunu ise tam tersi: diziler çok uzar ve
+her birim neredeyse hiçbir şey ifade etmez.
+[**Byte-pair encoding (BPE)**](#gloss-byte-pair-encoding){#term-byte-pair-encoding .term-ref}
+ikisinin arasında bir orta yol bulur: birimlerini veriden *öğrenir*
+[@sennrich2016neural].
 
 Algoritma şaşırtıcı ölçüde basit. Karakterlerle başla. Komşu her çifti say.
 En sık çifti yeni bir sembole birleştir. Tekrarla.
@@ -167,14 +210,13 @@ merge  9: 'low' + '</w>' -> 'low</w>'  (seen 5 times)
 merge 10: 'w' + 'i' -> 'wi'  (seen 3 times)
 ```
 
-Kimse bir dilbilgisi vermeden ne olduğuna bakın. Algoritma daha ilk
+Kimse bir dilbilgisi kuralı vermeden ne olduğuna bakın. Algoritma daha ilk
 birimde `est`'i — İngilizcenin üstünlük ekini — keşfetti, çünkü üstünlük
 biçimleri sık geçiyor. Ardından `low` ve `new`'i gövde olarak buldu.
 [Kimse ona İngilizcede ek olduğunu söylemedi.]{.hl} Saydı.
 
 Kazancın asıl göründüğü yer, modelin hiç görmediği bir kelimedir.
-Bölütlemek için öğrenilen birleştirmeleri öğrenildikleri sırayla tekrar
-oynatırız:
+Öğrenilen birleştirmeleri, öğrenildikleri sırayla tekrar oynatırız:
 
 ```python
 def apply_merges(word, merges):
@@ -261,7 +303,7 @@ html`<div style="font-size:0.9rem;">
         <p style="margin-top:0.7rem; color:#5B6272;">
           Sonuç: <b>${bpeTrace[bpeTrace.length - 1].symbols.length}</b> token.
           Dört kelimelik bir derlemden sadece 10 birleştirme öğrenildi —
-          gerçek bir bölütleyici 50.000 ve fazlasını öğrenir.
+          gerçek bir tokenizer 50.000 ve fazlasını öğrenir.
         </p>
       </div>`}
 </div>`
@@ -271,10 +313,10 @@ html`<div style="font-size:0.9rem;">
 ### Faturayı Türkçe ödüyor
 
 Şimdi, İngilizce dışında bir dille çalışıyorsanız asıl önemli olan kısım.
-Bölütleyici bir derlem üzerinde eğitilir ve o derlem ezici çoğunlukla
+Tokenizer bir derlem üzerinde eğitilir ve o derlem ezici çoğunlukla
 İngilizcedir. Sonuç ölçülebilir. Aşağıda İnsan Hakları Evrensel
 Bildirgesi'nin 1. maddesinin resmî İngilizce ve Türkçe metinleri,
-OpenAI'ın bölütleyicilerinden geçiriliyor:
+OpenAI'ın tokenizer'larından geçiriliyor:
 
 ```python
 import tiktoken
@@ -308,10 +350,10 @@ o200k_base:
   turkish costs 1.39x more tokens
 ```
 
-Aynı cümle, aynı anlam, GPT-3.5/4 bölütleyicisinde [1,82 kat token]{.hl}.
+Aynı cümle, aynı anlam, GPT-3.5/4 tokenizer'ında [1,82 kat token]{.hl}.
 API'ler token başına ücretlendirdiğine ve bağlam pencereleri token
 cinsinden ölçüldüğüne göre, Türkçe konuşan biri daha az bağlam için daha
-çok para öder. Yeni bölütleyiciler farkı daraltıyor (`o200k_base` ile 1,39
+çok para öder. Yeni tokenizer'lar farkı daraltıyor (`o200k_base` ile 1,39
 kat) ama kapatmıyor. Bu, diller arasında belgelenmiş ve sayısallaştırılmış
 bir eşitsizliktir [@petrov2023language]; yuvarlama hatası değil.
 
@@ -356,7 +398,7 @@ bağlam penceresi ilanlarda karakter değil token cinsindendir, yani
 biçimde daha az metin demektir — parçalama boyutlarınızı
 ([20. bölüm](../../en/chapters/20-rag.html)) buna göre ayarlayın. Üçüncüsü:
 Türkçeye özgü bir sözlük gerçekten gerekiyorsa, `sentencepiece`
-[@kudo2018sentencepiece] ile kendi bölütleyicinizi eğitmek kapalı bir yol
+[@kudo2018sentencepiece] ile kendi tokenizer'ınızı eğitmek kapalı bir yol
 değildir; ama önce ölçün, çünkü çoğu ekipte kazanç yeni bir model seçmekten
 gelir.
 :::
@@ -367,11 +409,11 @@ gelir.
 Karakter sözlüğü minik (~100 sembol), sözlük dışı sorunu hiç yaşamaz ve
 eğitim gerektirmez. Peki neden herkes alt kelime kullanıyor?
 
-**Çünkü asıl kısıt dizi uzunluğudur.** Dikkat mekanizmasının maliyeti dizi
+**Çünkü asıl kısıt dizi uzunluğudur.** Attention mekanizmasının maliyeti dizi
 uzunluğunun karesiyle büyür
 ([7. bölüm](../../en/chapters/07-transformers.html)), dolayısıyla 5 kat uzun
 bir dizi kabaca 25 kat pahalıdır. Alt kelimeler bir sıkıştırma şemasıdır:
-sözlük harcayıp kısa dizi satın alırlar. Bölütleyici, sözlük büyüklüğü ile
+sözlük harcayıp kısa dizi satın alırlar. Tokenizer, sözlük büyüklüğü ile
 dizi uzunluğu arasındaki takası ayarlayan düğmedir ve BPE bu düğmeyi bir
 insanın tahminine göre değil verinin istatistiğine göre ayarlar.
 :::
@@ -488,7 +530,7 @@ biçimlendirdi:
    hataları, bileşikler. Alt kelimelerin gerekçesi, tek cümlede, budur.
 2. **Sözlüğünüzün büyük kısmı istatistiksel olarak işe yaramaz.** Bir kez
    görülmüş kelime hiçbir şeyin kestirimini desteklemez. `min_df` bunun
-   için vardır ve matrisi etkisiz kelime atmaktan çok daha fazla kırpar.
+   için vardır ve matrisi stop word atmaktan çok daha fazla kırpar.
 3. **Sıklık ile bilgilendiricilik neredeyse zıttır.** En çok gördüğünüz
    kelimeler size en az şeyi söyler. Bir sonraki bölümün tohumu bu
    gözlemdir.
@@ -564,7 +606,7 @@ Bu cümleyi aklınızda tutun. Onu düzeltmek,
 ### 3. adım — belge, one-hot'larının toplamıdır
 
 Bir belgedeki her token'ın one-hot vektörünü toplayın; bir sayım vektörü
-elde edersiniz. Kelime torbası budur: token'ların çoklu kümesi, sıra
+elde edersiniz. İşte bag-of-words budur: token'ların çoklu kümesi, sıra
 atılmış hâlde.
 
 ```text
@@ -590,10 +632,17 @@ was        0   1   0   1
 
 (Sayfaya sığsın diye devriği gösterildi — matris 4 belge × 9 terim.)
 
+::: {#gloss-feature .column-margin .term-gloss}
+**feature** (öznitelik) — verinizin ölçülmüş bir sütunu. Burada, bir kelime.
+İstatistikten geliyorsanız bu, başka bir isim altındaki bir öngörücü
+değişkendir. [↩](#term-feature){.term-back}
+:::
+
 Bir istatistikçi bunu anında tanımalı: bu bir tasarım matrisidir. Her belge
-bir gözlem, her kelime bir değişken; birbiriyle ilişkili, çoğu sıfır olan
-çok sayıda öngörücüyle regresyon hakkında bildiğiniz her şey artık burada
-geçerlidir.
+bir gözlem, her kelime bir
+[**feature**](#gloss-feature){#term-feature .term-ref}; birbiriyle ilişkili,
+çoğu sıfır olan çok sayıda öngörücüyle regresyon hakkında bildiğiniz her şey
+artık burada geçerlidir.
 
 ### 4. adım — sayımlar yanlış sayılardır
 
@@ -608,7 +657,15 @@ nadir olduğunda yüksek olmalı. Bunu iki çarpana ayırmak TF-IDF'i verir.
 **Terim frekansı**, kelimenin bu belgede kaç kez geçtiğidir — zaten
 elimizdeki sayım.
 
-**Belge frekansı**, $\mathrm{df}(t)$, kelimenin hiç olmazsa geçtiği belge
+::: {#gloss-document-frequency .column-margin .term-gloss}
+**document frequency (df)** (belge frekansı) — bir kelimenin, her birinde kaç
+kez geçtiğine bakılmaksızın, kaç belgede hiç olmazsa bir kez göründüğü. Her
+belgede geçen bir kelime hiçbir belgeyi ayırt etmez.
+[↩](#term-document-frequency){.term-back}
+:::
+
+[**Document frequency (df)**](#gloss-document-frequency){#term-document-frequency .term-ref},
+$\mathrm{df}(t)$, kelimenin en az bir kez geçtiği belge
 sayısıdır. Ağırlığın df arttıkça düşmesini istiyoruz, o hâlde tersini
 alıyoruz. Ama ham tersleme fazla sert kalıyor, bu yüzden logaritma
 alıyoruz [@sparckjones1972statistical]:
@@ -763,7 +820,14 @@ html`<p style="font-size:0.86rem; color:#5B6272; margin-top:0.4rem;">
 
 ### 5. adım — çarp, sonra normalleştir
 
-TF-IDF, hücre hücre hesaplanan çarpımdır. d1 (`the pump failed`) için:
+::: {#gloss-tf-idf .column-margin .term-gloss}
+**TF-IDF** — bir belgedeki her kelimeyi, burada ne sıklıkta geçtiğine göre
+puanlayıp her yerde ne kadar yaygın olduğuna bölmek. Sık-ve-nadir kazanır;
+sık-ve-her-yerde kaybeder. [↩](#term-tf-idf){.term-back}
+:::
+
+[**TF-IDF**](#gloss-tf-idf){#term-tf-idf .term-ref}, hücre hücre hesaplanan
+çarpımdır. d1 (`the pump failed`) için:
 
 ```text
 counts        : [1 0 1 0 0 0 1 0 0]
@@ -887,11 +951,19 @@ html`<div style="font-size:0.86rem; color:#5B6272;">
 ```
 :::
 
-### 6. adım — belgeleri kosinüs benzerliğiyle karşılaştırmak
+### 6. adım — belgeleri cosine similarity ile karşılaştırmak
+
+::: {#gloss-cosine-similarity .column-margin .term-gloss}
+**cosine similarity** (kosinüs benzerliği) — iki belgenin ne kadar aynı yöne
+işaret ettiği; ne kadar uzun oldukları hesaba katılmadan. İki satırlık bir not
+ile on sayfalık bir raporun karşılaştırılabilmesinin sebebi budur.
+[↩](#term-cosine-similarity){.term-back}
+:::
 
 Normalleştirilmiş iki vektör iç çarpımlarıyla karşılaştırılır; bu da
-aralarındaki açının kosinüsüdür: 1 aynı yön, 0 ise ortak kelime yok
-demektir.
+aralarındaki açının kosinüsüdür — yani
+[**cosine similarity**](#gloss-cosine-similarity){#term-cosine-similarity .term-ref}:
+1 aynı yön, 0 ise ortak kelime yok demektir.
 
 ```python
 from sklearn.metrics.pairwise import cosine_similarity
@@ -914,8 +986,8 @@ d4  0.258  0.447  0.258  1.000
 
 İki paneli karşılaştırın. Ham sayımda d1 ile d4 %26 benzer görünüyor — oysa
 paylaştıkları tek kelime `the`. TF-IDF bunu doğru biçimde %11'e indiriyor.
-Bütün çiftler düşüyor ve en çok düşenler, tek ortak paydası bir etkisiz
-kelime olanlar.
+Bütün çiftler düşüyor ve en çok düşenler, tek ortak paydası bir stop
+word olanlar.
 
 ::: {.callout-note collapse="true"}
 ## Sezgi kontrolü: neden kosinüs, neden Öklid uzaklığı değil?
@@ -932,9 +1004,48 @@ uzaklığı monoton biçimde ilişkilidir —
 $\lVert a - b \rVert^2 = 2 - 2\cos(a,b)$. Yani normalleştirilmiş
 vektörlerde seçim fark etmez. Normalleştirilmemiş vektörlerde ise muazzam
 fark eder. Mülakatçıların genelde aradığı cevap bu denkliktir.
+
+Şekil üzerinden doğrulayın. $a$ ile $c$ arasındaki açı $\cos = 0,651$
+veriyor; dolayısıyla $\lVert a - c \rVert^2 = 2 - 2(0{,}651) = 0{,}698$ ve
+uzaklık $\sqrt{0{,}698} = 0,836$ oluyor. Normalleştirmeden önce aynı çift
+3,16 uzaklıktaydı; normalleştirmeden sonra 0,836 ve — asıl önemli kısım
+burası — artık her çiftin *sıralaması* kosinüsle uyuşuyor.
 :::
 
-## Kelime torbasının yapamadıkları
+::: {.callout-note collapse="true"}
+## $2 - 2\cos$ nereden geliyor?
+
+İki satırlık cebir, ama bir kez yapmaya değer: bu özdeşlik
+@sec-gommeler'de, biri kosinüs indeksini L2 indeksiyle değiştirip aynı
+komşuları bekledikçe tekrar tekrar karşınıza çıkacak.
+
+Kareli uzaklığı, $(x-y)^2$'yi açar gibi açın; tek fark, çarpımların iç
+çarpım olması:
+
+$$
+\lVert a - b \rVert^2 = (a - b) \cdot (a - b)
+= a \cdot a - 2\,(a \cdot b) + b \cdot b
+$$
+
+Şimdi normalleştirmenin bize kazandırdığını kullanın. Bir vektörün kendisiyle
+iç çarpımı, uzunluğunun karesidir ve normalleştirilmiş her vektörün uzunluğu
+tam olarak 1'dir; yani $a \cdot a = 1$ ve $b \cdot b = 1$. İkisi de birim
+uzunlukta olduğu için iç çarpımları *doğrudan* kosinüstür. Yerine koyun:
+
+$$
+\lVert a - b \rVert^2 = 1 - 2\cos(a,b) + 1 = 2 - 2\cos(a,b)
+$$
+
+Uzaklık, benzerliğin kesin azalan bir fonksiyonudur: kosinüs 0'dan 1'e
+tırmanırken kareli uzaklık 2'den 0'a düşer. Yani Öklid uzaklığına göre
+yapılan bir en yakın komşu araması ile kosinüse göre yapılan arama aynı
+sıralı listeyi döndürür — **vektörler önceden normalleştirilmiş olmak
+şartıyla**. Normalleştirmeyi atlarsanız ikisi ayrışır ve L2 uzaklığı
+üzerine kurulmuş bir erişim indeksi, sessizce konuya göre değil belge
+uzunluğuna göre sıralamaya başlar.
+:::
+
+## Bag-of-words'ün yapamadıkları
 
 Sıra sınırlarda — ve bu sınırlar, kitabın geri kalanının var olma
 sebebini oluşturacak kadar ağır.
@@ -982,7 +1093,7 @@ düşürdü*. n-gram'lar yerel bir yamadır, çözüm değil. Gerçek çözüm
 cosine similarity: 0.866
 ```
 
-Operasyonel anlamı taban tabana zıt iki cümle %87 benzer. Etkisiz kelime
+Operasyonel anlamı taban tabana zıt iki cümle %87 benzer. Stop word
 listenizde *no* varsa — ki çoğu hazır listede vardır — %100 benzer olurlar.
 Bir metin sınıflandırıcısının güvenlik kritik bir incelemede sessizce
 çuvallamasının en yaygın yolu budur.
@@ -990,8 +1101,8 @@ Bir metin sınıflandırıcısının güvenlik kritik bir incelemede sessizce
 ::: {.column-margin}
 Türkçede aynı tuzak daha da sinsidir: olumsuzluk ayrı bir kelime değil,
 gövdeye yapışan bir ektir. `çalışıyor` ile `çalışmıyor` kelime düzeyinde
-iki ayrı token'dır — bu iyi haber — ama alt kelime bölütlemesinden sonra
-farkın tek bir `-mı-` parçasına indiğini ve etkisiz kelime listesinin
+iki ayrı token'dır — bu iyi haber — ama alt kelime tokenization'ından sonra
+farkın tek bir `-mı-` parçasına indiğini ve stop word listesinin
 `değil`'i atabileceğini unutmayın.
 :::
 
@@ -1049,7 +1160,7 @@ Bu altı satırı dikkatle okuyun, çünkü içlerinde dört ders var:
 
 1. **TF-IDF, ham sayımlara göre 6,4 doğruluk puanı ediyor** — bedava, ek
    veri yok, ayar yok. Ağırlıklandırma süs değildir.
-2. **Etkisiz kelime atmak burada faydalı** (+2,2 puan) — konu
+2. **Stop word atmak burada faydalı** (+2,2 puan) — konu
    sınıflandırmasında, işlev kelimeleri gerçekten sinyal taşımadığı için.
    Duygu analizinde ya da olumsuzluk tespitinde zarar verirdi. Evrensel bir
    cevap yok.
@@ -1096,8 +1207,8 @@ Aşağıdakilerin hiçbiri tarihî merak konusu değil ve her biri onu kuran
 şirket tarafından belgelenmiş durumda:
 
 - **Uber'de talep yönlendirme.** Uber'in müşteri destek sistemi COTA, bu
-  bölümdeki hattı neredeyse satır satır çalıştırıyor: temizle, bölütle,
-  etkisiz kelimeleri at, kök bul, TF-IDF, LSA ile boyut indir, sonra aday
+  bölümdeki hattı neredeyse satır satır çalıştırıyor: temizle, tokenize et,
+  stop word'leri at, kök bul, TF-IDF, LSA ile boyut indir, sonra aday
   çözümleri talebe kosinüs benzerliğine göre sırala [@uber2018cota]. Talep
   çözüm süresini yaklaşık %10 kısaltmış; yazıda ayrıca kosinüs benzerliğine
   dayalı sıralayıcının, konu vektörlerini doğrudan kullanmaya kıyasla
@@ -1119,9 +1230,9 @@ Aşağıdakilerin hiçbiri tarihî merak konusu değil ve her biri onu kuran
   değişkenlerin hiçbir katkı vermeyip sonunda aşırı öğrenmeye yol açtığını
   gözlemliyor. Bizim ikili n-gram sonucumuz — 249.522 değişken, *daha kötü*
   doğruluk — aynı bulgunun küçük bir derlemdeki hâli.
-- **RAG için melez erişim.** Modern erişim yığınları, yoğun gömme
+- **RAG için melez erişim.** Modern erişim yığınları, yoğun embedding
   aramasıyla seyrek BM25 aramasını birleştirir; çünkü seyrek yarı,
-  gömmelerin birbirine karıştırdığı birebir eşleşmeleri — parça numaraları,
+  embedding'lerin birbirine karıştırdığı birebir eşleşmeleri — parça numaraları,
   hata kodları, soyadları — yakalar. Bunun bir örneğini
   [20. bölümde](../../en/chapters/20-rag.html) kuracaksınız.
 - **Ölçekte istenmeyen içerik ve kötüye kullanım filtreleme.** Seyrek metin
@@ -1214,7 +1325,7 @@ belirleyen bir kısıttır.
 ::: {.callout-note collapse="true"}
 ## 5. Arama motorunuz "P-101" parça numarası için hiçbir şey döndürmüyor. Neden?
 
-Neredeyse kesinlikle bölütleyiciniz yüzünden. `scikit-learn`'ün varsayılan
+Neredeyse kesinlikle tokenizer'ınız yüzünden. `scikit-learn`'ün varsayılan
 `token_pattern=r"(?u)\b\w\w+\b"` kalıbı en az iki kelime karakteri ister ve
 tireyi aşmaz:
 
@@ -1234,7 +1345,7 @@ Bunu önleyen alışkanlık: herhangi bir vektörleştiriciyi eğittikten sonra
 :::
 
 ::: {.callout-note collapse="true"}
-## 6. 2026'da kelime torbası ne zaman *doğru* seçimdir?
+## 6. 2026'da bag-of-words ne zaman *doğru* seçimdir?
 
 Şunlardan en az ikisi geçerliyse: sınıf başına çok az etiketli örneğiniz
 var; sözlüğünüz alana özgü ve birebir eşleşme önemli (parça numaraları, gen
@@ -1307,15 +1418,15 @@ gürültü katıyor. Bu bölümdeki deney tam olarak bunu gösteriyor: 32.318 �
 düzenlileştirmeyi güçlendirmek ya da noktasal karşılıklı bilgi eşiğini
 geçen ikililerle sınırlamak.
 
-**S: Etkisiz kelimeleri atmak bir duygu analizi modeline neden bazen zarar
+**S: Stop word'leri atmak bir duygu analizi modeline neden bazen zarar
 verir?**
 
-Çünkü etkisiz kelime listeleri, işlev kelimelerinin sinyal taşımadığı konu
+Çünkü stop word listeleri, işlev kelimelerinin sinyal taşımadığı konu
 erişimi için yapılmıştır; duygu ise konu değildir. Standart listeler
 *not*, *no*, *never*, *very*, *only* ve *but* kelimelerini siler — yani bir
 görüşü tersine çeviren ya da şiddetlendiren kelimeleri. *This is not good*
 ile *this is good* aynı vektöre dönüşür. Bu bölümün kendi sayıları her iki
-yönü de gösteriyor: etkisiz kelime atmak konu sınıflandırmasında 2,2
+yönü de gösteriyor: stop word atmak konu sınıflandırmasında 2,2
 doğruluk puanı kazandırdı, olumsuzlama örneğinde ise ağır kaybettirirdi.
 Yüksek sesle söylenmesi gereken kural: ön işleme göreve göre seçilmelidir,
 asla varsayılan olarak uygulanmamalıdır.
@@ -1345,7 +1456,7 @@ ilgilidir.
 **S: İki belgenin kosinüs benzerliği 0. Bu ne demek ve pratikte ne kadar
 olası?**
 
-Hiçbir terimi paylaşmıyorlar demek. Etkisiz kelimelerin korunduğu gerçek
+Hiçbir terimi paylaşmıyorlar demek. Stop word'lerin korunduğu gerçek
 bir derlemde bu neredeyse imkânsızdır, çünkü her belgede *the* geçer. Çok
 sayıda sıfır görüyorsanız muhtemelen fazla agresif filtrelemişsinizdir ya
 da belgeleriniz aşırı kısadır — ki bu da başlı başına yoğun gösterimlere
@@ -1360,7 +1471,7 @@ matrisleri %0,1–1 arasında sıfırdan farklıdır, yani kazanç iki ile üç
 büyüklük mertebesindedir. Sonra seyrekliği *bozan* işlemlerden — ortalama
 merkezleme, ham matris üzerinde PCA — ve onu korumak için tasarlanmış
 olanlardan söz edin; özellikle kesilmiş SVD'den, ki bu gizli anlam
-analizidir ve gömmelere giden tarihsel köprüdür
+analizidir ve embedding'lere giden tarihsel köprüdür
 ([3. bölüm](../../en/chapters/03-embeddings.html)).
 
 ### Bir şey sahiden yayına almış olup olmadığınızı sınayanlar
@@ -1385,48 +1496,48 @@ tasarlayın.**
 sınıyorlar. Beklenen cevap shingling + MinHash + yerellik duyarlı özetleme
 (LSH); bu, neredeyse doğrusal zamanda yaklaşık benzerlik verir. Bu bölümün
 malzemesi o hattın ön yarısıdır: shingle'lar, yukarıda tartışılan
-bölütleme kararlarından çıkan karakter ya da kelime n-gram'larıdır.
+tokenization kararlarından çıkan karakter ya da kelime n-gram'larıdır.
 
 **S: Kurum içi teknik dokümantasyon için bir arama motoru kurun. Nereden
 başlarsınız?**
 
 Elasticsearch ya da benzeri bir motor üzerinden BM25 ile
 [@robertson2009probabilistic]; çünkü bu hafta yayına girebilen güçlü bir
-temel çizgidir ve gömmelerin yok ettiği parça numarası birebir
+temel çizgidir ve embedding'lerin yok ettiği parça numarası birebir
 eşleşmelerini düzgün kaldırır. Ölçün. Sonra başka sözcüklerle anlatım için
 yoğun erişimi ekleyin ve ikisini birleştirin — yani
 [20. bölümde](../../en/chapters/20-rag.html) kuracağınız melez erişim
-mimarisini. Sözcük temelli bir temel çizgi kurmadan doğrudan gömmelere
+mimarisini. Sözcük temelli bir temel çizgi kurmadan doğrudan embedding'lere
 atlayan adaylar, mühendislik muhakemesini ölçen bir soruya yanlış cevap
 veriyor demektir.
 
 **S: Türkçe (ya da Arapça, ya da Fince) ürününüz İngilizce olandan istek
 başına çok daha pahalıya mal oluyor. Açıklayın ve çözün.**
 
-Bölütleyici eşitsizliği: bölütleyici ağırlıkla İngilizce veride
+Tokenizer eşitsizliği: tokenizer ağırlıkla İngilizce veride
 eğitildiğinden, morfolojik olarak zengin diller daha çok token'a parçalanır
 [@petrov2023language]. Bu bölümdeki sayılar — `cl100k_base`'de 1,82 kat,
 `o200k_base`'de 1,39 kat — bu cevabı inandırıcı kılan türden somut
-kanıttır. Çareler, artan emek sırasıyla: bölütleyicisinin kapsaması daha
+kanıttır. Çareler, artan emek sırasıyla: tokenizer'ının kapsaması daha
 iyi olan bir model seçmek; maliyeti istek başına değil *görev* başına
 token cinsinden ölçmek; yeterince büyük bir dağıtım için alana ve dile
-özgü bir bölütleyici eğitmek [@kudo2018sentencepiece].
+özgü bir tokenizer eğitmek [@kudo2018sentencepiece].
 
-### Bölütlemede derinliği sınayanlar
+### Tokenization'da derinliği sınayanlar
 
-**S: BPE'yi anlatın. Bölütleyicinin hiç görmediği bir kelimeye ne olur?**
+**S: BPE'yi anlatın. Tokenizer'ın hiç görmediği bir kelimeye ne olur?**
 
 Birleştirme döngüsünü anlatın, sonra asıl soruyu cevaplayın: özel hiçbir
 şey olmaz — ki mesele de budur. Kelime bilinen alt kelimelere, en kötü
 durumda tek tek karakterlere ayrışır; yani `<UNK>` token'ı yoktur ve
-hiçbir bilgi atılmaz. Bu bölümdeki işlenmiş örneği kullanın: `lowest`i hiç
+hiçbir bilgi atılmaz. Bu bölümdeki işlenmiş örneği kullanın: `lowest`'i hiç
 görmemiş bir modelde `lowest → low + est`.
 
 **S: Gövdeleme mi kök bulma mı — ve bugün ikisinden birini kullanır
 mıydınız?**
 
 İkisini de tanımlayın, sonra modern cevabı verin: genelde hiçbirini,
-çünkü alt kelime bölütlemesi aynı seyreklik problemini dile özgü bir kural
+çünkü alt kelime tokenization'ı aynı seyreklik problemini dile özgü bir kural
 kümesi olmadan çözüyor ve Transformer'lar çekimi doğrudan kaldırıyor.
 Bunları gerçekten seyrek model senaryolarına ya da iyi bir çözümleyicinizin
 olduğu morfolojik olarak zengin dillere saklayın [@oflazer1994two].
@@ -1441,7 +1552,7 @@ bakıyor.
   Jurafsky & Martin [@jurafsky2025slp]. Alanın standart başvuru kaynağı;
   ücretsiz ve sürekli güncelleniyor. Bu bölüm için:
   [2. bölüm, *Words and Tokens*](https://web.stanford.edu/~jurafsky/slp3/2.pdf)
-  (bölütleme, normalleştirme, Zipf, BPE) ve
+  (tokenization, normalleştirme, Zipf, BPE) ve
   [5. bölüm, *Embeddings*](https://web.stanford.edu/~jurafsky/slp3/5.pdf)
   (TF-IDF, kosinüs, PPMI). Ocak 2026 taslağında bölümlerin yeniden
   numaralandığına dikkat edin — sizi "vektör anlambilimi için 6. bölüme"
@@ -1460,25 +1571,25 @@ bakıyor.
   matrislerle değil veri çerçeveleriyle düşünüyorsanız, TF-IDF'i anlatan bu
   bölüm yukarıdakilerin hepsinden hızlı oturabilir. Çevrimiçi ücretsiz.
 
-**Bölütleme, uygulamalı.**
+**Tokenization, uygulamalı.**
 
 - **[Hugging Face LLM Course, 6. bölüm](https://huggingface.co/learn/llm-course/chapter6/1)**.
-  BPE, WordPiece ve Unigram bölütleyicilerini sıfırdan kurar ve hangi
+  BPE, WordPiece ve Unigram tokenizer'larını sıfırdan kurar ve hangi
   modelin hangisini kullandığını anlatır.
   [BPE dersi](https://huggingface.co/learn/llm-course/chapter6/5) bizim
   oyuncak uygulamamızın doğrudan devamıdır.
 - **[minbpe](https://github.com/karpathy/minbpe)** ve eşlik eden
   [iki saatlik video](https://www.youtube.com/watch?v=zduSFxRajkE), Andrej
-  Karpathy [@karpathy2024minbpe]. GPT sınıfı bir bölütleyiciyi sıfırdan
+  Karpathy [@karpathy2024minbpe]. GPT sınıfı bir tokenizer'ı sıfırdan
   kuran birkaç yüz satır temiz Python. Bu listeden tek bir şey yapacaksanız
   bunu yapın.
 - **[The Tokenizer Playground](https://huggingface.co/spaces/Xenova/the-tokenizer-playground)**.
-  Metni yapıştırın, bölütleyici değiştirin, bölünmeyi izleyin. Kendi
+  Metni yapıştırın, tokenizer değiştirin, bölünmeyi izleyin. Kendi
   adınızı, şirketinizin parça numaralarını ve bir paragraf Türkçe deneyin.
 - **[tiktoken](https://github.com/openai/tiktoken)**. Bu bölümdeki maliyet
   ölçümlerinde kullanılan kütüphane.
 - **[sentencepiece](https://github.com/google/sentencepiece)**
-  [@kudo2018sentencepiece]. Kendi bölütleyicinizi eğitmeniz gerektiğinde —
+  [@kudo2018sentencepiece]. Kendi tokenizer'ınızı eğitmeniz gerektiğinde —
   örneğin Türkçe ağırlıklı bir derlem için — fiilî standart araç.
 
 **Başvuru dokümantasyonu ve dersler.**
@@ -1504,9 +1615,9 @@ bakıyor.
 
 ## Alıştırmalar
 
-1. **Bölütleyici ekonomisi.** Kendi teknik yazınızdan bir paragraf Türkçe
+1. **Tokenizer ekonomisi.** Kendi teknik yazınızdan bir paragraf Türkçe
    metni ve İngilizce çevirisini alın. Tokenizer Playground ya da
-   `tiktoken` ile iki farklı bölütleyicide token sayın. Maliyet oranını
+   `tiktoken` ile iki farklı tokenizer'da token sayın. Maliyet oranını
    hesaplayın, sonra bu oranın ayda 100.000 istekte yıllık API faturanıza
    ne yaptığını kestirin.
 2. **Vektörleştiriciyi kırın.** Kendi alanınızdan on belge üzerinde bir
