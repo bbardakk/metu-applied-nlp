@@ -1,6 +1,3093 @@
 # Transformer'lar ve Attention {#sec-transformerlar}
 
-::: {.callout-note appearance="simple" icon="false"}
-**Bölüm durumu: çevriliyor.** Bu bölümün Türkçesi hazırlanıyor. Tam ve güncel
-metin için [İngilizce sürüme](../../en/chapters/07-transformers.html) bakabilirsiniz.
+**Öğrenme hedefleri.** Bu bölümün sonunda şunları yapabileceksiniz:
+
+- self-attention'ı (öz-dikkat) token temsilleri üzerinde *öğrenilmiş bir ağırlıklı ortalama* olarak açıklamak;
+- $\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\big(QK^{\top}/\sqrt{d_k}\big)\,V$ denklemini terim terim okumak ve üç token'lık bir cümle için içindeki her sayıyı elle hesaplamak;
+- bir cümleyi eksiksiz bir transformer bloğunun içinden geçirmek — multi-head attention, residual, layer norm, feed-forward — ve her token'ın ne kazandığını söylemek;
+- birden fazla head'in neden var olduğunu ve farklı head'lerin neyde uzmanlaştığını anlatmak;
+- konum bilgisinin modele neden açıkça verilmesi gerektiğini açıklamak; absolute, learned, RoPE ve ALiBi'yi karşılaştırmak;
+- attention maskesinin neden BERT ile GPT arasındaki fark olduğunu açıklamak;
+- bir modelin parametre sayısını ve KV cache boyutunu şeklinden kestirmek, hangisinin sizi sınırladığını söylemek;
+- uzun bağlamları karşılanabilir kılan teknikleri saymak — KV cache, GQA/MQA, FlashAttention;
+- bir mixture-of-experts modelinin toplam parametrelerini aktif olanlardan ayırmak ve donanım faturanızı hangisinin belirlediğini söylemek;
+- scaling laws'ın (ölçekleme yasaları) neyi öngördüğünü ve bu öngörünün nerede bittiğini ifade etmek.
+
+## Temel ilkelerden self-attention
+
+@sec-dil-modelleri ile birlikte bir sonraki kelimeyi kestirebiliyorduk, ama
+tekrarlayan (recurrent) modellerimizde bir darboğaz vardı: modelin cümle
+hakkında bildiği her şey, adım adım, sabit boyutlu bir durumdan sıkıştırılarak
+geçmek zorundaydı. Bu mecazi değil, birebir böyleydi — bir
+sequence-to-sequence çevirmen, hedef dilde tek bir kelime bile üretmeden önce
+tüm kaynak cümleyi tek bir vektöre kodluyordu [@sutskever2014sequence]. Uzun
+menzilli ilişkiler — bir zamir ile işaret ettiği isim, bir fiil ile uzaktaki
+öznesi — sürekli kayboluyordu ve cümle uzadıkça çeviri kötüleşiyordu.
+
+Attention tam da bunu yamamak için icat edildi. @bahdanau2015neural,
+decoder'ın encoder'ın *bütün* durumlarına geri bakmasına ve her çıktı adımında
+hangilerinin önemli olduğunu öğrenmesine izin verdi; uzunluğa bağlı çöküş de
+ortadan kalktı. Tarihe dikkat edin: yıl 2015 ve altta hâlâ tekrarlayan bir ağ
+var.
+
+Transformer'ın üç yıl sonraki katkısı [@vaswani2017attention], işi asıl
+yapanın bu yama olduğunu fark edip geri kalan her şeyi çöpe atmaktı. Verdiği
+cevap neredeyse utandıracak kadar dolaysız: [bırakın her token diğer bütün
+token'lara baksın ve her birinin ne kadar önemli olduğunu öğrensin]{.hl}.
+Hayatınızda bir kez ağırlıklı ortalama hesapladıysanız, çekirdek sezgi zaten
+sizde demektir. Attention, token vektörlerinin bir ağırlıklı ortalamasıdır;
+farkı, *ağırlıkların kendisinin veriden kestirilmesidir*.
+
+Her token'ın vektörü üç ayrı yöne izdüşürülür: bir **query** (sorgu — "ben ne
+arıyorum?"), bir **key** (anahtar — "ben ne içeriyorum?") ve bir **value**
+(değer — "seçilirsem ne aktarırım?"). $i$ token'ı ile $j$ token'ı arasındaki
+skor, $q_i \cdot k_j$ iç çarpımıdır; ölçeklenir ve bir softmax'tan geçirilir ki
+her satır bir olasılık dağılımına dönüşsün:
+
+$$
+\operatorname{Attention}(Q, K, V) = \operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right) V
+$$
+
+Softmax'tan çıkan o satır, ağırlıklı ortalamadaki ağırlıklar kümesinin ta
+kendisidir. İstatistikçi diline çevirisi: model, her token için tüm cümle
+üzerinde küçük ve veriye bağlı bir regresyon çalıştırır ve *şu anda hangi
+token'ların bilgi taşıdığına* karar verir.
+
+### Modelin bütününün şekli
+
+Herhangi bir kutuyu açmadan önce attention'ın gerçekte nerede durduğunu
+görmekte fayda var. Bir transformer, tek bir parçası tekrarlanan kısa bir
+pipeline'dır:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Attention modelin bütününde nerede duruyor</div>
+<svg viewBox="0 0 764 340" style="max-width:744px" role="img"
+     aria-label="Modelin tamamı soldan sağa çizilmiş. Token'lar bir embedding tablosunda aranır, konum bilgisi eklenir, sonuç L adet özdeş transformer bloğundan oluşan bir yığından geçer, ardından son bir layer normalisation ve bir unembedding izdüşümü sözlükteki her kelime için bir skor üretir. Her transformer bloğu bir multi-head attention alt katmanı ve bir feed-forward alt katmanı içerir. Token sayısı ile model genişliği yığının bir ucundan diğerine değişmez.">
+  <defs>
+    <marker id="arc-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <text x="37" y="92" class="t-xs t-mid t-muted t-b">TOKEN'LAR</text>
+  <rect x="10" y="104" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="118" class="t-xs t-mid t-mono">kedi</text>
+  <rect x="10" y="128" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="142" class="t-xs t-mid t-mono">sütü</text>
+  <rect x="10" y="152" width="54" height="20" rx="5" class="chip"/>
+  <text x="37" y="166" class="t-xs t-mid t-mono">içti</text>
+
+  <line x1="66" y1="138" x2="84" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="88" y="110" width="84" height="56" rx="9" class="box"/>
+  <text x="130" y="134" class="t-sm t-mid t-b">Embedding</text>
+  <text x="130" y="150" class="t-xs t-mid t-muted">tablo araması</text>
+  <text x="130" y="206" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="172" y1="138" x2="190" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <circle cx="204" cy="138" r="13" class="chip"/>
+  <text x="204" y="143" class="t-sm t-mid t-b">+</text>
+  <rect x="166" y="214" width="78" height="40" rx="9" class="box-navy"/>
+  <text x="205" y="232" class="t-sm t-mid t-b">Konum</text>
+  <text x="205" y="246" class="t-xs t-mid t-muted">burada eklenir,</text>
+  <text x="205" y="258" class="t-xs t-mid t-muted">ya da her blokta</text>
+  <path d="M205,214 L205,155" class="ln" fill="none" marker-end="url(#arc-a)"/>
+
+  <line x1="217" y1="138" x2="238" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <text x="347" y="70" class="t-xs t-mid t-b t-accent">× L BLOK</text>
+  <rect x="254" y="78" width="206" height="104" rx="10" class="box" opacity="0.45"/>
+  <rect x="249" y="83" width="206" height="104" rx="10" class="box" opacity="0.7"/>
+  <rect x="244" y="88" width="206" height="104" rx="10" class="box-navy"/>
+  <text x="347" y="107" class="t-sm t-mid t-b">Transformer bloğu</text>
+  <rect x="256" y="118" width="86" height="56" rx="8" class="box-accent"/>
+  <text x="299" y="140" class="t-xs t-mid t-b">Multi-head</text>
+  <text x="299" y="154" class="t-xs t-mid t-b">attention</text>
+  <rect x="352" y="118" width="86" height="56" rx="8" class="box-warm"/>
+  <text x="395" y="140" class="t-xs t-mid t-b">Feed-</text>
+  <text x="395" y="154" class="t-xs t-mid t-b">forward</text>
+  <text x="347" y="206" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="450" y1="138" x2="470" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="476" y="110" width="58" height="56" rx="9" class="box"/>
+  <text x="505" y="134" class="t-xs t-mid t-b">Son</text>
+  <text x="505" y="150" class="t-xs t-mid t-b">LayerNorm</text>
+
+  <line x1="534" y1="138" x2="552" y2="138" class="ln" marker-end="url(#arc-a)"/>
+
+  <rect x="556" y="110" width="84" height="56" rx="9" class="box"/>
+  <text x="598" y="134" class="t-xs t-mid t-b">Unembedding</text>
+  <text x="598" y="150" class="t-xs t-mid t-muted">sözlüğe</text>
+  <text x="598" y="206" class="t-xs t-mid t-muted">n × |V|</text>
+
+  <line x1="640" y1="138" x2="658" y2="138" class="ln" marker-end="url(#arc-a)"/>
+  <text x="664" y="134" class="t-sm t-b">logits</text>
+  <text x="664" y="150" class="t-xs t-muted">p(sonraki)</text>
+
+  <line x1="14" y1="276" x2="750" y2="276" class="ln-thin"/>
+  <text x="14" y="298" class="t-sm">Token sayısı n ve genişlik d her okta aynıdır: blok vektörleri yeniden yazar,</text>
+  <text x="14" y="316" class="t-sm">şekillerini asla değiştirmez. Bu bölüm lacivert kutuyu parça parça açıyor.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Mimarinin tamamı. Bir transformer'ı transformer yapan her şey tekrarlanan
+bloğun içindedir; iki yanındaki parçalar bir arama tablosu ile bir matris
+çarpımından ibarettir.
 :::
+::::
+
+Bu resmin iki özelliğini şimdiden aklınıza kazımakta fayda var, çünkü sonraki
+her şey onlara yaslanıyor.
+
+**Şekil hiç değişmez.** $n$ token bir bloğa $n \times d$ matris olarak girer ve
+$n \times d$ matris olarak çıkar. [Blok bir yeniden yazma adımıdır, yeniden
+şekillendirme adımı değil]{.hl}; üst üste yığmanın bu kadar kolay olmasının
+sebebi tam olarak budur: 12. blok, 1. blokla aynı arayüzü sunar, dolayısıyla
+derinlik serbest bir parametredir.
+
+**Yalnızca tek bir bileşen yana bakabilir.** Feed-forward alt katmanı,
+normalizasyonlar ve unembedding, her token'ı tek başına ele alır. Attention,
+modelin tamamında $i$ konumunun $j$ konumunu okuyabildiği *tek* yerdir. Bu
+kitapta bir modelin uzaktaki iki kelimeyi "bağlaması" hakkında söylenen her
+şey, mekanik olarak, bir attention matrisindeki bir sayıya karşılık gelir.
+
+### Neden üç izdüşüm, bir tane değil?
+
+Yukarıdaki denkleme yöneltilebilecek haklı bir itiraz var. Attention'ın
+bilmesi gereken şey hangi token'ların ilişkili olduğuysa, $Q$, $K$ ve $V$'yi
+kurmaya niye zahmet edelim? Token vektörlerini doğrudan $x_i \cdot x_j$ diye
+karşılaştırıp üç matris çarpımından kurtulmak varken?
+
+Bu itirazı ciddiye almaya değer, çünkü tasarımı apaçık hale getiren şey, onu
+gerçekten denemektir. Aşağıdaki çözümlü örnekteki dört boyutlu embedding'leri
+kullanalım — `kedi` = `[0.9, 0.1, 0.0, 0.5]`, `sütü` = `[0.1, 0.9, 0.0, 0.5]`,
+`içti` = `[0.0, 0.1, 0.9, 0.5]`. Ham iç çarpımlar şöyle çıkar:
+
+$$
+XX^{\top} = \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & \mathbf{1{,}07} & 0{,}43 & 0{,}26\\
+\texttt{sütü} & 0{,}43 & \mathbf{1{,}07} & 0{,}34\\
+\texttt{içti} & 0{,}26 & 0{,}34 & \mathbf{1{,}07}
+\end{array}
+$$
+
+Burada iki şey ters gider ve her biri tek başına ölümcüldür.
+
+**Benzerlik simetriktir.** Zorunlu olarak $x_i \cdot x_j = x_j \cdot x_i$'dir.
+Yani "fiil nesnesini arıyor" ile "nesne fiilini arıyor" *aynı güçte aynı ifade*
+olmaya mahkûmdur. Oysa dilbilgisi, tek yönlü işleyen ilişkilerle doludur ve
+simetrik bir skor bunların bir tanesini bile ifade edemez.
+
+**Kendine benzerlik diğer her şeyi bastırır.** Bir token'ın kendisine karşı
+skoru $x \cdot x$, yani uzunluğunun karesidir ve burada bu değer her satırdaki
+en büyük girdidir. Matrisi bir softmax'tan geçirin: `içti`, **en büyük**
+ağırlığı olan 0,4235'i kendisine verir, `kedi`ye ise yalnızca 0,2825 ayırır.
+Fiil hiçbir şeye uzanmaz. Katman, pahalı bir hesapla *her token'ı kendi haline
+bırakmanın* yaklaşık bir kopyasını üretir.
+
+::: {.column-margin}
+Kesin konuşmak gerekirse $x_i \cdot x_i$, $x_i \cdot x_j$'yi yalnızca
+$\|x_j\| \le \|x_i\|$ olduğunda geçer — daha uzun bir komşu sizi geçebilir. Üç
+oyuncak vektörümüzün hepsinde $\|x\|^2 = 1{,}07$, dolayısıyla burada köşegen
+açık ara kazanıyor. Genel iddia daha zayıf ama yine de ölümcül: izdüşümsüz bir
+skor, iki token ilişkili olsun olmasın, kendine benzerliği kuruluş gereği
+şişirir.
+:::
+
+Şimdi aynı cümleyi izdüşümler yerine konmuş haliyle görelim; birazdan
+kuracağınız head tam olarak budur. İki sütun da softmax satırıdır ve her biri
+kendi genişliğinin kareköküyle ölçeklenmiştir — solda $\sqrt{4}$, sağda
+$\sqrt{2}$ — böylece karşılaştırılabilirler:
+
+| `içti` şuna bakıyor | izdüşüm yok | $W^Q$, $W^K$ ile |
+|:--|--:|--:|
+| `kedi` (öznesi) | 0,2825 | 0,4230 |
+| `sütü` (nesnesi) | 0,2940 | **0,5012** |
+| `içti` (kendisi) | **0,4235** | 0,0759 |
+
+Fiil artık attention'ının %42,35'ini kendisine harcamak yerine %92,41'ini iki
+argümanına ayırıyor. Üstelik skor matrisi de artık simetrik değil: `içti`,
+`sütü`ye 2,97 skoru verirken `sütü`, `içti`ye 0,27 veriyor — [11 kat
+asimetri, ki bütün mesele de bu]{.hl}. İzdüşümsüz hiçbir skor bunu
+üretemezdi.
+
+Yani üç matris süs değil. Tek bir vektörün aynı anda taşıyamayacağı işleri
+birbirinden ayırmak için varlar:
+
+- $W^Q$, **query**'yi kurar — *ben ne arıyorum?* Bakan token'dan okunur.
+- $W^K$, **key**'i kurar — *başkalarına neyi ilan ediyorum?* Bakılan token'dan
+  okunur.
+- $W^V$, **value**'yu kurar — *seçilirsem ne teslim ederim?*
+
+Tasarımın kendisi bu iş bölümüdür. [$Q$ ile $K$ birlikte bilginin **nereye**
+aktığına karar verir; **neyin** aktığına ise tek başına $V$ karar
+verir]{.hl}. Bunları ayrı tutmak, bir token'ın bir şeyi ilan edip başka bir
+şeyi teslim etmesine izin verir — ve birbirine hiç benzemeyen iki token'ın yine
+de güçlü bir bağla bağlanmasını sağlar; bir fiil ile öznesinin ihtiyacı olan
+şey tam da budur.
+
+#### İki matris mi, bir matris mi? {.unnumbered}
+
+Bu argümanın neyi kanıtladığı konusunda dikkatli olun. Skoru açık açık yazın,
+izdüşümler birbirinin içinde erisin:
+
+$$
+q_i \cdot k_j \;=\; (x_i W^Q)(x_j W^K)^{\top} \;=\; x_i^{\top}\,\underbrace{W^Q
+W^{K\top}}_{M,\;\; d \times d}\, x_j
+$$
+
+Skora dokunan tek şey $M$ **çarpımıdır**. Öğrenilmiş tek bir $d \times d$
+matrisi aynı skorları verirdi — yine asimetrik, yine kendine benzerlik
+tuzağından uzak, çünkü $M$'yi simetrik olmaya zorlayan hiçbir şey yok. O halde
+dürüst iddia "iki matris zorunludur" değil; [modelin aynı zamanda ucuz olmasını
+da istediğiniz anda iki matris zorunlu hale gelir]{.hl}. Üç somut gerekçe:
+
+- **Parametreler.** GPT-3 ölçeğinde $d = 4096$ ve $d_k = 128$: tek bir head'in
+  $W^Q, W^K$ çifti $2 \times 4096 \times 128 = 1{,}048{,}576$ sayıya mal
+  olurken, tam bir $M$ $4096^2 = 16{,}777{,}216$ sayı tutar — **16 kat fazla**.
+  Oran, katmanın tamamı için de aynıdır, çünkü her head'e bir $M$ gerekirdi:
+  $32$ head, çarpanlara ayrılmış halde $2d^2 = 33,5$M, ayrılmamış halde
+  $32d^2 = 537$M eder. Çarpanlara ayırma kasıtlı bir düşük rank kısıtıdır: $M$,
+  rankı $\le d_k$ olmaya zorlanır ve bu bir kayıp değil, bir özelliktir.
+- **Aritmetik.** $Q$ ve $K$ üzerinden skorlama $O(n^2 d_k)$ tutar. $M$
+  üzerinden skorlama $O(n^2 d)$ tutar — aynı sayılar için $d/d_k = 32$ kat
+  fazla ödersiniz.
+- **Cache genişliği.** Tasarımı asıl belirleyen gerekçe budur. $M$ ile de
+  cache'leyebilirsiniz — $x_i^{\top} M x_j = (M^{\top} x_i) \cdot x_j$ olduğu
+  için doğrudan $x_j$'yi saklarsınız — ama sakladığınız şey tam $d$
+  genişliğinde takılı kalır. Çarpanlara ayırma, key'leri kendilerine ait $d_k$
+  genişliğinde bir uzaya taşır ve oraya yerleştikleri anda *o uzayı
+  küçültebilirsiniz*: tek bir key head'ini birçok query head'i arasında
+  paylaştırmak, cache'i katman başına token başına $4096$ sayıdan $1024$'e
+  indirir. Bu numaranın adı GQA'dır, @sec-attention-maliyeti bölümünün konusudur
+  ve ayrı bir $W^K$ olmadan ifade edilmesi bile mümkün değildir.
+
+Aynı belirlenemezlik value yolunda da geçerlidir: bir head'in çıktısı residual
+akışa $x W^V W^O_{\text{head}}$ olarak girer; bu da yalnızca birlikte görünen
+iki matrisin bir başka çarpımıdır. Çarpanlara ayırma, rank ve maliyet üzerine
+alınmış mühendislik kararıdır ve aynı gerekçelerle iki kez alınmıştır.
+
+Ortaya çıkan mekanizma, zaten bildiğiniz bir şeyin *yumuşak* bir sürümüdür:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir dictionary tek anahtarı arar; attention hepsini birden arar</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="Karşılaştırılan iki panel. Solda bir dictionary araması: sütü sorgusu tam olarak tek bir anahtarla eşleşir ve yalnızca o anahtarın değeri, milk, döndürülür. Sağda attention: içti'nin sorgusu üç anahtarla aynı anda karşılaştırılır, 0,4230, 0,5012 ve 0,0759 ağırlıkları çıkar ve çıktı, her biri kendi ağırlığıyla ölçeklenmiş üç değerin toplamıdır. Dictionary tek bir değer döndürür; attention her değerin bir harmanını döndürür.">
+  <defs>
+    <marker id="sl-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="sl-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="14" y="22" class="t-xs t-b t-muted">DICTIONARY — TAM EŞLEŞME, TEK DEĞER</text>
+  <text x="138" y="44" class="t-xs t-mid t-muted t-b">ANAHTAR</text>
+  <text x="248" y="44" class="t-xs t-mid t-muted t-b">DEĞER</text>
+
+  <rect x="14" y="88" width="70" height="28" rx="7" class="chip"/>
+  <text x="49" y="106" class="t-xs t-mid t-mono">"sütü"</text>
+
+  <rect x="100" y="52" width="76" height="28" rx="7" class="box"/>
+  <text x="138" y="70" class="t-xs t-mid t-mono">kedi</text>
+  <rect x="100" y="88" width="76" height="28" rx="7" class="box-accent"/>
+  <text x="138" y="106" class="t-xs t-mid t-mono">sütü</text>
+  <rect x="100" y="124" width="76" height="28" rx="7" class="box"/>
+  <text x="138" y="142" class="t-xs t-mid t-mono">içti</text>
+
+  <rect x="210" y="52" width="76" height="28" rx="7" class="box"/>
+  <text x="248" y="70" class="t-xs t-mid t-mono">cat</text>
+  <rect x="210" y="88" width="76" height="28" rx="7" class="box-accent"/>
+  <text x="248" y="106" class="t-xs t-mid t-mono">milk</text>
+  <rect x="210" y="124" width="76" height="28" rx="7" class="box"/>
+  <text x="248" y="142" class="t-xs t-mid t-mono">drank</text>
+
+  <line x1="84" y1="102" x2="96" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <line x1="176" y1="102" x2="206" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <line x1="286" y1="102" x2="302" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <text x="308" y="106" class="t-sm t-b">milk</text>
+
+  <text x="14" y="180" class="t-xs t-muted">Üç anahtardan ikisi tamamen yok sayılır.</text>
+  <text x="14" y="196" class="t-xs t-muted">Anahtarı ıskalarsanız hiçbir cevap alamazsınız.</text>
+
+  <line x1="380" y1="14" x2="380" y2="200" class="ln-thin"/>
+
+  <text x="408" y="22" class="t-xs t-b t-accent">ATTENTION — KISMİ EŞLEŞME, HARMAN DEĞER</text>
+  <text x="540" y="44" class="t-xs t-mid t-muted t-b">ANAHTAR</text>
+  <text x="610" y="44" class="t-xs t-mid t-muted t-b">AĞIRLIK</text>
+  <text x="682" y="44" class="t-xs t-mid t-muted t-b">DEĞER</text>
+
+  <rect x="408" y="88" width="76" height="28" rx="7" class="chip"/>
+  <text x="446" y="106" class="t-xs t-mid t-mono">q(içti)</text>
+
+  <rect x="506" y="52" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="70" class="t-xs t-mid t-mono">k(kedi)</text>
+  <rect x="506" y="88" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="106" class="t-xs t-mid t-mono">k(sütü)</text>
+  <rect x="506" y="124" width="68" height="28" rx="7" class="box"/>
+  <text x="540" y="142" class="t-xs t-mid t-mono">k(içti)</text>
+
+  <text x="610" y="70" class="t-xs t-mid t-mono t-accent">0,4230</text>
+  <text x="610" y="106" class="t-xs t-mid t-mono t-accent">0,5012</text>
+  <text x="610" y="142" class="t-xs t-mid t-mono t-muted">0,0759</text>
+
+  <rect x="648" y="52" width="68" height="28" rx="7" class="box-accent"/>
+  <text x="682" y="70" class="t-xs t-mid t-mono">v(kedi)</text>
+  <rect x="648" y="88" width="68" height="28" rx="7" class="box-accent"/>
+  <text x="682" y="106" class="t-xs t-mid t-mono">v(sütü)</text>
+  <rect x="648" y="124" width="68" height="28" rx="7" class="box"/>
+  <text x="682" y="142" class="t-xs t-mid t-mono">v(içti)</text>
+
+  <path d="M484,102 L495,102 L495,66 L502,66" class="ln-accent" fill="none" marker-end="url(#sl-b)"/>
+  <line x1="484" y1="102" x2="502" y2="102" class="ln-accent" marker-end="url(#sl-b)"/>
+  <path d="M484,102 L495,102 L495,138 L502,138" class="ln-thin" fill="none" marker-end="url(#sl-a)"/>
+
+  <text x="408" y="180" class="t-xs t-muted">Her anahtara danışılır ve her değer bir şeyler katar.</text>
+  <text x="408" y="196" class="t-xs t-muted">Hiçbir şey yok sayılmaz; yalnızca ağırlıklandırılır.</text>
+
+  <line x1="14" y1="216" x2="750" y2="216" class="ln-thin"/>
+  <text x="14" y="240" class="t-sm">Aynı üç parça — query, key, value — ama eşleşme kesin değil, dereceli; bu yüzden cevap</text>
+  <text x="14" y="258" class="t-sm">bütün value'ların bir harmanı oluyor. Tek değişiklik bu ve attention'ı türevlenebilir</text>
+  <text x="14" y="276" class="t-sm">kılan da bu: “hangi anahtar eşleşti” üzerinden gradyan alamazsınız, ama 0,5012</text>
+  <text x="14" y="294" class="t-sm">değerindeki bir ağırlık üzerinden alabilirsiniz.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Attention, türevlenebilir bir dictionary'dir. Sağdaki ağırlıklar,
+@sec-attention-ornek bölümünde kurulan head'ten `içti` için çıkan gerçek
+ağırlıklardır.
+:::
+::::
+
+Son cümle kendi paragrafını hak ediyor, çünkü softmax'ın neden orada
+durduğunu — neden daha basit bir normalizasyon olmadığını — açıklıyor. Sert
+bir arama, yani en iyi eşleşen tek anahtarı almak, bir basamak fonksiyonudur;
+basamak fonksiyonlarının gradyanı ise neredeyse her yerde sıfırdır, dolayısıyla
+yukarı akıştaki hiçbir şey öğrenemezdi. [Softmax, bu şeyi eğitebilmenin
+bedelidir]{.hl}: "en iyi eşleşmeyi seç" davranışını ruhen korur, ama her skora
+göre kullanılabilir bir türev bırakır.
+
+### Keşif: bir head neye bakıyor?
+
+Farklı attention head'leri farklı ve çoğu zaman yorumlanabilir alışkanlıklar
+öğrenir. Aşağıdaki widget, tek bir cümle için üsluplaştırılmış bir attention
+matrisi gösteriyor. Her **satır** bakan token'dır; her **sütun** bakılan
+token'dır; koyu renk daha çok ağırlık demektir. Head'leri değiştirin ve
+örüntünün nasıl değiştiğini izleyin — özellikle `it` satırını.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Attention head gezgini — “The robot poured coffee because it was ready.”</div>
+```
+
+```{ojs}
+//| echo: false
+viewof headChoice = Inputs.radio(
+  [
+    "Zamir head'i — “it” neye bakıyor?",
+    "Önceki-token head'i",
+    "Düzgün head (bag of words)"
+  ],
+  { value: "Zamir head'i — “it” neye bakıyor?", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+attnData = {
+  const tokens = ["The", "robot", "poured", "coffee", "because", "it", "was", "ready", "."];
+  const n = tokens.length;
+  const M = Array.from({ length: n }, () => new Array(n).fill(0));
+
+  if (headChoice.startsWith("Önceki")) {
+    for (let i = 0; i < n; i++) {
+      if (i === 0) { M[i][i] = 1; }
+      else { M[i][i - 1] = 0.82; M[i][i] = 0.18; }
+    }
+  } else if (headChoice.startsWith("Düzgün")) {
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) M[i][j] = 1 / n;
+  } else {
+    // Zamir (gönderim tadında) head'i
+    // her satır bir softmax satırıdır ve toplamı 1 olmalı; 0. token'ın yalnızca kendisi var
+    for (let i = 0; i < n; i++) {
+      if (i === 0) { M[i][i] = 1; }
+      else { M[i][i] = 0.62; M[i][i - 1] = 0.38; }
+    }
+    const it = tokens.indexOf("it");
+    M[it] = new Array(n).fill(0);
+    // "…because it was ready" -> "it" kahvedir, ama ezici bir farkla değil
+    M[it][tokens.indexOf("coffee")] = 0.46;
+    M[it][tokens.indexOf("robot")]  = 0.34;
+    M[it][it] = 0.12;
+    M[it][tokens.indexOf("ready")]  = 0.08;
+  }
+
+  const cells = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++)
+      cells.push({ from: tokens[i], to: tokens[j], w: M[i][j] });
+  return { tokens, cells };
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 640,
+  height: 480,
+  marginLeft: 70,
+  marginBottom: 60,
+  x: { domain: attnData.tokens, label: "…şuna bakıyor (key)", tickRotate: -35 },
+  y: { domain: attnData.tokens, label: "token (query)…" },
+  color: { type: "linear", range: ["#F2F5F5", "#0E7C7B"], label: "attention ağırlığı", legend: true },
+  marks: [
+    Plot.cell(attnData.cells, {
+      x: "to", y: "from", fill: "w", inset: 1.5, rx: 4,
+      title: d => `${d.from} → ${d.to}: ${d.w.toFixed(2)}`
+    })
+  ]
+})
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Zamir head'indeki belirsizlik gerçektir ve klasik *Winograd* kurulumudur. Şu
+iki cümle arasında yalnızca tek bir kelime değişir, ama `it`'in gönderimi bir
+isimden diğerine kayar:
+
+- "The robot poured coffee because it was **ready**." → `it`, **kahvedir**.
+- "The robot poured coffee because it was **instructed to**." → `it`,
+  **robottur**.
+
+Sözdiziminde bunları ayıran hiçbir şey yok; dilbilgisi birebir aynı. Zamiri
+çözmek dünya bilgisi gerektirir — kahve hazır olabilir, robotlar talimat alır —
+ki büyük ölçekli ön eğitimin satın aldığı şey tam olarak budur.
+:::
+:::
+
+## Tek katman, üç token, bütün sayılar {#sec-attention-ornek}
+
+O denklem dört sembol genişliğinde ve beş ayrı adımı gizliyor. Ondan korkmayı
+bırakmanın en hızlı yolu, kalemle kontrol edilebilecek kadar küçük sayılar
+üzerinde onu bir kez baştan sona çalıştırmaktır.
+
+Cümlemiz Türkçe: **kedi sütü içti**. Bu cümle özellikle seçildi, çünkü Türkçe
+fiili sona koyar; dolayısıyla `içti`, ihtiyaç duyduğu iki şey için de *geriye*
+uzanmak zorundadır — içme eylemini kim yaptı ve ne içildi. Bu da aradığımız
+örüntüyü daha hesaba girmeden ifade etmemizi kolaylaştırıyor: attention makul
+bir şey yapıyorsa, `içti` satırı kendisine değil diğer iki token'a yaslanmalı.
+
+Her şey bilinçli olarak minik tutuldu. Üç token, $d_{\text{model}} = 4$ model
+genişliği ve $d_k = d_v = 2$ head boyu.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**Bu matrisler öğrenilmedi, elle kuruldu.** Aritmetik okunaklı kalsın ve her
+boyut adını koyabileceğiniz bir anlam taşısın diye seçildiler. Eğitilmiş bir
+model, daha geniş, daha yoğun ve sütun sütun yorumlanamayan matrisler bulur. Bu
+örnekten taşınacak olan şey *yordam* ve *şekillerdir* — bu belirli değerler
+asla.
+:::
+
+Dört embedding boyutuna anlam yüklüyoruz ki "bu sayı neden büyük?" sorusunun
+her zaman bir cevabı olsun:
+
+| token | anlamı | canlı | sıvı | eylem | hep-açık |
+|:--|:--|--:|--:|--:|--:|
+| `kedi` | kedi | 0,9 | 0,1 | 0,0 | 0,5 |
+| `sütü` | süt (nesne) | 0,1 | 0,9 | 0,0 | 0,5 |
+| `içti` | içti | 0,0 | 0,1 | 0,9 | 0,5 |
+
+Dördüncü boyut üç token'da da aynı. Başına ne geldiğini izleyin: hiç
+değişmediği için bir token'ın kendisini ayırt eden herhangi bir şeyi *ilan
+etmesine* yardım edemez ve aşağıdaki bütün karşılaştırmalardan düşer. Gözünüzü
+ondan ayırmayın — bölümün sonunda geri dönüp "sabit bir öznitelik hiçbir işe
+yaramaz" iddiasının gerçekten doğru olup olmadığını soracağız.
+
+### 1. adım — her token'ı üç yöne izdüşür
+
+Aynı girdi vektörü, bir query, bir key ve bir value üretmek için üç farklı
+öğrenilmiş matrisle çarpılır. Modelin parametreleri attention hesabına
+yalnızca burada girer.
+
+$$
+Q = XW^Q, \qquad K = XW^K, \qquad V = XW^V
+$$
+
+Üç matris üç farklı soruyu kodlar. $W^Q$ *ne arıyorum*'u, $W^K$ *neyi ilan
+ediyorum*'u ve $W^V$ *seçilirsem ne teslim ederim*'i kurar:
+
+$$
+W^Q=\begin{bmatrix}2&0\\0&2\\2&2\\0&0\end{bmatrix}\;
+W^K=\begin{bmatrix}1{,}5&0\\0&1{,}5\\0&0\\0&0\end{bmatrix}\;
+W^V=\begin{bmatrix}1&0\\0&1\\0&0\\0{,}2&0{,}2\end{bmatrix}
+$$
+
+$W^Q$'yu satır satır okuyun. *Eylem* satırı `[2, 2]`; yani fiil benzeri her şey,
+hem bir özne **hem de** bir nesne arayan bir query yayımlar. $W^K$'da ise
+*eylem* satırı `[0, 0]`: fiil bunların hiçbirini ilan etmez, dolayısıyla hiçbir
+şey ona bakmak istemeyecektir. Çarpımları yapınca:
+
+| token | query $q_i$ | key $k_i$ | value $v_i$ |
+|:--|:--|:--|:--|
+| `kedi` | `[1.80, 0.20]` | `[1.35, 0.15]` | `[1.00, 0.20]` |
+| `sütü` | `[0.20, 1.80]` | `[0.15, 1.35]` | `[0.20, 1.00]` |
+| `içti` | `[1.80, 2.00]` | `[0.00, 0.15]` | `[0.10, 0.20]` |
+
+İki satırda durup düşünmeye değer. Her iki koordinatta da *aynı anda* büyük
+olan tek query `içti`ye ait — aynı anda iki şeyin peşinde. Bir de `içti`nin
+value'su `[0.10, 0.20]`, yani neredeyse hiç: fiilin kendine ait ne özne
+içeriği var ne de nesne içeriği. Bunu aklınızda tutun; işin can alıcı noktası
+bu.
+
+### 2. adım — her query her key ile buluşur
+
+$i$ token'ını $j$ token'ına karşı bir iç çarpımla, $q_i \cdot k_j$ ile
+skorlayın. Dokuz token çifti, dokuz sayı; öyle dizilmişler ki [her **satır**
+bakan token, her **sütun** ise bakılan token olsun]{.hl}:
+
+$$
+QK^{\top} = \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & 2{,}46 & 0{,}54 & 0{,}03\\
+\texttt{sütü} & 0{,}54 & 2{,}46 & 0{,}27\\
+\texttt{içti} & 2{,}73 & 2{,}97 & 0{,}30
+\end{array}
+$$
+
+İç çarpım, iki vektör aynı yöne baktığında büyük olur; yani bu sayılar birer
+benzerlik skorudur, daha egzotik bir şey değil. Tablodaki en büyük girdi
+$2{,}97$ ve bu, `içti`nin `sütü`ye bakışı. Fiil nesnesini bulmuş. `içti`
+satırındaki en küçük girdi olan $0{,}30$ ise fiilin kendisine bakışı —
+tasarlandığı gibi, çünkü fiiller hiçbir şey ilan etmiyor.
+
+### 3. adım — head boyunun kareköküne böl
+
+$$
+\frac{QK^{\top}}{\sqrt{d_k}} = \frac{QK^{\top}}{\sqrt{2}}
+= \frac{QK^{\top}}{1{,}4142}
+$$
+
+$$
+\begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & 1{,}7395 & 0{,}3818 & 0{,}0212\\
+\texttt{sütü} & 0{,}3818 & 1{,}7395 & 0{,}1909\\
+\texttt{içti} & 1{,}9304 & 2{,}1001 & 0{,}2121
+\end{array}
+$$
+
+Bu adım titiz bir muhasebe ayrıntısı gibi görünür, ama değildir. Rastgele iki
+$d_k$ boyutlu vektörün iç çarpımının standart sapması $\sqrt{d_k}$ gibi büyür;
+yani bölme olmadan head'ler genişledikçe skorlar sistematik olarak büyür — ve
+softmax *mutlak* büyüklüğe tepki verir. 20.000 rastgele çift üzerinde ölçtük:
+
+| $d_k$ | $q\cdot k$'nın std. sapması | $\sqrt{d_k}$ | $\sqrt{d_k}$'ya bölündükten sonra |
+|--:|--:|--:|--:|
+| 2 | 1,414 | 1,414 | 1,000 |
+| 8 | 2,859 | 2,828 | 1,011 |
+| 64 | 8,029 | 8,000 | 1,004 |
+| 512 | 22,746 | 22,627 | 1,005 |
+
+Ortadaki iki sütun yüzde yarım hassasiyetle uyuşuyor — kalan fark, 20.000
+çiftlik bir kestirimin örnekleme gürültüsü, sistematik bir açık değil. Bütün
+mesele de bu: ham skorların ölçülen yayılımı gerçekten $\sqrt{d_k}$ gibi
+büyüyor, dolayısıyla $\sqrt{d_k}$'ya bölmek onu gerçekten bir sabite
+düzleştiriyor; son sütun bunu 256 katlık bir genişlik aralığında doğruluyor.
+Sonucu, bir token 64 token'la yarıştığında görüyoruz — aşağıda *kazanan*
+key'in aldığı ortalama ağırlık var:
+
+| $d_k$ | $1/\sqrt{d_k}$ ile | onsuz |
+|--:|--:|--:|
+| 2 | 0,104 | 0,165 |
+| 8 | 0,105 | 0,420 |
+| 64 | 0,108 | 0,786 |
+| 512 | 0,107 | **0,928** |
+
+::: {.callout-note appearance="simple" icon="false"}
+Ölçekleme olmadan 512 boyutlu bir head, ağırlığının %93'ünü tek bir token'a
+veriyor — üstelik daha hiçbir şey öğrenmemişken. Bu, doyuma ulaşmış bir
+softmax'tır ve doymuş bir softmax'ın gradyanı neredeyse yoktur; yani head'e
+nereye bakması gerektiği artık *öğretilemez*. Ölçekleme varken yarışma, head
+ne kadar geniş olursa olsun aşağı yukarı aynı sıcaklıkta kalır. Ölçeklenmiş
+sütun kıpırdamıyor bile: 0,104 · 0,105 · 0,108 · 0,107.
+:::
+
+### 4. adım — softmax skorları ağırlığa çevirir
+
+Softmax her satırın üstelini alır ve satırın toplamına böler; böylece her
+satır negatif olmayan değerlerden oluşur ve toplamı bire eşitlenir. `içti`
+satırı için baştan sona açalım:
+
+$$
+\begin{aligned}
+\text{ölçekli skorlar} &= [\,1{,}9304,\; 2{,}1001,\; 0{,}2121\,]\\
+\exp(\cdot) &= [\,6{,}8923,\; 8{,}1670,\; 1{,}2363\,]\\
+\textstyle\sum \exp(\cdot) &= 16{,}2956\\
+\text{ağırlıklar} &= [\,6{,}8923,\; 8{,}1670,\; 1{,}2363\,]/16{,}2956\\
+&= [\,0{,}4230,\; 0{,}5012,\; 0{,}0759\,]
+\end{aligned}
+$$
+
+Aynı işlemi üç satıra da uygulayınca attention matrisi çıkar:
+
+$$
+A = \operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)
+= \begin{array}{r|rrr}
+ & \texttt{kedi} & \texttt{sütü} & \texttt{içti}\\\hline
+\texttt{kedi} & \mathbf{0{,}6961} & 0{,}1791 & 0{,}1249\\
+\texttt{sütü} & 0{,}1750 & \mathbf{0{,}6804} & 0{,}1446\\
+\texttt{içti} & 0{,}4230 & \mathbf{0{,}5012} & 0{,}0759
+\end{array}
+$$
+
+Her satırın toplamı 1,000. İki içerik kelimesi attention'ının yaklaşık
+%70'ini kendisine harcıyor; bir isim için makul olan da bu — çünkü ihtiyaç
+duyduğu bilginin kendisi zaten o. Fiil ise başka bir şey yapıyor: %42 / %50
+olarak öznesi ile nesnesi arasında bölüşüyor ve kendisine yalnızca %7,6
+ayırıyor. Daha tek bir işlem yapmadan önce yaptığımız kestirim tuttu.
+
+### 5. adım — ağırlıklı ortalama
+
+Son olarak ağırlıkları value'larla çarpın. Burada yeni bir şey olmuyor; bu,
+ağırlıkları 4. adımdan gelen sıradan bir ağırlıklı ortalama.
+
+$$
+\operatorname{Attention}(Q,K,V) = AV
+$$
+
+| token | attention **öncesi** value | attention **sonrası** çıktı |
+|:--|:--|:--|
+| `kedi` | `[1.00, 0.20]` | `[0.7444, 0.3433]` |
+| `sütü` | `[0.20, 1.00]` | `[0.3256, 0.7443]` |
+| `içti` | `[0.10, 0.20]` | `[0.5308, 0.6009]` |
+
+Son satıra bakın, çünkü bütün mekanizmanın var olma sebebi o. `içti` elinde
+`[0.10, 0.20]` ile geldi — neredeyse hiç özne içeriği, neredeyse hiç nesne
+içeriği yok. Elinde `[0.5308, 0.6009]` ile ayrılıyor. [Fiil, o kelimelerin
+hangileri olduğunu kimse söylemeden her iki argümanını da toplamış
+oldu]{.hl}; sadece sordu ve key'leri eşleşen iki token cevap verdi. Bir
+sonraki katman 3. konuma baktığında gördüğü şey bu yeni vektördür.
+
+İki isim daha az hareket etti ve beklediğiniz yönde: `kedi`, `[1.00, 0.20]`
+konumundan `[0.74, 0.34]` konumuna geçti; kendi kimliğinin çoğunu korurken
+artık ilişkilendirildiği nesneden biraz aldı.
+
+::: {.callout-tip appearance="simple" icon="false"}
+Yukarıdaki her adım ya bir matris çarpımı ya da bir softmax. Konumlar üzerinde
+bir döngü yok, tekrarlama yok ve sırayla olması gereken hiçbir şey yok — bunun
+@sec-dil-modelleri bölümündeki tekrarlayan modellerin yerini almasının sebebi
+tam olarak budur. Dokuz skorun hepsi aynı anda hesaplanabilir; hem de aynı anda
+çok sayıda şey hesaplamakta çok iyi olan bir donanım üzerinde.
+:::
+
+### Kendiniz deneyin
+
+Widget, yukarıdaki aritmetiği canlı olarak çalıştırıyor. Pipeline'ı aşama
+aşama ilerletin; iki anahtar, mekanizmayı bilerek bozup ne olduğunu izlemenize
+izin veriyor.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Tek bir attention katmanı, aşama aşama — “kedi sütü içti”</div>
+```
+
+```{ojs}
+//| echo: false
+qkvTok = ["kedi", "sütü", "içti"]
+```
+
+```{ojs}
+//| echo: false
+// Metnin adım adım işlediği elle kurulmuş matrislerin aynısı; böylece widget
+// ile metin birbirinden hiç ayrışamaz.
+qkvE  = [[0.9, 0.1, 0.0, 0.5],
+         [0.1, 0.9, 0.0, 0.5],
+         [0.0, 0.1, 0.9, 0.5]]
+```
+
+```{ojs}
+//| echo: false
+qkvWQ = [[2, 0], [0, 2], [2, 2], [0, 0]]
+```
+
+```{ojs}
+//| echo: false
+qkvWK = [[1.5, 0], [0, 1.5], [0, 0], [0, 0]]
+```
+
+```{ojs}
+//| echo: false
+qkvWV = [[1, 0], [0, 1], [0, 0], [0.2, 0.2]]
+```
+
+```{ojs}
+//| echo: false
+qkvMul = (A, B) =>
+  A.map(r => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)))
+```
+
+```{ojs}
+//| echo: false
+qkvTrans = M => M[0].map((_, j) => M.map(r => r[j]))
+```
+
+```{ojs}
+//| echo: false
+qkvSoftmax = row => {
+  const finite = row.filter(v => Number.isFinite(v));
+  const m = Math.max(...finite);
+  const e = row.map(v => Number.isFinite(v) ? Math.exp(v - m) : 0);
+  const s = e.reduce((a, b) => a + b, 0);
+  return e.map(v => v / s);
+}
+```
+
+```{ojs}
+//| echo: false
+viewof qkvStage = Inputs.radio(
+  ["1 · izdüşür → Q, K, V",
+   "2 · skorlar QKᵀ",
+   "3 · ölçekle ÷ √dₖ",
+   "4 · softmax → ağırlıklar",
+   "5 · ağırlıklı ortalama → çıktı"],
+  { value: "4 · softmax → ağırlıklar", label: "Aşama" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof qkvScaleOn = Inputs.toggle(
+  { label: "√dₖ'ya böl", value: true }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof qkvMaskOn = Inputs.toggle(
+  { label: "nedensel maske (decoder)", value: false }
+)
+```
+
+```{ojs}
+//| echo: false
+qkvPipe = {
+  const Q = qkvMul(qkvE, qkvWQ);
+  const K = qkvMul(qkvE, qkvWK);
+  const V = qkvMul(qkvE, qkvWV);
+  const raw = qkvMul(Q, qkvTrans(K));
+  const denom = qkvScaleOn ? Math.sqrt(2) : 1;
+  let scaled = raw.map(r => r.map(v => v / denom));
+  if (qkvMaskOn)
+    scaled = scaled.map((r, i) => r.map((v, j) => (j <= i ? v : -Infinity)));
+  const A = scaled.map(qkvSoftmax);
+  const out = qkvMul(A, V);
+  return { Q, K, V, raw, scaled, A, out };
+}
+```
+
+```{ojs}
+//| echo: false
+qkvShown = {
+  const s = qkvStage[0];
+  if (s === "2") return { M: qkvPipe.raw,    fmt: v => v.toFixed(2), heat: false };
+  if (s === "3") return { M: qkvPipe.scaled, fmt: v => Number.isFinite(v) ? v.toFixed(4) : "−∞", heat: false };
+  if (s === "4") return { M: qkvPipe.A,      fmt: v => v.toFixed(4), heat: true };
+  return { M: null };
+}
+```
+
+```{ojs}
+//| echo: false
+qkvStage[0] === "1" || qkvStage[0] === "5"
+  ? html`<table style="width:100%;font-size:0.86rem;border-collapse:collapse">
+      <tr style="border-bottom:1px solid #ccc">
+        <th style="text-align:left;padding:.35rem">token</th>
+        ${(qkvStage[0] === "1"
+            ? ["query q", "key k", "value v"]
+            : ["value v (önce)", "çıktı (sonra)"]
+          ).map(h => `<th style="text-align:left;padding:.35rem">${h}</th>`).join("")}
+      </tr>
+      ${qkvTok.map((t, i) => `<tr style="border-bottom:1px solid #eee">
+        <td style="padding:.35rem"><code>${t}</code></td>
+        ${(qkvStage[0] === "1"
+            ? [qkvPipe.Q[i], qkvPipe.K[i], qkvPipe.V[i]]
+            : [qkvPipe.V[i], qkvPipe.out[i]]
+          ).map(v => `<td style="padding:.35rem;font-family:monospace">[${v.map(x => x.toFixed(4)).join(", ")}]</td>`).join("")}
+      </tr>`).join("")}
+    </table>`
+  : Plot.plot({
+      width: 560,
+      height: 240,
+      marginLeft: 78,
+      marginBottom: 46,
+      x: { domain: qkvTok, label: "…şuna bakıyor (key)" },
+      y: { domain: qkvTok, label: "token (query)…" },
+      color: qkvShown.heat
+        ? { type: "linear", domain: [0, 1], range: ["#F2F5F5", "#0E7C7B"] }
+        : { type: "linear", range: ["#F2F5F5", "#0E7C7B"] },
+      marks: [
+        Plot.cell(
+          qkvTok.flatMap((_, i) => qkvTok.map((_, j) => ({ i, j, v: qkvShown.M[i][j] }))),
+          { x: d => qkvTok[d.j], y: d => qkvTok[d.i],
+            fill: d => Number.isFinite(d.v) ? d.v : 0, inset: 1.5, rx: 4 }
+        ),
+        Plot.text(
+          qkvTok.flatMap((_, i) => qkvTok.map((_, j) => ({ i, j, v: qkvShown.M[i][j] }))),
+          { x: d => qkvTok[d.j], y: d => qkvTok[d.i],
+            text: d => qkvShown.fmt(d.v),
+            fill: d => (Number.isFinite(d.v) && d.v > (qkvShown.heat ? 0.55 : 2.0)) ? "white" : "#1a1f33",
+            fontSize: 12 }
+        )
+      ]
+    })
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.85rem;opacity:0.8;margin-top:0.2rem">${
+  qkvStage[0] === "1" ? "Aynı girdinin üç izdüşümü. Query'si her iki koordinatta da büyük olan tek token <code>içti</code> — aynı anda iki şey arıyor."
+  : qkvStage[0] === "2" ? "Ham iç çarpımlar. En büyük girdi <code>içti</code> → <code>sütü</code>: fiil nesnesini bulmuş."
+  : qkvStage[0] === "3" ? (qkvScaleOn ? "Skorlar √2'ye bölündü; bu, head'ler genişledikçe softmax'ı doyumdan uzak tutar." : "<b>Ölçekleme kapalı.</b> Daha geniş head'lerde softmax'ı doyuma iten ve gradyanı öldüren şey budur.")
+  : qkvStage[0] === "4" ? "Her satırın toplamı artık 1. İsimler ağırlığın ~%70'ini kendilerinde tutuyor; fiil ise attention'ını iki argümanı arasında bölüştürüyor."
+  : "Ağırlıklı ortalama. <code>içti</code> neredeyse eli boş geliyor ve iki argümanını da yanına alıp gidiyor."
+}</div>`
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Denemeniz gereken iki şey var. **Nedensel maskeyi** açın ve matrisin sağ üst
+köşesinin sıfıra gidişini izleyin — `kedi` artık yalnızca kendisini görebilir;
+bir modelin metni soldan sağa üretebilmesini sağlayan kısıt da budur
+(@sec-model-aileleri). **√dₖ'ya böl** anahtarını kapatın ve bütün ağırlıkların
+uç değerlere kayışını izleyin; $d_k=2$'de etki hafiftir, zaten sorunun geniş
+head'ler kurulana kadar fark edilmemesinin sebebi tam olarak budur.
+:::
+:::
+
+### Aynı resmin geometrisi
+
+$d_k = 2$ seçtiğimiz için her query ve her key düzlemde bir noktadır ve iç
+çarpım *gözle görülebilir* bir şeye dönüşür. Bir query, iki ok benzer yöne
+baktığında ve ikisi de uzun olduğunda bir key'e karşı yüksek skor alır.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Query'ler ve key'ler aynı 2 boyutlu uzayda yaşar</div>
+```
+
+```{ojs}
+//| echo: false
+viewof qkvWho = Inputs.radio(qkvTok, { value: "içti", label: "Kimin query'si?" })
+```
+
+```{ojs}
+//| echo: false
+{
+  const i = qkvTok.indexOf(qkvWho);
+  const q = qkvPipe.Q[i];
+  const arrows = [
+    ...qkvTok.map((t, j) => ({ t, x: qkvPipe.K[j][0], y: qkvPipe.K[j][1], kind: "key" })),
+    { t: qkvWho, x: q[0], y: q[1], kind: "query" }
+  ];
+  return Plot.plot({
+    width: 560, height: 380, marginLeft: 55, marginBottom: 45,
+    x: { domain: [-0.25, 2.3], label: "1. boyut  →  “öznelik”", grid: true },
+    y: { domain: [-0.25, 2.3], label: "2. boyut  →  “nesnelik”", grid: true },
+    marks: [
+      Plot.ruleX([0]), Plot.ruleY([0]),
+      Plot.arrow(arrows, {
+        x1: 0, y1: 0, x2: "x", y2: "y",
+        stroke: d => d.kind === "query" ? "#B3453E" : "#0E7C7B",
+        strokeWidth: d => d.kind === "query" ? 2.4 : 1.6,
+        headLength: 9
+      }),
+      Plot.text(arrows, {
+        x: "x", y: "y", text: d => d.kind === "query" ? `q(${d.t})` : `k(${d.t})`,
+        dx: 16, dy: -8, fontSize: 12,
+        fill: d => d.kind === "query" ? "#B3453E" : "#1a1f33"
+      })
+    ]
+  });
+}
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.85rem;opacity:0.8">
+<b>${qkvWho}</b> query'sinin her key'e karşı skorları —
+${qkvTok.map((t, j) =>
+  `<code>${t}</code> ${qkvPipe.raw[qkvTok.indexOf(qkvWho)][j].toFixed(2)}`
+).join(" · ")}
+&nbsp;→&nbsp; ağırlıklar
+${qkvPipe.A[qkvTok.indexOf(qkvWho)].map(w => w.toFixed(3)).join(" · ")}
+</div>`
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+`içti`yi seçin. Query'si (kırmızı) çapraz olarak sağ yukarı bakıyor, bu yüzden
+**hem** `kedi`nin key'iyle **hem de** `sütü`nün key'iyle büyük bir iç çarpımı
+var. `kedi`yi seçin; query yatay eksene doğru dönüyor ve kendi key'inden başka
+hiçbir şeyle hizalanmıyor. Attention örüntüsü bir arama tablosu değildir —
+her token için tekrarlanan bu geometridir.
+:::
+:::
+
+## Multi-head attention ve transformer bloğu {#sec-blok}
+
+Tek bir head, tek bir alışkanlık demektir. Az önce kurduğumuz head'in dil
+hakkında tek bir fikri var — *bana bir özne ve bir nesne bul* — ve bu fikri
+anlamlı olsun olmasın her token'a uyguluyor. Yalnızca bunu yapabilen bir model
+çok dar bir alet olurdu.
+
+Çözüm utandıracak kadar basit: aynı girdi üzerinde, her biri kendi $W^Q$,
+$W^K$, $W^V$'sine sahip birkaç head'i yan yana çalıştırın ve uzmanlaşmalarına
+izin verin.
+
+### İkinci bir head, aynı cümle
+
+`kedi sütü içti` ile ilgili her şeyi olduğu gibi bırakıp farklı bir işi olan
+bir head daha ekleyelim. 1. head *argümanlarım kimler* diye soruyor. [2. head
+ise tam tersini soruyor — *beni hangi fiil yönetiyor*]{.hl}; fiilin sona
+geldiği bir dilde bu, iki ismin de ileriye, `içti`ye işaret etmesi demektir:
+
+$$
+W^{Q}_{2}=\begin{bmatrix}2{,}5&0\\2{,}5&0\\0&2{,}5\\0&0\end{bmatrix}\;
+W^{K}_{2}=\begin{bmatrix}0&1{,}6\\0&1{,}6\\2&0\\0&0\end{bmatrix}\;
+W^{V}_{2}=\begin{bmatrix}0&0{,}6\\0&0{,}6\\1&0\\0&0\end{bmatrix}
+$$
+
+Query boyutları artık *bir eylem arıyorum* ve *bir isim arıyorum* anlamına
+geliyor; key boyutları ise *ben bir eylemim* ve *ben bir isimim* demek. Aynı
+beş adımı çalıştırınca tamamen farklı bir matris çıkıyor:
+
+::: {layout-ncol="2"}
+**1. head — argüman yapısı**
+
+| | `kedi` | `sütü` | `içti` |
+|:--|--:|--:|--:|
+| `kedi` | **0,6961** | 0,1791 | 0,1249 |
+| `sütü` | 0,1750 | **0,6804** | 0,1446 |
+| `içti` | 0,4230 | **0,5012** | 0,0759 |
+
+**2. head — beni hangi fiil yönetiyor**
+
+| | `kedi` | `sütü` | `içti` |
+|:--|--:|--:|--:|
+| `kedi` | 0,0383 | 0,0383 | **0,9234** |
+| `sütü` | 0,0383 | 0,0383 | **0,9234** |
+| `içti` | **0,4675** | 0,4675 | 0,0650 |
+:::
+
+İki head neredeyse her satırda anlaşmazlığa düşüyor ve bütün mesele de bu
+anlaşmazlık. 1. head'de `kedi` çoğunlukla kendisine bakıyor. 2. head'de ise
+`kedi` attention'ının %92'sini fiile harcıyor. İkisi de yanlış değil; aynı üç
+kelimeden iki farklı ilişki okuyorlar.
+
+::: {.callout-note appearance="simple" icon="false"}
+**Gerçek head'ler bu kadar derli toplu değildir.** Eğitilmiş modeller üzerine
+yayımlanan çözümlemeler, tanınabilir işleri olan head'ler buluyor — bir önceki
+token'a, eşleşen paranteze, bir öbeğin sözdizimsel başına bakanlar
+[@clark2019bert] — ama head'lerin çoğu tek cümlelik hiçbir tarife sığmıyor,
+birçoğu gereksiz tekrar ve büyük bir kısmı çok az kayıpla budanabiliyor
+[@michel2019sixteen]. "2. head fiili buluyor" ifadesini, eğitilmiş head'lerin
+ne yaptığına dair bir iddia olarak değil, *bu* elle kurulmuş örneğin tarifi
+olarak alın.
+:::
+
+### Önce birleştir, sonra izdüşür
+
+Her head, token başına $d_v$ genişliğinde bir vektör üretir. Bunları yan yana
+dizin ve sonucu bir matristen daha, $W^O$'dan geçirin:
+
+$$
+\operatorname{MultiHead}(X) = \operatorname{Concat}(\text{head}_1, \dots,
+\text{head}_h)\, W^O
+$$
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Head'lere böl, paralel çalıştır, sonuçları geri yapıştır</div>
+<svg viewBox="0 0 764 320" style="max-width:744px" role="img"
+     aria-label="Aynı girdi matrisi aynı anda iki attention head'ine verilir. Her head'in kendi query, key ve value matrisleri vardır ve kendi attention örüntüsünü üretir; böylece birinci head argüman yapısını raporlarken ikinci head her ismi hangi fiilin yönettiğini raporlar. Her head, d bölü h genişliğinde dar bir vektör çıkarır. İki çıktı, tam model genişliğine geri birleştirilir ve son bir çıkış matrisi W-O'dan geçirilir; bu matris her head'in raporunun ne kadarının modele geri yazılacağına karar verir.">
+  <defs>
+    <marker id="mh-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="mh-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="118" width="70" height="56" rx="9" class="box"/>
+  <text x="49" y="142" class="t-sm t-mid t-b">X</text>
+  <text x="49" y="158" class="t-xs t-mid t-muted">n × d</text>
+
+  <path d="M84,146 L106,146 L106,80 L126,80" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+  <path d="M84,146 L106,146 L106,212 L126,212" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+
+  <rect x="130" y="44" width="250" height="72" rx="9" class="box-accent"/>
+  <text x="140" y="63" class="t-xs t-b">HEAD 1 — ARGÜMAN YAPISI</text>
+  <text x="140" y="81" class="t-xs t-muted">kendi W_Q, W_K, W_V'si</text>
+  <text x="140" y="99" class="t-xs t-mono">içti → 0,4230 / 0,5012 / 0,0759</text>
+  <text x="370" y="63" class="t-xs t-end t-muted">n × d/h</text>
+
+  <rect x="130" y="176" width="250" height="72" rx="9" class="box-warm"/>
+  <text x="140" y="195" class="t-xs t-b">HEAD 2 — BENİ HANGİ FİİL YÖNETİYOR</text>
+  <text x="140" y="213" class="t-xs t-muted">farklı W_Q, W_K, W_V</text>
+  <text x="140" y="231" class="t-xs t-mono">içti → 0,4675 / 0,4675 / 0,0650</text>
+  <text x="370" y="195" class="t-xs t-end t-muted">n × d/h</text>
+
+  <path d="M380,80 L410,80 L410,132 L430,132" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+  <path d="M380,212 L410,212 L410,160 L430,160" class="ln-accent" fill="none" marker-end="url(#mh-b)"/>
+
+  <rect x="434" y="110" width="78" height="72" rx="9" class="box"/>
+  <text x="473" y="140" class="t-sm t-mid t-b">Birleştir</text>
+  <text x="473" y="158" class="t-xs t-mid t-muted">n × d</text>
+
+  <line x1="512" y1="146" x2="534" y2="146" class="ln" marker-end="url(#mh-a)"/>
+
+  <rect x="538" y="118" width="76" height="56" rx="9" class="box-navy"/>
+  <text x="576" y="142" class="t-sm t-mid t-b">W_O</text>
+  <text x="576" y="158" class="t-xs t-mid t-muted">d × d</text>
+
+  <line x1="614" y1="146" x2="636" y2="146" class="ln" marker-end="url(#mh-a)"/>
+  <text x="642" y="142" class="t-sm t-b">çıktı</text>
+  <text x="642" y="158" class="t-xs t-muted">n × d</text>
+
+  <line x1="14" y1="268" x2="750" y2="268" class="ln-thin"/>
+  <text x="14" y="290" class="t-sm">Her head yalnızca d/h genişliğinde olduğu için h head, tam genişlikte tek bir head kadar ağırlık</text>
+  <text x="14" y="308" class="t-sm">tutar: h ne olursa olsun izdüşümler için 3d², W_O için d². Büyüyen şey skor tensörü, h·n².</text>
+</svg>
+```
+
+::: {.fig-cap}
+`kedi sütü içti` üzerinde iki head. Gösterilen satırlar, aşağıda hesaplanan,
+her head'in `içti` için gerçek attention ağırlıkları — aynı token, aynı anda
+iki farklı biçimde okunuyor.
+:::
+::::
+
+Genişliği 2 olan iki head ile birleştirme tam olarak 4 genişliğinde oluyor —
+yani $d_{\text{model}}$'e geri döndük ve bu bir rastlantı değil. [Head boyu tam
+da birleştirdiğinizde başladığınız yere dönesiniz diye
+$d_k = d_{\text{model}} / h$ seçilir]{.hl}:
+
+| token | h1 özne | h1 nesne | h2 eylem | h2 isim |
+|:--|--:|--:|--:|--:|
+| `kedi` | 0,7444 | 0,3433 | 0,8310 | 0,1014 |
+| `sütü` | 0,3256 | 0,7443 | 0,8310 | 0,1014 |
+| `içti` | 0,5308 | 0,6009 | 0,0585 | 0,5649 |
+
+Sonra $W^O$, her head'in raporunun ne kadarının modelin çalışma belleğine geri
+yazılacağına karar verir. Bizimki, 1. head'in özne ve nesne içeriğini *canlı*
+ve *sıvı* boyutlarına, 2. head'in eylem içeriğini ise *eylem* boyutuna
+yönlendiriyor:
+
+$$
+W^O=\begin{bmatrix}1&0&0&0\\0&1&0&0\\0&0&1&0\\0{,}2&0{,}2&0&0\end{bmatrix}
+\qquad\Longrightarrow\qquad
+\begin{array}{r|rrrr}
+ & \text{canlı} & \text{sıvı} & \text{eylem} & \text{sabit}\\\hline
+\texttt{kedi} & 0{,}7646 & 0{,}3635 & 0{,}8310 & 0{,}0000\\
+\texttt{sütü} & 0{,}3458 & 0{,}7646 & 0{,}8310 & 0{,}0000\\
+\texttt{içti} & 0{,}6438 & 0{,}7139 & 0{,}0585 & 0{,}0000
+\end{array}
+$$
+
+::: {.callout-important appearance="simple" icon="false"}
+**Multi-head attention neredeyse hiç fazladan maliyet getirmez.**
+$d_{\text{model}}/h$ genişliğinde $h$ head'in toplam parametre sayısı ve
+*matris çarpımı* FLOP sayısı, $d_{\text{model}}$ genişliğinde tek bir head ile
+aynıdır: $W^Q$, $W^K$, $W^V$ izdüşümleri her iki durumda da $3d^2$, $W^O$ buna
+$d^2$ ekler ve skorlama, $h$ ne olursa olsun
+$h \cdot n^2 \cdot (d/h) = n^2 d$ tutar. Head'lere bölmek, birbirinden bağımsız
+birkaç attention örüntüsünü neredeyse bedavaya satın alır; tasarımın tutmasının
+sebebi de budur.
+
+Yine de iki maliyet kalemi kıpırdar ve bunlar bu bölümün ilerisinde önem
+kazanacak:
+
+- **Skor tensörü büyür.** Tek head $n^2$ skor saklar; $h$ head $h \cdot n^2$
+  saklar. $n = 1024$, $h = 32$ için bu, 1,05M yerine 33,5M girdi demek —
+  @sec-attention-maliyeti bölümünün konusu olan bellekte ve matris çarpımı
+  olmayan softmax işinde 32 kat artış.
+- **Her head daralır.** $d/h$ genişliğindeki bir head yalnızca rankı $\le d/h$
+  olan bir attention örüntüsü ifade edebilir. $d = 4096$ için bu, head başına
+  4096 yerine 128 demektir. Yüksek ranklı tek bir ilişkiyi düşük ranklı 32
+  ilişkiyle takas ediyorsunuz — genellikle iyi bir takas, ama her hâlükârda bir
+  takas.
+:::
+
+### Kazanç, sayılarla
+
+Şimdi attention çıktısını her token üzerindeki bir *değişim* olarak okuyun. Her
+token, tek başına ne olduğunu söyleyen bir vektörle işe başladı; attention alt
+katmanı ona cümlenin geri kalanından öğrendiklerini geri veriyor:
+
+| token | başlangıç | attention'ın eklediği | okunuşu |
+|:--|:--|:--|:--|
+| `içti` | canlı 0,0 · sıvı 0,1 | canlı **+0,6438** · sıvı **+0,7139** | fiil bir özne ve bir nesne edindi |
+| `kedi` | eylem 0,0 | eylem **+0,8310** | isim, ait olduğu fiili buldu |
+| `sütü` | eylem 0,0 | eylem **+0,8310** | diğeri de öyle |
+
+["Bağlamsal embedding" dediğimiz şey, aritmetik olarak ifade edilmiş
+haliyle budur.]{.hl} `içti` fiili katmana yalnızca bir eylem olduğunu bilerek
+girdi; *kim* içti ve *ne* içildi bilgisinin sayısal izlerini taşıyarak
+çıkıyor. @sec-gommeler bölümündeki durağan vektörlerle — orada `içti`nin
+sonsuza dek tek bir vektörü vardır — bir transformer arasındaki fark budur;
+transformer'da o vektör her katmanda komşularından yeniden kurulur.
+
+`sabit` sütunu her satırda tam olarak sıfır kazandı — bu, alt satırı o boyuta
+hiçbir şey geri göndermeyen elimizdeki $W^O$'nun bir yan ürünü.
+
+Şimdi sabit boyuta söz verdiğimiz dönüşü yapalım, çünkü onunla ilgili derli
+toplu hikâye ancak üçte iki oranında doğru. Skoru, sabit $c$'nin katkıda
+bulunduğu parçalara ayıralım; her token'ı $x_i = [z_i, c]$ diye yazıyoruz:
+
+$$
+q_i \cdot k_j = \underbrace{z_i A \cdot z_j B}_{\text{asıl içerik}}
+\;+\; \underbrace{c\,(z_i A \cdot b)}_{\text{her } j \text{ için aynı}}
+\;+\; \underbrace{c\,(a \cdot z_j B)}_{\textbf{j ile değişir}}
+\;+\; \underbrace{c^2 (a \cdot b)}_{\text{her } j \text{ için aynı}}
+$$
+
+Burada $a$ ile $b$, $W^Q$ ve $W^K$'nın sabit özniteliği okuyan satırlarıdır.
+Softmax, bir satırın tamamına aynı sayıyı eklemeye karşı değişmezdir;
+dolayısıyla ikinci ve dördüncü terimler gerçekten yok olur. Üç sonuç çıkıyor
+ve bunlardan yalnızca ilk ikisi tahmin edebileceğiniz türden:
+
+- **Key tarafında işe yaramaz.** Sabit bir şey ilan edemez. $b$ ne olursa
+  olsun katkısı bütün $j$'ler için aynıdır ve sadeleşir.
+- **Value tarafında bir sabit terimdir.** Bizim $W^V$'miz ona 0,2 ağırlık
+  veriyor, yani her value vektörünün iki bileşenine de sabit bir $+0{,}1$
+  ekliyor.
+- **Query tarafında ise hiç de işe yaramaz değildir.** Üçüncü terim $j$'ye
+  bağlıdır ve sadeleş*mez*. Bu, her token'ın ne olduğuna bakmaksızın istediği,
+  key'ler üzerinde sabit bir tercihtir — öğrenilmiş küresel bir önsel. Bizim
+  örneğimizde yok olmasının tek sebebi, bu $W^Q$'nun o öznitelik için sıfır bir
+  satıra sahip olması; o satırı $[0{,}9, -0{,}7]$ yaparsanız attention
+  ağırlıkları **0,1592** kadar oynar.
+
+[Sabit bir öznitelik hiçbir soruyu cevaplayamaz, ama bir soru sorabilir.]{.hl}
+Üçüncü terim bir merak konusu değildir: bir modelin *attention sink*
+kurmasının yolu esasen budur — yani bakacak belirli bir şeyi olmadığında her
+token'ın artan ağırlığını boşalttığı bir konum.
+
+### Residual bağlantılar: değiştirmek değil, eklemek
+
+*Eklendi* kelimesine dikkat edin. Alt katmanın çıktısı yeni temsil değildir;
+eskisinin üzerine toplanır:
+
+$$
+x \;\leftarrow\; x + \operatorname{MultiHead}(x)
+$$
+
+Bu, [residual connection](#gloss-residual-connection){#term-residual-connection .term-ref}'dır (artık bağlantı) ve tek satırlık tanımının
+ima ettiğinden çok daha fazla iş yapar. Her alt katman, ilerleyen bir vektörün
+üzerine yazmak yerine ona *eklediği* için, modelin derinliği boyunca akan bu
+vektör dizisine sıklıkla **residual akış** denir: her katmanın okuyup yazdığı
+ortak bir çalışma alanı. Katkı sunacak faydalı bir şeyi olmayan bir katman
+sıfıra yakın bir çıktı verip akışı olduğu gibi bırakabilir; yani bir
+transformer'a katman eklemek sıfırdan değil, "zarar verme" noktasından başlar.
+
+::: {#gloss-residual-connection .column-margin .term-gloss}
+**residual connection** (artık bağlantı) — bir alt katmanın girdisini çıktısına ekleyen kestirme; böylece katman tamamen yeni bir temsil yerine yalnızca bir düzeltme öğrenmek zorunda kalır. [↩](#term-residual-connection){.term-back}
+:::
+
+Gradyana da yardım eder. $x + f(x)$'in $x$'e göre türevi $1 + f'(x)$ verir:
+$f'$ ne kadar küçülürse küçülsün, loss'tan daha önceki her katmana geri giden
+ve türevi tam olarak 1 olan bir yol vardır.
+
+::: {.column-margin}
+Residual bağlantılar çoğu zaman kaybolan gradyanların çaresi olarak
+tanıtılır. @he2016deep, çözdükleri şeyin bu *olmadığını* açıkça söylüyor.
+Ağlarında zaten batch normalisation vardı, yani gradyanların sağlıklı olduğu
+doğrulanmıştı. Adını koydukları sorun **bozulma** idi: 56 katmanlı düz bir ağ,
+*eğitim* hatasında 20 katmanlı olandan daha kötü skor alıyordu. Daha sığ ağı
+taklit etmeyi öğrenemiyordu, çünkü bir katman yığınına birim dönüşümü
+hesaplatmak zordur — residual yol ise o birim dönüşümü ona bedavaya verir. Daha
+iyi gradyan akışı gerçek bir yan etkidir, tedavi edilen hastalık değil.
+:::
+
+### Layer normalisation ve neden öne alındığı
+
+Residual akışlar büyür. Her alt katman bir şeyler eklediği için derinlik
+arttıkça sayıların ölçeği yukarı kayar; hem attention (softmax üzerinden) hem
+de feed-forward doğrusal olmayanlığı ölçeğe duyarlıdır. [Layer
+normalisation](#gloss-layer-normalization){#term-layer-normalization .term-ref} (katman normalizasyonu) her token'ın vektörünü tek başına yeniden
+ölçekler [@ba2016layer] — batch boyunca değil, dizi boyunca da değil, o
+token'ın kendi $d_{\text{model}}$ özniteliği boyunca:
+
+$$
+\operatorname{LN}(x) = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \odot \gamma
++ \beta,
+\qquad \mu = \frac{1}{d}\sum_j x_j,
+\qquad \sigma^2 = \frac{1}{d}\sum_j (x_j - \mu)^2
+$$
+
+::: {#gloss-layer-normalization .column-margin .term-gloss}
+**layer normalization** (katman normalizasyonu) — her token'ın öznitelik vektörünü sıfır ortalama ve birim varyansa yeniden ölçeklemek; hesap, batch boyunca değil o token'ın kendi öznitelikleri boyunca yapılır. [↩](#term-layer-normalization){.term-back}
+:::
+
+Bunu bloğun gerçek sırasında uygulayın. Bir pre-norm blokta *feed-forward* alt
+katmanından önceki normalizasyon $x + \operatorname{Attn}(\cdot)$'yi görür; yani
+[alt katmanın çıktısını değil, residual toplamı normalize edin]{.hl}. Önce bir
+önceki bölümdeki toplamayı yapalım:
+
+::: {.column-margin}
+Bir basitleştirmeyi açıkça söyleyelim. Gerçek bir pre-norm blok, attention'dan
+*önce* de normalize eder — çözümlü örnekte sayılar okunaklı kalsın diye ham
+embedding'ler doğrudan $W^Q$, $W^K$, $W^V$'ye verildi. Aşağı akıştaki her şey
+bu tercihi devralıyor. Burada izlediğiniz normalizasyon, bloğun doğru
+konumundaki ikinci normalizasyonudur.
+:::
+
+| token | canlı | sıvı | eylem | sabit |
+|:--|--:|--:|--:|--:|
+| `kedi` | 1,6646 | 0,4635 | 0,8310 | 0,5000 |
+| `sütü` | 0,4458 | 1,6646 | 0,8310 | 0,5000 |
+| `içti` | 0,6438 | 0,8139 | 0,9585 | 0,5000 |
+
+ve ancak ondan sonra bu satırları $\gamma = 1$, $\beta = 0$ ile normalize
+edelim:
+
+| token | canlı | sıvı | eylem | sabit |
+|:--|--:|--:|--:|--:|
+| `kedi` | 1,6543 | −0,8299 | −0,0699 | −0,7545 |
+| `sütü` | −0,8509 | 1,6508 | −0,0602 | −0,7397 |
+| `içti` | −0,4932 | 0,4908 | 1,3268 | −1,3244 |
+
+Artık her satırın ortalaması 0, standart sapması 1. Bunun bedeline dikkat
+edin: [normalizasyondan sonra bir öznitelik yalnızca *o token'ın kendi diğer
+özniteliklerine göre* anlamlıdır]{.hl}. `içti` yukarıda bir hayli canlı içerik
+kazandı, ama daha da fazla sıvı ve eylem içeriği kazandı; bu yüzden canlı
+değeri negatif çıkıyor. Mutlak büyüklükler gitti; ayakta kalan yalnızca profil.
+
+Diğer örneklerden bu bağımsızlık, neden batch norm değil de layer norm
+kullandığımızı açıklıyor. Batch normalisation istatistikleri batch boyunca
+hesaplar; bu, diziler farklı uzunluklarda olduğunda bozulur, eğitimi batch'in
+bileşimine bağımlı kılar ve çıkarım için yürüyen istatistiklerin saklanmasını
+gerektirir. Layer norm'un ihtiyacı tek bir token'ın kendi sayılarıdır, başka
+hiçbir şey değil; bu yüzden batch boyu 512'de de 1'de de birebir aynı
+davranır.
+
+**Nereye konduğu önemlidir.** Özgün Transformer, normalizasyonu residual
+toplamadan *sonra* koyuyordu: $\operatorname{LN}(x + f(x))$ — post-norm.
+GPT-2'den beri standart, onu alt katmandan *önce* koymaktır:
+$x + f(\operatorname{LN}(x))$ — pre-norm. Fark şu: pre-norm, residual yolu
+tamamen temiz bırakır; girdi embedding'inden son katmana kadar üzerinde hiçbir
+şey oturmayan, kesintisiz bir birim bağlantı vardır. Post-norm ise akışı her
+blokta yeniden ölçekler, dolayısıyla birim yol artık birim değildir ve derin
+post-norm modeller eğitilebilmek için bir öğrenme oranı ısınmasına ihtiyaç
+duyar [@xiong2020layernorm]. Aşağıdaki her şey pre-norm'dur.
+
+::: {.column-margin}
+"Standart", "evrensel" demek değil. Gemma 2, her alt katmandan hem önce *hem
+de* sonra normalize eden **sandwich norm** kullanıyor:
+$x + \operatorname{N}_2(f(\operatorname{N}_1(x)))$. OLMo 2 ise tersine gidip
+girdi norm'unu atıyor ve yalnızca bir çıkış norm'u tutuyor:
+$x + \operatorname{N}(f(x))$. Her ikisi de ölçekte eğitim kararlılığı için
+benimsendi — ve her ikisinde de normalizasyon hâlâ *daldadır*, yani birim yol
+kesintisiz kalır. Kimsenin vazgeçmediği özellik budur. Belirli bir
+checkpoint'in pre-norm olduğunu varsaymadan önce yapılandırmasına bakın.
+:::
+
+### Feed-forward alt katmanı
+
+Attention, bilgiyi token'lar *arasında* taşır ve yapabildiği şey aşağı yukarı
+bundan ibarettir. Nedenini net söyleyelim. Attention, $x$'in doğrusal bir
+fonksiyonu değildir — bir karesel formun softmax'ı fazlasıyla doğrusal
+değildir. Ama ağırlıklar *verildiğinde* çıktı, value vektörlerinin dışbükey bir
+bileşimidir: yalnızca kendisine verilen value'ların dışbükey örtüsünün içinde
+kalan noktalar üretebilir. Yeniden ağırlıklandırıp harmanlayabilir; girdilerinin
+hiçbirinde bulunmayan yeni bir özniteliği hesaplayamaz. Birilerinin bir
+vektörün *içeriğine* etki eden bir doğrusal olmayanlık sağlaması ve birilerinin
+her token'a az önce aldığını tek başına işleme fırsatı vermesi gerekir.
+
+İkinci alt katman işte budur — her konuma ayrı ayrı ve birebir aynı şekilde
+uygulanan iki katmanlı bir MLP:
+
+$$
+\operatorname{FFN}(x) = \sigma(x W_1 + b_1)\, W_2 + b_2,
+\qquad W_1 \in \mathbb{R}^{d \times d_{\text{ff}}},
+\qquad W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}
+$$
+
+[*Ayrı ayrı ve birebir aynı şekilde* ifadesi bütün yükü taşıyor: `kedi`nin FFN
+hesabı `sütü`yü hiç görmez.]{.hl} Bir transformer'daki token'lar arası her
+etkileşim attention'da olur, başka hiçbir yerde değil. Uzun bir belgede iki
+varlığı birbirine karıştıran bir modelde hata ararken bunu hatırlamakta fayda
+var — karışma yalnızca bir attention örüntüsünden gelmiş olabilir.
+
+#### Neden $d_{\text{ff}} = 4d$? {.unnumbered}
+
+Kısa cevap: @vaswani2017attention 4'ü seçti, işe yaradı ve on yıllık modeller
+onu korudu. Bir türetme yok. Ama bu şekli anlamlı kılan bir okuma var: FFN, bir
+**key–value bellek** gibi davranır [@geva2021transformer]. $W_1$'in
+$d_{\text{ff}}$ satırının her biri bir örüntü dedektörüdür ve $W_2$'nin
+eşleşen satırı, o dedektör ateşlendiğinde residual akışa yazılan şeydir. Bu
+okumaya göre $d_{\text{ff}}$ basitçe *bu katmanın kaç şey bilebileceğidir* ve
+önce genişleyip sonra daralan şekil de tam olarak buna hizmet eder: elinizdeki
+boyut sayısından daha fazla ayrı örüntüyü tutmak için $d$'den geniş bir yere
+ihtiyacınız var.
+
+Çevredeki tasarım değiştiğinde ne olduğunu izleyin, çünkü o "4"ün tamamen
+pazarlığa açık olduğu ortaya çıkıyor. Modern modeller tek $W_1$'i **kapılı**
+bir birimle — SwiGLU ile — değiştiriyor; bu birim iki yerine *üç* matris
+kullanıyor, dolayısıyla alt katman $2\,d\,d_{\text{ff}}$ yerine
+$3\,d\,d_{\text{ff}}$ tutuyor. Peki alan bununla ne yaptı?
+
+| model | $d$ | $d_{\text{ff}}$ | oran | FFN parametreleri |
+|:--|--:|--:|--:|--:|
+| GPT-2, ReLU | 768 | 3.072 | 4,00 | $8d^2$ |
+| Llama 2 7B, SwiGLU | 4.096 | 11.008 | 2,69 | $8{,}1d^2$ |
+| Llama 3 8B, SwiGLU | 4.096 | 14.336 | 3,50 | $10{,}5d^2$ |
+| Llama 3 70B, SwiGLU | 8.192 | 28.672 | 3,50 | $10{,}5d^2$ |
+| Mistral 7B, SwiGLU | 4.096 | 14.336 | 3,50 | $10{,}5d^2$ |
+
+Llama 2, $\tfrac{8}{3}d \approx 2{,}67d$ seçti; bu, üçüncü matrise rağmen
+parametre sayısını $8d^2$'de tutan genişliğin ta kendisi. Llama 3 ve Mistral
+ise bu disiplini bırakıp doğrudan %31 daha fazla harcadı. [Yani ne 4 bir
+yasadır ne de $8d^2$.]{.hl} Ayakta kalan şey *şekildir* — $d$'yi epeyce aşacak
+kadar genişlet, bir doğrusal olmayanlık uygula, geri daralt — ve bir modelin
+parametrelerinin çoğunun bu alt katmana gittiği gerçeği. Herhangi bir sabiti,
+birinin türettiği bir sonuç değil, birinin ayarladığı bir hiperparametre olarak
+görün.
+
+#### Ateşlemeyi izlemek {.unnumbered}
+
+$d_{\text{ff}} = 8$ alalım ($d=4$ olan gerçek bir model 16 kullanırdı; bu,
+sayfaya sığsın diye küçültüldü) ve $W_1$'in satırlarını elle kuralım ki her
+nöron tanınabilir bir dedektör olsun; sabit terim de onun ateşleme eşiği olsun.
+Dört girdi boyutunu *canlı, sıvı, eylem, sabit* sırasıyla okuyoruz:
+
+$$
+W_1^{\top}=\begin{bmatrix}
+1&0&1&0\\ 0&1&1&0\\ 1&1&0&0\\ 1&0&0&0\\ 0&1&0&0\\ 0&0&1&0\\
+0{,}5&0{,}5&0&0\\ 0&0&0&1
+\end{bmatrix},
+\qquad
+b_1=\begin{bmatrix}-0{,}9\\-0{,}9\\-0{,}9\\-0{,}5\\-0{,}5\\-0{,}5\\-0{,}5\\-0{,}5\end{bmatrix}
+$$
+
+Her satır bir soru, her sabit terim ise nöronun cevap vermeden önce ne kadar
+ikna olması gerektiğidir. Ona bir önceki bölümün normalize edilmiş vektörlerini
+verelim:
+
+| dedektör | $W_1$'deki satırı ne soruyor | `kedi` | `sütü` | `içti` |
+|:--|:--|--:|--:|--:|
+| canlı + eylem | bu, bir fiile bağlı canlı bir şey mi? | **0,6845** | 0 | 0 |
+| sıvı + eylem | bu, bir fiile bağlı bir sıvı mı? | 0 | **0,6906** | **0,9176** |
+| canlı + sıvı | bu aynı anda hem canlı *hem de* sıvı mı? | 0 | 0 | 0 |
+| yalnızca canlı | bu canlı mı, fiil olsun olmasın? | **1,1543** | 0 | 0 |
+| yalnızca sıvı | bu bir sıvı mı, fiil olsun olmasın? | 0 | **1,1508** | 0 |
+| yalnızca eylem | bu bir eylem mi? | 0 | 0 | **0,8268** |
+| herhangi bir isim | bu zayıfça canlı *ya da* sıvı mı? | 0 | 0 | 0 |
+| sabit | hep-açık boyut büyük mü? | 0 | 0 | 0 |
+
+Sütunları okuyun. `kedi`, *canlı + eylem* dedektörünü ateşliyor — attention'dan
+sonra artık sadece canlı bir şey değil, bir fiile bağlı canlı bir şey. `içti`
+ise nesnesini soğurduğu için *sıvı + eylem*'i ateşliyor. ReLU, eşiğin altındaki
+her şeyi sıfırlar; doğrusal bir katmanın bir anahtarlar kümesine dönüşme şekli
+budur. Hangi satırların ilginç işi yaptığına dikkat edin. Tek öznitelikli üç
+dedektör ham embedding'lerde de ateşlenirdi — size attention'ın zaten
+bilmediği hiçbir şey söylemiyorlar. İlginç olanlar bileşik dedektörlerdir,
+özellikle de iki isim için: attention çalışmadan önce `kedi` ile `sütü`nün
+eylem içeriği tam olarak 0,0'dı, yani hiçbir şey "canlı **ve** bir fiile bağlı"
+sorusunu cevaplayamazdı. (`içti`, kuralı doğrulayan istisnadır — kendine ait
+biraz sıvı içeriğiyle başlamıştı, dolayısıyla *sıvı + eylem* dedektörü zaten
+zayıfça ateşlenirdi; attention onu 0,1'den 0,9176'ya çıkardı.) [FFN, bir alt
+katman önce attention'ın yarattığı öznitelikleri okuyor; iki alt katmanın
+dönüşümlü olmasının bütün sebebi de bu.]{.hl}
+
+İki dürüst gözlem. Birincisi, `içti`, *canlı + eylem* dedektörünü 0,066 farkla
+kaçırıyor — özne içeriği var, ama layer normalisation o özniteliği token'ın
+kendi ortalamasının altına itti ve eşik eşiktir. İkincisi, *sabit* nöronu hiçbir
+şey için ateşlenmiyor: normalizasyondan sonra hep-açık boyut her token'ın
+ortalamasının altında kalıyor. Elle tasarlanmış dedektörler tam olarak bu
+şekilde kırılgandır; eğitilmiş ağların her kavramı tek bir nöron yerine birçok
+nörona yaymasının sebeplerinden biri de budur.
+
+#### Cevabı geri yazmak {.unnumbered}
+
+Tespit etmek işin yarısı. $W_2$, o sekiz nöronu residual akışın dört boyutuna
+geri indirir ve yukarıdaki okumaya göre [$W_2$'nin her satırı, dedektörünün
+ateşlendiğinde yayınladığı mesajdır]{.hl}. Satır sırasını koruyarak ve
+$b_2 = 0$ alarak:
+
+$$
+W_2=\begin{bmatrix}
+0{,}4&0&0{,}5&0\\ 0&0{,}4&0{,}5&0\\ 0{,}4&0{,}4&0&0\\ 0{,}3&0&0&0\\
+0&0{,}3&0&0\\ 0&0&0{,}3&0\\ 0{,}15&0{,}15&0&0\\ 0&0&0&0
+\end{bmatrix}
+$$
+
+Her dedektör tam olarak sorduğu özniteliklere yazar. Bileşik olanlar en sert
+şekilde *eylem*'e yazar ($0{,}5$), çünkü yayınlamaya değer olan bilgi "bu isim
+bir fiile bağlı"dır; tek öznitelikli olanlar ise daha yumuşak bir $0{,}3$
+yazar, çünkü token'ın zaten ilan ettiği şeyi tekrar etmekten öteye gitmezler.
+Çarpımı yapıp residual'a ekleyelim,
+$x + \operatorname{FFN}(\operatorname{N}(x))$:
+
+| token | canlı | sıvı | eylem | sabit |
+|:--|--:|--:|--:|--:|
+| `kedi` | 2,2847 | 0,4635 | 1,1733 | 0,5 |
+| `sütü` | 0,4458 | 2,2860 | 1,1763 | 0,5 |
+| `içti` | 0,6438 | 1,1810 | 1,6654 | 0,5 |
+
+Blok çıktısı bu — aşağıdaki widget'ta 4. aşama. Dikkat edilecek iki şey var.
+*Sabit* sütununa dokunulmadı, çünkü $W_2$'nin hiçbir satırı oraya yazmıyor. Bir
+de 3., 7. ve 8. satırlar hiç kullanılmadı: o dedektörler üç token'ın hiçbiri
+için ateşlenmedi, dolayısıyla satırlarında ne olduğunun burada bir önemi
+olmadı. Eğitilmiş bir modelde bu, istisna değil normal durumdur — herhangi bir
+girdi için feed-forward katmanının çoğu kapalıdır. Bunu aklınızda tutun, çünkü
+@sec-moe bölümünün bütün öncülü budur.
+
+### Bloğun tamamı
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Tek bir pre-norm transformer bloğu</div>
+<svg viewBox="0 0 764 320" style="max-width:744px" role="img"
+     aria-label="Soldan sağa çizilmiş bir transformer bloğu. Residual akış tam ortadan dümdüz geçer. Önce bir layer norm ve ardından multi-head attention'a dallanır; bunun çıktısı akışa geri eklenir. Sonra yine bir layer norm ve ardından konum bazlı bir feed-forward ağına dallanır; onun çıktısı da geri eklenir. Attention bilgiyi token'lar arasında karıştırır; feed-forward ağı her token'ı tek başına işler.">
+  <defs>
+    <marker id="blk-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="blk-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <!-- residual akış -->
+  <line x1="14" y1="176" x2="750" y2="176" class="ln" marker-end="url(#blk-a)"/>
+  <text x="14" y="164" class="t-xs t-muted t-b">RESIDUAL AKIŞ</text>
+  <text x="20" y="200" class="t-mono t-xs">x</text>
+  <text x="700" y="200" class="t-mono t-xs">x'</text>
+
+  <!-- branch 1 -->
+  <circle cx="86" cy="176" r="4" class="chip"/>
+  <path d="M86,176 L86,116 L150,116" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <rect x="154" y="92" width="86" height="48" rx="9" class="box"/>
+  <text x="197" y="114" class="t-sm t-mid t-b">LayerNorm</text>
+  <text x="197" y="130" class="t-xs t-mid t-muted">token başına</text>
+  <line x1="242" y1="116" x2="266" y2="116" class="ln-accent" marker-end="url(#blk-b)"/>
+  <rect x="270" y="86" width="132" height="60" rx="9" class="box-accent"/>
+  <text x="336" y="108" class="t-sm t-mid t-b">Multi-head</text>
+  <text x="336" y="124" class="t-sm t-mid t-b">attention</text>
+  <text x="336" y="139" class="t-xs t-mid t-muted">4d² parametre</text>
+  <path d="M402,116 L444,116 L444,168" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <circle cx="444" cy="176" r="11" class="chip"/>
+  <text x="444" y="181" class="t-sm t-mid t-b">+</text>
+
+  <!-- branch 2 -->
+  <circle cx="480" cy="176" r="4" class="chip"/>
+  <path d="M480,176 L480,116 L512,116" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <rect x="516" y="92" width="72" height="48" rx="9" class="box"/>
+  <text x="552" y="120" class="t-sm t-mid t-b">LayerNorm</text>
+  <line x1="590" y1="116" x2="608" y2="116" class="ln-accent" marker-end="url(#blk-b)"/>
+  <rect x="612" y="86" width="104" height="60" rx="9" class="box-warm"/>
+  <text x="664" y="108" class="t-sm t-mid t-b">Feed-</text>
+  <text x="664" y="124" class="t-sm t-mid t-b">forward</text>
+  <text x="664" y="139" class="t-xs t-mid t-muted">8d² parametre</text>
+  <path d="M664,146 L664,168" class="ln-accent" fill="none" marker-end="url(#blk-b)"/>
+  <circle cx="664" cy="176" r="11" class="chip"/>
+  <text x="664" y="181" class="t-sm t-mid t-b">+</text>
+
+  <!-- karşıtlık -->
+  <line x1="14" y1="238" x2="750" y2="238" class="ln-thin"/>
+  <rect x="270" y="252" width="132" height="24" rx="6" class="box-accent"/>
+  <text x="336" y="268" class="t-xs t-mid t-b">TOKEN'LARI KARIŞTIRIR</text>
+  <rect x="612" y="252" width="104" height="24" rx="6" class="box-warm"/>
+  <text x="664" y="268" class="t-xs t-mid t-b">HER TOKEN AYRI AYRI</text>
+  <text x="14" y="268" class="t-sm">Bilginin konumlar arasında</text>
+  <text x="14" y="286" class="t-sm">geçtiği tek yer, vurgu</text>
+  <text x="14" y="304" class="t-sm">renkli kutudur.</text>
+  <text x="430" y="292" class="t-xs t-muted">PARAMETRELERİN ÜÇTE İKİSİ</text>
+  <text x="430" y="306" class="t-xs t-muted">FEED-FORWARD YARISINDADIR.</text>
+</svg>
+```
+
+::: {.fig-cap}
+GPT-2'den beri varsayılan olan pre-norm düzeni: normalizasyon daldadır, asla
+akışın üzerinde değil; böylece girdi embedding'inden çıktıya kesintisiz bir
+birim yol kalır. Bu bloğu $L$ kez üst üste yığın — GPT-2 small için 12, 70B
+sınıfı bir model için 80 — ve elinizde bir transformer olur.
+:::
+::::
+
+### Her parça ve çözdüğü sorun
+
+O şemadaki hiçbir şey süs değil. Her parça belirli bir başarısızlığa verilmiş
+bir cevaptır ve bir bileşeni anlamanın en hızlı yolu, onu sildiğinizde neyin
+bozulduğunu sormaktır. Bu tablo, bölümün tek sayfaya sığmış hali — her satırın
+gerekçesi ya yukarıda ya aşağıda tartışılıyor.
+
+| bileşen | var olma sebebi olan sorun | o olmadan ne bozulur |
+|:--|:--|:--|
+| öğrenilmiş *herhangi* bir skor matrisi | ham benzerlik $x_i \cdot x_j$ simetriktir ve köşegeni şişirir | ilişkiler yönlendirilemez; her token çoğunlukla kendisine bakar |
+| onu $W^Q$, $W^K$ olarak *çarpanlara ayırmak* | head başına bir $d \times d$ matris 16 kat parametre demektir ve cache'i $d$ genişliğine mıhlar | eğitim maliyeti şişer ve GQA ifade edilemez hale gelir |
+| ayrı bir $W^V$ | bir token'ın *ilan ettiği* şey, *teslim etmesi gereken* şey değildir | yönlendirme ile içerik aynı şey olmaya zorlanır |
+| iç çarpım | $n^2$ çiftin tamamı için ucuz ve karşılaştırılabilir tek bir skor gerekir | her çifti karşılaştırmanın ölçeklenebilir bir yolu kalmaz |
+| $\div\sqrt{d_k}$ | skor yayılımı $\sqrt{d_k}$ gibi büyür ve softmax mutlak büyüklüğe tepki verir | geniş head'ler softmax'ı doyurur ve gradyan ölür |
+| softmax | ağırlıklar pozitif olmalı, toplamı 1 etmeli ve türevlenebilmelidir | sert bir "en iyi eşleşme"nin gradyanı sıfırdır; yukarı akışta hiçbir şey öğrenemez |
+| birden çok head | tek bir ağırlıklı ortalama tam olarak tek bir ilişkiyi izleyebilir | katman, konum başına birkaç değil yalnızca bir ilişki ifade eder |
+| $W^O$ | head çıktıları ayrı alt uzaylarda yaşar ve akışa geri girmelidir | head'lerin bulduklarını birleştirmenin ya da yönlendirmenin yolu kalmaz |
+| residual toplama | bir katman hiçbir şey yapmayabilmelidir; bu seçenek olmadan derin yığınlar bozulur | derinlik eklemek önce fayda etmeyi bırakır, sonra doğrudan zarar verir |
+| layer norm | akışın büyüklüğü derinlikle artar; softmax ve ReLU ölçeğe duyarlıdır | aktivasyonlar kayar ve eğitim kararsızlaşır |
+| normalizasyonun *pre*-norm konumu | post-norm akışı yeniden ölçekler, dolayısıyla birim yol birim değildir | derin modeller eğitilebilmek için öğrenme oranı ısınmasına muhtaç olur |
+| feed-forward | attention yalnızca *karıştırır*: çıktısı value'ların dışbükey bir bileşimidir | token başına özel, doğrusal olmayan işleme kalmaz ve kapasitenin çoğu kaybolur |
+| konum sinyali | maskesiz attention permütasyona eşdeğişkendir — sırayı göremez | bir encoder her cümleyi bag of words olarak okur |
+
+Ortadaki sütunu tek başına okuyun; elinizde bütün mimarinin tasarım gerekçesi
+olur. [Bunların her biri somut bir kusura yamadır, estetik bir tercih
+değil]{.hl} — 2017'den beri çevresindeki neredeyse her şey değişirken bu
+şeklin yerinden kıpırdamamasının sebebi de budur.
+
+### Temsilin değişimini izleyin
+
+Yukarıdaki her şey, dörder sayıdan oluşan üç vektörün başına geliyor. Bloğu
+adım adım ilerletin ve onların nasıl hareket ettiğini izleyin.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Residual akış, aşama aşama</div>
+```
+
+```{ojs}
+//| echo: false
+blkDims = ["canlı", "sıvı", "eylem", "sabit"]
+```
+
+```{ojs}
+//| echo: false
+blkStages = [
+  {
+    key: "input",
+    label: "1 · girdi embedding'leri",
+    note: "Her token yalnızca tek başına ne olduğunu bilir. `içti`nin kimin içtiğine dair hiçbir fikri yok.",
+    rows: [[0.9, 0.1, 0.0, 0.5], [0.1, 0.9, 0.0, 0.5], [0.0, 0.1, 0.9, 0.5]]
+  },
+  {
+    key: "attn",
+    label: "2 · + multi-head attention",
+    note: "Residual toplama. `içti` canlı +0,64 ve sıvı +0,71 kazanıyor; iki isim de eylem +0,83 kazanıyor.",
+    rows: [[1.6646, 0.4635, 0.8310, 0.5], [0.4458, 1.6646, 0.8310, 0.5],
+           [0.6438, 0.8139, 0.9585, 0.5]]
+  },
+  {
+    key: "ln",
+    label: "3 · LayerNorm (dalda)",
+    note: "Token başına sıfır ortalama, birim varyans. Mutlak büyüklük gitti; ayakta kalan yalnızca profil.",
+    rows: [[1.6543, -0.8299, -0.0699, -0.7545], [-0.8509, 1.6508, -0.0602, -0.7397],
+           [-0.4932, 0.4908, 1.3268, -1.3244]]
+  },
+  {
+    key: "out",
+    label: "4 · + feed-forward = blok çıktısı",
+    note: "Girdiyle aynı şekil; bunları üst üste yığabilmenizin bütün sebebi de bu.",
+    rows: [[2.2847, 0.4635, 1.1733, 0.5], [0.4458, 2.2860, 1.1763, 0.5],
+           [0.6438, 1.1810, 1.6654, 0.5]]
+  }
+]
+```
+
+```{ojs}
+//| echo: false
+viewof blkStage = Inputs.radio(
+  blkStages.map(s => s.label),
+  { value: blkStages[0].label, label: "Aşama" }
+)
+```
+
+```{ojs}
+//| echo: false
+blkNow = blkStages.find(s => s.label === blkStage)
+```
+
+```{ojs}
+//| echo: false
+blkLong = ["kedi", "sütü", "içti"].flatMap(
+  (t, i) => blkDims.map((d, j) => ({ token: t, dim: d, value: blkNow.rows[i][j] }))
+)
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 74,
+  marginTop: 26,
+  height: 250,
+  width: 660,
+  x: { domain: [-1.9, 2.9], grid: true, label: "değer" },
+  y: { label: null, domain: blkDims },
+  fy: { label: null, domain: ["kedi", "sütü", "içti"] },
+  color: { domain: blkDims, range: ["#0E7C7B", "#4C6EF5", "#B3453E", "#9AA3AE"], legend: false },
+  marks: [
+    Plot.barX(blkLong, { x: "value", y: "dim", fy: "token", fill: "dim" }),
+    Plot.ruleX([0]),
+    Plot.text(blkLong, {
+      x: "value", y: "dim", fy: "token",
+      text: d => d.value.toFixed(2),
+      textAnchor: d => (d.value >= 0 ? "start" : "end"),
+      dx: d => (d.value >= 0 ? 4 : -4),
+      fontSize: 10
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="margin:0.4rem 0 0;font-size:0.85rem;">${blkNow.note}</p>`
+```
+:::
+
+1. aşama ile 4. aşamayı karşılaştırın. Her token bloktan, geldiğinden daha
+uzun bir vektörle ayrılıyor — normlar 1,03'ten kabaca 2,2–2,7'ye çıkıyor — ve
+daha önemlisi, sahip olmadığı bir içerikle. `kedi` bloğa *canlı* olarak girdi,
+*bir eyleme bağlı canlı* olarak çıkıyor. Bu tek bir blok. On iki tane üst üste
+koyun; her biri, kendinden önceki on birin çıkardığı sonuca koşullanma imkânı
+bulsun.
+
+### Parametreler gerçekte nerede duruyor
+
+Bloğun şekli sabit olduğu için boyu bir formüldür. $d_{\text{ff}} = 4d$ ile:
+
+| parça | matrisler | parametre |
+|:--|:--|--:|
+| attention | her biri $d \times d$ olan $W^Q, W^K, W^V, W^O$ | $4d^2$ |
+| feed-forward | $d \times 4d$ ve $4d \times d$ | $8d^2$ |
+| **blok toplamı** | | $\mathbf{12d^2}$ |
+
+Sabit terimler ve layer-norm parametreleri $O(d)$ mertebesindedir ve
+yuvarlandığında yok olur. Yani:
+
+| $d_{\text{model}}$ | attention | feed-forward | tek blok |
+|--:|--:|--:|--:|
+| 768 | 2.359.296 | 4.718.592 | 7.077.888 |
+| 1.024 | 4.194.304 | 8.388.608 | 12.582.912 |
+| 4.096 | 67.108.864 | 134.217.728 | 201.326.592 |
+| 8.192 | 268.435.456 | 536.870.912 | 805.306.368 |
+
+[Her transformer *bloğunun* üçte ikisi feed-forward yarısıdır.]{.hl} İnsanlar
+"attention is all you need" diyor, sonra da attention'ın ağırlıkların üçte biri
+olduğu bloklar kuruyor.
+
+*Blok* deyin, *model* değil. Oran bir bloğun içinde geçerlidir; modelin
+tamamında embedding'ler onu seyreltir ve ne kadar seyrelteceği boyuta bağlıdır.
+Aşağıdaki GPT-2 small'da 12 blok parametrelerin ancak %68'i, yani
+feed-forward'ın *model* içindeki payı yaklaşık %46. $d = 8192$'de
+embedding'ler bir yuvarlama hatasına dönüşür ve model oranı yeniden üçte ikiye
+yakınsar. Küçük modeller ağırlıkla sözlüktür; büyük modeller ağırlıkla
+feed-forward.
+
+Üstelik üçte iki *alt sınırdır*. Bu, $4d^2$ attention'a karşı $8d^2$
+feed-forward olan GPT-2 şeklini varsayıyor. Bir Llama-3 bloğu SwiGLU
+feed-forward'ına $10{,}5d^2$ harcar; bu da payı %72'ye çıkarır. Son birkaç
+yılın her mimari değişikliği ağırlığı bu alt katmanın *içine* taşıdı, dışına
+değil.
+
+Bir pratik kural, ancak bakıp doğrulayabileceğiniz bir sayıyı üretiyorsa
+elde tutmaya değer. GPT-2 small herkese açık: sözlük 50.257, $d = 768$, 12
+katman, bağlam 1.024.
+
+| parça | aritmetik | parametre |
+|:--|:--|--:|
+| token embedding'leri | $50{,}257 \times 768$ | 38.597.376 |
+| konum embedding'leri | $1{,}024 \times 768$ | 786.432 |
+| 12 blok | $12 \times 12 \times 768^2$ | 84.934.656 |
+| **toplam** | | **124.318.464** |
+
+Yayımlanan boyut ~124M ve kural buna **%0,098** yaklaşıyor. Kalan fark
+gizemli değil — kuralın attığı $O(d)$ terimlerinin ta kendisi. Onları geri
+koyun, sayım tamamen kapansın:
+
+| atılan terim | aritmetik | parametre |
+|:--|:--|--:|
+| attention sabit terimleri | $12 \times (3d + d)$ | 36.864 |
+| feed-forward sabit terimleri | $12 \times (4d + d)$ | 46.080 |
+| layer-norm $\gamma, \beta$ | $12 \times 2 \times 2d + 2d$ | 38.400 |
+| **tam toplam** | 124.318.464 + 121.344 | **124.439.808** |
+
+Yani kural, açıklanamayan bir sapması olan bir yaklaşıklık değil; adı konmuş üç
+terimi silinmiş tam bir sayımdır. Kapasite planlaması için ona güvenin ve
+birileri sizin sayınızla model kartının neden son beş hanede ayrıştığını
+sorduğunda hangi terimleri attığınızı hatırlayın.
+
+::: {.column-margin}
+Tablonun neyi içermediğine dikkat edin: sözlüğe geri giden bir çıkış izdüşümü.
+GPT-2, çıkış ağırlıklarını girdi embedding matrisine bağlar; yani o 38,6M
+parametre bir kez sayılır, iki kez kullanılır.
+:::
+
+## Konum bilgisi: absolute, learned, RoPE, ALiBi {#sec-konum}
+
+Attention'ın kendisi sıra körü olduğu için konum bilgisinin modele açıkça
+verilmesi gerekir — model, bu bilgi olmadan "köpek adamı ısırdı" ile "adam
+köpeği ısırdı"yı birebir ayırt edemez. Bu, @sec-karsilastirma bölümünde
+ortalanmış embedding'lerin çarptığı duvarın aynısı; orada
+`kalite iyi fiyat kötü` ile `kalite kötü fiyat iyi` kosinüs 1,0000 çıkmıştı.
+
+### Önce sorunun gerçek olduğunu kanıtlayalım
+
+Bu iddiayı söylemek de, kontrol etmeden inanmak da kolay; o halde kontrol
+edelim. Çözümlü örneği alın, üç token'ı `içti kedi sütü` sırasına karıştırın,
+attention'ı tekrar çalıştırın, sonra çıktıların karışıklığını geri alıp
+karşılaştırın:
+
+| token | çıktılar, özgün sıra | çıktılar, karıştırılıp geri düzeltilmiş |
+|:--|:--|:--|
+| `kedi` | `[0.7444, 0.3433]` | `[0.7444, 0.3433]` |
+| `sütü` | `[0.3256, 0.7443]` | `[0.3256, 0.7443]` |
+| `içti` | `[0.5308, 0.6009]` | `[0.5308, 0.6009]` |
+
+Tablonun herhangi bir yerindeki en büyük uyuşmazlık:
+$1{,}11 \times 10^{-16}$; bu bir fark değil, kayan nokta gürültüsüdür.
+[Maskesiz self-attention *permütasyona eşdeğişkendir*: girdileri karıştırın,
+çıktılar da onlarla birlikte karışır, başka hiçbir şey değişmez.]{.hl}
+
+Bu, birinin düzeltmeyi unuttuğu bir hata değil; doğrudan tanımdan geliyor. Her
+token'ın çıktısı bütün token'lar üzerinden bir ağırlıklı toplamdır ve bir
+toplam, şeyleri hangi sırayla eklediğinizi umursamaz. $QK^{\top}$'un,
+softmax'ın ya da $AV$'nin hiçbir yerinde bir indisi görebilecek bir şey yoktur.
+Çok akıllıca bir ortalama alma düzeni olan bir bag of words, yine de bag of
+words'tür.
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bu cümlede "maskesiz" kelimesi ciddi bir iş yapıyor.**
+@sec-model-aileleri bölümündeki nedensel maskeyi ekleyin, simetri kırılsın: 1.
+token tek bir konuma bakabilirken 5. token beş konuma bakabilir, yani *görünür
+token sayısı* zaten bir indisi kodlar. Dolayısıyla yalnızca decoder'dan oluşan
+modeller hiçbir positional encoding olmadan da konumu öğrenebilir — meşhur
+**NoPE** sonucu [@kazemnejad2023impact]; küçük ölçekte bu sonuç, uzun dizilere
+bazı açık şemalardan daha iyi bile dışdeğerleme yapıyor. Pratikte yine de
+herkes açık bir sinyal ekliyor, çünkü bir sayım, sırayı öğrenmenin zayıf ve
+dolaylı bir yoludur. Ama dürüst ifade şudur: maske konumu sızdırır; yoksa bir
+decoder, encoding olmadan kör değildir.
+:::
+
+### Konum sinyali eklemek
+
+Özgün Transformer'ın cevabı, her *yuva* için bir vektör kurup oraya düşen
+kelimeye eklemektir [@vaswani2017attention]. Vektör, geometrik olarak aralıklı
+frekanslardaki sinüs ve kosinüslerden yapılır:
+
+$$
+\text{PE}_{(\text{pos},\, 2i)} = \sin\!\left(\frac{\text{pos}}{10000^{2i/d}}\right),
+\qquad
+\text{PE}_{(\text{pos},\, 2i+1)} = \cos\!\left(\frac{\text{pos}}{10000^{2i/d}}\right)
+$$
+
+$d = 4$'te iki frekans var — biri hızlı, biri yüz kat daha yavaş — ve
+encoding'in tamamı üç satıra sığıyor:
+
+| konum | $\sin(\text{pos})$ | $\cos(\text{pos})$ | $\sin(\text{pos}/100)$ | $\cos(\text{pos}/100)$ |
+|--:|--:|--:|--:|--:|
+| 0 | 0,0000 | 1,0000 | 0,0000 | 1,0000 |
+| 1 | 0,8415 | 0,5403 | 0,0100 | 1,0000 |
+| 2 | 0,9093 | −0,4161 | 0,0200 | 0,9998 |
+
+Embedding'lere $0{,}3 \times \text{PE}$ ekleyin ve karıştırma testini tekrar
+edin. [İşe yaramasını sağlayan incelik şu: kelimeler yer değiştirdiğinde konum
+vektörleri onlarla birlikte **hareket etmez**.]{.hl} Konum 0 hâlâ konum 0'dır;
+yani önce birinci sırada olan, şimdi üçüncü sırada olan bir kelime öncekinden
+farklı bir vektör alır:
+
+| token | çıktılar, özgün sıra | çıktılar, karıştırılıp geri düzeltilmiş |
+|:--|:--|:--|
+| `kedi` | `[0.8029, 0.7345]` | `[1.1319, 0.5094]` |
+| `sütü` | `[0.6385, 1.0023]` | `[0.7489, 0.6805]` |
+| `içti` | `[0.7865, 0.8342]` | `[0.8767, 0.6607]` |
+
+En büyük uyuşmazlık: **0,3289**. Sıra körlüğü ortadan kalktı.
+
+::: {#gloss-positional-encoding .column-margin .term-gloss}
+**positional encoding** (konum kodlaması) — token embedding'lerine eklenen (ya da onlara uygulanan) konum sinyali; çünkü attention tek başına sıra körüdür. [↩](#term-positional-encoding){.term-back}
+:::
+
+### Neden özellikle sinüsler
+
+Yuva başına birbirinden farklı herhangi bir vektör de beraberliği bozardı.
+Sinüslerin seçilme sebebi, ifade edilmesi kolay ve bu literatürde ender
+rastlanacak biçimde birebir doğru olan bir özelliktir. Bu şekilde kurulmuş bir
+[positional encoding](#gloss-positional-encoding){#term-positional-encoding .term-ref} için,
+
+$$
+\text{PE}_{p} \cdot \text{PE}_{p+k} \;=\; \sum_{i} \cos(k\,\omega_i)
+$$
+
+Açı farkı özdeşliği sayesinde $p$ terimleri sadeleşir ve ayakta kalan şey
+yalnızca $k$'ya — yani *kaydırmaya* — bağlıdır. Yani iki konum arasındaki
+benzerlik, dizide nerede durduklarının değil, birbirlerinden ne kadar uzak
+olduklarının bir fonksiyonudur.
+
+Bu yalnızca yaklaşık olarak doğru olsaydı çok daha az değerli olurdu; o halde
+ölçelim. $d = 64$'te $p$'yi 256 konum boyunca tarayıp kaydırmayı sabit
+tutunca:
+
+| kaydırma $k$ | ortalama $\text{PE}_p \cdot \text{PE}_{p+k}$ | $p$ üzerinden std | $p$ üzerinden aralık |
+|--:|--:|--:|--:|
+| 0 | 32,000000 | 1,6e−15 | 1,1e−14 |
+| 1 | 30,916832 | 7,8e−15 | 4,6e−14 |
+| 2 | 28,303862 | 1,1e−14 | 7,8e−14 |
+| 4 | 23,934362 | 7,4e−15 | 5,0e−14 |
+| 8 | 22,413912 | 5,8e−15 | 3,9e−14 |
+| 16 | 19,372820 | 5,8e−15 | 3,9e−14 |
+| 32 | 19,553972 | 1,0e−14 | 7,1e−14 |
+| 64 | 13,906089 | 1,2e−14 | 9,1e−14 |
+
+256 farklı mutlak konum boyunca $10^{-14}$'lük bir standart sapma, özdeşliğin
+kayan noktada birebir tuttuğu anlamına gelir. Ayrıca her konum vektörünün
+uzunluğu, on hane hassasiyetle aynıdır: $\sqrt{d/2} = 5{,}656854$ — encoding
+yön ekler, asla büyüklük değil.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**Ortadaki sütunu dürüstçe okuyun.** Ortalama, $k$'ya göre monoton *değildir*:
+32 kaydırması 16 kaydırmasından yüksek skor alıyor. Bu bir kosinüsler
+toplamıdır, dolayısıyla salınır. Doğru iddia, "bu nicelik yalnızca kaydırmaya
+bağlıdır" iddiasıdır ve son iki sütun bunu tartışmasız biçimde ortaya koyuyor.
+Cazip iddia — "yakın konumlar uzak konumlardan daha benzer görünür" — tablonun
+gösterdiği şey değildir; bunu yine de söyleyen bir ders kitabı, sizden sayılar
+yerine bir resme güvenmenizi istiyordur.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Sinüzoidal konum kodlamaları, resim olarak</div>
+```
+
+```{ojs}
+//| echo: false
+viewof peDim = Inputs.range([8, 64], { step: 8, value: 32, label: "d_model" })
+```
+
+```{ojs}
+//| echo: false
+viewof peN = Inputs.range([16, 128], { step: 16, value: 64, label: "konum sayısı" })
+```
+
+```{ojs}
+//| echo: false
+peGrid = {
+  const out = [];
+  for (let pos = 0; pos < peN; pos++)
+    for (let i = 0; i < peDim / 2; i++) {
+      const w = pos / Math.pow(10000, (2 * i) / peDim);
+      out.push({ pos, dim: 2 * i, v: Math.sin(w) });
+      out.push({ pos, dim: 2 * i + 1, v: Math.cos(w) });
+    }
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 46,
+  height: 300,
+  width: 680,
+  x: { label: "konum →", ticks: 8 },
+  y: { label: "↑ boyut", reverse: true },
+  color: { type: "diverging", scheme: "BuRd", domain: [-1, 1], legend: true },
+  marks: [Plot.cell(peGrid, { x: "pos", y: "dim", fill: "v" })]
+})
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Düşük boyutlar (üstte) birkaç konumda bir işaret değiştiriyor; yüksek
+boyutlar (altta) pencerenin tamamı boyunca neredeyse hiç değişmiyor. Bütün
+mesele dalga boylarındaki bu yelpaze: hızlı boyutlar "hangi komşu" bilgisini,
+yavaş boyutlar "belgenin kabaca neresi" bilgisini kodluyor. `d_model` değerini
+yukarı çekin ve altta kaç tane daha yavaş boyutun belirdiğine bakın.
+:::
+:::
+
+### Öğrenilmiş mutlak konumlar
+
+Sinüsler zarif ama sonradan anlaşıldı ki gereksiz. BERT de GPT-2 de onları
+bir kenara atıp konumla indekslenen sıradan bir embedding tablosu kullandı:
+0. satır 0. yuvanın vektörü ve diğer bütün parametreler gibi gradyan inişiyle
+öğreniliyor [@devlin2019bert; @radford2019language]. Aşağı yukarı aynı işi
+görüyor; bedelini de yukarıdaki parametre tablosunda gördünüz — GPT-2 small
+buna 786.432 parametre harcıyor.
+
+Asıl bedel başka yerde. [Öğrenilmiş bir tablonun satır sayısı, onu eğitirken
+kullandığınız uzunluktan bir fazla değildir.]{.hl} GPT-2'nin tablosunda 1.024
+satır var, dolayısıyla 1.025. token'ın hiç vektörü yok — bozuk bir vektörü
+değil, hiç. Bağlam sınırı, çıkarım anında gevşetebileceğiniz bir ayar tercihi
+değil; bir ağırlık matrisinin şekline gömülmüş durumda. Bu model ailesi için
+önerilen her "bağlam penceresini genişlet" yöntemi, özünde hiç eğitilmemiş
+satırlar imal etmekle ilgilidir.
+
+### RoPE: eklemek yerine döndür
+
+Bugün baskın tercih rotary position embedding (döndürmeli konum gömmesi) ve
+fikri daha iyi bir tablo değil, cinsi bir değişiklik [@su2024roformer]. RoPE
+embedding'e hiçbir şey eklemez. Query ve key vektörlerini alır — izdüşümden
+sonra, her head'in içinde — ardışık koordinat çiftlerine ayırır ve her çifti
+konumla orantılı bir açı kadar *döndürür*:
+
+$$
+\begin{bmatrix} q'_{2i} \\ q'_{2i+1} \end{bmatrix}
+=
+\begin{bmatrix} \cos m\theta_i & -\sin m\theta_i \\
+                \sin m\theta_i & \phantom{-}\cos m\theta_i \end{bmatrix}
+\begin{bmatrix} q_{2i} \\ q_{2i+1} \end{bmatrix},
+\qquad \theta_i = 10000^{-2i/d}
+$$
+
+Bir vektörü $m\theta$ kadar, bir başkasını $n\theta$ kadar döndürüp sonra iç
+çarpımlarını alırsanız geriye $(m-n)\theta$ açısı kalır. Yani attention
+*skorunun kendisi* kaydırmanın bir fonksiyonu hâline gelir — embedding'e
+eklenip izdüşümlerden sağ çıkması umulan bir yan kanal değil, doğrudan skorun
+kendisi.
+
+İddia iddialı olduğu için ölçülmüş hâli şöyle. Sabit ve rastgele bir query ile
+key, $d = 64$, birbirinden çok farklı dört mutlak konumdan ($n = 0, 100, 1000,
+5000$) sabit bir kaydırmayla skorlandı:
+
+| kaydırma $m-n$ | skor | dört konum arasındaki yayılım |
+|--:|--:|--:|
+| 0 | 2,152941 | 2,2e−15 |
+| 1 | 3,606170 | 1,5e−13 |
+| 2 | 5,453257 | 3,1e−13 |
+| 5 | 6,457170 | 5,0e−13 |
+| 10 | 8,827710 | 1,4e−13 |
+| 50 | −0,061180 | 1,5e−13 |
+| 200 | −13,740668 | 4,1e−14 |
+
+Şimdi aynı ölçüm, konum vektörünün izdüşümden önce embedding'e eklendiği
+toplamalı şema için:
+
+| kaydırma $m-n$ | $n=0$'da skor | $n=100$'de | $n=1000$'de | yayılım |
+|--:|--:|--:|--:|--:|
+| 0 | 31,19 | 26,98 | 48,15 | 26,3 |
+| 1 | 31,82 | 27,54 | 47,52 | 26,6 |
+| 10 | 13,74 | 20,55 | 38,85 | 25,1 |
+| 200 | 1,86 | 6,43 | 25,00 | 23,1 |
+
+[$10^{-13}$'lük bir yayılıma karşı 26'lık bir yayılım.]{.hl} Toplamayla, "beş
+token geride" ifadesi 0. konumda başka, 5.000. konumda başka bir şey demek
+oluyor ve modelin bununla baş etmeyi öğrenmesi gerekiyor. Döndürmeyle her yerde
+aynı şeyi ifade ediyor, üstelik bedava. RoPE ayrıca vektör normlarını birebir
+korur — döndürme döndürmedir — dolayısıyla toplamanın yapabildiği gibi bir
+query'nin büyüklüğünü bozamaz.
+
+RoPE'nin Llama, Qwen, Mistral, Gemma'da ve 2023'ten beri yayımlanan hemen her
+açık ağırlıklı modelde bulunmasının sebebi bu; bu modellerin bağlam genişletme
+hilelerinin (position interpolation, NTK-aware scaling, YaRN) yeni tablolar
+değil, hep $\theta_i$'nin yeniden parametrelendirilmesi olmasının sebebi de.
+
+### ALiBi: kodlamayı bırak, mesafeyi cezalandır
+
+En ekonomik cevap hiçbir şey kodlamamak ve doğrudan attention skorlarından
+mesafeyle orantılı bir ceza çıkarmak [@press2022alibi]:
+
+$$
+\text{score}(i, j) = \frac{q_i \cdot k_j}{\sqrt{d_k}} - m\,(i - j)
+$$
+
+Ceza, $\sqrt{d_k}$ ölçeklemesinden önce değil *sonra* çıkarılır — bu önemli,
+çünkü $m$ eğimlerinin farklı genişlikteki modeller arasında taşınabilir
+olmasını sağlayan şey tam da budur.
+
+Her head geometrik bir programa göre kendi sabit eğimini $m$ alır. Sekiz head
+varken eğimler $\tfrac12, \tfrac14, \tfrac18, \dots, \tfrac{1}{256}$ olur;
+yani $m = 0{,}5$ olan head 2 token sonra bir nat ceza biriktirmiş olur ve
+fiilen yereldir, $m = 1/256$ olan head ise aynı cezayı biriktirmek için 256
+token'a ihtiyaç duyar ve fiilen küreseldir. Farklı head'ler, tasarım gereği,
+farklı mesafe ölçeklerini görür.
+
+$m = 0{,}5$ olan bir head'in altı token boyunca eklediği yanlılık:
+
+| | 0 | 1 | 2 | 3 | 4 | 5 |
+|:--|--:|--:|--:|--:|--:|--:|
+| **konum 0** | 0,0 | −∞ | −∞ | −∞ | −∞ | −∞ |
+| **konum 1** | −0,5 | 0,0 | −∞ | −∞ | −∞ | −∞ |
+| **konum 2** | −1,0 | −0,5 | 0,0 | −∞ | −∞ | −∞ |
+| **konum 3** | −1,5 | −1,0 | −0,5 | 0,0 | −∞ | −∞ |
+| **konum 4** | −2,0 | −1,5 | −1,0 | −0,5 | 0,0 | −∞ |
+| **konum 5** | −2,5 | −2,0 | −1,5 | −1,0 | −0,5 | 0,0 |
+
+Bu tek matris aynı anda hem nedensel maske hem de konum sinyalidir ve içinde
+öğrenilmiş tek bir parametre yoktur. $i - j$ üzerinden bir formülle
+tanımlandığı için her mesafe için tanımlıdır; 1.024 uzunlukta eğitilmiş bir
+ALiBi modelinin 2.048 uzunlukta çökmeden çalışabilmesinin sebebi de budur —
+makalenin başlığında reklamı yapılan sonuç.
+
+### Aralarında seçim yapmak
+
+| şema | konum nasıl giriyor | ek parametre | eğitim uzunluğunun ötesinde |
+|:--|:--|:--|:--|
+| sinüzoidal | embedding'lere eklenir | yok | tanımlı, ama kalite bozulur |
+| öğrenilmiş mutlak | embedding'lere eklenir | $n_{\text{ctx}} \times d$ | **tanımsız** — satır yok |
+| RoPE | her head'de Q ve K'yı döndürür | yok | tanımlı, ama sert biçimde bozulur; ancak $\theta$ yeniden ölçeklenirse kullanılabilir |
+| ALiBi | skorlardan çıkarılır | yok | tasarım gereği yumuşak biçimde bozulur |
+
+::: {.callout-warning appearance="simple" icon="false"}
+**RoPE kendi başına dışdeğerleme yapmaz.** $i - j$ üzerinden bir formül olduğu
+için RoPE her mesafede *tanımlıdır* — ama 4k'da eğitilmiş bir model tipik
+olarak 8k'ya varmadan çok önce dağılır, çünkü eğitim uzunluğunun ötesinde
+gördüğü döndürme açılarıyla daha önce hiç karşılaşmamıştır. Uzun bağlam alet
+çantası tam da bu başarısızlık yüzünden vardır: **Position Interpolation**
+görülmemiş konumları eğitilmiş aralığa geri sıkıştırır [@chen2023extending];
+**NTK-aware scaling** ve **YaRN** [@peng2024yarn] ise $\theta$'yı tekdüze
+değil, frekans frekans yeniden ölçekler. Bir RoPE modeli hakkındaki her "128k'ya
+genişletildi" duyurusu, aslında bunlardan birinin üstüne eğitime devam
+edildiğini duyurur — RoPE'nin bedava bir özelliğini değil.
+:::
+
+[Pratikte önemli olan sütun sonuncusu.]{.hl} Bir sağlayıcı bağlam penceresi
+duyurduğunda, eğitim verisi kadar konum şemasının bir özelliğini de anlatıyor
+demektir — ve bir model belli bir uzunluktan sonra tuhaf biçimde güvenilmez
+olmaya başladığında, ilk bakılacak yer konum şemasıdır. İlan edilen bağlam
+uzunluğu ile *kullanılabilir* bağlam uzunluğu farklı sayılardır; bu farkı
+varsaymak yerine ölçmek gerekir.
+
+## Encoder-only, decoder-only, encoder-decoder {#sec-model-aileleri}
+
+Kulağa aşırı basitleştirme gibi gelen ama olmayan bir gerçek:
+[BERT ile GPT arasındaki yapısal fark, attention matrisinin hangi girdilerinin
+sıfırdan farklı olmasına izin verildiğidir.]{.hl}
+
+Aynı bloklar, aynı multi-head attention, aynı feed-forward alt katmanı, aynı
+residual akış. Değişen tek şey, softmax'tan önce skorlara uygulanan
+[causal mask](#gloss-causal-mask){#term-causal-mask .term-ref} (nedensel maske)
+— ve bundan çıkan sonuç: modelin ne yapmak üzere eğitilebileceği.
+
+::: {#gloss-causal-mask .column-margin .term-gloss}
+**causal mask** (nedensel maske) — her konumun kendinden sonrakilere bakmasını engeller; böylece model soldan sağa üretim yapmak üzere eğitilebilir. [↩](#term-causal-mask){.term-back}
+:::
+
+### Maske, mimarinin kendisidir
+
+Üç desene bakın.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Hangi token hangisine bakabilir</div>
+```
+
+```{ojs}
+//| echo: false
+mskToks = ["kedi", "sütü", "içti", "çünkü", "açtı"]
+```
+
+```{ojs}
+//| echo: false
+viewof mskKind = Inputs.radio(
+  ["çift yönlü (encoder)", "nedensel (decoder)", "prefix (prefix-LM)"],
+  { value: "nedensel (decoder)", label: "Maske" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof mskPrefix = Inputs.range([1, 4], {
+  step: 1, value: 2, label: "prefix uzunluğu", disabled: !mskKind.startsWith("prefix")
+})
+```
+
+```{ojs}
+//| echo: false
+mskCells = {
+  const n = mskToks.length;
+  const out = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++) {
+      let ok;
+      if (mskKind.startsWith("çift")) ok = true;
+      else if (mskKind.startsWith("nedensel")) ok = j <= i;
+      else ok = i < mskPrefix ? j < mskPrefix : j <= i;
+      out.push({ q: mskToks[i], k: mskToks[j], ok });
+    }
+  return out;
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  marginLeft: 62,
+  marginTop: 46,
+  height: 280,
+  width: 420,
+  x: { domain: mskToks, label: "bakılan (key) →", axis: "top", tickRotate: -30 },
+  y: { domain: mskToks, label: "↓ bakan (query)" },
+  color: { domain: [true, false], range: ["#0E7C7B", "#E6E3DC"], legend: false },
+  marks: [
+    Plot.cell(mskCells, { x: "k", y: "q", fill: "ok", inset: 1.5 }),
+    Plot.text(mskCells, {
+      x: "k", y: "q", text: d => (d.ok ? "✓" : "·"),
+      fill: d => (d.ok ? "white" : "#9AA3AE"), fontSize: 13
+    })
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="margin:0.4rem 0 0;font-size:0.85rem;">${
+  mskKind.startsWith("çift")
+    ? "Her token, kendinden sonra geleni de dahil olmak üzere cümlenin tamamını görür. Mükemmel temsiller — ve üretim için işe yaramaz, çünkü bir sonraki kelimeyi zaten görüyorsanız onu tahmin etmek anlamsızlaşır."
+    : mskKind.startsWith("nedensel")
+    ? "Kesinlikle alt üçgensel. i token'ı yalnızca 0…i token'larını görür; böylece \"bir sonrakini tahmin et\" görevi her konumda aynı anda dürüst bir görev olur. Ham metin üzerinde ön eğitimi mümkün kılan maske budur."
+    : "İlk " + mskPrefix + " token birbirini iki yönlü görür; sonrası nedenseldir. Kodlanacak sabit bir talimat ya da belge ve üretilecek bir devam olduğunda kullanılır."
+}</p>`
+```
+:::
+
+Nedensel maskeyi açın, sağ üst üçgen griye döner. 0. konumdaki `kedi` artık
+yalnızca kendisine bakabilir. Bir decoder'ın ham metin üzerinde
+eğitilebilmesinin tek sebebi bu kısıttır: onun sayesinde modelden, cevabı hiç
+görmeden, bir cümledeki *bütün* token'ları aynı anda tahmin etmesi istenebilir
+ve bu da tek bir belgeyi binlerce eğitim sinyaline çevirir.
+
+Mekanik olarak tek satır: maskelenen skorları softmax'tan önce $-\infty$ yapın;
+böylece $e^{-\infty} = 0$ olur ve o token'lar tam olarak sıfır ağırlık alır.
+Ağırlıkları softmax'tan *sonra* sıfırlamak eşdeğer olmazdı, çünkü kalan
+ağırlıkların toplamı artık 1 etmezdi.
+
+### Üç aile
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Üç aile, tek fark: hangi hücrelere izin veriliyor</div>
+<svg viewBox="0 0 764 262" style="max-width:744px" role="img"
+     aria-label="Yan yana üç attention maske deseni; her biri dört çarpı dörtlük bir ızgara olarak çizilmiş ve dolu bir hücre, o query satırının o key sütununu okuyabileceği anlamına geliyor. Encoder-only maskesi tamamen dolu, yani her token her token'ı görüyor. Decoder-only maskesi alt üçgensel, yani bir token yalnızca kendisini ve kendinden öncekileri görüyor. Encoder-decoder ailesi ikisini birden kullanıyor: kaynak dizi üzerinde tamamen dolu bir maske ve hedef dizi üzerinde alt üçgensel bir maske, cross-attention ile birbirine bağlanmış.">
+  <defs>
+    <marker id="fam-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="132" y="24" class="t-xs t-mid t-b t-accent">ENCODER-ONLY</text>
+  <rect x="100" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="100" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="116" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="132" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="148" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <text x="132" y="142" class="t-xs t-mid">her token her token'ı görür</text>
+  <text x="132" y="160" class="t-xs t-mid t-muted">boşluk doldurmak üzere eğitilir</text>
+  <text x="132" y="178" class="t-xs t-mid t-muted">BERT — sınıflandırma, çıkarım, gömme</text>
+
+  <text x="382" y="24" class="t-xs t-mid t-b t-accent">DECODER-ONLY</text>
+  <rect x="350" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="382" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="398" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="398" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="398" y="76" width="16" height="16" rx="2" class="box"/>
+  <rect x="350" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="366" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="382" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="398" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <text x="382" y="142" class="t-xs t-mid">token yalnızca geçmişi görür</text>
+  <text x="382" y="160" class="t-xs t-mid t-muted">sonraki token'ı tahmin etmek üzere eğitilir</text>
+  <text x="382" y="178" class="t-xs t-mid t-muted">GPT, Llama, Qwen — üretim</text>
+
+  <text x="622" y="24" class="t-xs t-mid t-b t-accent">ENCODER-DECODER</text>
+  <rect x="538" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="44" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="60" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="76" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="538" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="554" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="570" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <rect x="586" y="92" width="16" height="16" rx="2" class="box-accent"/>
+  <line x1="606" y1="76" x2="636" y2="76" class="ln-accent" marker-end="url(#fam-a)"/>
+  <text x="621" y="68" class="t-xs t-mid t-muted">çapraz</text>
+  <rect x="642" y="44" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="674" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="690" y="44" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="60" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="60" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="690" y="60" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="76" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="690" y="76" width="16" height="16" rx="2" class="box"/>
+  <rect x="642" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="658" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="674" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <rect x="690" y="92" width="16" height="16" rx="2" class="box-warm"/>
+  <text x="570" y="124" class="t-xs t-mid t-muted">kaynak</text>
+  <text x="674" y="124" class="t-xs t-mid t-muted">hedef</text>
+  <text x="622" y="142" class="t-xs t-mid">girdi tam, çıktı nedensel</text>
+  <text x="622" y="160" class="t-xs t-mid t-muted">hedef dizi üretmek üzere eğitilir</text>
+  <text x="622" y="178" class="t-xs t-mid t-muted">T5, BART — çeviri, özetleme</text>
+
+  <line x1="14" y1="202" x2="750" y2="202" class="ln-thin"/>
+  <text x="14" y="224" class="t-sm">Dolu hücre "bu query satırı bu key sütununu okuyabilir" demek. Üç aile arasında mimaride</text>
+  <text x="14" y="242" class="t-sm">başka hiçbir şey değişmiyor — aynı blok, aynı matematik, farklı maske.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Satırlar query, sütunlar key; model ailelerinin bütün sınıflandırması hangi
+hücrelerin açık olduğuna indirgeniyor.
+:::
+::::
+
+| aile | maske | ne için eğitilir | temsilci | iyi olduğu iş |
+|:--|:--|:--|:--|:--|
+| encoder-only | çift yönlü | maskelenmiş token'ları doldurmak | BERT [@devlin2019bert] | sınıflandırma, bilgi çıkarımı, arama embedding'leri |
+| decoder-only | nedensel | sonraki token'ı tahmin etmek | GPT, Llama, Qwen | üretim ve — ölçek geldiğinden beri — geri kalan her şey |
+| encoder-decoder | girişte çift yönlü, çıkışta nedensel | hedef bir dizi üretmek | T5 [@raffel2020exploring], BART | çeviri, özetleme, her türlü girdi→çıktı yeniden yazımı |
+
+Bir encoder-decoder'ın fazladan bir mekanizmaya ihtiyacı var. Decoder'ı önce o
+ana kadar ürettiği şey üzerinde self-attention çalıştırır, ardından
+**cross-attention** (çapraz dikkat) adı verilen ikinci bir attention alt
+katmanı gelir: burada [query'ler decoder'dan, key ve value'lar encoder'dan
+gelir]{.hl}. Yukarıda adım adım yaptığınız aritmetiğin aynısıdır — tek fark,
+$Q$ ile $K, V$'nin iki farklı diziden hesaplanmasıdır. "Çeviriyi yazarken
+kaynak cümleye bak" cümlesi işte böyle ifade edilir.
+
+::: {.column-margin}
+Çok kipli (multimodal) modellerin çoğu da bir görüntüyü dil modeline
+cross-attention ile bağlar: görüntü encoder'ı key ve value'ları üretir, dil
+modeli query'leri sağlar.
+:::
+
+### Decoder-only neden kazandı
+
+2019'da makul tahmin, her ailenin kendi nişini koruyacağıydı. Öyle olmadı; bu
+kitapta kullanacağınız her şey neredeyse tamamen decoder-only. Kabaca önem
+sırasına göre üç sebep.
+
+**Tek bir amaç, bütün veri.** Sonraki token tahmini ne etiket ister, ne bir
+bozma şeması, ne de eşleştirilmiş veri. İnternetteki her belge onun için eğitim
+verisidir ve o belgedeki her konum bir eğitim örneğidir.
+
+**Görevin metne dönüşmesi.** Bir model devam ettirmede yeterince iyi olduğunda;
+sınıflandırma, çeviri ve özetleme ayrı head'ler olarak inşa edilmek yerine
+prompt olarak *yazılabilir* hâle gelir. Genel bir modele kibarca
+sorabiliyorsanız, encoder-decoder'ın mimari uzmanlaşması masrafını çıkarmayı
+bırakır. Prompt mühendisliğinin bütün hikâyesi budur.
+
+**Ucuz artımlı çözümleme.** Nedensel maskeyle, $i$ token'ının temsili kendinden
+sonraki hiçbir şeye bağlı değildir — dolayısıyla sona bir token eklediğinizde
+önceki bütün hesap hâlâ geçerlidir. KV cache'i mümkün kılan şey budur ve
+üretimin maliyetinin bu kadar olmasının sebebi de KV cache'tir.
+
+::: {.callout-note appearance="simple" icon="false"}
+**Encoder-only modeller demode değil.** Hacimli sınıflandırma ve arama
+işlerinde, 110M parametreli BERT tarzı bir encoder çoğu zaman belge başına
+üretken bir modelden 100× daha ucuz ve en az onun kadar isabetlidir; çünkü
+token token çözümleme yapmak yerine tek bir ileri geçişte tek bir vektör verir.
+Arama sistemlerinin arkasındaki embedding modelleri encoder'dır. Duygu analizi
+için 7B'lik bir decoder seçmek yaygın ve pahalı bir hatadır —
+@sec-karsilastirma bölümü de ucuz temsilin ne sıklıkla kazandığını zaten
+göstermişti.
+:::
+
+## Verimlilik: FlashAttention, GQA/MQA, KV cache {#sec-attention-maliyeti}
+
+Buraya kadar her şey attention'ın *ne hesapladığıyla* ilgiliydi. Bu bölüm ise
+*neye mal olduğuyla* ilgili — yani bu işi gerçekten çalıştırıp
+çalıştıramayacağınıza karar veren kısımla.
+
+### Karesel terim, byte cinsinden
+
+$QK^{\top}$ matrisi $n \times n$ boyutundadır. Bütün sorun tek satırda bu. Naif
+yazıldığında, tek bir katmandaki tek bir head'in bu matrisi bellekte tutması
+gerekir:
+
+| dizi uzunluğu | $QK^{\top}$ girdi sayısı | fp16'da tek bir skor matrisi |
+|--:|--:|--:|
+| 512 | 262.144 | 0,0005 GiB |
+| 4.096 | 16.777.216 | 0,03 GiB |
+| 32.768 | 1.073.741.824 | 2,00 GiB |
+| 100.000 | 10.000.000.000 | 18,63 GiB |
+
+[Tek katmandaki tek bir head için on sekiz gigabyte.]{.hl} Bunu 32 head ve 32
+katmanla çarpın; sayı artık bir bellek sorunu olmaktan çıkıp fanteziye dönüşür.
+
+### Attention gerçekte ne zaman baskın hâle gelir?
+
+Karesel terim her zaman önemli olan terim değildir ve insanlar onu düzenli
+olarak abartır. Katman başına, sabitleri göz ardı edersek:
+
+$$
+\underbrace{24\,n\,d^2}_{\text{izdüşümler ve FFN}}
+\qquad\text{'e karşı}\qquad
+\underbrace{4\,n^2 d}_{\text{skorlar ve ağırlıklandırma}}
+$$
+
+İkisini eşitlerseniz $n = 6d$ çıkar. Bunun altında transformer, zamanının çoğunu
+gayet sıradan ve dizi uzunluğunda doğrusal olan matris çarpımlarına harcar:
+
+| $d_{\text{model}}$ | dizi uzunluğu $n$ | | attention'ın FLOP payı |
+|--:|--:|:--|--:|
+| 768 | 1.024 | | %18 |
+| 768 | 4.608 | *dönüm noktası* | %50 |
+| 768 | 32.768 | | %88 |
+| 4.096 | 4.096 | | %14 |
+| 4.096 | 24.576 | *dönüm noktası* | %50 |
+| 4.096 | 100.000 | | %80 |
+
+[Uygulamaların çoğunun gerçekte kullandığı bağlam uzunluklarında attention,
+hesabın *azınlığıdır*.]{.hl} 4.096 genişliğindeki bir model 4.096 token
+işlerken aritmetiğinin %86'sını feed-forward ve izdüşüm matrislerine harcar.
+Karesel terim, uzun bağlamda çarptığınız bir duvardır; her uzunlukta ödediğiniz
+bir vergi değil — ve hangi rejimde olduğunuzu bilmek, attention'ı optimize
+etmenin zamanınıza değip değmeyeceğini söyler.
+
+### FlashAttention: matrisi hiç kurma
+
+Uzun bağlamı pratik hâle getiren gözlem şu: modern bir GPU'da attention'ı
+sınırlayan şey aritmetik değil. Sınırlayan şey, o $n \times n$ matrisi hızlı
+yonga içi bellekle yavaş yüksek bant genişlikli bellek arasında taşımak. FLOP'lar
+ucuz; gidiş-dönüşler değil [@dao2022flashattention].
+
+Bu yüzden FlashAttention skor matrisini hiç somutlaştırmaz. Diziyi karolar
+hâlinde dolaşır, yürüyen bir softmax normalleştiricisi tutar — böylece kısmen
+hesaplanmış bir softmax yeni karolar geldikçe düzeltilebilir — ve çıktıyı
+doğrudan biriktirir.
+
+::: {.callout-important appearance="simple" icon="false"}
+**FlashAttention kesin sonuç verir.** Seyrek bir yaklaşıklama, düşük ranklı bir
+çarpanlara ayırma ya da pencereli bir sezgisel yöntem değildir. Naif
+gerçeklemeyle aynı fonksiyonu hesaplar; yalnızca neyi sakladığı bakımından
+ondan ayrılır. Kesin olmak *bit bit aynı* olmakla aynı şey değildir: çevrim içi
+softmax toplamları yeniden gruplar ve kayan noktalı toplama birleşme özelliği
+taşımaz, dolayısıyla son basamaklar oynayabilir — herhangi iki matris çarpımı
+çekirdeğinin son basamaklarda anlaşamaması gibi. Asla feda edilmeyen şey
+kalitedir; bir makaleden varsayılana yaklaşık on sekiz ayda geçmesinin ve
+hesaplama hâlâ karesel olduğu hâlde attention'daki bellek kullanımının artık
+$n$ ile doğrusal olmasının sebebi budur.
+:::
+
+### KV cache: dağıtıma karar veren sayı
+
+Üretim artımlıdır. 500 token ürettikten sonra model 501.'i üretir — ve maske
+nedensel olduğu için ilk 500'ün key ve value'ları değişmemiştir. Onları yeniden
+hesaplamak saf israf olurdu, o yüzden saklanırlar. Bu depo
+[KV cache](#gloss-kv-cache){#term-kv-cache .term-ref}'tir ve üretimi token
+başına kareselden token başına doğrusala çevirir.
+
+::: {#gloss-kv-cache .column-margin .term-gloss}
+**KV cache** (anahtar-değer önbelleği) — önceki token'lardan saklanan key ve value'lar; böylece üretim onları yeniden hesaplamaz. Bir GPU'nun kaç kullanıcıya hizmet verebileceğine genelde modelin değil, bu önbelleğin boyutu karar verir. [↩](#term-kv-cache){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Önbellek neyi kazandırıyor, neye mal oluyor</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="İki satır, altıncı token'ın üretilmesini karşılaştırıyor. Önbelleksiz durumda altı token'ın da key ve value'ları her adımda sıfırdan yeniden hesaplanıyor. Önbellekli durumda ilk beş token'ın key ve value'ları bellekten olduğu gibi geri okunuyor ve yalnızca altıncısı hesaplanıyor. Aritmetikte kazanılan, bellekte ödeniyor; bu bellek bağlam uzunluğuyla doğrusal büyüyor ve eşzamanlı her istek için ayrı ayrı tutuluyor.">
+  <text x="14" y="34" class="t-xs t-b t-muted">6. TOKEN ÜRETİLİYOR — ÖNBELLEK YOK</text>
+  <text x="14" y="76" class="t-xs">6'sını da</text>
+  <text x="14" y="92" class="t-xs t-b">yeniden hesapla</text>
+  <rect x="120" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="158" y="72" class="t-xs t-mid t-b">tok 1</text>
+  <text x="158" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="204" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="242" y="72" class="t-xs t-mid t-b">tok 2</text>
+  <text x="242" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="288" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="326" y="72" class="t-xs t-mid t-b">tok 3</text>
+  <text x="326" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="372" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="410" y="72" class="t-xs t-mid t-b">tok 4</text>
+  <text x="410" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="456" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="494" y="72" class="t-xs t-mid t-b">tok 5</text>
+  <text x="494" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <rect x="540" y="52" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="578" y="72" class="t-xs t-mid t-b">tok 6</text>
+  <text x="578" y="88" class="t-xs t-mid t-muted">k, v</text>
+  <text x="632" y="78" class="t-sm t-b t-rose">6 × iş</text>
+
+  <text x="14" y="154" class="t-xs t-b t-accent">6. TOKEN ÜRETİLİYOR — ÖNBELLEKLE</text>
+  <text x="14" y="196" class="t-xs">5'ini kullan,</text>
+  <text x="14" y="212" class="t-xs t-b">1'ini hesapla</text>
+  <rect x="120" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="158" y="192" class="t-xs t-mid t-muted">tok 1</text>
+  <text x="158" y="208" class="t-xs t-mid t-muted">önbellek</text>
+  <rect x="204" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="242" y="192" class="t-xs t-mid t-muted">tok 2</text>
+  <text x="242" y="208" class="t-xs t-mid t-muted">önbellek</text>
+  <rect x="288" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="326" y="192" class="t-xs t-mid t-muted">tok 3</text>
+  <text x="326" y="208" class="t-xs t-mid t-muted">önbellek</text>
+  <rect x="372" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="410" y="192" class="t-xs t-mid t-muted">tok 4</text>
+  <text x="410" y="208" class="t-xs t-mid t-muted">önbellek</text>
+  <rect x="456" y="172" width="76" height="44" rx="8" class="box"/>
+  <text x="494" y="192" class="t-xs t-mid t-muted">tok 5</text>
+  <text x="494" y="208" class="t-xs t-mid t-muted">önbellek</text>
+  <rect x="540" y="172" width="76" height="44" rx="8" class="box-accent"/>
+  <text x="578" y="192" class="t-xs t-mid t-b">tok 6</text>
+  <text x="578" y="208" class="t-xs t-mid t-b">YENİ</text>
+  <text x="632" y="198" class="t-sm t-b t-accent">1 × iş</text>
+
+  <line x1="14" y1="244" x2="750" y2="244" class="ln-thin"/>
+  <text x="14" y="266" class="t-sm">Bunu meşru kılan şey nedensel maske: 3. token'ın key'i asla 6. token'a bağlı olamaz, yani</text>
+  <text x="14" y="284" class="t-sm">hiç yeniden hesaplanması gerekmez. Kazandığınız aritmetik, bütçelenecek bellek olarak döner.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Üretimin ucuz, uzun bağlamın pahalı olmasının sebebi aynı şey: önbellek. Adım
+başına $O(n)$ yeniden hesabı — bütün bir üretim boyunca $O(n^2)$ — eşzamanlı
+her istek için ayrı tutulan $O(n)$ depolamayla takas eder.
+:::
+::::
+
+Bir yandan da GPU'nuzu yiyip bitirir:
+
+$$
+\text{byte} = 2 \times L \times h_{\text{kv}} \times d_{\text{head}} \times
+n_{\text{token}} \times \text{değer başına byte}
+$$
+
+Baştaki 2, K ve V içindir. Neyin *olmadığına* dikkat edin: query head sayısı ve
+modelin parametre sayısı. Neyin olduğuna da dikkat edin: token sayısı,
+doğrusal olarak, ve **eşzamanlı istek başına**.
+
+| model şekli | katman | KV head | head boyu | bağlam | KV cache |
+|:--|--:|--:|--:|--:|--:|
+| 7B sınıfı | 32 | 32 | 128 | 4.096 | 2,1 GB |
+| 7B sınıfı | 32 | 32 | 128 | 32.768 | 17,2 GB |
+| 70B sınıfı, *varsayımsal* MHA | 80 | 64 | 128 | 32.768 | 85,9 GB |
+| 7B sınıfı | 32 | 32 | 128 | 100.000 | 52,4 GB |
+
+fp16'daki 7B'lik bir model 14 GB ağırlık demektir. 100.000 token'lık bağlamda
+KV cache'i 52 GB — [tek bir sohbet için modelin kendisinin neredeyse dört
+katı.]{.hl} "Uzun bağlam neden bu kadar pahalı?" sorusunun arkasındaki aritmetik
+budur ve servis sistemlerinin bu belleğin nasıl bölümlendiğine ve yeniden
+kullanıldığına bu kadar kafa yormasının sebebi de budur.
+
+Üçüncü satır bilerek *varsayımsal* diye işaretlendi: **indirebileceğiniz hiçbir
+70B sınıfı modelin gerçekten 64 KV head'i yok.** Llama 2 70B, Llama 3, Mistral
+ve onların torunlarının hepsi 8 kullanıyor; sebebini bir sonraki bölüm
+anlatıyor. Aritmetiği $h_{\text{kv}} = 8$ ile tekrarlayın, 85,9 GB **10,7 GB**
+oluyor. Bu tek yerine koyma, bir düğüm gerektiren modelle tek bir karta sığan
+model arasındaki farktır ve bu bölümdeki en sonuç doğuran tek sayıdır.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">KV cache hesaplayıcısı</div>
+```
+
+```{ojs}
+//| echo: false
+viewof kvLayers = Inputs.range([8, 128], { step: 4, value: 32, label: "katman" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvQHeads = Inputs.range([8, 128], { step: 4, value: 32, label: "query head" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvScheme = Inputs.radio(
+  ["MHA (KV head = query head)", "GQA, 8 KV head", "GQA, 4 KV head", "MQA (1 KV head)"],
+  { value: "MHA (KV head = query head)", label: "Şema" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof kvCtx = Inputs.range([1024, 200000], { step: 1024, value: 32768, label: "bağlam token'ı" })
+```
+
+```{ojs}
+//| echo: false
+viewof kvBytes = Inputs.radio([2, 1], {
+  value: 2, label: "değer başına byte", format: b => (b === 2 ? "fp16 (2)" : "fp8 (1)")
+})
+```
+
+```{ojs}
+//| echo: false
+kvHeads = kvScheme.startsWith("MHA") ? kvQHeads
+  : kvScheme === "GQA, 8 KV head" ? 8
+  : kvScheme === "GQA, 4 KV head" ? 4 : 1
+```
+
+```{ojs}
+//| echo: false
+kvTotal = 2 * kvLayers * kvHeads * 128 * kvCtx * kvBytes
+```
+
+```{ojs}
+//| echo: false
+kvBaseline = 2 * kvLayers * kvQHeads * 128 * kvCtx * 2
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.9rem;line-height:1.7;">
+  <div style="font-size:1.6rem;font-weight:600;">${(kvTotal / 1e9).toFixed(1)} GB</div>
+  <div>head boyu 128'de sabit · ${kvHeads} KV head ·
+  token başına ${(kvTotal / kvCtx / 1e3).toFixed(1)} KB</div>
+  <div style="margin-top:0.35rem;">
+  ${kvTotal < kvBaseline
+    ? `Aynı şekildeki fp16 multi-head attention'dan (${(kvBaseline / 1e9).toFixed(1)} GB) <strong>${(kvBaseline / kvTotal).toFixed(1)}× daha küçük</strong>.`
+    : "Bu, multi-head fp16 baseline'ı."}
+  </div>
+  <div style="margin-top:0.35rem;color:#8a8a8a;">
+  Ölçek fikri versin: 80 GB'lık tek bir hızlandırıcı, ağırlıklara hiç yer
+  bırakmadan bu boyutta
+  ${Math.max(0, Math.floor(80e9 / kvTotal))} eşzamanlı istek tutar.
+  </div>
+</div>`
+```
+:::
+
+### GQA ve MQA: daha az key, aynı query
+
+Formülde apaçık bir kol var. Her query head'in kendi key ve value head'ine
+sahip olmasını gerektiren hiçbir şey yok — birkaç query head tek bir takımı
+paylaşabilir.
+
+- **Multi-query attention** bunu uca taşır: bütün query head'ler tek bir K/V
+  head'ini paylaşır [@shazeer2019fast].
+- **Grouped-query attention** ise kazanan uzlaşma: query head'ler gruplara
+  ayrılır, grup başına bir K/V head düşer [@ainslie2023gqa].
+
+Yukarıdaki 32 katmanlı, 32 head'li, 100.000 token'lık modelde:
+
+| şema | KV head | KV cache | küçülme |
+|:--|--:|--:|--:|
+| MHA | 32 | 52,4 GB | 1× |
+| GQA | 8 | 13,1 GB | **4×** |
+| MQA | 1 | 1,6 GB | **32×** |
+
+MQA'nın 32×'i cezbedici ama biraz fazla agresif — kalite bozuluyor ve eğitim
+kararsızlaşıyor. 4 ya da 8 gruplu GQA, tasarrufun büyük kısmını korurken
+kalitenin neredeyse tamamını geri kazanıyor; Llama 2 70B, Llama 3, Mistral ve
+o günden beri çıkan hemen her şeyin onunla gelmesinin sebebi bu. [Verimlilik
+hilesinin doğruluğa neredeyse hiç bedele mal olmadığı ender bir durum; evrensel
+hâle gelmesinin sebebi de tam olarak bu.]{.hl}
+
+Son olarak şunu fark edin: bu, ayarladığınız değil, devraldığınız bir karardır.
+Bir MHA kontrol noktasını servis yapılandırmanızda GQA'ya çeviremezsiniz.
+Dönüştürebilirsiniz *ama* — GQA makalesinin kendi tarifi her grubun key ve value
+head'lerini ortalamayla havuzlar, ardından özgün ön eğitim hesabının kabaca
+%5'i kadar **üst eğitim** yapar [@ainslie2023gqa] — bir ön eğitim koşusunun %5'i
+de nihayetinde bir eğitim koşusudur: küme, bütçe ve bir hafta ister. Pratikteki
+her amaç için "KV cache ne kadar büyük" sorusu, optimizasyon listenize değil,
+model seçim listenize aittir.
+
+## Mixture of Experts {#sec-moe}
+
+Her transformer bloğunun üçte ikisi feed-forward alt katmanıdır ve her token
+bunun tamamından geçer. [mixture of experts](#gloss-mixture-of-experts){#term-mixture-of-experts .term-ref}
+(uzmanlar karışımı) bunun şart olup olmadığını sorar.
+
+Bir bloktaki tek feed-forward ağını $E$ kopyayla — *uzmanlar* — ve her token
+için uzmanları skorlayıp onu en iyi $k$ tanesine gönderen küçük, öğrenilmiş bir
+**router** (yönlendirici) ile değiştirin; genelde $k = 2$. Yalnızca o $k$ tanesi
+çalışır. Diğer $E - k$ tanesi o token için boş oturur ve aynı cümledeki başka
+bir token farklı bir çift seçebilir.
+
+::: {#gloss-mixture-of-experts .column-margin .term-gloss}
+**mixture of experts** (uzmanlar karışımı) — tek bir feed-forward ağının yerine çok sayıda ağ koyar ve her token'ı bunlardan birkaçına yönlendirir; böylece toplam parametre sayısı ile token başına hesap artık aynı sayı olmaktan çıkar. [↩](#term-mixture-of-experts){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir token, sekiz uzman, ikisi çalışıyor</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="Tek bir token bir router'a giriyor; router sekiz uzman feed-forward ağını skorluyor. Bu token için yalnızca en yüksek skorlu iki uzman çalışıyor, diğer altısı boşta kalıyor. Çıktıları router'ın ağırlıklarıyla tek bir çıktı vektöründe birleşiyor. Sekiz uzmanın hepsinin yine de bellekte tutulması gerekiyor; yani donanım gereksinimini toplam parametre sayısı, gecikmeyi ise aktif iki uzman belirliyor.">
+  <defs>
+    <marker id="moe-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+    <marker id="moe-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="126" width="62" height="32" rx="7" class="chip"/>
+  <text x="45" y="146" class="t-xs t-mid t-mono">token</text>
+  <line x1="76" y1="142" x2="96" y2="142" class="ln" marker-end="url(#moe-b)"/>
+
+  <rect x="100" y="114" width="76" height="56" rx="9" class="box-navy"/>
+  <text x="138" y="138" class="t-sm t-mid t-b">Router</text>
+  <text x="138" y="154" class="t-xs t-mid t-muted">8'ini skorlar</text>
+
+  <path d="M176,142 L198,142 L198,42 L216,42" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,70 L216,70" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M176,142 L198,142 L198,98 L216,98" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,126 L216,126" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,154 L216,154" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,182 L216,182" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M176,142 L198,142 L198,210 L216,210" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+  <path d="M176,142 L198,142 L198,238 L216,238" class="ln-thin" fill="none" marker-end="url(#moe-b)"/>
+
+  <rect x="220" y="30" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="46" class="t-xs t-muted">uzman 1</text>
+  <rect x="220" y="58" width="104" height="24" rx="6" class="box-accent"/>
+  <text x="228" y="74" class="t-xs t-b">uzman 2</text>
+  <text x="318" y="74" class="t-xs t-end t-mono">0.62</text>
+  <rect x="220" y="86" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="102" class="t-xs t-muted">uzman 3</text>
+  <rect x="220" y="114" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="130" class="t-xs t-muted">uzman 4</text>
+  <rect x="220" y="142" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="158" class="t-xs t-muted">uzman 5</text>
+  <rect x="220" y="170" width="104" height="24" rx="6" class="box-accent"/>
+  <text x="228" y="186" class="t-xs t-b">uzman 6</text>
+  <text x="318" y="186" class="t-xs t-end t-mono">0.38</text>
+  <rect x="220" y="198" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="214" class="t-xs t-muted">uzman 7</text>
+  <rect x="220" y="226" width="104" height="24" rx="6" class="box"/>
+  <text x="228" y="242" class="t-xs t-muted">uzman 8</text>
+
+  <path d="M324,70 L370,70 L370,124" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <path d="M324,182 L370,182 L370,160" class="ln-accent" fill="none" marker-end="url(#moe-a)"/>
+  <circle cx="370" cy="142" r="14" class="chip"/>
+  <text x="370" y="147" class="t-sm t-mid t-b">+</text>
+  <line x1="384" y1="142" x2="406" y2="142" class="ln" marker-end="url(#moe-b)"/>
+  <text x="412" y="139" class="t-sm t-b">çıktı</text>
+  <text x="412" y="154" class="t-xs t-muted">n × d</text>
+
+  <rect x="480" y="86" width="270" height="112" rx="10" class="box-navy"/>
+  <text x="494" y="110" class="t-xs t-b">8 UZMAN, TOP-2 YÖNLENDİRME, d = 4096</text>
+  <text x="494" y="136" class="t-sm">TOPLAM 36,5B — hepsi bellekte durmalı</text>
+  <text x="494" y="158" class="t-sm">AKTİF 10,7B — gecikmeyi belirleyen bu</text>
+  <text x="494" y="182" class="t-xs t-muted">GPU'yu ilk sayı için kiralıyorsunuz.</text>
+
+  <line x1="14" y1="266" x2="750" y2="266" class="ln-thin"/>
+  <text x="14" y="288" class="t-sm">Her token kendi çiftini seçer; aynı cümledeki başka bir kelime bambaşka bir rota izleyebilir.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Router, uzmanları skorlayıp en iyi $k$ tanesini normalleştiren küçük ve
+öğrenilmiş bir katmandır. Sekiz kutudan altısı bu token için hiç aritmetik
+yapmaz — ama sekizi de bellekte yer kaplar.
+:::
+::::
+
+[Bu, başından beri geçerli olan bir bağı koparır: toplam parametre sayısı ile
+token başına hesap artık aynı sayı değildir.]{.hl} $d = 4096$, 32 katman, 8
+uzman, top-2 yönlendirme alalım:
+
+| | toplam parametre | token başına aktif |
+|:--|--:|--:|
+| yoğun (dense) | 6,4B | 6,4B |
+| MoE, 8 uzman, top-2 | **36,5B** | **10,7B** |
+
+MoE modeli yoğun modelin 5,7 katı parametre tutuyor ve 1,67 katı aritmetik
+yapıyor. Bellek faturası ilk sayıyı, gecikmesi ikinci sayıyı takip ediyor.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**GPU'yu toplam için kiralar, aktif olanın gecikmesini alırsınız.** 36,5B
+parametrenin tamamı bellekte durmalı — router'ın seçimi token başına olduğu için
+herhangi bir uzmana herhangi bir anda ihtiyaç duyulabilir. Bir tanıtım
+yazısındaki "düşük aktif parametre sayısı" size hızdan bahseder, ne satın almanız
+gerektiğinden değil. Açık ağırlıklı model duyurularında en çok yanlış okunan tek
+sayı budur ve kendi sunucunuzda barındırmanın maliyetini çıkarırken doğrudan
+işinize dokunur.
+:::
+
+Fikir eski [@shazeer2017outrageously]; yönlendirme token başına tek uzmana
+sadeleştirilip mühendislik ölçekte oturunca pratik hâle geldi
+[@fedus2022switch]. Pratikte zor olan kısım yönlendirme kuralı değil, **yük
+dengeleme**: router'ın üç uzmana âşık olup geri kalanını aç bırakmasını
+engelleyen hiçbir şey yok; bu da parasını ödediğiniz parametreleri çöpe atar ve
+eğitimi çökertebilir. Gerçek sistemler, dengesiz uzman kullanımını cezalandıran
+yardımcı bir loss ekler — ana amacın seve seve düştüğü bir hata moduna karşı
+açıkça konulmuş bir düzeltme.
+
+## Ölçekleme yasaları ve neyi öngördükleri {#sec-olcekleme-yasalari}
+
+Transformer'ların, makine öğrenmesinde başka hemen hiçbir şeyde bulunmayan bir
+özelliği olduğu ortaya çıktı: [büyüttüğünüzde loss'ları önceden
+öngörebileceğiniz bir biçimde düşüyor.]{.hl} Loss; parametre, veri ve hesap
+karşısında bir üs yasası izliyor — log-log eksenlerde, çok sayıda büyüklük
+mertebesi boyunca düz bir çizgi [@kaplan2020scaling]. Tek bir eğitim koşusuna
+dokuz haneli para harcamayı göze alanların sebebi bu öngörülebilirlikti.
+
+Analizin ilk sürümü, modeli veriden çok daha hızlı büyütmeyi öneriyordu.
+Yanlıştı; üstelik önemli ve anlaşılmaya değer bir biçimde yanlıştı, çünkü hata
+aritmetik değil yöntemseldi: öğrenme oranı programları koşu başına ayarlanmamıştı.
+Düzgün biçimde tekrarlandığında farklı bir cevap çıktı — [sabit bir hesap
+bütçesi için parametreler ve token'lar kabaca aynı hızda büyümeli]{.hl},
+parametre başına yaklaşık 20 token [@hoffmann2022chinchilla]:
+
+| model | parametre | eğitim token'ı | parametre başına token |
+|:--|--:|--:|--:|
+| Gopher | 280B | 300B | 1,1 |
+| Chinchilla | 70B | 1,4T | 20 |
+
+Chinchilla, Gopher'ın dörtte biri boyutunda, aynı hesap bütçesini kullandı ve
+onu geniş bir cephede geçti. Bir model kuşağı fena hâlde az eğitilmişti ve kimse
+bunu bilmiyordu; çünkü herkes aynı ölçekleme yasasını okuyordu.
+
+İki dürüst kayıt; ikisine de ihtiyacınız olacak.
+
+**Yasalar loss'u öngörür, yeteneği değil.** Loss, ayrılmış metin üzerindeki
+ortalama negatif log-olabilirliktir. Düzgündür ve sizin asıl derdiniz o
+değildir. Bir modelin çok adımlı bir talimatı izleyip izleyemeyeceği, kötü bir
+isteği reddedip reddedemeyeceği ya da aritmetiği güvenilir biçimde yapıp
+yapamayacağı, bu eğrilerin öngördüğü bir nicelik değildir — üstelik düzgün bir
+loss eğrisi ile tırtıklı bir yetenek eğrisi arasındaki ilişki hâlâ gerçekten
+tartışmalıdır. Bir ölçekleme grafiğinin size "bu model sizin görevinizi
+yapabilecek" dediğini sanmayın.
+
+**Hesap açısından en iyi olan, dağıtım açısından en iyi değildir.** Chinchilla,
+verilen bir loss için eğitim hesabını optimize eder. Bir modeli milyonlarca
+kullanıcıya sunacaksanız, ömür boyu faturasına çıkarım maliyeti hâkim olur; o
+zaman *daha küçük* bir modeli yasanın önerdiğinden çok daha fazla token üzerinde
+eğitmek mantıklıdır — sonsuza kadar daha az ödemek için baştan daha çok ödemek.
+Llama ailesi modellerinin yaptığı tam olarak budur ve "Chinchilla-optimal'in
+ötesinde eğitildi" ifadesinin bir hata değil bir tasarım kararı olmasının sebebi
+de budur. Eğitim pipeline'ının tamamına @sec-on-egitim bölümünde döneceğiz.
+
+## Laboratuvar: attention'ı yazın, sonra profilini çıkarın {#sec-attention-lab}
+
+Bu laboratuvarın amacı karesel terimi okumak değil, hissettirmek. Önce NumPy
+ile çalışın; bir çatıya ancak 3. adımda uzanın.
+
+1. **Ölçeklenmiş iç çarpım attention'ını** @sec-attention-ornek bölümündeki
+   denklemden yazın — izdüşümler, skorlar, ölçekleme, isteğe bağlı maske,
+   softmax, ağırlıklı toplam. Softmax'ı kendiniz yazın ve üs almadan önce satır
+   maksimumunu çıkarın. Hazır attention kütüphanesi yok.
+2. **Bu bölümdeki sayıları birebir yeniden üretin.** Aynı $E$, $W^Q$, $W^K$,
+   $W^V$ değerlerini kullanın ve `içti` için attention satırının
+   `[0.4230, 0.5012, 0.0759]` çıktığını doğrulayın. Çıkmıyorsa hatanız ya
+   devrik almada ya da normalleştirdiğiniz eksendedir — başka aday yok.
+3. **Bir referansa karşı doğrulayın.** Farklı şekillerde rastgele girdilerle
+   `torch.nn.functional.scaled_dot_product_attention` ile karşılaştırın ve
+   maksimum mutlak farkı raporlayın. fp32'de yaklaşık $10^{-5}$ üstündeki her
+   şey yuvarlama değil, gerçek bir uyuşmazlıktır.
+4. **Permütasyona eşdeğişkenliği doğrulayın.** *Maskesiz* olarak token'ları
+   karıştırın, tekrar çalıştırın, çıktıların karışıklığını geri alın ve
+   maksimum farkı raporlayın. Bu bölümde olduğu gibi makine epsilonu
+   çıkmalı. Sonra bir konum kodlaması ekleyip sayıyı tekrar raporlayın. Son
+   olarak bütün testi nedensel maskeyle ve konum kodlaması olmadan tekrarlayın:
+   hiçbir konum sinyali eklemediğiniz hâlde eşdeğişkenlik bozulur. Bunun
+   sebebini, bu bölümü okumamış birine anlatın.
+5. **Üssü ölçün.** $d = 64$ sabitken ve geri kalan her şey sabitken attention'ı
+   $n = 128, 256, \dots, 4096$ için zamanlayın. Log-log eksenlerde çizip bir
+   eğim uydurun. Ölçtüğünüz üssü ve 2 olup olmadığını belirtin — küçük $n$
+   değerlerinde 2'nin epey altındaysa, onu hangi sabit maliyetlerin gizlediğini
+   açıklayın.
+6. **Belleği ölçün.** Skor matrisinin tepe boyutunu ölçün ve
+   @sec-attention-maliyeti bölümündeki tabloyla karşılaştırın. Makinenizin pes
+   ettiği $n$ değerini bulun. Raporlayın.
+7. **Nedensel maske ekleyin**, sonra çalıştığını gözle inceleyerek değil,
+   davranışsal olarak kanıtlayın: bir dizide çalıştırın, sona bir token ekleyip
+   tekrar çalıştırın ve özgün konumların çıktılarının değişmediğini doğrulayın.
+   Bir sonraki adımı meşru kılan şey bu değişmezdir.
+8. **Bir KV cache kurun.** 512 token'ı teker teker üretin; önce her adımda her
+   şeyi yeniden hesaplayarak, sonra K ve V'yi önbelleğe alarak. İkisi için de
+   token başına gecikmeyi çizin ve 512. token'daki hızlanmayı raporlayın.
+   Önbelleğin byte cinsinden boyutunu @sec-attention-maliyeti bölümündeki
+   formülden hesaplayın ve sürecinizin gerçekte ayırdığı bellekle karşılaştırın.
+
+**Teslim edilecek:** uydurduğunuz üssü içeren log-log grafiği, token başına iki
+gecikme eğrisi ve donanımınızın kaldırabildiği en uzun dizi hakkında kısa bir
+not — tükenen kaynağın adını da vererek.
+
+## Sezgi kontrolleri {#sec-transformerlar-sezgi}
+
+Her birini açmadan önce cevaplayın. Bunlar, transformer'a dair standart zihinsel
+modelin paraya mal olacak biçimde yanlış olduğu altı yer.
+
+::: {.callout-note collapse="true"}
+## 1. Attention karesel olduğuna göre bir transformer'ı çalıştırmanın maliyetine o hâkimdir. Doğru mu?
+
+Genelde yanlış ve buna inanmak sizi yanlış şeyi optimize etmeye yollar.
+
+Katman başına iki terim şu: izdüşümler ve feed-forward için $24nd^2$, attention
+için $4n^2d$. $n = 6d$'de eşitleniyorlar — yani 4.096 genişliğindeki bir model
+için dönüm noktası **24.576 token**. Uygulamaların çoğunun gerçekte çalıştığı
+4.096 token'lık bağlamda [attention aritmetiğin %14'ü, feed-forward ve izdüşüm
+matrisleri ise %86'sı]{.hl}.
+
+Karesel terim uzun bağlamda çarptığınız bir duvardır, her uzunlukta ödediğiniz
+bir vergi değil. Attention'ı optimize etmeden önce hangi rejimde olduğunuzu
+hesaplayın; $n < 6d$ ise bakmanız gereken yer feed-forward tarafıdır.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Q, K ve V aynı girdiden geliyorsa neden üç matris yerine tek matris kullanmıyoruz?
+
+Çünkü üç farklı soruyu cevaplıyorlar ve onları tek matriste toplamak modelin
+soru sorma yeteneğini elinden alıyor.
+
+$Q$, bir token'ın *ne aradığıdır*; $K$, *ne diye bulunmayı teklif ettiğidir*;
+$V$ ise bulunduğunda gerçekte ne katkı verdiğidir. [$Q$ ile $K$ birlikte
+bilginin **nereye** aktığına karar verir; $V$ tek başına **neyin** aktığına
+karar verir.]{.hl} Bunları birbirine bağlarsanız bir token'ın ilanı sorgusuyla
+aynı hâle gelir; bu da her token'ı en güçlü biçimde kendisine bakmaya zorlar ve
+asimetrik ilişkileri — *beni hangi fiil yönetiyor* — ifade edilemez kılar.
+
+@sec-attention-ornek bölümündeki çözümlü örnek bunu somut olarak gösteriyor:
+örneği çalıştıran skor, girdilerin izdüşümsüz hiçbir iç çarpımıyla
+üretilemezdi.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Modelinizin 100.000 token'lık bağlamı var. İlk tükenen kaynak hangisi olur?
+
+Bellek — ama modelin belleği değil. fp16'daki 7B'lik bir model 14 GB ağırlık
+demek. 100.000 token'da KV cache'i **52,4 GB** — [tek bir sohbet için modelin
+kendisinin neredeyse dört katı]{.hl} — ve bu rakam *eşzamanlı istek başına*,
+oysa ağırlıklar hepsi arasında paylaşılıyor.
+
+Bir GPU'nun kaç kullanıcıya hizmet verebileceğine genelde parametre sayısının
+değil KV cache'in karar vermesinin ve GQA'nın evrenselleşmesinin sebebi bu: 32
+KV head'den 8'e inmek aynı önbelleği 52,4 GB'tan **13,1 GB**'a indiriyor;
+kalitede neredeyse hiç bedel ödemeden 4× tasarruf.
+
+"$n \times n$ skor matrisi" dediyseniz, bu FlashAttention'dan önceki doğru
+cevaptı; FlashAttention o matrisi hiç somutlaştırmıyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Bir mixture-of-experts modelinin 36B parametresi var. Ne kadar GPU belleği gerekir ve ne kadar hızlıdır?
+
+Bunlar iki farklı cevabı olan iki farklı soru; mimarinin bütün meselesi de bu.
+
+36B parametrenin **hepsini** bellekte tutmanız gerekir, çünkü herhangi bir token
+herhangi bir uzmana yönlenebilir. Ama token başına yalnızca en iyi $k$ uzman
+çalışır — yaklaşık 3B aktif — dolayısıyla gecikme küçük sayıyı takip eder.
+[Toplam parametre donanım faturanızı, aktif parametre gecikmenizi
+belirler.]{.hl}
+
+@sec-siniflandirma bölümü tam olarak bunu ölçtü: `qwen3.6:35b-a3b` bir belgeyi
+0,353 saniyede sınıflandırıyor; *yoğun* 9,7B'lik bir model için bu süre 0,365
+saniye, yoğun 27,4B için 0,592 saniye — ikisinden de hızlı, üstelik ikisinden de
+yüksek puan alıyor ve bunu diskte 23,9 GB yer kaplayarak yapıyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Modeliniz 1.024 konumluk embedding'lerle eğitildi. 1.025. token'da ne olur?
+
+Öğrenilmiş mutlak konumlarla hiç iyi bir şey olmaz: tabloda 1.025. satır yoktur,
+dolayısıyla modelin ekleyecek bir vektörü yoktur. GPT-2 daha uzun bir diziyi hiç
+işleyemez — yaşanan şey bir kalite düşüşü değil, bir arama hatasıdır.
+
+Alanın RoPE ve ALiBi'ye geçmesinin somut sebebi budur. RoPE konumu bir *döndürme*
+olarak kodlar, böylece iki token arasındaki skor yalnızca aralarındaki kaydırmaya
+bağlı olur. @sec-konum bölümünde ölçüldü: sabit bir kaydırmadaki aynı query-key
+çifti, 0, 100, 1000 ve 5000 mutlak konumlarında değerlendirildiğinde skorlar
+yalnızca **$2 \times 10^{-13}$** kadar değişiyor — ham skorlardaki 26'lık
+yayılıma karşı. [Sabit bir öznitelik hiçbir soruyu cevaplayamaz, ama soru
+sorabilir.]{.hl}
+
+Bunun neyi *sağlamadığına* dikkat edin: eğitim uzunluğunun çok ötesine
+dışdeğerleme yapmak kaliteyi yine de bozar. Sert bir başarısızlığı ortadan
+kaldırıp yerine yumuşak bir tanesini koyar.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Residual akış neden herhangi bir tekil alt katmandan daha önemlidir?
+
+Çünkü her alt katmanın okuduğu ve yazdığı tek şey odur ve genişliği hiç
+değişmez.
+
+Attention da feed-forward ağı da residual akışı içeri alır ve geri bir düzeltme
+ekler. [Blokları üst üste dizmenin bu kadar kolay olmasının — 12. blok birebir
+1. blok gibi görünür]{.hl} ve pre-norm'un alt katman çıktısını değil residual
+toplamı normalleştirmesinin sebebi budur.
+
+Pratikteki sonuç: bir transformer'ın belli bir derinlikte "ne bildiğini"
+incelediğinizde, herhangi bir katmanın çıktısını değil residual akışı
+okuyorsunuz demektir. Ağın ortasındaki bir katmandan vektör çıkaran her teknik
+için de aynısı geçerlidir — @sec-siniflandirma bölümünün karşılaştırdığı donuk
+encoder embedding'leri dahil.
+:::
+
+## Mülakat soruları {#sec-transformerlar-mulakat}
+
+Mülakatlarda transformer soruları genellikle bir mimari şemayı ezberden
+sayabilmenizi değil, bir sistem hakkında aritmetik yapabilmenizi ölçer. Aşağıdaki
+cevaplar, yanına sayı iliştirilmiş olanlar.
+
+::: {.column-margin}
+"Attention'ı anlat" denirse, softmax formülüyle başlama dürtüsüne direnin. Onun
+*ne işe yaradığıyla* başlayın — her token diğer her token'a bakabilir ve her
+birinin ne kadar önemli olduğunu öğrenebilir — sonra formülü türetin.
+Mülakatçılar anlayıp anlamadığınızı mı yoksa ezberleyip ezberlemediğinizi mi
+dinliyor; sıralama sizi ele verir.
+:::
+
+1. **Regresyon bilen birine self-attention'ı anlatın.** Öğrenilmiş bir ağırlıklı
+   ortalamadır. Her token bir query öne sürer, her token bir key ilan eder, iç
+   çarpımlar softmax'tan geçerek ağırlığa dönüşür ve çıktı, bu ağırlıkların
+   value'lara uygulanmış hâlidir. Alışılmadık olan tek kısım, ağırlıkların bir
+   kez uydurulmak yerine *çıkarım anında veriden hesaplanmasıdır* — aynı
+   kelimenin farklı bir cümlede farklı bir vektör almasının sebebi tam olarak
+   budur. Sonra ölçeklemeyi söyleyin: $\sqrt{d_k}$'ye bölünür, çünkü $d_k$
+   boyutlu vektörlerin iç çarpımları $\sqrt{d_k}$ gibi büyür ve ölçeklenmemiş
+   bir softmax doyuma ulaşır.
+
+2. **Attention'dan sonra neden bir feed-forward ağı var?** Çünkü token'ların
+   *karıştığı* tek yer attention'dır ve value'lar açısından tamamen doğrusaldır —
+   doğrusal olmayan bir işlem olmadan karıştırmak çökerdi. Feed-forward yarısı
+   token başına derinlik uygular: $W_1$ bir dedektör bankası, $W_2$ ise her
+   dedektör ateşlediğinde yaydığı şeydir. Oranı doğru bilin, çünkü adayların çoğu
+   tersini söylüyor: [her transformer bloğunun parametrelerinin üçte ikisi
+   feed-forward alt katmanıdır]{.hl}, attention değil.
+
+3. **Bir modelin GPU'nuza sığıp sığmadığını nasıl kestirirsiniz?** İki sayı,
+   toplanır. Ağırlıklar: parametre × parametre başına byte (fp16'da 7B = 14 GB).
+   KV cache: $2 \times \text{katman} \times \text{KV head} \times
+   \text{head boyu} \times \text{token} \times \text{byte}$, **eşzamanlı istek
+   başına**. Çözümlü örneği verin: 32.768 token'da 7B'lik bir model 14 GB ağırlık
+   ve 17,2 GB önbellek ister; yani bağlam şimdiden modelden pahalıya gelmiştir.
+   Cevabın kıdemli sürümü kolun adını söyler — GQA, nicemleme ya da daha kısa
+   bağlam — ve önce hangisini çekeceğinizi belirtir.
+
+4. **FlashAttention gerçekte neyi değiştirir?** Matematiği değil — çıktı
+   birebir aynıdır. Değiştirdiği şey *belleğe neyin yazıldığıdır*: $n \times n$
+   skor matrisi hiç somutlaştırılmaz, bunun yerine hızlı yonga içi bellekte kalan
+   karolar hâlinde hesaplanır. Bu, attention'ı bellek bant genişliği sınırlı
+   olmaktan çıkarıp hesap sınırlı hâle getirir. Motivasyonu veren sayı: 100.000
+   token'da **tek katmandaki tek bir head** için tek bir skor matrisi fp16'da
+   18,63 GiB. Bunu 32 head ve 32 katmanla çarpın; naif sürüm yavaş değil,
+   imkânsızdır.
+
+5. **Encoder-only mu, decoder-only mu, encoder-decoder mı?** Ayrım tamamen
+   attention matrisinin hangi girdilerinin sıfırdan farklı olmasına izin
+   verildiğiyle ilgilidir. Encoder-only her şeyi iki yönlü görür ve tam bir
+   metnin temsiline ihtiyacınız olduğunda doğru tercihtir — sınıflandırma, arama
+   ve @sec-siniflandirma bölümündeki bütün sonuçlar. Decoder-only nedensel olarak
+   maskelenmiştir ve üretim için gereken odur. Encoder-decoder ikisini birden
+   tutar ve decoder'ın encoder'a bakmasına izin verir; çeviride varlığını
+   sürdürmesinin sebebi budur. Pratik sürümü söyleyin: [etiketli sınıflandırmada
+   2026'da hâlâ varsayılan encoder'dır]{.hl} ve ölçüm @sec-siniflandirma
+   bölümünde.
+
+6. **Transformer'lar RNN'lerin yerini neden aldı?** Daha ifade gücü yüksek
+   oldukları için değil — eğitimde paralelleştirilebildikleri için. Bir RNN
+   $t+1$'inci token'dan önce $t$'inci token'ı işlemek zorundadır; transformer
+   bütün konumları aynı anda hesaplar, bu da ardışık bir bağımlılığı matris
+   çarpımına çevirir ve GPU'yu düzgün kullanmanızı sağlar. Bedeli, karesel terim
+   ve sınırsız bağlamın kaybıdır. Şunu net söyleyin: bu, ölçeğin önünü açan bir
+   *mühendislik* zaferiydi ve yetenekleri üreten şey ölçekti —
+   @sec-olcekleme-yasalari bölümünün nicel olarak yaptığı argüman.
+
+## Daha derine inmek için
+
+Bu bölümle çok iyi giden üç dış görselleştirme var: adım adım şemalar için
+[Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/),
+tarayıcınızda canlı bir GPT-2 çalıştıran Georgia Tech'in
+[Transformer Explainer](https://poloclub.github.io/transformer-explainer/)
+aracı ve Brendan Bycroft'un
+[3D LLM gezintisi](https://bbycroft.net/llm).
+
+Birincil kaynaklar alışılmadık ölçüde okunaklı ve bu bölümden sonra onları
+doğrudan okuyacak donanıma sahipsiniz. @vaswani2017attention ile başlayın —
+sekiz sayfa ve içindeki her denklemi artık biliyorsunuz. Sonra, kabaca bu
+bölümün onlara ihtiyaç duyduğu sırayla:
+
+| konu | makale |
+|:--|:--|
+| mimarinin kendisi | @vaswani2017attention |
+| residual bağlantılar | @he2016deep |
+| layer norm ve yerinin değişmesi | @ba2016layer; @xiong2020layernorm |
+| head'ler gerçekte ne öğreniyor | @clark2019bert; @michel2019sixteen |
+| döndürmeli konumlar | @su2024roformer |
+| mesafe cezasıyla konum | @press2022alibi |
+| kesin, GÇ farkındalıklı attention | @dao2022flashattention |
+| KV cache'i küçültmek | @shazeer2019fast; @ainslie2023gqa |
+| seyrek uzmanlar | @shazeer2017outrageously; @fedus2022switch |
+| ölçekleme yasaları ve düzeltmesi | @kaplan2020scaling; @hoffmann2022chinchilla |
+
+## Alıştırmalar
+
+1. Attention gezgininde zamir head'i ağırlığını *coffee* ile *robot* arasında
+   kabaca 46/34 bölüyor — kahveye meyilli, ama kıl payı. *ready* yerine
+   konabilecek, oranı kesin biçimde bir tarafa itmesi gereken **üç** tek
+   kelimelik ikame yazın ve her biri için okumayı zorlayan, dilbilgisiyle değil
+   dünyayla ilgili olguyu belirtin. Sonra bunun, bir dil modelinin yetkinliğinin
+   ne kadarının tek başına attention deseninden gelebileceğine dair ne ima
+   ettiğini söyleyin.
+2. Attention tek başına sıra körüdür. @sec-karsilastirma bölümünden,
+   ortalamayla kosinüsü 1,0000 çıkan kelime sırası çiftini alın ve bir
+   transformer bloğunun tam olarak hangi bileşeninin bu iki cümleyi farklı
+   temsil edilebilir kıldığını açıklayın.
+3. 32 katmanlı, 32 head'li ve head boyu 128 olan bir model 100.000 token'lık
+   bağlam sunuyor. 16 bit hassasiyette KV cache'in boyutunu gigabyte cinsinden
+   hesaplayın. Ardından grouped-query attention'ın neden var olduğunu açıklayın.
+4. Çözümlü örnekte dördüncü embedding boyutu üç token için de 0,5 ve hiçbir
+   attention ağırlığına katkı vermedi. Bunun ne kadar genellendiğini iki
+   parçada bulun. **(a)** *Key* tarafının her zaman sadeleştiğini kanıtlayın:
+   $W^K$ sabit bir özniteliğe hangi satırı atarsa atasın, katkısının her key
+   $j$ için aynı olduğunu ve dolayısıyla softmax'ta yok olduğunu gösterin.
+   **(b)** Sonra *query* tarafının sadeleşmediğini bir karşı örnekle gösterin.
+   $W^Q$'ya sabit öznitelik için sıfırdan farklı bir satır verin, `içti`'nin
+   attention ağırlıklarını yeniden hesaplayın ve ne kadar oynadıklarını
+   raporlayın. Aynı özniteliğin neden bir izdüşümde önemli, diğerinde önemsiz
+   olabildiğini tek cümleyle açıklayın.
+5. $W^Q$ ve $W^K$'yı, çarpımı 3 yerine 1 olan bir ölçeğe geri alın ve
+   `içti`'nin attention satırını yeniden hesaplayın. Ağırlıkları raporlayın ve
+   gözlemlediğiniz şey üzerinden $1/\sqrt{d_k}$ teriminin neye karşı koruduğunu
+   açıklayın.
+6. Bölüm, $d/h$ genişliğindeki $h$ head'in $d$ genişliğindeki tek bir head
+   kadar maliyetli olduğunu iddia ediyor. Bunu $d = 512$ için $h = 1, 8, 64$
+   değerlerinde parametre ve çarpma sayarak doğrulayın. Sonra $h$ büyüdükçe
+   gerçekten neyin kaybedildiğini ve bunun hangi noktada canınızı yakmasını
+   beklediğinizi belirtin.
+7. Sinüzoidal kodlamalar için göreli konum tablosunu alın. 32 kaydırmasındaki
+   ortalama, 16 kaydırmasındakinden *yüksek*. Bunun sebebini
+   $\sum_i \cos(k\omega_i)$ formülünden açıklayın ve sinüzoidal kodlamaların
+   yakın konumları daha benzer yaptığı yolundaki yaygın iddia açısından bunun ne
+   anlama geldiğini söyleyin.
+8. RoPE deneyini yeniden üretin: sabit ve rastgele bir query ile key, 0, 100,
+   1.000 ve 5.000 mutlak konumlarından 5 kaydırmayla skorlansın. Yayılımı
+   raporlayın. Sonra aynısını öğrenilmiş tarzda toplamalı bir kodlamayla yapın ve
+   o yayılımı da raporlayın. Bu iki sayıyı kullanarak bir paragrafta RoPE lehine
+   ya da aleyhine argüman kurun.
+9. 70B sınıfı bir modelin 80 katmanı, 64 query head'i ve 128 head boyu var.
+   fp16 ağırlıkları 140 GB, dolayısıyla dört adet 80 GB'lık hızlandırıcıdan
+   oluşan bir düğümde — toplam 320 GB — sunuluyor. KV cache hesaplayıcısını
+   kullanarak, dört eşzamanlı kullanıcıya sunabileceğiniz en uzun bağlamı önce
+   64 KV head ile, sonra da piyasaya çıkan her 70B'de gerçekte olduğu gibi 8 KV
+   head ile bulun. İki uzunluğu ve aralarındaki oranı raporlayın. Ardından
+   önbellek formülünde değişen ve değişmeyen bütün nicelikleri adlandırın.
+10. Bir duyuru, bir modeli "toplam 120B parametre, 5B aktif" diye tanıtıyor.
+    Bir meslektaşınız 5B küçük olduğu için modelin 24 GB'lık bir tüketici
+    GPU'sunda çalışacağı sonucuna varıyor. Aritmetiğiyle birlikte iki cümlelik
+    düzeltmeyi yazın.
+11. Gopher parametre başına 1,1 token, Chinchilla ise 20 token kullandı. Her
+    iki iddia da bir ölçekleme yasası analizinden geldi. Aralarında neyin
+    değiştiğini açıklayın ve yeni bir ölçekleme yasası makalesine dayanarak bir
+    eğitim bütçesini yeniden dağıtmadan önce o makalede neyi görmeniz
+    gerektiğini belirtin.
+
+<!-- TODO: notebooks/ eklendiğinde ödev defteri bağlantısı (Colab rozeti). -->
