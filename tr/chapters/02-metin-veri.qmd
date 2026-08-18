@@ -22,18 +22,18 @@ uzayı gezginleri tamamen etkileşimlidir.
 Model, sayılar üzerinde aritmetik yapan bir fonksiyondur. Bakım kaydı ise
 bir karakter dizisidir. Bu bölümdeki her şey bu boşluğu kapatmak için var
 ve köprünün tam olarak iki ayağı var: [birimlerin ne olduğuna karar
-vermek]{.hl} (tokenization) ve [her birimin hangi ağırlıkla katkı vereceğine
-karar vermek]{.hl} (ağırlıklandırma).
+vermek]{.hl} (tokenization / bölütleme) ve [her birimin hangi ağırlıkla katkı
+vereceğine karar vermek]{.hl} (weighting / ağırlıklandırma).
 
 Bütün bölüm bundan ibaret. Bunu baştan söylemekte fayda var, çünkü aşağıda
 göreceğiniz teknikler — bag-of-words, TF-IDF — zaman zaman "tarihe
-karıştı" diye geçiştiriliyor. Karışmadılar. Yoğun yarısıyla
-@sec-gommeler'de tanışacağınız bir alanın
-seyrek yarısıdırlar; küçük veride hâlâ kazanırlar, üretimdeki aramayı hâlâ
-onlar çalıştırır ve uygulamalı NLP pozisyonu için yapılan her mülakat
-bunları anlayıp anlamadığınızı yoklar. Daha da önemlisi: sizi almaya
-zorladıkları *kararlar*, modern bir hattın da aldırdığı kararların ta
-kendisidir — sadece burada görünürler.
+karıştı" diye geçiştiriliyor. Karışmadılar. Bu teknikler bir alanın
+**seyrek (sparse)** yarısı; aynı alanın **yoğun (dense)** yarısıyla
+@sec-gommeler'de tanışacaksınız. Küçük veride hâlâ kazanırlar, üretimdeki
+aramayı hâlâ onlar çalıştırır ve Doğal Dil İşleme ile ilgili gireceğiniz iş
+görüşmelerinin neredeyse hepsi bunları anlayıp anlamadığınızı yoklar. Daha da
+önemlisi: sizi almaya zorladıkları *kararlar*, modern bir hattın da aldırdığı
+kararların ta kendisidir — sadece burada görünürler.
 
 ::: {.column-margin}
 Bütün bölüm boyunca işinize yarayacak, istatistikçi bakışıyla bir çerçeve:
@@ -55,6 +55,15 @@ bir tasarım kararıdır. [↩](#term-tokenization){.term-back}
 parçası, bazen bir noktalama işareti. Bir satıcı sizden "token başına" ücret
 aldığında, saydığı şey budur. [↩](#term-token){.term-back}
 :::
+
+Bir model herhangi bir şeyi sayabilmeden önce, birinin *"şey" nedir*
+sorusuna cevap vermesi gerekir. O cevabı siz verirsiniz, bir kez
+verirsiniz ve sonraki her aşama onu devralır: sözlüğünüzün ne kadar
+büyüyeceği, modelin "hiç görmediğim kelime" diyeceği şeyin ne olduğu ve —
+size token başına fatura kesiliyorsa — bir cümlenin kaça mal olacağı. Bu
+kararın alındığını kimse duyurmaz; bir kütüphaneye yapılan tek satırlık
+çağrının içine gizlenmiş gelir. Bu bölüm, onu kazara değil bilerek
+vermekle ilgili.
 
 Akla gelen ilk hamle boşluklardan bölmektir. Anında başarısız olur ve
 başarısız olma biçimleri
@@ -102,7 +111,7 @@ aleyhteki argümanlardır.
 | Noktalama temizleme | `fail;` = `fail` | `P-101`'i, ondalıkları, URL'leri, kimyasal formülleri bozar. | Hayır — seçerek temizleyin |
 | [**Stop word**](#gloss-stop-word){#term-stop-word .term-ref} atma | `the`, `is`, `of` düşer; burada token'ların %43,9'u | Olumsuzlamayı (`not`) ve *to be or not to be* gibi ifadeleri yok eder. | Yalnızca seyrek sayım modellerinde |
 | Gövdeleme (stemming) | `replaced` → `replac`; çekimleri ucuza tek çatı altında toplar | Kaba ek kırpma. `university` → `univers` = `universe`. | Hayır |
-| Kök bulma (lemmatization) | `replaced` → `replace`, doğru biçimde | Sözlük ve sözcük türü etiketleme ister, üstelik yavaştır. | Nadiren — alt kelimeler daha ucuz |
+| Kök bulma (lemmatization) | `replaced` → `replace`, doğru biçimde | Sözlük ve sözcük türü etiketleme (part-of-speech tagging) ister, üstelik yavaştır. | Nadiren — alt kelimeler daha ucuz |
 
 : Normalleştirme merdiveni {tbl-colwidths="[14,28,40,18]"}
 
@@ -120,8 +129,8 @@ zamanı, diğerinde bir yön olduğunu bilmek zorundadır.
 
 "Hangisini kullanayım?" sorusunun dürüst modern cevabı *muhtemelen hiçbiri*.
 Gövdeleme (stemming), seyrek sözlükler için bulunmuş bir çareydi; alt kelime
-tokenization'ı (aşağıda) aynı problemi daha iyi çözüyor. Yine de aradaki farkı
-anlatabilmelisiniz, çünkü alanda en sık ve en düzenli sorulan
+(subword) tokenization'ı (aşağıda) aynı problemi daha iyi çözüyor. Yine de
+aradaki farkı anlatabilmelisiniz, çünkü alanda en sık ve en düzenli sorulan
 sorulardan biridir.
 
 ::: {.callout-warning appearance="simple"}
@@ -244,8 +253,9 @@ widest   -> wi d est</w>
 
 `lowest` eğitimde hiç geçmedi ve modelin çok iyi bildiği iki birime
 bölündü. Alt kelimelerin kazanmasının bütün sebebi budur: **sözlük dışı
-token diye bir şey yoktur**. En kötü durumda kelime karakterlere düşer,
-`slow`'da kısmen olduğu gibi. Kalitesi düşer; ama hiç çuvallamaz.
+(out-of-vocabulary, OOV) token diye bir şey yoktur**. En kötü durumda kelime
+karakterlere düşer, `slow`'da kısmen olduğu gibi. Kalitesi düşer; ama hiç
+çuvallamaz.
 
 :::: {.anlp-fig}
 ```{=html}
