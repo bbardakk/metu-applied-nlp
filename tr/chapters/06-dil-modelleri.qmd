@@ -1,6 +1,1558 @@
 # Dil Modelleri: Saymaktan Sinir Ağlarına {#sec-dil-modelleri}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Bölüm durumu: çevriliyor.** Bu bölümün Türkçesi hazırlanıyor. Tam ve güncel
-metin için [İngilizce sürüme](../../en/chapters/06-language-models.html) bakabilirsiniz.
+**Bölüm durumu: taslak.** Bu sayfadaki her sayı, gösterilen kodun tek bir
+makinede çalıştırılmasıyla üretildi; PyTorch 2.13.0, NumPy 2.5.2 ve
+pandas 3.0.5 ile Python 3.14.5 üzerinde. N-gram modelleri düz Python
+sözlüklerinden ibaret ve hiçbir kütüphane gerektirmiyor; sinirsel model
+bir dizüstü GPU'sunda yaklaşık iki dakikada eğitiliyor. Derlem ve bölme
+@sec-karsilastirma bölümünün derlemi ve bölmesi; böylece iki bölümün
+sayıları birbirine karşı okunabiliyor.
 :::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda şunları yapabileceksiniz:
+
+- bir dil modelini diziler üzerindeki bir olasılık dağılımı olarak
+  tanımlamak ve zincir kuralıyla onu bir sonraki kelime olasılıklarının
+  çarpımı olarak yeniden yazmak — kestirimi mümkün kılan adım bu;
+- bir n-gram modelini sayarak kestirmek ve modelin bozulduğu birbirinden
+  farklı iki yolu göstermek: sıfır olasılıklar ve kullandığınız bağlam
+  uzadıkça kötüleşen bir seyreklik;
+- perplexity'yi ayrı tutulmuş bir log-olabilirlikten hesaplamak, onu
+  etkin bir dallanma çarpanı olarak okumak ve iki perplexity'yi
+  karşılaştırmanın anlamsız olduğu iki koşulu söylemek;
+- smoothing'in ne kazandırdığını, add-one'ın burada neden işe yaramaktan
+  da kötü olduğunu ve daha kısa bağlamlara geri çekilmenin neden asıl işe
+  yarayan fikir olduğunu açıklamak;
+- sinirsel bir dil modelinin embedding'ler üzerinden istatistiksel gücü
+  nasıl paylaştırdığını açıklamak, bunun hangi n-gram arızasını
+  düzelttiğini ve hangisine dokunmadığını tam olarak söylemek; recurrent
+  (yinelemeli) modellerin devraldığı, @sec-transformerlar bölümününse
+  kaldırdığı iki darboğazı adlandırmak.
+
+## 4. bölümün cevaplayamadığı soru
+
+@sec-karsilastirma onaramadığı bir başarısızlıkla bitmişti. İki Türkçe
+yorum, dörder kelime, zıt anlamlar:
+
+```text
+a = "kalite iyi fiyat kötü"
+b = "kalite kötü fiyat iyi"
+
+kosinüs, ortalanmış fastText   1.0000
+kosinüs, tf-idf                1.0000
+```
+
+Kısım I'deki her temsil, bir belgedeki kelimelerin *kümesinin* bir
+fonksiyonu. İki cümle de aynı kümeyi içeriyor, dolayısıyla ikisi de aynı
+vektörü alıyor ve üzerine kurulan hiçbir sınıflandırıcı bunları
+birbirinden ayıramıyor.
+
+Aynı çift, bu bölümdeki modellerle puanlandığında şöyle görünüyor —
+her modelin cümlenin tamamına atadığı olasılık; modeller ham yorum
+metninden başka hiçbir şeyle eğitilmedi:
+
+```text
+### log10 P(sentence), Kneser-Ney smoothed
+                  log P(a)   log P(b)   P(a)/P(b)
+unigram            -12.340    -12.340       1.000
+bigram             -12.297    -12.764       2.933
+trigram            -12.481    -12.835       2.259
+```
+
+Unigram model, 4. bölümün başarısızlığını *birebir* tekrar ediyor: oran
+tam olarak 1; çünkü unigram model, üstüne bir olasılık dağılımı geçirilmiş
+bir bag of words'ten başka bir şey değil. Bigram model ise beraberliği
+bozuyor ve bir Türkçe konuşurunun da tercih edeceği cümleyi yaklaşık üç
+kat farkla öne çıkarıyor.
+
+[O üç katlık çarpan, Kısım II'nin tamamının minyatürü.]{.hl} Bu kitapta
+ilk kez bir model kelimelerin sırasına duyarlı davranıyor ve bu, tek bir
+yapısal değişiklikten geldi: her kelimeyi kendinden öncekine koşullamak.
+Buradan @sec-akil-yuruten bölümüne kadar olan her şey, "tam olarak *neye*
+koşullanmış?" sorusuna verilen giderek uzayan bir cevap.
+
+Yine de bigram modelin gerçekte ne bildiği konusunda kesin olun; çünkü
+göründüğünden azını biliyor. İşi yapan altı sayım şunlar:
+
+```text
+a: kalite iyi        7     b: kalite kötü       1
+   iyi fiyat       112        kötü fiyat        0
+   fiyat kötü        0        fiyat iyi        25
+```
+
+Model 858.000 token içinde ne `kötü fiyat` *ne de* `fiyat kötü` görmüş;
+yani kötü fiyatlar hakkında hiç doğrudan kanıtı yok — iki cümle de bir
+bigram üzerinden backoff cezası ödüyor. Terazinin dengesini bozan şey
+büyük ölçüde `iyi fiyat`ın 112 kez görülmüş kalıplaşmış bir Türkçe ifade
+olması, aynadaki karşılığınınsa olmaması. [Model bir anlam değil, bir eş
+dizim öğrendi]{.hl} — `a` cümlesini tercih ediyor, çünkü o kelime sırası
+okuduğu yorumlara benziyor. Bu hem gerçek hem kullanışlı bir sinyal, ama
+aynı zamanda saymanın sizi götürebileceği yerin tam sınırı. Bu ayrımı
+aklınızda tutun; bölümün geri kalanı bunu ölçüyor.
+
+## Dil modeli nedir
+
+Bir dil modeli, bir diziye olasılık atar. Tanımın tamamı bu ve kulağa
+daha zor gelmesini sağlama dürtüsüne direnmeye değer.
+
+$$
+P(w_1, w_2, \ldots, w_n)
+$$
+
+::: {#gloss-chain-rule .column-margin .term-gloss}
+**chain rule** (zincir kuralı) — "bu cümlenin tamamı ne kadar olası"
+sorusunu "her kelime, kendinden öncekiler verildiğinde ne kadar olası"
+sorusuyla değiştirmenize izin veren kural. Bu takasta hiçbir şey
+kaybolmaz; iki sorunun cevabı aynıdır. [↩](#term-chain-rule){.term-back}
+:::
+
+Bunu doğrudan kestiremezsiniz — olası dört kelimelik Türkçe cümlelerin
+sayısı, şimdiye kadar yazılmış dört kelimelik Türkçe cümlelerin sayısını
+kat kat aşar; dolayısıyla onları saymak umutsuz bir iştir. Ama
+olasılığın [chain rule](#gloss-chain-rule){#term-chain-rule .term-ref}'u
+bunu hiçbir yaklaşıklık kullanmadan yeniden yazar:
+
+$$
+P(w_1, \ldots, w_n) = \prod_{i=1}^{n} P(w_i \mid w_1, \ldots, w_{i-1})
+$$
+
+Bu bir model değil, bir özdeşlik. Cümleler üzerindeki bir ortak
+dağılımın, kendinden öncekilerin tamamı verildiğinde bir sonraki kelimeyi
+kestirme kuralıyla aynı şey olduğunu söylüyor. **Alanı çalışılabilir
+kılan hamle budur** ve bu kitabın geri kalanının neden bir sonraki
+token'ı kestirmekle ilgili olduğunun sebebi de bu: tek seferde tek kelime
+kestirmek, dil modellemenin basitleştirilmiş hali değil; tam olarak dil
+modellemenin kendisi.
+
+Zorluk yok olmadı, sadece yer değiştirdi. $P(w_i \mid w_1, \ldots,
+w_{i-1})$ sınırsızca büyüyen bir bağlama koşullanıyor ve göreceğiniz
+uzun bağlamların neredeyse hepsi daha önce hiç görmediğiniz bağlamlar.
+N-gram cevabı, bağlamı kesmek:
+
+$$
+P(w_i \mid w_1, \ldots, w_{i-1}) \approx P(w_i \mid w_{i-n+1}, \ldots, w_{i-1})
+$$
+
+::: {#gloss-markov-assumption .column-margin .term-gloss}
+**Markov assumption** (Markov varsayımı) — yalnızca son birkaç kelimeye
+bakıp cümlenin geri kalanını atma kararı. Yanlış bir varsayım ve buna
+rağmen yapıyoruz; çünkü imkânsız bir sayımı mümkün bir sayıma çeviren
+şey bu. [↩](#term-markov-assumption){.term-back}
+:::
+
+Yalnızca son $n-1$ kelime önemli. Bu, **[Markov assumption](#gloss-markov-assumption){#term-markov-assumption .term-ref}**'ıdır
+ve apaçık yanlıştır — "geçen mart istasyonun yanındaki dükkândan aldığım
+telefon sonunda ___" cümlesinin on bir konum geriden bir kelimeye
+ihtiyacı var. Soru, varsayımın yanlış olup olmadığı değil, ne kadara mal
+olduğu; ve bunun ölçülebilir olduğu ortaya çıkıyor.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">İmkânsız bir nicelikten sayım tablosuna üç adım</div>
+<svg viewBox="0 0 760 268" style="max-width:740px" role="img"
+     aria-label="Bir cümlenin ortak olasılığı, zincir kuralıyla birebir olarak sonraki kelime koşullularının çarpımına dönüştürülüyor, sonra Markov varsayımıyla yalnızca önceki n eksi bir kelimeye koşullanacak şekilde yaklaştırılıyor, sonra da bir sayımın bir başka sayıma bölünmesiyle kestiriliyor.">
+  <defs>
+    <marker id="lm-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="16" y="60" width="152" height="76" rx="9" class="box"/>
+  <text x="92" y="86" class="t-sm t-mid t-b">P(cümlenin tamamı)</text>
+  <text x="92" y="105" class="t-xs t-mid t-muted">SAYILAMAZ —</text>
+  <text x="92" y="119" class="t-xs t-mid t-muted">HER CÜMLE YENİ</text>
+
+  <line x1="170" y1="98" x2="212" y2="98" class="ln" marker-end="url(#lm-a)"/>
+  <text x="191" y="88" class="t-xs t-mid t-accent t-b">BİREBİR</text>
+
+  <rect x="216" y="60" width="164" height="76" rx="9" class="box-accent"/>
+  <text x="298" y="84" class="t-sm t-mid t-b">zincir kuralı</text>
+  <text x="298" y="102" class="t-mono t-sm t-mid">∏ P(wᵢ | w₁…wᵢ₋₁)</text>
+  <text x="298" y="121" class="t-xs t-mid t-muted">BİR ÖZDEŞLİK. KAYIP YOK.</text>
+
+  <line x1="382" y1="98" x2="424" y2="98" class="ln" marker-end="url(#lm-a)"/>
+  <text x="403" y="88" class="t-xs t-mid t-rose t-b">KAYIPLI</text>
+
+  <rect x="428" y="60" width="164" height="76" rx="9" class="box-rose"/>
+  <text x="510" y="84" class="t-sm t-mid t-b">Markov varsayımı</text>
+  <text x="510" y="102" class="t-mono t-sm t-mid">P(wᵢ | wᵢ₋ₙ₊₁…wᵢ₋₁)</text>
+  <text x="510" y="121" class="t-xs t-mid t-muted">DAHA ESKİSİNİ UNUT</text>
+
+  <line x1="594" y1="98" x2="628" y2="98" class="ln" marker-end="url(#lm-a)"/>
+
+  <rect x="632" y="60" width="112" height="76" rx="9" class="box"/>
+  <text x="688" y="84" class="t-sm t-mid t-b">sayım</text>
+  <text x="688" y="104" class="t-mono t-sm t-mid">c(h,w) / c(h)</text>
+  <text x="688" y="121" class="t-xs t-mid t-muted">İKİ SÖZLÜK</text>
+
+  <line x1="16" y1="168" x2="744" y2="168" class="ln-thin"/>
+  <text x="16" y="188" class="t-xs t-muted">TEK YAKLAŞIKLIK ÜÇÜNCÜ KUTUDA. KISIM II'DEKİ HER ŞEY ONU ZAYIFLATMA YA DA KALDIRMA DENEMESİ.</text>
+  <text x="16" y="212" class="t-sm">N-gram'lar bağlamı keser. <tspan class="t-b">Sinirsel modeller</tspan> kesmeyi korur ama onun düzgün</text>
+  <text x="16" y="230" class="t-sm">bir fonksiyonunu öğrenir. <tspan class="t-b">Recurrent modeller</tspan> kesmeyi akan bir durumla değiştirir.</text>
+  <text x="16" y="248" class="t-sm"><tspan class="t-b">Transformer'lar</tspan> (@sec-transformerlar) her konumun kendinden önceki hepsini aynı anda görmesini sağlar.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Zincir kuralı bedava; modelleme işi Markov varsayımında oluyor. Son
+kutunun öğrenme değil aritmetik olduğuna dikkat edin — bir n-gram model
+bir tam sayının bir başkasına bölünmesiyle uydurulur; otuz yıl boyunca,
+başka hiçbir şeyi eğitemeyecek donanımlar üzerinde en iyi yöntem olarak
+kalmasının sebebi de bu.
+:::
+::::
+
+::: {.column-margin}
+Shannon 1951'de bunu zaten yapıyordu; elle, bir kitap ve bir kalemle,
+İngilizcenin entropisini kestirmek için [@shannon1951prediction]. Bu
+bölümdeki matematik onun matematiği; değişen tek şey derlem büyüklüğü.
+:::
+
+## 38.000 yorum üzerinde saymak
+
+Derlem @sec-karsilastirma bölümündeki Türkçe ürün yorumu kümesi ve bölme
+bilinçli olarak aynı bölme; böylece orada veri hakkında öğrendiğiniz her
+şey burada da geçerli kalıyor. Tek bir ekleme var.
+[Smoothing](#gloss-smoothing){#term-smoothing .term-ref}'in
+hiperparametreleri var ve test kümesine bakarak seçilen hiperparametreler
+hiperparametre değil, sızıntıdır. Bu yüzden 40.000 eğitim yorumu bir kez
+daha bölünüyor ve modelin hiç saymadığı, [ayrı tutulmuş](#gloss-held-out-data){#term-held-out-data .term-ref}
+bir dev dilimi ayrılıyor:
+
+::: {#gloss-smoothing .column-margin .term-gloss}
+**smoothing** (yumuşatma) — gördüğünüz kelime birleşimlerinden bir parça
+olasılık alıp görmediklerinize vermek; böylece "hiç görülmedi", "imkânsız"
+demek olmaktan çıkar. [↩](#term-smoothing){.term-back}
+:::
+
+::: {#gloss-held-out-data .column-margin .term-gloss}
+**held-out data** (ayrı tutulmuş veri) — modelin saymasına izin
+verilmeyen metin. Bir skorun anlam taşıdığı tek yer burasıdır; çünkü bir
+model ezberlediği metni her zaman geri okuyabilir. [↩](#term-held-out-data){.term-back}
+:::
+
+```text
+### the language-modelling setup
+reviews counted            38,000
+reviews held out (dev)      2,000     smoothing constants chosen here
+reviews held out (test)    10,000     read exactly once, at the end
+tokens counted            857,987
+distinct word forms        72,087
+vocabulary (count >= 2)    29,773
+```
+
+İki idari karar ileride gerçekten iş görüyor, o yüzden açıkça
+söylenmeye değer.
+
+**Her yorum dolduruluyor ve sonlandırılıyor.** Başa bir `<s>` işareti
+ekleniyor ki ilk gerçek kelimenin bir bağlamı olsun; sona bir `</s>`
+işareti ekleniyor ki model *yorumun bittiğini* de kestirmek zorunda
+kalsın. Sonlandırıcı olmadan olasılıklar her uzunluktaki cümleler
+üzerinde bire toplanmaz ve model hiçbir şey üretmekte kullanılamaz;
+çünkü asla durmazdı.
+
+**Bir kez görülen kelimeler `<unk>` ile değiştiriliyor.**
+@sec-karsilastirma, Türkçe yorum kelime biçimlerinin %58,6'sının hapax
+olduğunu ölçmüştü; bunları tutmak, her biri tek bir gözlemden 43.579
+olasılık kestirmek demek. Hepsini tek bir "bilinmeyen kelime" sembolüne
+eşlemek geriye 29.773 kelime bırakıyor ve modele, hiç görmediği
+kelimelere sıfırdan farklı olasılık atama imkânı veriyor. Ayrıca geri
+döneceğimiz ve uzunca duracağımız bir sonucu var; çünkü yayımlanmış
+perplexity sayılarını anlamsızlaştırmanın en yaygın yolu bu.
+
+```text
+### the test set, through that vocabulary
+test tokens                229,055
+test tokens -> <unk>        17,003     7.42%
+distinct test forms         32,573
+  never seen in training    15,352     47.1%
+prediction events          239,055     229,055 words + 10,000 </s>
+```
+
+Şimdi modelin kendisi. Bir bigram model, iki sözlük ve bir bölmeden
+ibaret:
+
+```python
+from collections import Counter
+
+ctx, ngr = Counter(), Counter()
+for s in train_seqs:                       # her biri zaten dolduruldu
+    for i in range(1, len(s)):
+        ctx[s[i - 1]] += 1
+        ngr[(s[i - 1], s[i])] += 1
+
+def p_mle(prev, w):
+    return ngr[(prev, w)] / ctx[prev]
+```
+
+1990'da istatistiksel NLP'nin geldiği yerin tamamı bu ve neyi ürettiğine
+bakmaya değer. Modelin `kargo` kelimesinden sonra gelen kelime üzerindeki
+dağılımı şöyle:
+
+```text
+### P(next | kargo), bigram MLE
+ve             167   0.0676
+için           163   0.0659
+hızlı          105   0.0425
+bedava         103   0.0417
+da              93   0.0376
+çok             83   0.0336
+</s>            82   0.0332   (yorum burada bitiyor)
+ile             81   0.0328
+
+context count 2,472; 516 distinct continuations observed
+```
+
+Kimse bir dilbilgisi yazmadı. Model, `kargo` kelimesinden sonra işlev
+kelimelerinin, hız ve maliyetle ilgili sıfatların ve — zamanın %3,3'ünde —
+yorumun sonunun geldiğini keşfetti. Bu, Türk alışverişçilerin gerçekte
+nasıl yazdığının, sayarak çıkarılmış bir betimlemesi.
+
+::: {.callout-note collapse="true"}
+## Sezgi kontrolü: bir yorumun sonu neden bir token olmak zorunda?
+
+Çünkü aksi hâlde model, *cümleler* üzerinde bir dağılım değildir.
+
+`</s>`'i attığınızı varsayın. O zaman $P(\text{"kargo hızlı"})$ ve
+$P(\text{"kargo hızlı geldi"})$ ifadelerinin ikisi de koşulluların
+çarpımıdır ve kısa olan zorunlu olarak daha büyüktür; çünkü uzun olan,
+kısa olanın 1'den küçük bir olasılıkla çarpılmış hâlidir. Her
+uzunluktaki tüm diziler üzerinden toplayın, bir değil sonsuz elde
+edersiniz. Modelin "ve sonra durdu" diyecek bir yolu yoktur.
+
+Pratikte bu, üretmeye başladığınız anda ortaya çıkar: sonlandırıcı
+olmadan örnekleyiciniz siz sıkılıp kesene kadar çalışır ve yazdığı her
+cümle yarım kalır. Bir üretim döngüsünün beklediği şey `</s>`'tir ve
+modern bir sohbet modelinde bu, *end-of-turn token* adı altında tam
+olarak aynı mekanizmadır.
+:::
+
+## Perplexity
+
+::: {#gloss-perplexity .column-margin .term-gloss}
+**perplexity** — modelin her adımda etkin olarak kaç kelime arasından
+seçim yaptığı. Düşük olan iyidir: 10 perplexity, modelin on kişilik bir
+kısa listeden seçim yapan biri kadar kararsız olduğu anlamına gelir. [↩](#term-perplexity){.term-back}
+:::
+
+Bir dil modelinin ne kadar iyi olduğunu söyleyen bir sayıya ihtiyacımız
+var ve bu sayı aşağı akıştaki bir görev gerektirmemeli; çünkü işin
+bütün amacı, modelin böyle bir görev olmadan eğitilmiş olması.
+
+Doğal nicelik, modelin hiç görmediği metne atadığı olasılık. Ayrı
+tutulmuş veri üzerindeki olasılık yüz binlerce küçük sayının çarpımı
+olduğu için bunun yerine ortalama logaritmayla çalışıyoruz ve sonra
+yorumlanabilir bir şeye geri dönmek üzere üs alıyoruz:
+
+$$
+\mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N} \log P(w_i \mid h_i)\right)
+$$
+
+Bu, $1/P(w_i \mid h_i)$ ifadesinin geometrik ortalaması — modelin,
+gerçekten sonra gelen kelimeye verdiği tipik olasılığın çarpmaya göre
+tersi.
+
+**Bunu etkin bir dallanma çarpanı olarak okuyun.**
+[Perplexity](#gloss-perplexity){#term-perplexity .term-ref}'si 100 olan
+bir model, ortalamada, her konumda 100 kelime arasından düzgün dağılımla
+seçim yapıyormuş kadar kararsızdır. Hilesiz bir altı yüzlü zarın
+perplexity'si 6'dır. Doğru sonraki kelimeye her seferinde 1 olasılığı
+atayan bir modelin perplexity'si 1'dir. Düşük olan iyidir ve birimi şu:
+"etkin olarak kaç eşit olasılıklı seçenek arasından seçiyorum".
+
+::: {.callout-note collapse="true"}
+## Aritmetik, tek cümlelik bir derlem üzerinde
+
+Üç token'lık bir dizi ve şunları atayan bir model alın:
+
+$$
+P(w_1 \mid h_1) = 0{,}5, \quad P(w_2 \mid h_2) = 0{,}25, \quad P(w_3 \mid h_3) = 0{,}125
+$$
+
+Ortalama negatif log olasılığı şu:
+
+$$
+-\tfrac{1}{3}\left(\ln 0{,}5 + \ln 0{,}25 + \ln 0{,}125\right)
+= -\tfrac{1}{3}\ln(0{,}015625) = 1{,}386
+$$
+
+ve $\exp(1{,}386) = 4{,}0$. Yani perplexity 4; bu da 2, 4 ve 8'in geometrik
+ortalaması — tam olarak üç olasılığın çarpmaya göre tersleri.
+
+Bundan, pratikte önemli olan iki özellik çıkıyor.
+
+**Perplexity bir geometrik ortalamadır, dolayısıyla tek bir felaket
+token her şeye hükmeder.** Üçüncü olasılığı $10^{-6}$ ile değiştirin,
+perplexity 4,0'tan 158'e sıçrasın. 0 ile değiştirin, model derlemdeki
+diğer her token'da ne kadar iyi iş çıkarmış olursa olsun perplexity
+sonsuz olur. Sonraki bölüm tamamen bu olguyla ilgili.
+
+**Perplexity token başınadır, dolayısıyla token'ın ne olduğuna
+bağlıdır.** Aynı model, aynı metin, aynı kestirimler — ama metni
+kelimeler yerine karakterlere bölün, $N$ değiştiği için sayı tamamen
+değişir. Bu bir incelik değil; iki makaledeki iki perplexity sayısının
+çoğu zaman hiç karşılaştırılamamasının sebebi.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Model nerede şaşırdı?</div>
+```
+
+Her çubuk bir token'ın **surprisal** (şaşırma) değeri, yani
+$-\log_2 P(w \mid h)$; bu bölümde kurulan modeller üzerinde ölçüldü. 10
+değerinde bir çubuk, modelin o kelimeye yaklaşık binde bir olasılık
+verdiği anlamına gelir. Bağlam uzunluğunu değiştirin ve hangi çubukların
+çöktüğüne bakın — fazladan bağlamın satın aldığı şey tam olarak o.
+
+```{ojs}
+//| echo: false
+surprisal = ({
+  "kargo çok hızlı geldi": {
+    1: {ppl: 126.8, t: [["kargo",8.5],["çok",5.5],["hızlı",7.9],["geldi",8.5],["</s>",4.6]]},
+    2: {ppl:  35.2, t: [["kargo",7.5],["çok",4.8],["hızlı",5.2],["geldi",4.9],["</s>",3.3]]},
+    3: {ppl:  11.8, t: [["kargo",7.5],["çok",3.5],["hızlı",1.0],["geldi",3.5],["</s>",2.3]]}
+  },
+  "ürünü çok beğendim kesinlikle tavsiye ederim": {
+    1: {ppl: 152.0, t: [["ürünü",7.8],["çok",5.5],["beğendim",10.4],["kesinlikle",8.6],["tavsiye",6.9],["ederim",7.0],["</s>",4.6]]},
+    2: {ppl:  10.3, t: [["ürünü",4.4],["çok",5.2],["beğendim",5.7],["kesinlikle",5.7],["tavsiye",1.3],["ederim",0.5],["</s>",0.7]]},
+    3: {ppl:   5.5, t: [["ürünü",4.4],["çok",4.8],["beğendim",1.7],["kesinlikle",4.9],["tavsiye",0.5],["ederim",0.6],["</s>",0.5]]}
+  },
+  "fiyatına göre gayet kaliteli bir ürün": {
+    1: {ppl: 132.3, t: [["fiyatına",9.4],["göre",8.2],["gayet",7.5],["kaliteli",8.1],["bir",5.5],["ürün",6.1],["</s>",4.6]]},
+    2: {ppl:  10.5, t: [["fiyatına",6.7],["göre",0.2],["gayet",3.7],["kaliteli",4.9],["bir",2.5],["ürün",2.3],["</s>",3.4]]},
+    3: {ppl:   6.2, t: [["fiyatına",6.6],["göre",0.0],["gayet",2.9],["kaliteli",4.0],["bir",2.2],["ürün",0.7],["</s>",2.1]]}
+  },
+  "kalite iyi fiyat kötü": {
+    1: {ppl: 293.7, t: [["kalite",10.2],["iyi",6.8],["fiyat",8.5],["kötü",10.9],["</s>",4.6]]},
+    2: {ppl: 288.0, t: [["kalite",9.7],["iyi",6.8],["fiyat",6.1],["kötü",13.9],["</s>",4.3]]},
+    3: {ppl: 313.5, t: [["kalite",9.7],["iyi",7.1],["fiyat",5.2],["kötü",15.1],["</s>",4.3]]}
+  },
+  "kalite kötü fiyat iyi": {
+    1: {ppl: 293.7, t: [["kalite",10.2],["kötü",10.9],["fiyat",8.5],["iyi",6.8],["</s>",4.6]]},
+    2: {ppl: 357.1, t: [["kalite",9.7],["kötü",11.8],["fiyat",10.8],["iyi",6.6],["</s>",3.5]]},
+    3: {ppl: 368.9, t: [["kalite",9.7],["kötü",12.6],["fiyat",10.9],["iyi",6.6],["</s>",2.8]]}
+  },
+  "kedi klavyede uyuyakaldı": {
+    1: {ppl: 900.7, t: [["kedi",13.3],["klavyede",17.0],["<unk>",4.4],["</s>",4.6]]},
+    2: {ppl: 623.7, t: [["kedi",12.7],["klavyede",17.4],["<unk>",2.5],["</s>",4.6]]},
+    3: {ppl: 666.4, t: [["kedi",12.8],["klavyede",17.5],["<unk>",2.5],["</s>",4.7]]}
+  }
+})
+```
+
+```{ojs}
+//| echo: false
+viewof sentence = Inputs.select(Object.keys(surprisal), {
+  value: "kargo çok hızlı geldi", label: "Cümle"
+})
+```
+
+```{ojs}
+//| echo: false
+viewof order = Inputs.radio([1, 2, 3], {
+  value: 2, label: "Bağlam uzunluğu",
+  format: n => n === 1 ? "unigram (bağlam yok)"
+             : n === 2 ? "bigram (1 kelime)" : "trigram (2 kelime)"
+})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 640,
+  height: 260,
+  marginLeft: 110,
+  marginBottom: 40,
+  x: { domain: [0, 18], label: "surprisal (bit) — uzun olan daha çok şaşırdı demek" },
+  y: { domain: surprisal[sentence][order].t.map(d => d[0]), label: null },
+  marks: [
+    Plot.barX(surprisal[sentence][order].t, {
+      x: d => d[1], y: d => d[0],
+      fill: d => d[1] > 10 ? "#B3453E" : "#0E7C7B",
+      rx: 3,
+      title: d => `${d[0]}: ${d[1].toFixed(1)} bit ≈ ${Math.round(2 ** d[1]).toLocaleString()}'te 1`
+    }),
+    Plot.ruleX([0])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<div style="font-size:0.85rem;opacity:0.75;margin-top:-0.4rem">
+Bu bağlam uzunluğunda cümle perplexity'si:
+<b>${surprisal[sentence][order].ppl.toFixed(1)}</b></div>`
+```
+
+::: {.callout-tip appearance="simple" icon="false"}
+Aranmaya değer üç şey var. `fiyatına göre…` cümlesinde `göre` kelimesi,
+model `fiyatına`yı görebildiği anda 8,2 bitten 0,2 bite düşüyor —
+Türkçede `göre` neredeyse o kelimenin ardından gelmek zorunda olan bir
+ilgeç ve bunu bilmek için bir kelimelik bağlam yetiyor. `kalite kötü
+fiyat iyi` cümlesinde surprisal, bağlam arttıkça *yükseliyor*; çünkü
+model Türk yorumcuların böyle bir ifade yazmadığını öğrenmiş. Son
+cümlede ise `uyuyakaldı` sözlükte hiç yok, dolayısıyla model onun yerine
+`<unk>`'i puanlıyor — üstelik 2,5 bitle, *şaşırtıcı değil* diye. Bunu
+aklınızda tutun.
+:::
+:::
+
+## Felaket
+
+::: {#gloss-maximum-likelihood-estimation-mle .column-margin .term-gloss}
+**maximum likelihood estimation (MLE)** (en büyük olabilirlik kestirimi)
+— bir ham sayımı bir başkasına, hiçbir şey eklemeden bölerek elde
+ettiğiniz kestirim. Eğitim metnine olabildiğince sıkı uyar; problemi de
+tam olarak budur. [↩](#term-maximum-likelihood-estimation-mle){.term-back}
+:::
+
+Şimdi $c(h,w)/c(h)$ dışında hiçbir şeyle tanımlanmayan
+[maximum-likelihood](#gloss-maximum-likelihood-estimation-mle){#term-maximum-likelihood-estimation-mle .term-ref}
+modelini, ayrı tutulmuş yorumlar üzerinde çalıştırın.
+
+```text
+### test perplexity, maximum likelihood
+unigram      1,303.6
+bigram             ∞
+trigram            ∞
+4-gram             ∞
+5-gram             ∞
+```
+
+"Büyük" değil. **Sonsuz**; üstelik son derece sıradan bir sebeple: bazı
+test bigram'ları eğitimde hiç görülmedi, dolayısıyla model onlara tam
+olarak sıfır olasılık atıyor, dolayısıyla logaritma $-\infty$ oluyor,
+dolayısıyla ortalama $-\infty$ oluyor. 239.055 kestirimin herhangi bir
+yerindeki tek bir görülmemiş kelime çifti, hepsinin skorunu yok etmeye
+yetiyor.
+
+Üstelik tek bir olay da değil. Sayısı şu kadar:
+
+```text
+### test predictions the MLE model assigns probability zero
+bigram        73,225 of 239,055     30.6%
+trigram      161,544 of 239,055     67.6%
+4-gram       201,599 of 239,055     84.3%
+5-gram       214,122 of 239,055     89.6%
+```
+
+858.000 kelimelik Türkçe yorum üzerinde eğitilmiş bir trigram model, bir
+sonraki Türkçe yorumun üçte ikisinin *imkânsız* olduğunu söylüyor.
+
+Sebep bir yazılım hatası değil; düzeltebileceğiniz türden bir veri
+kıtlığı da değil. Sebep şu: olası n-gram sayısı $V^n$ gibi büyürken
+derleminiz $N$ gibi büyüyor; dolayısıyla $n$ arttığı anda böldüğünüz
+sayımlar minicik kalıyor. $n$ büyüdükçe modele ne olduğuna bakın:
+
+```text
+### how the count table behaves, 895,987 training events
+          distinct    a new type      seen exactly
+n         n-grams     every…          once
+1           29,773     30.6 tokens      0.0%
+2          383,579      2.3 tokens     78.9%
+3          674,067      1.3 tokens     91.8%
+5          818,339      1.1 tokens     98.0%
+```
+
+**$n = 5$'e gelindiğinde eğitim verisindeki n-gram'ların %98'i tam olarak
+bir kez geçiyor ve okuduğunuz token'ların %91,3'ü daha önce hiç
+görmediğiniz bir 5-gram'ı devreye sokuyor.** "Model" artık model olmaktan
+çıkmış; derlemin biraz kayıplı bir kopyasına dönüşmüş. (Unigram'larda tek
+geçenlerin oranının %0,0 görünmesinin tek sebebi, onları zaten `<unk>`'e
+eşlemiş olmamız.)
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Daha çok bağlam, daha az kanıt — her n-gram modelin yaptığı takas</div>
+<svg viewBox="0 0 760 320" style="max-width:740px" role="img"
+     aria-label="N-gram derecesi 2'den 5'e çıktıkça, bağlamı eğitimde görülmüş test kestirimlerinin payı yüzde 100'den yüzde 18,4'e, n-gram'ının tamamı görülmüş olanların payı ise yüzde 69,4'ten yüzde 10,4'e düşüyor; bu sırada sayım tablosu 384 binden 818 bin girdiye büyüyor.">
+  <defs>
+    <marker id="sp-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <text x="20" y="20" class="t-xs t-muted">239.055 TEST KESTİRİMİNİN KAÇI DAHA ÖNCE GÖRÜLMÜŞTÜ?</text>
+
+  <!-- axes -->
+  <line x1="70" y1="40" x2="70" y2="212" class="ln-thin"/>
+  <line x1="70" y1="212" x2="430" y2="212" class="ln-thin"/>
+  <g class="t-xs t-muted t-end">
+    <text x="62" y="216">0%</text><text x="62" y="173">25%</text>
+    <text x="62" y="130">50%</text><text x="62" y="87">75%</text>
+    <text x="62" y="44">100%</text>
+  </g>
+  <g class="ln-thin ln-dash">
+    <line x1="70" y1="169" x2="430" y2="169"/><line x1="70" y1="126" x2="430" y2="126"/>
+    <line x1="70" y1="83" x2="430" y2="83"/>
+  </g>
+  <g class="t-xs t-muted t-mid">
+    <text x="70" y="230">n=2</text><text x="190" y="230">n=3</text>
+    <text x="310" y="230">n=4</text><text x="430" y="230">n=5</text>
+  </g>
+
+  <!-- context seen: 100, 69.6, 33.9, 18.4 -->
+  <polyline points="70,40 190,92 310,153 430,180" class="ln-accent"/>
+  <g class="head-accent">
+    <circle cx="70" cy="40" r="3.5"/><circle cx="190" cy="92" r="3.5"/>
+    <circle cx="310" cy="153" r="3.5"/><circle cx="430" cy="180" r="3.5"/>
+  </g>
+  <text x="200" y="82" class="t-sm t-accent t-b">bağlam görülmüş</text>
+  <text x="200" y="95" class="t-xs t-muted">modelin bir kestirimi var</text>
+
+  <!-- full ngram seen: 69.4, 32.4, 15.7, 10.4 -->
+  <polyline points="70,93 190,156 310,185 430,194" class="ln-rose"/>
+  <g class="head-rose">
+    <circle cx="70" cy="93" r="3.5"/><circle cx="190" cy="156" r="3.5"/>
+    <circle cx="310" cy="185" r="3.5"/><circle cx="430" cy="194" r="3.5"/>
+  </g>
+  <text x="200" y="176" class="t-sm t-rose t-b">n-gram'ın tamamı görülmüş</text>
+  <text x="200" y="189" class="t-xs t-muted">kestirim sıfır değil</text>
+
+  <text x="20" y="256" class="t-xs t-muted">BU SIRADA SAKLAMAK ZORUNDA OLDUĞUNUZ TABLO BÜYÜMEYE DEVAM EDİYOR</text>
+  <g class="t-sm">
+    <text x="20" y="278">n=2</text><text x="120" y="278" class="t-end t-mono">383,579</text>
+    <text x="200" y="278">n=3</text><text x="300" y="278" class="t-end t-mono">674,067</text>
+    <text x="380" y="278">n=5</text><text x="480" y="278" class="t-end t-mono">818,339</text>
+  </g>
+  <text x="20" y="298" class="t-xs t-muted">GİRDİ, 895.987 EĞİTİM OLAYINA KARŞI — TABLO DERLEMİN KENDİSİNE YAKLAŞIYOR</text>
+
+  <rect x="490" y="40" width="254" height="172" rx="9" class="box"/>
+  <text x="506" y="64" class="t-sm t-b">Çıkmaz</text>
+  <text x="506" y="88" class="t-sm">Uzun bağlam aynı anda hem daha</text>
+  <text x="506" y="106" class="t-sm">bilgilendirici hem daha az gözlenmiş.</text>
+  <text x="506" y="132" class="t-sm">Her n-gram model, bu eğrinin</text>
+  <text x="506" y="150" class="t-sm">neresinde duracağının seçimidir ve</text>
+  <text x="506" y="168" class="t-sm">durulacak iyi bir yer yoktur.</text>
+  <line x1="506" y1="182" x2="728" y2="182" class="ln-thin"/>
+  <text x="506" y="200" class="t-xs t-muted">SMOOTHING, AYNI ANDA İKİ YERDE DURMAKTIR</text>
+</svg>
+```
+
+::: {.fig-cap}
+Teal çizgi, modelin *herhangi* bir kestirimi olduğu test kestirimlerinin
+oranı; gül rengi çizgi ise o kestirimin sıfırdan farklı olduğu oran.
+İkisi de uçurumdan düşüyor ve aralarındaki boşluk, smoothing'in icat
+etmek zorunda olduğu olasılık kütlesi. $n=5$'te model, okuduğunun
+%10,4'ü hakkında bilgiye dayalı bir şey söyleyebiliyor.
+:::
+::::
+
+## Smoothing, başka bir adla düzenlileştirmedir
+
+Bunu okuyan her istatistikçi problemi çoktan teşhis etti: seyrek
+sayımlara uydurulmuş, yansız ama varyansı felaket bir kestirici. Tedavi
+de her zamanki: biraz yanlılığı göze alın, karşılığında bolca varyans
+geri kazanın ve hepsinden önemlisi kestirimin sıfıra inmesini tümden
+engelleyin.
+
+**Add-one: ders kitaplarının ilk fikri ve neden bir felaket olduğu.**
+Başlamadan önce olası her devamı bir kez görmüş gibi yapın:
+
+$$
+P_{+1}(w \mid h) = \frac{c(h, w) + 1}{c(h) + V}
+$$
+
+Bu, yoğunlaşma parametresi 1 olan bir Dirichlet önseli — gayet saygın bir
+şey — ve bu derlem üzerinde işe yaramaz olmaktan da kötü:
+
+```text
+### test perplexity, add-one
+unigram      1,313.8
+bigram       3,216.5
+trigram     13,221.2
+5-gram      22,234.0
+```
+
+**Add-one smoothing'li bigram model, bağlamı tümden yok saymaktan iki
+buçuk kat kötü.** Aritmetik sebebini gösteriyor. `kargo` sonrasında
+$c(h) = 2{,}472$ ve $V = 29{,}773$ iken add-one, olasılık kütlesinin
+$29{,}773/(2{,}472 + 29{,}773) = \%92{,}3$'ünü hiç gözlenmemiş devamların
+üstüne koyuyor. Model `kargo`dan sonra ne geldiğine dair 2.472 örnek
+gördü ve add-one ona bu kanıtın %92'sini yok saymasını söylüyor. Daha
+uzun bağlamlarda $c(h)$ daha da küçük ve hasar tam.
+
+Sözde sayımı aşağı çekmek yardımcı oluyor ve bu ayarın dev kümesinde
+yapılması şart:
+
+```text
+### add-k, k chosen on the dev set
+order   best k     dev      test
+2       0.003     714.6     728.5
+3       0.001   4,011.3   4,058.6
+5       0.0003 16,280.4  16,141.8
+```
+
+$n=2$'de daha iyi, ötesinde hâlâ felaket. Her sayıma bir sabit eklemek
+işe yaramaz; çünkü problem, görülmemiş olayların biraz kütleye ihtiyaç
+duyması değil — problem, görülmemiş olayların *hangisinin* bunu hak
+ettiğine dair hiçbir fikrimizin olmaması; bir sabit ise hepsinin aynı
+şeyi hak ettiğini söylüyor.
+
+::: {#gloss-interpolation .column-margin .term-gloss}
+**interpolation** (aradeğerleme) — üç kelimelik, iki kelimelik ve tek
+kelimelik kestirimleri tek bir sayıda harmanlamak; harman ağırlıklarına
+zevk değil veri karar verir. [↩](#term-interpolation){.term-back}
+:::
+
+**İşe yarayan fikir: daha kısa bir modele sorun.** `kargo çok hızlı`yı
+hiç görmediyseniz, `çok hızlı`yı büyük ihtimalle görmüşsünüzdür ve
+`hızlı`yı kesinlikle görmüşsünüzdür. Dereceleri
+[interpolation](#gloss-interpolation){#term-interpolation .term-ref} ile
+harmanlayın:
+
+$$
+P_{\text{int}}(w \mid h) = \lambda_3 P(w \mid w_{-2}, w_{-1}) + \lambda_2 P(w \mid w_{-1}) + \lambda_1 P(w)
+$$
+
+burada $\lambda$'lar bire toplanıyor ve dev kümesinde EM ile uyduruluyor
+[@jelinek1980interpolated]. Artık görülmemiş bir trigram, düzgün dağılımlı
+bir tahmine değil bir bigram kestirimine geri çekiliyor ve bu geri
+çekilme, her dereceye ne kadar güvenilebileceğine göre derecelendiriliyor.
+
+EM'in verdiği karar, ürettiği perplexity'den daha ilginç:
+
+```text
+### interpolation weights, fitted on dev
+                unigram  bigram  trigram  4-gram  5-gram
+2-gram model     0.4204  0.5796
+3-gram model     0.4228  0.4834   0.0938
+4-gram model     0.4237  0.4878   0.0882  0.0003
+5-gram model     0.4234  0.4900   0.0865  0.0001  0.0000
+```
+
+[EM'e 4-gram'ların ve 5-gram'ların bu derlemde işe yaramaz olduğunu kimse
+söylemedi; bunu kendisi çıkardı.]{.hl} Her dereceye ne kadar güveneceğini
+serbestçe seçebildiğinde ağırlığın %0,03'ünü 4-gram'lara koyuyor ve
+5-gram'ları sıfıra yuvarlıyor. Bu, yukarıdaki seyreklik tablosunun öteki
+yönden yeniden keşfedilmiş hâli ve bölümün en dürüst model seçimi sonucu.
+
+**Kneser-Ney ve gerçekten zekice bir fikir.** En iyi klasik smoothing
+yöntemi [@kneser1995improved; @chen1999empirical], gözlenen her sayımdan
+sabit bir $d$ indirimi düşüyor ve aldığını yeniden dağıtıyor:
+
+$$
+P_{\text{KN}}(w \mid h) = \frac{\max(c(h,w) - d,\ 0)}{c(h)} + \lambda(h)\, P_{\text{KN}}(w \mid h')
+$$
+
+::: {#gloss-backoff .column-margin .term-gloss}
+**backoff** (geri çekilme) — uzun bağlam hiç görülmemişse baştan bir
+kelime atıp bunun yerine daha kısa bağlama sormak. Interpolation her
+zaman harmanlar; backoff yalnızca mecbur kaldığında geri çekilir. [↩](#term-backoff){.term-back}
+:::
+
+Zekice olan kısım indirim değil, alt derece dağılımının neyi saydığı.
+Naif bir [backoff](#gloss-backoff){#term-backoff .term-ref} "bu kelime ne
+sıklıkta geçiyor?" diye sorar. Kneser-Ney ise **"bu kelime kaç farklı
+bağlamda geçiyor?"** diye sorar. Standart örnek Türkçede de işliyor:
+`Francisco` kelimesi sık geçer, ama neredeyse yalnızca `San`'dan sonra
+geçer; dolayısıyla *başka* herhangi bir kelimeden sonra berbat bir
+tahmindir. Sıklık "yaygın" der; devam sayısı "uzmanlaşmış" der.
+Kneser-Ney ikincisini kullanır.
+
+```text
+### test perplexity, everything together
+order      MLE    add-1    add-k*   interpolated   Kneser-Ney
+1      1,303.6  1,313.8   1,303.6            —            —
+2            ∞  3,216.5     728.5        427.8        351.9
+3            ∞ 13,221.2   4,058.6        426.4        333.5
+4            ∞ 20,147.7  11,240.8        438.1        344.7
+5            ∞ 22,234.0  16,141.8        447.6        353.8
+```
+
+Tablodaki en iyi model **333,5'te bir Kneser-Ney trigram'ı** ve bu tablo
+hakkında yüksek sesle söylenmeye değer üç şey var.
+
+Smoothing bir ayrıntı değil. Birebir aynı sayımlar üzerinde sonsuz bir
+perplexity ile 333,5 arasındaki fark bu. Burada kestirici, model
+sınıfından daha önemli.
+
+Trigram'ların ötesine geçmek yardımcı olmuyor — zarar veriyor.
+4-gram'lar ve 5-gram'lar her smoothing şemasında trigram'lardan kötü; bu
+da seyreklik eğrisinin tam olarak vaat ettiği şeyi yapması. Fazladan
+bağlam, modelin ulaşamadığı gerçek bir bilgi.
+
+Ve 333,5'te bir trigram şu demek: bir Türkçe yorumun iki kelimesini
+okuduktan sonra model hâlâ, 333 eşit olasılıklı kelime arasından rastgele
+seçiyormuş kadar kararsız. Sayma çağının tavanı bu ve oraya varmak otuz
+yıllık bir yaratıcılık aldı.
+
+::: {.column-margin}
+Kneser-Ney'i yenen şey zekâdan çok ölçek oldu. Google'ın 2000'lerin
+sonundaki n-gram modelleri *stupid backoff* kullanıyordu
+[@brants2007large] — normalize edilmemiş, olasılık dağılımı bile olmayan
+bir şema — çünkü trilyon token ölçeğinde smoothing yöntemi önemini
+yitiriyor, yalnızca mühendislik önemli kalıyor [@heafield2011kenlm].
+Kanıt tükendiğinde daha kısa bir bağlama geri çekilme fikri daha da eski
+[@katz1987estimation]; Kneser-Ney'in katkısı *neye* geri çekilineceğiydi.
+:::
+
+::: {.callout-note collapse="true"}
+## Sezgi kontrolü: derlemi ikiye katlıyorsunuz. O tablodaki hangi sayı en çok oynar?
+
+Trigram'ın 333,5'i değil. 5-gram'ın 353,8'i.
+
+O tablonun her sütunu sayımlarla sınırlı ve en çok aç kalanlar yüksek
+dereceler — eğitim 5-gram'larının %98'i tek geçenlerdi; dolayısıyla
+veriyi ikiye katlamak bu oranı kabaca yarıya indiriyor ve 5-gram modele,
+daha önce hiç kestirimi olmayan yerlerde gerçek kestirimler kazandırıyor.
+Trigram'ın test kestirimlerinin zaten %69,6'sında bir bağlam eşleşmesi
+vardı; fazladan veri orada çoğunlukla mevcut kestirimleri
+keskinleştirmekle yetiniyor.
+
+Aktarılabilir hâli: **daha fazla verinin faydası, tam olarak modelin en
+aç kaldığı yerde en büyüktür.** Ölçekleme yasalarının arkasındaki
+mekanizma bu ve @sec-on-egitim bölümündeki modellerin neden milyonlarca
+değil trilyonlarca token üzerinde eğitildiğinin de sebebi — küçük bir
+derlem üzerindeki büyük bir model, üstüne birkaç adım eklenmiş bir
+5-gram tablosudur.
+
+Ayrıca şimdiden kestirilmeye değer bir sınırı var. Derlemi ikiye
+katlamak 5-gram modeli iyileştirir ama 5-gram'ları *yeterli* kılmaz;
+çünkü hem İngilizce hem Türkçe beş kelimeden uzun bağımlılıklar içerir.
+Hiçbir veri miktarı yanlış bir varsayımı düzeltmez; yalnızca etrafındaki
+varyansı azaltır.
+:::
+
+## Modelin gerçekte bildiği şey
+
+Perplexity bir özettir ve özetler bazı şeyleri gizler. Bir dil modelinin
+daha çok şey ele veren ikinci bir arayüzü vardır: modelden örnek
+çekebilirsiniz. Dolgu token'larıyla başlayın, koşullu dağılımdan bir
+kelime çekin, bağlamı kaydırın, `</s>` gelene kadar tekrarlayın.
+
+```text
+### sampling, seed 7
+
+unigram
+  kullanım <unk> tavsi
+  sadece telefon
+  ederi bu göre
+
+bigram
+  ürünü tercih edilebilir
+  makina sessiz ve tadi oluyor ben çok kullanışlı ve masaj yapacak alan…
+  en iyi bir ürün kolay
+
+trigram
+  arkadaşlar ürün günde <unk> ulaştırdıkları için siteye teşekkür ediyorum
+  ofise aldık çok beğendi teşekkürler hepsiburada
+  ürünü yeni kullanmaya başladım gayet güzel ve kalıcı fıs yetiyor…
+
+5-gram
+  ürünü yeni aldım gayet kullanışlı tavsiye ediyorum
+  bu ürünü uzun süredir kullanıyorum şunu diyebilirim ki ses yapiyor…
+  yıllardır kullandığım ürün en uzun gece kampanyası ile tl ye uygun…
+```
+
+Unigram çıktısı kelime salatası. Bigram çıktısının yerel bir dilbilgisi
+var ama bütününde anlamı yok. Trigram çıktısında Türkçe gibi okunan tam
+yan cümleler geçiyor. 5-gram çıktısı ise bir ürün yorumu gibi okunuyor.
+
+Ürün yorumu gibi okunuyor çünkü *zaten* bir ürün yorumu:
+
+```text
+### of the 8-word spans the model generates, how many appear verbatim
+### in the training corpus?
+unigram      0.0%
+bigram       0.0%
+trigram      5.8%
+5-gram      91.6%
+```
+
+[5-gram modelin "yazdığı" 8 kelimelik parçaların onda dokuzu, eğitim
+verisinden kelimesi kelimesine kopyalanmış.]{.hl} Bu akıcılık üretim
+değil, birkaç ara adımla yapılmış bir geri getirme işlemi — ki seyreklik
+tablosu tam olarak bunu haber veriyordu: eğitimdeki 5-gram'ların %98'i
+yalnızca bir kez geçtiği için, dört kelimeye koşullanmak modele çoğu
+zaman tek bir seçenek bırakıyor: geçen sefer bu dört kelimeden sonra
+gelen kelime.
+
+Bu bölümden sonraki her şeyin sebebi işte bu çıkmaz. **Akıcılık uzun
+bağlam ister. Sayarak kestirilen uzun bağlam ise kopyalamak demektir.**
+Bir n-gram modeli aynı anda hem akıcı hem özgün olamaz; ne kadar
+smoothing yaparsanız yapın bu değişmez, çünkü smoothing olasılığı yeniden
+dağıtır, yeni bir genelleme yaratmaz.
+
+Bu iki bozulma biçimiyle modern bir kılıkta yeniden karşılaşacaksınız —
+eğitim verisinin birebir ezberlenmesi büyük dil modelleri için de güncel
+bir sorun [@carlini2021extracting]; @sec-veri-etiketleme bölümünün
+benchmark bulaşmasına (contamination) dair uyarıları da aynı olgunun
+değerlendirme tarafından görünen hâli.
+
+## Perplexity'nin size söylemedikleri
+
+Sayma çağını geride bırakmadan önce, yayımlanmış pek çok sayıyı —
+aralarında sizden yeniden üretmeniz istenecek olanlar da var — yanlış
+okumanızı önleyecek bir uyarı.
+
+Perplexity sözlüğe bağlıdır. Sözlüğün dışında kalan her kelime `<unk>`
+olur ve `<unk>` *sık* geçen bir semboldür, dolayısıyla kestirmesi
+kolaydır. Sözlüğü küçültürseniz zor kestirimleri kolaylarıyla değiştirmiş
+olursunuz. Aşağıda aynı Kneser-Ney trigram modeli, aynı kod, aynı test
+yorumları var; değişen tek şey bir kelimenin sözlükte tutulması için
+gereken sıklık eşiği:
+
+```text
+### one model, one test set, eight vocabularies
+min_count    vocab    test <unk>    perplexity
+    1       72,089        5.21%          752.5
+    2       29,773        7.42%          333.5
+    3       20,090        9.00%          281.6
+    5       12,839       11.36%          222.6
+   10        7,275       15.17%          157.8
+   25        3,460       21.56%           94.3
+  100        1,057       34.58%           38.0
+  500          199       54.83%           10.9
+```
+
+**Test kümesindeki kelimelerin yarısından fazlasını adlandıramayan bir
+model 10,9 perplexity bildiriyor.** Bu bir zafer gibi görünüyor ama
+aslında bir yan etki: "kestirimlerinin" %54,8'i tek ve kolay bir tahmin,
+`<unk>`. Widget'ın son cümlesinin sayısal hâli tam olarak bu —
+`uyuyakaldı` 2,5 bit aldıysa bunun sebebi modelin bir şey anlaması değil,
+denemeyi bırakmasına izin verilmiş olması.
+
+En üstteki satıra da dikkat edin. Tek kez geçen (hapax) kelimelerin
+hepsini tutmak, onları atmaktan *daha kötü* sonuç veriyor: 752,5.
+Yani eşikleme için gerçek bir modelleme gerekçesi de var, eşikleyerek
+hile yapmanın bir yolu da. İkisi yalnızca perplexity'ye bakarak
+birbirinden ayırt edilemez. Mesele de bu.
+
+Yani: **iki perplexity ancak iki model aynı sözlüğü ve aynı
+tokenizasyonu paylaşıyorsa karşılaştırılabilir.** Farklı tokenizer'lar
+arasında karşılaştırma sadece haksız değil, tanımsızdır; çünkü paydadaki
+$N$ farklı şeyleri sayar — modern makalelerin bayt başına bit
+bildirmesinin ya da sözlüğü dondurulmuş sabit bir benchmark üzerinde
+raporlamasının sebebi budur [@chelba2014billion]. Bir gün bir model
+sıralama tablosuyla (leaderboard) karşılaştığınızda ona soracağınız ilk
+soru bu olsun.
+
+::: {.column-margin}
+Uyarının daha derin hâli: perplexity, bir modelin metni ne kadar iyi
+kestirdiğini ölçer; bu, modelin *işe yarar* olup olmadığıyla aynı şey
+değildir. Bir model ürün yorumlarının sonraki token'ını kestirmede
+mükemmel olup, bir yorum hakkında sorulan soruyu yanıtlayamayabilir.
+@sec-egitim-sonrasi baştan sona bu iki şey arasındaki uçuruma dair.
+:::
+
+## Sinirsel dil modelleri
+
+Buraya kadarki bütün başarısızlıkların tek bir sebebi var. `kargo` ile
+`teslimat` neredeyse aynı anlama geliyor, ama bir sayım tablosu için
+bunlar birbiriyle alakasız iki karakter dizisi. Biri hakkında öğrenilen
+hiçbir şey diğerine aktarılmıyor. Bu, @sec-gommeler bölümünün
+şikâyetinin olasılıksal bir ortamda yeniden karşımıza çıkması: modelin
+iki bağlamın *benzer* olduğunu söyleyecek bir yolu yok.
+
+Bengio ve arkadaşları [@bengio2003neural], bugün bütün alanın üzerinde
+yürüdüğü çözümü önerdi. Markov varsayımını koruyun — önceki $n-1$
+kelimeye koşullanın — ama bu kelimelere sembol muamelesi yapmayı bırakın.
+Bunun yerine:
+
+1. **Her bağlam kelimesi için yoğun bir vektör alın.** Bunlar
+   @sec-gommeler bölümündeki embedding'lerdir; tek fark, kimsenin onları
+   ayrıca eğitmemesi: bunlar dil modelinin parametreleridir ve kestirim
+   hedefinden backpropagation ile öğrenilirler.
+2. **Bu vektörleri birleştirip bir gizli katmandan geçirin**; böylece
+   model bir tablodaki hücreye bakmak yerine bağlamın düzgün (smooth) bir
+   fonksiyonunu hesaplar.
+3. **Sözlük üzerinde bir softmax'e izdüşürün**; bu, sonraki kelime
+   üzerinde geçerli bir olasılık dağılımı verir.
+
+İlişkili kelimeler arasında kanıt paylaşma fikri yeni değildi — Brown ve
+arkadaşları [@brown1992class] sayımların bir havuzda toplanabilmesi için
+kelimeleri çoktan katı sınıflara ayırmıştı. Bengio ve arkadaşlarının
+değiştirdiği şey, gruplamanın *yumuşak*, *öğrenilmiş* ve *sürekli*
+olması: hiçbir kelimenin tam olarak tek bir sınıfa atanması gerekmiyor ve
+benzerlik bir derece meselesi.
+
+Sonuç, meselenin ta kendisi. Model bağlam vektörlerinin *sürekli* bir
+fonksiyonu olduğu ve `kargo` ile `teslimat` birbirine yakın vektörlere
+yerleştiği için, model zorunlu olarak bu ikisine benzer kestirimler
+verir. [Benzer bağlamlar arasında genelleme sonradan eklenmiş bir özellik
+değildir; bir arama tablosunu düzgün bir fonksiyonla değiştirmenin
+matematiksel sonucudur.]{.hl}
+
+PyTorch'ta modelin tamamı dokuz satır:
+
+```python
+class NNLM(nn.Module):
+    def __init__(self, V, ctx, emb=64, hid=256, drop=0.5):
+        super().__init__()
+        self.emb = nn.Embedding(V, emb)
+        self.net = nn.Sequential(
+            nn.Linear(ctx * emb, hid), nn.Tanh(), nn.Dropout(drop),
+            nn.Linear(hid, V))
+
+    def forward(self, x):              # x: (batch, ctx) kelime id'leri
+        return self.net(self.emb(x).flatten(1))
+```
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Düzgün bir fonksiyon, bir tablonun genelleyemediği yerde neden genelliyor</div>
+<svg viewBox="0 0 760 342" style="max-width:740px" role="img"
+     aria-label="Solda, bir sayım tablosu kargo bağlamı ve teslimat bağlamı için ayrı satırlar tutuyor; aralarında hiçbir yol yok, bu yüzden biri hakkındaki kanıt diğerine hiç ulaşmıyor. Sağda, sinirsel bir model iki kelimeyi de embedding uzayında birbirine yakın noktalara eşliyor, ortak bir gizli katmandan geçiriyor ve benzer dağılımlar üretiyor; böylece kanıt kendiliğinden paylaşılıyor.">
+  <defs>
+    <marker id="nn-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="nn-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="16" y="22" class="t-sm t-b">SAYIM TABLOSU</text>
+  <text x="16" y="40" class="t-xs t-muted">İKİ SATIR, HİÇ BAĞLANTI YOK</text>
+
+  <rect x="16" y="56" width="120" height="34" rx="7" class="box"/>
+  <text x="76" y="78" class="t-mono t-sm t-mid">kargo</text>
+  <rect x="16" y="104" width="120" height="34" rx="7" class="box"/>
+  <text x="76" y="126" class="t-mono t-sm t-mid">teslimat</text>
+
+  <line x1="138" y1="73" x2="196" y2="73" class="ln" marker-end="url(#nn-a)"/>
+  <line x1="138" y1="121" x2="196" y2="121" class="ln" marker-end="url(#nn-a)"/>
+
+  <rect x="200" y="52" width="128" height="42" rx="7" class="box"/>
+  <text x="264" y="70" class="t-xs t-mid t-muted">SATIR 1 — 2.472 GÖZLEM</text>
+  <text x="264" y="86" class="t-xs t-mid">kendi dağılımı</text>
+  <rect x="200" y="100" width="128" height="42" rx="7" class="box"/>
+  <text x="264" y="118" class="t-xs t-mid t-muted">SATIR 2 — 391 GÖZLEM</text>
+  <text x="264" y="134" class="t-xs t-mid">kendi dağılımı</text>
+
+  <line x1="160" y1="90" x2="160" y2="104" class="ln-dash"/>
+  <text x="172" y="99" class="t-xs t-rose t-b">YOL YOK</text>
+
+  <line x1="372" y1="30" x2="372" y2="312" class="ln-thin"/>
+
+  <text x="404" y="22" class="t-sm t-b">SİNİRSEL MODEL</text>
+  <text x="404" y="40" class="t-xs t-muted">TEK FONKSİYON, ORTAK PARAMETRELER</text>
+
+  <rect x="404" y="56" width="112" height="86" rx="9" class="box-accent"/>
+  <text x="460" y="76" class="t-xs t-mid t-muted">EMBEDDING UZAYI</text>
+  <circle cx="440" cy="104" r="4" class="head-accent"/>
+  <circle cx="452" cy="112" r="4" class="head-accent"/>
+  <text x="470" y="104" class="t-xs t-accent">kargo</text>
+  <text x="478" y="120" class="t-xs t-accent">teslimat</text>
+  <text x="460" y="136" class="t-xs t-mid t-muted">YAKIN = BENZER</text>
+
+  <line x1="518" y1="99" x2="556" y2="99" class="ln-accent" marker-end="url(#nn-b)"/>
+
+  <rect x="560" y="66" width="80" height="66" rx="9" class="box-accent"/>
+  <text x="600" y="94" class="t-xs t-mid">gizli</text>
+  <text x="600" y="110" class="t-xs t-mid t-muted">tanh</text>
+
+  <line x1="642" y1="99" x2="676" y2="99" class="ln-accent" marker-end="url(#nn-b)"/>
+
+  <rect x="680" y="66" width="64" height="66" rx="9" class="box"/>
+  <text x="712" y="94" class="t-xs t-mid">softmax</text>
+  <text x="712" y="110" class="t-xs t-mid t-muted">29,774</text>
+
+  <text x="404" y="168" class="t-xs t-accent t-b">BİR VEKTÖRÜ OYNATIN, İKİ KESTİRİM BİRDEN OYNAR.</text>
+
+  <line x1="16" y1="196" x2="744" y2="196" class="ln-thin"/>
+  <text x="16" y="218" class="t-sm t-b">UMDUĞUMUZ DEĞİL, ÖLÇTÜĞÜMÜZ</text>
+  <text x="16" y="240" class="t-sm">Bu derlemde paylaşım <tspan class="t-b">yalnızca zaten bir miktar kanıt olan yerde</tspan> işe yarıyor.</text>
+  <text x="16" y="262" class="t-sm">Eğitimde görülen bağlamlar: sinirsel <tspan class="t-accent t-b">265,9</tspan>, Kneser-Ney'i <tspan class="t-b">273,1</tspan> ile geçiyor.</text>
+  <text x="16" y="284" class="t-sm">Hiç görülmemiş bağlamlar: sinirsel <tspan class="t-rose t-b">554,4</tspan>, Kneser-Ney'e <tspan class="t-b">526,7</tspan> ile <tspan class="t-b">kaybediyor</tspan>.</text>
+  <text x="16" y="310" class="t-xs t-muted">DERS KİTABI ANLATISI, SİNİRSEL MODELLERİN YENİ BAĞLAMLARDA KAZANDIĞIDIR. BURADA KAZANMIYORLAR. AŞAĞIYA BAKIN.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Sağdaki mekanizma gerçek ve bu bölümün ilerisinde iki modelin bu kadar
+faydalı biçimde birleştirilebilmesinin sebebi de o. Ama ölçülen fayda,
+standart anlatının vaat ettiğinden başka bir yere düşüyor; iddia etmek
+yerine ölçmeye değmesinin sebebi de bu.
+:::
+::::
+
+### İlk deneme bir başarısızlıktı
+
+Yukarıdaki ayarlarla ve `drop=0.2` ile eğitildiğinde model, Kneser-Ney
+trigram'ının **333,5**'ine karşı **429,0** test perplexity'sine ulaştı.
+Daha kötüsü, eğitim eğrisi sebebini apaçık söylüyordu:
+
+```text
+epoch  train ppl   dev ppl
+    2      456.6     432.7
+    3      297.1     430.0   <- best dev
+    4      219.8     448.4
+    5      177.6     467.5   early stop
+```
+
+Eğitim perplexity'si dibe vururken dev perplexity'si 3. epoch'ta geri
+dönüyor. Bu, ders kitabı tanımıyla overfitting (aşırı uyum): 896.000
+eğitim olayına karşı 9,6 milyon parametre, yani örnek başına kabaca on
+bir parametre. Bu tek denemeye dayanarak "sinirsel dil modelleri
+Kneser-Ney'e kaybediyor" diye yayın yapmak, hiperparametre seçimlerim
+hakkındaki bir ifadeyi mimariler hakkında bir ifade kılığına sokmak
+olurdu.
+
+Dolayısıyla dürüst olan bir sonraki adım bir arama yapmak — **dev**
+kümesi üzerinde, test kümesine sona kadar hiç dokunmadan.
+
+```text
+### 7 configurations, ranked by dev perplexity
+ctx   emb   hid   drop        params       dev      test
+  2    32   128    0.5     4,801,934     329.8     332.4
+  2    64   256    0.5     9,590,478     362.5     362.6
+  3    64   256    0.5     9,606,862     366.0     365.3
+  2    64   256    0.2     9,590,478     430.0     429.0
+  2   128   512    0.5    19,216,718     432.1     436.4
+  3   128   512    0.5    19,282,254     479.6     483.1
+  5   128   512    0.5    19,413,326     541.4     548.8
+```
+
+Bu tabloyu aşağıdan yukarıya okuyun, çünkü asıl ders sıralamada.
+[Kapasitede atılan her *geri* adım, kalitede bir ileri adım oldu.]{.hl}
+Denenen en büyük model — beş kelimelik bağlam ve 19,4 milyon parametre —
+548,8 ile sayfadaki en kötü şey; add-k trigram'ından bile kötü. Kazanan
+ise denenen en küçük model: iki kelimelik bağlam, 32 boyutlu
+embedding'ler, 128 birimlik bir gizli katman.
+
+Bu, @sec-karsilastirma bölümündeki dersin başka bir kapıdan girmiş hâli.
+Otuz sekiz bin yorum küçük bir derlem. Küçük bir derlemde bağlayıcı kısıt
+kapasite değil veridir; fazladan parametre size eğitim kümesini
+ezberlemenin daha hızlı bir yolundan başka bir şey kazandırmaz. `ctx=5`
+satırı bunun en net örneği: modele daha çok bağlam vermek onu kesinlikle
+kötüleştirdi, çünkü elinde o bağlamı kullanacak daha fazla kanıt yoktu.
+
+### Sonuç, dürüstçe söylenirse
+
+```text
+                          test ppl    stored numbers
+Kneser-Ney trigram           333.5         1,087,421 counts
+neural, ctx=2 32/128         332.4         4,801,934 parameters
+```
+
+**Bu bir beraberlik, zafer değil.** %0,3'lük bir fark gürültünün epey
+içinde kalır ve bunun için sözüme güvenmenize gerek yok: aynı
+yapılandırmayı hiçbir şey değiştirmeden yeniden eğitmek, 332,4 yerine
+330,3 test değeri verdi. [Denemeden denemeye değişkenlik, zafer
+payından daha büyük.]{.hl} Bunu "sinirsel model kazanıyor" diye bildiren
+biri fazlasını iddia ediyordur; bunu yakalamanın ucuz yolu da burada
+kullanılan yol — modeli iki kez eğitin.
+
+İkinci sütuna da dikkat edin, çünkü sinirsel modellerin daha derli toplu
+olduğu yolundaki bilindik iddia *burada yanlış*: sinirsel model, ancak
+başa baş kalabildiği sayım tablosunun dört buçuk katı sayı saklıyor ve
+bir saniye yerine iki dakikada eğitiliyor.
+
+Bu da bariz soruyu doğuruyor — o zaman ne diye uğraştık? İki cevabı var
+ve asıl önemlisi ikincisi.
+
+### Sinirsel modelin üstünlüğü aslında nerede yatıyor
+
+Test olaylarını, iki kelimelik bağlamın eğitimde hiç görülüp
+görülmediğine göre ikiye ayırın. İki model de tam olarak aynı iki
+kelimeye koşullandığı için bu adil bir bölme:
+
+```text
+                        events      KN    neural    mixture
+all                    239,055   333.5     332.4      274.4
+context seen           166,375   273.1     265.9      227.4
+context unseen          72,680   526.7     554.4      421.8
+```
+
+Son iki satıra bakın, çünkü büyük ihtimalle size öğretilenin tam tersini
+söylüyorlar. Modelin daha önce gördüğü bağlamlarda sinirsel model
+kazanıyor — 273,1'e karşı 265,9. *Hiç* görmediği bağlamlarda ise sinirsel
+model **kaybediyor**, hem de az farkla değil: 526,7'ye karşı 554,4.
+
+[Genelleme anlatısı bu derlemde tersine dönüyor.]{.hl} Yeni bağlamlarla
+daha iyi başa çıkan taraf, smoothing uygulanmış sayım modeli; çünkü
+Kneser-Ney'in backoff'u tam olarak bu duruma verilmiş, özenle
+tasarlanmış bir cevap — elinizde kanıt yoksa, bir kelimenin kaç *farklı*
+bağlamı tamamladığına geri çekilirsiniz. Sinirsel model ise hiç görmediği
+bir bağlamla karşılaştığında, kendisi de seyrek ve gürültülü sayımlardan
+kestirilmiş bir embedding geometrisinden dışdeğerleme yapıyor ve bu
+dışdeğerleme iyi bir backoff kuralından daha kötü.
+
+Bunun gerçekleştiğini modelin kendi belirsizliğinde izleyebilirsiniz:
+
+```text
+### neural model, mean predictive entropy
+context seen      7.42 bits  =  171.2 effective choices
+context unseen    7.83 bits  =  228.0 effective choices
+```
+
+Model başının dertte olduğunu biliyor — çekimser davranıp olasılık
+kütlesini daha çok kelimeye yayıyor. Sadece, bu iş için özel olarak
+tasarlanmış bir backoff kadar iyi çekimser davranamıyor.
+
+Bu bulguyu ne kadar ileri taşıdığınıza dikkat edin. Bu, **bu ölçekteki bu
+derlem** hakkında bir sonuç: 896.000 eğitim olayı, 29.774 kelimelik bir
+sözlük ve iki kelimelik bağlamı olan ileri beslemeli bir model.
+@sec-on-egitim bölümündeki ölçeklerde tablo tersine döner; alanın
+gittiği yönün sebebi de budur. Bu sonucun kalıcı olarak kanıtladığı şey
+şu: "sinirsel modeller daha iyi genelliyor" iddiası, ders kitabından
+varsayılacak değil, kendi verinizde ölçülecek bir iddiadır.
+
+### Sinirsel modelleri kalıcı kılan hamle
+
+Bölünmüş tablodan çıkan gözlem şu: iki model *farklı şeylerde* iyi. Bu,
+birini seçmek için bir sebep değil; ikisini birden kullanmak için bir
+sebep. İki dağılımı karıştırın ve tek karışım ağırlığını dev kümesinde
+belirleyin:
+
+$$
+P(w \mid h) = \lambda \, P_{\text{KN}}(w \mid h) + (1 - \lambda) \, P_{\text{NN}}(w \mid h)
+$$
+
+```text
+### dev perplexity against lambda (weight on Kneser-Ney)
+0.0   329.8      0.4   272.2      0.8   283.3
+0.1   296.7      0.5   270.9  <-  0.9   296.4
+0.2   283.6      0.6   272.1      1.0   327.9
+0.3   276.2      0.7   276.0
+```
+
+Eğri $\lambda = 0{,}50$'de dibe vuruyor — iki model eşit ağırlık alıyor,
+ki bu başlı başına hiçbirinin diğerine üstün gelmediğinin ifadesi. Test
+kümesini en sonda, tek seferde okuyunca:
+
+```text
+Kneser-Ney trigram    333.5
+neural                332.4
+50/50 mixture         274.4      -17.7% against the better of the two
+```
+
+**Tek tek berabere kalan iki modelden perplexity'de %18'lik bir
+düşüş.** Bu bir numara değil; sinirsel dil modellerini 2000'ler boyunca
+hayatta tutan sonuç bu. O yıllarda bu modeller tek başlarına iyi
+ayarlanmış bir n-gram modeliyle ancak yarışabiliyor ve eğitilmeleri epey
+daha pahalıya geliyordu. Bengio ve arkadaşları 2003'te aynı yapıda bir
+bulgu bildirmişti [@bengio2003neural]; sonraki on yıl boyunca güçlü olan
+her sistem, bir sayım modeliyle aradeğerlenmiş bir sinirsel modeldi
+[@mikolov2010recurrent].
+
+Karışım en çok da, bölünmüş tablonun iki modelin en çok ayrıştığını
+söylediği yerde işe yarıyor: görülmemiş bağlamlarda, tek başına daha iyi
+olan modeli %20 iyileştiriyor — 526,7'den 421,8'e.
+
+### Sayım modelinin asla yapamayacağı iki şey
+
+Perplexity'deki beraberlik sinirsel modeli olduğundan kötü gösteriyor,
+çünkü modelin iki özelliği perplexity'de hiç görünmüyor.
+
+**Birincisi, embedding'ler.** Kimse onları istemedi. Bir dil modelini
+eğitmenin yan ürünü olarak ilk katmandan kendiliğinden düşüyorlar.
+Kosinüs benzerliğine göre en yakın komşular, her kelimenin eğitimdeki
+sıklığıyla birlikte:
+
+```text
+güzel      (7547x)  harika, hoş, kaliteli, kaçırılmıyacak, kullanışlı
+hızlı      (3856x)  zamanında, hizli, mikemmel, hizlı, ücretsiz
+kargo      (2472x)  teslimat, gönderi, gönderim, kargolama, teslimatı
+telefon    (1977x)  makina, alet, ürün, kavrayışı, pil
+beğendim   ( 657x)  kaldım, getirebiliyorsunuz, memnunuz, memnunum
+iade       ( 158x)  rica, ade, istop, verem, iptal
+kalitesiz  ( 143x)  konsantre, lezzetlı, kapıdaydı, minicik, fileli
+```
+
+`kargo` satırı, bu bölümün vaadinin harfiyen yerine gelmiş hâli:
+`teslimat`, `gönderi`, `gönderim`, `kargolama`, `teslimatı` — model,
+Türk e-ticaretinin kargo sözlüğünü yalnızca sonraki kelimeyi kestirmeye
+çalışarak keşfetti. Bir de `hızlı` ile `tavsiye`ye bakın: komşuları
+arasında `hizli`, `hizlı`, `tevsiye`, `tafsiye`, `tasviye` var. **Model,
+bir kelimenin yazım hatalarının aynı kelime olduğunu öğrendi**, çünkü
+bunlar aynı yerlerde geçiyor. Hiçbir sayım tablosu bunu yapamaz; bir
+sayım tablosu için `hızlı` ile `hizli`, `hızlı` ile `kedi` kadar
+alakasızdır.
+
+Şimdi sıklık sütununu yukarıdan aşağı okuyun, çünkü bu bölümün
+dürüstlüğü buna bağlı. Komşular 7.547 geçişte mükemmel, 2.472'de iyi,
+657'de zayıf; 143 geçişte ise `kalitesiz` kelimesi `konsantre`,
+`lezzetlı`, `kapıdaydı` döndürüyor — gürültü. [Embedding'ler sihir
+değildir; kılık değiştirmiş sayımlardır]{.hl} ve altlarındaki
+sayımlarla birlikte, tam da @sec-gommeler bölümünde bulunduğu gibi
+bozulurlar. İstatistiksel gücün paylaşılması gerçek bir şey, ama bir
+tabanı var.
+
+**İkincisi ve daha önemlisi: sinirsel model kopyalamıyor.**
+
+```text
+### 8-word spans found verbatim in the training corpus
+5-gram model    91.6%
+neural, ctx=2    0.0%   (of 2,989 spans generated)
+```
+
+Sinirsel modelden örnekleme, seed 7:
+
+```text
+fiyatına göre süper bir makina hiç bir kalite herkese tavsiye ederim…
+sevimli hediye olarak aldım çok güzel çıktı olduğunu göreceksiniz…
+her gün bu <unk> bütün fonksiyonları bir verilen parayı hak ediyor…
+```
+
+Bu metin 5-gram'ın çıktısından daha kötü — dağılıyor ve bir iki yan
+cümleden sonra ipin ucunu kaçırıyor. Ama **ürettiği 2.989 sekiz kelimelik
+parçanın bir tanesi bile eğitim verisinin hiçbir yerinde geçmiyor.**
+5-gram modeli akıcılığını hazır parçaları geri getirerek elde ediyordu;
+bu model ise aynı perplexity'de cümleyi kendisi kuruyor. Yoruma
+benzemekte daha kötü, ama ikisi arasında ileride gerçek bir üretime
+dönüşebilecek bir şey yapan tek model o.
+
+Bu bölümün adım adım yaklaştığı takas bu ve Kısım II'nin var olma sebebi
+de bu. Kopyaladığı için akıcı olan bir modelle, cümleyi kendisi kurduğu
+için beceriksiz kalan bir model arasında seçim yapmak gerektiğinde,
+[bütün alan beceriksiz olanın üstüne oynadı]{.hl} — sonradan görüldüğü
+gibi haklı olarak, çünkü beceriksiz olan ölçekle iyileşiyor, kopyalayan
+iyileşemiyor.
+
+Son olarak, @sec-karsilastirma bölümündeki cümle çifti, son bir kez
+puanlanmış hâliyle:
+
+```text
+### log10 P(sentence), neural model
+kalite iyi fiyat kötü    -11.069
+kalite kötü fiyat iyi    -11.262    ratio 1.561
+```
+
+Beraberliği doğru yönde bozuyor, ama Kneser-Ney'in 2,933'ünden daha
+zayıf biçimde. Dört yaygın kelimeden kurulmuş dört kelimelik cümlelerde
+sayma hâlâ daha iyi bir araç. 4. bölümün açık bıraktığı soru kapandı ve
+cevap, kurgunun ima ettiği kadar zafer dolu değil — cevap zaten bu.
+
+## Pencereden duruma
+
+Bu bölümdeki her şeye rağmen ayakta kalan bir sınırlama var. Buraya
+kadarki her model — sayım tabanlı olsun, sinirsel olsun — **sabit
+boyutlu bir pencereye** koşullanıyor. Taramanın `ctx=5` satırı, bu
+pencereyi kaba kuvvetle genişletmenin bedelini gösterdi: parametre sayısı
+pencereyle birlikte büyüyor, parametre başına düşen kanıt azalıyor ve
+kalite düşüyor.
+
+Recurrent (yinelemeli) ağlar [@elman1990finding] pencereyi ortadan
+kaldırır. $n-1$ embedding'i birleştirmek yerine, kelimeleri teker teker
+işleyip bir gizli durumu (hidden state) ileri taşırlar:
+
+$$
+h_t = \tanh(W_{h} h_{t-1} + W_{x} x_t), \qquad
+P(w_{t+1} \mid w_1 \ldots w_t) = \operatorname{softmax}(W_o h_t)
+$$
+
+Koşullama çizgisinin sağında artık önekin *tamamı* var. Markov varsayımı
+— bu bölümün ilk şeklindeki tek yaklaşıklık — ortadan kalktı. Mikolov ve
+arkadaşlarının [@mikolov2010recurrent] dil modellemesine uyguladığı bu
+yaklaşım, günün en iyi n-gram sistemlerini geçti; LSTM'ler
+[@hochreiter1997long] ise uzun menzilli gradyanları pratikte
+eğitilebilecek kadar ehlileştirdi.
+
+Ama $h_t$'nin ne olmak zorunda olduğuna yakından bakın. Sabit boyutlu tek
+bir vektör ve keyfî uzunlukta bir geçmişten gelen her şeyi taşımak
+zorunda. [Pencereyi kaldırmak darboğazı kaldırmadı; yerini
+değiştirdi.]{.hl} Kısıt "yalnızca son dört kelimeye bakabilirsin"
+olmaktan çıkıp "kelime kelime sıkıştırarak 512 sayıya ne sığıyorsa onu
+hatırlayabilirsin" hâline geldi. Üstelik $h_t$, $h_{t-1}$'e bağlı olduğu
+için hesaplama doğası gereği sıralı — bin token'lık bir belge,
+paralelleştirilemeyen bin adım demek; modern donanımda ölümcül bir
+özellik.
+
+Demek ki iki darboğaz var: bir sıkıştırma darboğazı ve bir sıralılık
+darboğazı. @sec-transformerlar bölümü, birinin bu ikisini aynı anda
+kaldırmasıyla olanları anlatıyor: her konumun, hiçbir sıkıştırma ve
+yineleme olmadan doğrudan kendinden önceki her konuma bakmasına izin
+vererek. Bu bölümdeki her şey, bunu yapmanın neden değdiğinin
+gerekçesi.
+
+## Aralarında seçim yapmak
+
+| | n-gram + Kneser-Ney | İleri beslemeli sinirsel LM |
+|---|---|---|
+| Buradaki test perplexity'si | [333,5]{.pro} | [332,4]{.pro} |
+| Eğitim süresi | [~1 saniye]{.pro} | [~2 dakika]{.con} |
+| Yeni bağlamlar | [daha iyi — 526,7]{.pro} | [daha kötü — 554,4]{.con} |
+| Görülmüş bağlamlar | [273,1]{.con} | [daha iyi — 265,9]{.pro} |
+| Yeni metin üretiyor mu | [hayır — %91,6 kopya]{.con} | [evet — %0,0 kopya]{.pro} |
+| Embedding veriyor mu | [hayır]{.con} | [evet, bedava]{.pro} |
+| Veri eklemek | [saniyeler içinde yeniden eğitilir]{.pro} | [dakikalar içinde yeniden eğitilir]{.con} |
+| Daha çok veriyle ölçeklenme | [doyuma ulaşır]{.con} | [iyileşmeye devam eder]{.pro} |
+| Hata ayıklanabilirlik | [sayımlara bakarsınız]{.pro} | [hiçbir şeye bakamazsınız]{.con} |
+
+: 38.000 Türkçe yorumda her modelin aslında ne işe yaradığı {tbl-colwidths="[30,35,35]"}
+
+Pratik okuma: **bu ölçekte n-gram modelini kullanın; gücünüz yetiyorsa
+ikisini birden kullanın.** Sinirsel model yerini bugünkü perplexity'siyle
+değil, en alttaki iki satırla hak ediyor — kopyalamak yerine cümleyi
+kendisi kuruyor ve ona yüz kat daha fazla veri verdiğinizde iyileşen tek
+model o.
+Bu, geleceğe oynanmış bir bahis ve bu bölüm, kitapta bahsin yatırıldığı
+an.
+
+## Sezgi kontrolleri
+
+::: {.callout-note collapse="true"}
+## Sinirsel dil modeliniz n-gram baseline'ınızı 40 puan geçiyor. Meslektaşınız tek bir soru soruyor. Nedir?
+
+"Sözlük aynı mı?" Perplexity yalnızca aynı sözlüğü ve aynı tokenizasyonu
+paylaşan modeller arasında karşılaştırılabilir. *Perplexity'nin size
+söylemedikleri* bölümündeki tablo, sıklık eşiğinden başka hiçbir şeyi
+değiştirmeden tek bir modeli 752,5'ten 10,9'a taşıdı. Sinirsel model 30
+binlik bir sözlükle, baseline ise 72 binlikle eğitildiyse, o 40 puan bir
+sonuç değil, `<unk>` oranının yan etkisidir.
+:::
+
+::: {.callout-note collapse="true"}
+## Taramayı neden en küçük sinirsel model kazandı?
+
+Çünkü 38.000 yorum küçük bir derlem ve bağlayıcı kısıt kapasite değil,
+kanıt. 19,4 milyon parametreli modelde eğitim olayı başına kabaca 22
+parametre düşüyordu; model eğitim kümesini ezberledi ve dev perplexity'si
+3. epoch'ta geri döndü. Model kapasitesi veri kümesinin büyüklüğüne göre
+seçilmeli; bunu da tarama yaparak öğrenirsiniz — kapasitede atılan her
+geri adım kalitede bir ileri adım olduysa, bu daha da geri adım atmanız
+gerektiğinin işaretidir.
+:::
+
+::: {.callout-note collapse="true"}
+## İki model 333'te berabere kalıyorsa, karıştırmak neden %18 kazandırıyor?
+
+Çünkü farklı şeylerde yanılıyorlar. Görülmüş ve görülmemiş bağlama göre
+yapılan bölme, sinirsel modelin tanıdık bağlamlarda önde (265,9'a karşı
+273,1), yeni bağlamlarda geride (554,4'e karşı 526,7) olduğunu
+gösteriyor. İki modelin ortalaması, hataları tam olarak
+ilişkili olmadığı sürece ikisini de geçer — karışım, her olayda hangi
+model doğruysa onu geri kazanır. Belirlenen $\lambda = 0{,}50$ değeri
+zaten kanıtın kendisi: veri, ikisinin aynı değerde olduğunu söylüyor.
+:::
+
+::: {.callout-note collapse="true"}
+## Bir 5-gram modeli akıcı Türkçe yazıyor. Bu neden iyi değil de kötü haber?
+
+Çünkü ürettiği sekiz kelimelik parçaların %91,6'sı eğitim verisinden
+birebir kopyalanmış. Bu akıcılık üretim değil, geri getirme. Sebebi
+seyreklik: eğitimdeki 5-gram'ların %98'i bir kez geçiyor, dolayısıyla
+dört kelimelik bir bağlam çoğu zaman tek bir devama izin veriyor — geçen
+sefer gelen devama. Bu aynı zamanda modelin bir intihal incelemesinden
+geçmeden kullanıcıya gösterilemeyeceği ve iyileşemeyeceği anlamına gelir;
+çünkü ortada iyileştirilecek bir şey yok.
+:::
+
+## Mülakat soruları
+
+::: {.callout-warning appearance="simple"}
+**Kaynak belirtme üzerine — @sec-metin-veri bölümündeki uyarının aynısı.**
+Bunlar, ikisi de ücretsiz olan iki güvenilir açık kaynakta tekrar tekrar
+karşımıza çıkan sorular:
+Chip Huyen'in [*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+kitabı [@huyen2021interviews] ve
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews).
+"X şirketinin sorduğu sorular" diye liste veren her sayfayı pazarlama
+sayın.
+:::
+
+1. **Perplexity'yi tanımlayın, sonra neyi ölçmediğini söyleyin.** Cevap,
+   token başına ortalama negatif log-olabilirliğin üssü — yani etkin
+   dallanma çarpanı. Ölçmedikleri: herhangi bir aşağı akış görevindeki
+   yararlılık ve sözlük ya da tokenizasyon değiştiğinde hiçbir şey.
+   Formülü verip susan adaylar sorunun yarısını cevaplamıştır.
+
+2. **Add-one smoothing neden bu kadar kötü başarısız oluyor?** Çünkü
+   olasılık kütlesini kanıtla değil, sözlük büyüklüğüyle orantılı olarak
+   dağıtıyor. `kargo` kelimesinden sonra 516 gözlenmiş, 29.257
+   gözlenmemiş devam var; dolayısıyla add-one olasılığın %92,3'ünü hiç
+   görülmemiş şeylere veriyor. Kusur smoothing yapması değil, ima ettiği
+   önselin (prior) fena hâlde yanlış olması.
+
+3. **Kneser-Ney'in devam sayımı, ham sayımın yapmadığı neyi yapıyor?**
+   Bir kelimenin ne sıklıkta geçtiğini değil, *kaç farklı bağlamı*
+   tamamladığını soruyor. `Francisco` sık geçiyor ama neredeyse her zaman
+   `San`'dan sonra geliyor; bu yüzden devam sayımı düşük ve yeni bir
+   bağlamda haklı olarak kötü bir tahmin oluyor. Ham sıklık bunu tam
+   tersine anlıyor.
+
+4. **Elinizde 10 milyon token var. 5-gram mı, sinirsel mi?** Beklenen
+   cevap bir karşı soru — görev ne? O ölçekte yalnızca perplexity söz
+   konusuysa, iyi ayarlanmış bir n-gram modeli rekabetçidir ve saniyeler
+   içinde eğitilir. Embedding'lere ihtiyacınız varsa, metnin geri
+   getirilmesi değil üretilmesi gerekiyorsa ya da derlemin kat kat
+   büyümesini bekliyorsanız sinirsel modeli seçin.
+
+5. **Alan neden RNN'leri bırakıp transformer'lara geçti?** İki darboğaz
+   var ve mülakatçıların duymak istediği cevap ikincisi. Sıkıştırma:
+   sabit boyutlu bir gizli durum, sınırsız bir geçmişi tutmak zorunda.
+   Sıralılık: $h_t$, $h_{t-1}$'e bağlı; dolayısıyla $T$ uzunluğunda bir
+   belge, paralelleştirilemeyen $T$ adıma mal oluyor ve bu, alanın tam da
+   satın almaya başladığı donanımı çöpe atıyor.
+
+6. **Bildirilen bir perplexity'nin dürüst olmadığını nasıl anlarsınız?**
+   Sözlük büyüklüğünü, test kümesindeki `<unk>` oranını ve tokenizer'ı
+   sorun. %54,8 `<unk>` oranıyla 10,9 perplexity bildiren bir model metni
+   değil, `<unk>`'ü kestiriyordur.
+
+## Daha derine inmek için
+
+- **Speech and Language Processing**, 3. bölüm [@jurafsky2025slp].
+  N-gram'ların, smoothing'in ve perplexity'nin klasik anlatımı; çevrimiçi
+  ücretsiz ve bu bölümdeki terimlerin çoğunun geldiği kaynak.
+- **An empirical study of smoothing techniques** [@chen1999empirical].
+  Hepsini düzgünce çalıştırarak hangi smoothing yönteminin kullanılacağı
+  sorusunu kapatan makale. Ampirik karşılaştırmanın nasıl yapılacağına
+  dair bir örnek.
+- **A neural probabilistic language model** [@bengio2003neural]. Artık
+  kendiniz bir tane kurduğunuza göre okumaya değer: 1. bölümdeki
+  argüman, tam olarak yukarıdaki güç paylaşımı argümanı — üstelik onu
+  ikna edici biçimde gösterecek donanım daha ortada yokken yazılmış.
+- **Prediction and entropy of printed English** [@shannon1951prediction].
+  Yetmiş beş yaşında ve bir dil modelinin ne işe yaradığına dair hâlâ en
+  net ifade.
+- **Recurrent neural network based language model**
+  [@mikolov2010recurrent]. N-gram modelini pratikte emekliye ayıran
+  makale. Sonuç tablosu için okuyun: RNN açık ara kazanıyor ve bir n-gram
+  modeliyle aradeğerlendiğinde daha da fazla kazanıyor — yani bu
+  bölümdeki 50/50 sonucunun daha büyük ölçekteki hâli.
+- **KenLM** [@heafield2011kenlm]. Bir gün üretimde n-gram modeline
+  ihtiyacınız olursa — cihaz üstü konuşma tanıma ve klavye kestirimi için
+  hâlâ oluyor — kullanılacak gerçekleme budur.
+
+## Alıştırmalar
+
+1. **Felaketi yeniden üretin.** Bigram MLE modelini kurun ve sıfır
+   olasılık atadığı ilk test bigram'ını bulun. İki kelimeyi yazdırın.
+   Sonra "smoothing" kelimesini kullanmadan, ne kadar Türkçe yorum verisi
+   eklerseniz ekleyin bu tür olayların neden ortadan kalkmayacağını
+   açıklayın.
+2. **Add-one otopsisi.** `kargo` bağlamı için, add-one'ın 516 gözlenmiş
+   devama ve diğer 29.257'ye toplamda ne kadar olasılık verdiğini
+   hesaplayın. Sonra bu iki kütlenin eşitlendiği $k$ değerini bulun ve
+   ayarlanmış $k = 0{,}003$ ile karşılaştırın.
+3. **Geçiş noktasını kaydırın.** Aradeğerleme ağırlıkları 4-gram'lara
+   0,0001 veriyor. Modeli 5.000 yorumla ve 38.000 yorumun tamamıyla
+   yeniden eğitin, belirlenen $\lambda$ değerlerinin derlem büyüklüğüyle
+   nasıl değiştiğini çizdirin. Hangi derlem büyüklüğünde 4-gram'ların
+   ağırlıklarını hak etmeye başlayacağını kestiriyorsunuz?
+4. **Perplexity'yi bilerek kırın.** Sözlük tablosunu yeniden üretin,
+   sonra modelinizin bir okurun oyunu fark etmesini sağlayacak iki
+   cümlelik tanımını yazın. Bu, kodlama alıştırması olduğu kadar bir
+   yazma alıştırması.
+5. **Kopyalamayı ölçün.** Birebir parça ölçümünü 4-gram ve 6-gram'lara
+   genişletin ve kopyalama oranını $n$'e karşı çizdirin. Bölüm $n=3$ için
+   %5,8, $n=5$ için %91,6 bildiriyor; eğrinin keskin biçimde yukarı
+   döndüğü yeri bulun ve bu konumu seyreklik tablosundaki tek geçişli
+   (singleton) yüzdeleriyle açıklayın.
+6. **Bölmeyi yeniden üretin.** Görülmüş/görülmemiş bağlam tablosunu
+   yeniden hesaplayın, ama test olaylarını bağlamın görülüp görülmediğine
+   göre değil, *hedef kelimenin sıklığına* göre ayırın. Sinirsel modelin
+   üstünlüğü sık kelimelerde mi, nadir kelimelerde mi yatıyor? Cevabı,
+   embedding'lerin istatistiksel gücü paylaştığı iddiasını desteklemek ya
+   da çürütmek için kullanın.
+7. **Karışımı bozun.** 50/50 aradeğerleme perplexity'yi %18 düşürdü.
+   Bunun yerine Kneser-Ney'i *farklı seed'le eğitilmiş ikinci bir*
+   sinirsel modelle aradeğerleyin ve kazancı bildirin. %18'in ne kadarı
+   iki farklı model ailesini birleştirmekten, ne kadarı sıradan bir
+   topluluk (ensemble) etkisinden geliyor?
+8. **Türkçeye özgü bir sınama.** Türkçede olumsuzluk bir ektir; bu yüzden
+   `beğendim` ile `beğenmedim` farklı kelimelerdir. Her modelin olumlu
+   bir bağlamdan sonra olumsuz biçime ne kadar olasılık kütlesi verdiğini
+   ölçün ve bunu, bir n-gram modelinin Türkçe olumsuzluğunu İngilizce
+   karşılığından daha iyi mi yoksa daha kötü mü ele aldığını
+   tartışmak için kullanın.
+9. **Diğer yön.** Aynı yorumlar üzerinde *karakter* düzeyinde bir n-gram
+   modeli eğitin. Perplexity'sini bildirin, bu sayının bu bölümdeki
+   hiçbir sayıyla karşılaştırılamayacağını açıklayın ve sonra
+   karşılaştırılabilecek bir nicelik bulun.
