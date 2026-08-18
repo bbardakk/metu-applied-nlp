@@ -1,6 +1,2922 @@
 # Metin Sınıflandırma {#sec-siniflandirma}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Bölüm durumu: çevriliyor.** Bu bölümün Türkçesi hazırlanıyor. Tam ve güncel
-metin için [İngilizce sürüme](../../en/chapters/12-classification.html) bakabilirsiniz.
+**Bölüm durumu: taslak yazıldı.** Bu sayfadaki her sayı, @sec-karsilastirma'nın
+*tam olarak aynı* ayrımı üzerinde ölçüldü — aynı 40.000 eğitim ve 10.000 test
+yorumu; yeniden çekilmiş değil, geri kazanılmış hâlleriyle. Nedenini
+@sec-siniflandirma-kurulum anlatıyor. @sec-siniflandirma-llm ve
+@sec-siniflandirma-kesisim'deki LLM karşılaştırmaları, aynı test diliminden
+tabakalandırılmış 2.000 belgelik bir altörneklem kullanıyor ve yarışan bütün
+modeller onun üzerinde yeniden puanlandı; @sec-siniflandirma-llm bunun nedenini
+ve çözünürlük olarak neye mal olduğunu söylüyor. Yazılım: Python 3.14.5 üzerinde
+`scikit-learn` 1.9.0, `transformers` 5.15.0, PyTorch 2.13.0,
+`imbalanced-learn` 0.14.2, `scipy` 1.18.0; encoder eğitimi bir Apple M serisi
+GPU'da; yerel LLM'ler `ollama` 0.24.0 üzerinden.
 :::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda şunları yapabileceksiniz:
+
+- daha büyük bir şeye uzanmadan önce güçlü seyrek baseline'ı kurmak ve onun
+  yalnızca en büyük etiket bütçesinde değil, her etiket bütçesinde ne getirdiğini
+  söylemek;
+- bir encoder'ı fine-tune etmek ve faturayı hak etmeye hangi bütçede başladığını
+  adlandırmak;
+- modeliniz iyileştiğinde kıpırdayan bir metrikle kıpırdamayan bir metriği
+  ayırt etmek;
+- sınıf dengesizliğini bir veri ameliyatı sorunu değil, bir karar eşiği sorunu
+  olarak ele almak ve bunu bir ölçümle savunmak;
+- modelinizin olasılık dediği sayının gerçekten olasılık olup olmadığını sınamak
+  ve olmadığında onarmak;
+- bir maliyet matrisini eşiğe çevirmek ve bunun tahmin yürütmeye göre ne kadar
+  tasarruf ettirdiğini söylemek;
+- fine-tune edilmiş küçük bir modelle prompt'lanan bir LLM arasında ölçülmüş
+  doğruluk, gecikme ve maliyete bakarak karar vermek;
+- hata analizini fıkra anlatmak yerine tekrarlanabilir bir süreç olarak
+  yürütmek.
+
+## Yenilmesi gereken tek sayı {#sec-siniflandirma-kurulum}
+
+@sec-karsilastirma bir lider tablosuyla bitmişti. Yedi temsil, 40.000 Türkçe
+ürün yorumu, 10.000'lik tek bir tutulan küme ve bir kazanan: kelime unigram ve
+bigram'ları üzerinde tf-idf, lojistik regresyona verilmiş hâliyle,
+**76,21 [macro-F1](#gloss-macro-f1){#term-macro-f1 .term-ref}** ile.
+Bu bölümün işi, onu geçmenin neye mal olduğunu ve her artışın neye değdiğini
+bulmak.
+
+::: {#gloss-macro-f1 .column-margin .term-gloss}
+**macro-F1** — F1 puanını her sınıf için ayrı hesaplayıp ağırlıksız
+ortalamalarını almak. Nadir bir sınıf, yaygın bir sınıf kadar sayılır; bu
+derlemde doğruluk sapasağlam dururken macro-F1'in dağılmasının nedeni tam olarak
+budur. [↩](#term-macro-f1){.term-back}
+:::
+
+Bu çerçeve yalnızca test kümesi *harfi harfine aynı* olduğunda işe yarar. Başka
+bir 10.000 yorum üzerinde puanlanan bir model, 76,21 ile yarışmıyor; kimsenin
+ölçmediği bir sayıyla yarışıyor. Dolayısıyla bu bölümün ilk işi
+@sec-karsilastirma'nın ayrımını yeniden kurmak ve doğrulamak oldu.
+
+Bu beklenenden zor çıktı ve zorluğun kendisi ilk ders.
+
+### Bir ayrımı parmak izinden geri kazanmak
+
+@sec-karsilastirma altörneklemini "50.000 satır, tabakalandırılmış, seed 42"
+diye kaydetmişti. @sec-kumeleme-konu da altörneklemini aynı şekilde kaydetti.
+İkisi de doğru. İkisi de farklı örneklem, çünkü "seed 42 ile tabakalandırılmış"
+bir yordamı adlandırmıyor — birbiriyle anlaşamayan bir yordam ailesini
+adlandırıyor.
+
+Ayrımı yeniden kurma yönündeki ilk deneme, altörneklemi @sec-kumeleme-konu'nun
+yaptığı gibi grup grup çekti ve şunu üretti:
+
+```text
+                             dims      acc   macroF1   negF1
+target (@sec-bake-off)    101,659    92.57     76.21   56.47
+groupby.sample            100,350    92.21     74.65   53.55
+```
+
+Manşetteki her istatistik yakın ve her biri yanlış. Bir okur bunu fark etmezdi;
+74,65 de 76,21 de "yaklaşık 75"e yuvarlanıyor. Ama vektörleştiricinin boyut
+sayısı bir istatistik değil, bir *parmak izi*: hayatta kalan 101.659 farklı
+n-gram, eğitim yarısında tam olarak hangi belgelerin bulunduğuna dair bir olgu.
+50.000 satırlık iki farklı örneklem bu sayıda kazara anlaşmaz.
+
+Bu yüzden o parmak izine karşı dört kuruluş denedik:
+
+```text
+                             dims      acc   macroF1   negF1
+target                    101,659    92.57     76.21   56.47
+groupby.sample            100,350    92.21     74.65   53.55
+train_test_split 50k      101,659    92.57     76.21   56.47   ← exact
+train_test_split + shuffle 102,221   92.26     75.20   54.63
+plain sample 50k          101,539    91.68     74.40   53.36
+```
+
+Biri dört sayının dördünde birden tutturdu. @sec-karsilastirma 50.000'liğini tek
+bir tabakalandırılmış `train_test_split` ile çekmiş ve aşağıdaki bütün deneyler o
+geri kazanılmış ayrım üzerinde koşuyor.
+
+::: {.column-margin}
+Kıl payı ıskalamaya dikkat edin. "plain sample 50k", hedefin 120 boyut ve 0,5
+doğruluk puanı yakınına düşüyor — dikkatsiz bir kontrolün kabul edeceği kadar
+yakın. [Tek bir istatistikte anlaşmak kanıt değildir; birbiriyle ilgisiz dört
+istatistikte aynı anda anlaşmak kanıttır]{.hl}. Bir gün birinin deney kurulumunu
+geri kazanmanız gerekirse, elinizde yazılı olan niceliği değil, sabitlemeye
+çalıştığınız şeye en duyarlı niceliği seçin.
+:::
+
+Yan ürün, *başka* bir bölüme yapılan bir düzeltme oldu. İki altörneklemi
+kesiştirmek, @sec-kumeleme-konu ile @sec-karsilastirma'nın 50.000 belgelerinin
+23.819'unu paylaştığını gösterdi — %47,6. İkisi de tabakalandırılmış, ikisi de
+seed 42 kullanıyor, ikisi de tam olarak 46.839 olumlu ve 3.161 olumsuz yorum
+içeriyor ve aynı derlemin yarısından azı ortak. @sec-kumeleme-konu'nun kenar
+notu artık bunu söylüyor. Hiçbir doğrulayıcı bunu yakalayamazdı; yalnızca iki
+kümeyi kesiştirip saymak yakalardı.
+
+### Ayrım ve bu bölümün eklediği dilim
+
+```text
+rows as downloaded      235,165
+after de-duplication    233,508   (1,657 exact duplicates)
+stratified subsample     50,000   46,839 positive   3,161 negative
+
+  train                  40,000   37,471 positive   2,529 negative
+    fit                  32,000   29,977 positive   2,023 negative
+    cal                   8,000    7,494 positive     506 negative
+  test                   10,000    9,368 positive     632 negative
+```
+
+@sec-karsilastirma `train` ve `test`'i kullandı. Bu bölüm `train`'i bir kez daha
+ikiye ayırıyor: 32.000 belgelik bir `fit` dilimi ve 8.000 belgelik bir `cal`
+dilimi. Çünkü ölçtüğü şeylerin üçü — bir
+[decision threshold](#gloss-decision-threshold){#term-decision-threshold .term-ref},
+bir kalibrasyon eşlemesi, maliyet açısından en iyi çalışma noktası — *uydurulan
+nicelikler* ve test üzerinde uydurulmamaları gerekiyor.
+
+::: {#gloss-decision-threshold .column-margin .term-gloss}
+**decision threshold** (karar eşiği) — bir puanı etikete çeviren kesme noktası.
+Neredeyse her sınıflandırıcı varsayılan olarak 0,5 ile geliyor, ama 0,5 bir
+ölçüm değil bir gelenek: hataların size neye mal olduğuna bakarak, tutulan veri
+üzerinde seçmeniz beklenen serbest bir parametre.
+[↩](#term-decision-threshold){.term-back}
+:::
+
+[Bu bölümdeki her eşik `cal` üzerinde seçilip `test` üzerinde
+raporlanıyor.]{.hl} Bir sayı test üzerinde ayar yapılarak elde edilmişse
+**oracle** diye etiketleniyor ve yalnızca pişmanlığı ölçeceğimiz bir üst sınır
+olarak kullanılıyor. İşin çoğunu yapan ayrım bu — @sec-siniflandirma-maliyetler'de
+göreceksiniz.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Hangi dilim neye karar vermeye yetkili</div>
+<svg viewBox="0 0 764 288" style="max-width:744px" role="img"
+     aria-label="Veri ayrımının üç katmanlı şeması. Üst katman, 50.000 tabakalandırılmış belgeyi temsil eden tek bir çubuk; solda 40.000 belgelik büyük bir train parçası, sağda 10.000 belgelik daha küçük bir test parçası var. Orta katman train parçasını 32.000 belgelik bir fit dilimine ve 8.000 belgelik bir kalibrasyon dilimine bölüyor. Alt katmanda fit, cal ve test için birer kutu var; yukarıya kesik kılavuz çizgileriyle bağlanıyorlar. 32.000 belge tutan ve bunların 2.023'ü şikâyet olan fit kutusu şöyle etiketli: model ağırlıkları, vektörleştirici sözlüğü ve başka hiçbir şey. 8.000 belge tutan ve bunların 506'sı şikâyet olan cal kutusu şöyle etiketli: karar eşikleri, kalibrasyon eşlemeleri ve maliyet açısından en iyi çalışma noktaları. 10.000 belge tutan ve bunların 632'si şikâyet olan test kutusu şöyle etiketli: bu bölümde raporlanan her sayı, sonda bir kez okunur, üzerinde hiç uydurma yapılmaz. Alt satır, test üzerinde uydurulan her şeyin oracle diye etiketlendiğini ve yalnızca üst sınır olarak kullanıldığını belirtiyor.">
+  <text x="10" y="16" class="t-xs t-b t-muted">50.000 BELGE — TEKRARI TEMİZLENMİŞ DERLEMİN TABAKALANDIRILMIŞ ALTÖRNEKLEMİ</text>
+
+  <rect x="10" y="26" width="595" height="32" rx="6" class="box-accent"/>
+  <text x="307" y="47" class="t-xs t-mid t-b t-accent">train — 40.000</text>
+  <rect x="610" y="26" width="144" height="32" rx="6" class="box-rose"/>
+  <text x="682" y="47" class="t-xs t-mid t-b t-rose">test — 10.000</text>
+
+  <line x1="10" y1="60" x2="10" y2="70" class="ln-dash"/>
+  <line x1="605" y1="60" x2="605" y2="70" class="ln-dash"/>
+
+  <rect x="10" y="72" width="476" height="32" rx="6" class="box"/>
+  <text x="248" y="93" class="t-xs t-mid t-b">fit — 32.000</text>
+  <rect x="491" y="72" width="114" height="32" rx="6" class="box-warm"/>
+  <text x="548" y="93" class="t-xs t-mid t-b t-warm">cal — 8.000</text>
+
+  <line x1="248" y1="104" x2="130" y2="128" class="ln-dash"/>
+  <line x1="548" y1="104" x2="382" y2="128" class="ln-dash"/>
+  <line x1="682" y1="58" x2="634" y2="128" class="ln-dash"/>
+
+  <rect x="10" y="130" width="240" height="112" rx="8" class="box"/>
+  <text x="130" y="152" class="t-xs t-mid t-b">fit · 32.000</text>
+  <text x="130" y="169" class="t-xs t-mid t-muted">29.977 memnun · 2.023 şikâyet</text>
+  <text x="130" y="193" class="t-xs t-mid">model ağırlıkları</text>
+  <text x="130" y="211" class="t-xs t-mid">vektörleştirici sözlüğü</text>
+  <text x="130" y="231" class="t-xs t-mid t-muted">— başka hiçbir şey</text>
+
+  <rect x="262" y="130" width="240" height="112" rx="8" class="box-warm"/>
+  <text x="382" y="152" class="t-xs t-mid t-b t-warm">cal · 8.000</text>
+  <text x="382" y="169" class="t-xs t-mid t-muted">7.494 memnun · 506 şikâyet</text>
+  <text x="382" y="193" class="t-xs t-mid">karar eşikleri</text>
+  <text x="382" y="211" class="t-xs t-mid">kalibrasyon eşlemeleri</text>
+  <text x="382" y="231" class="t-xs t-mid">en iyi maliyet noktaları</text>
+
+  <rect x="514" y="130" width="240" height="112" rx="8" class="box-rose"/>
+  <text x="634" y="152" class="t-xs t-mid t-b t-rose">test · 10.000</text>
+  <text x="634" y="169" class="t-xs t-mid t-muted">9.368 memnun · 632 şikâyet</text>
+  <text x="634" y="193" class="t-xs t-mid t-b">burada raporlanan her sayı</text>
+  <text x="634" y="211" class="t-xs t-mid">sonda bir kez okunur</text>
+  <text x="634" y="231" class="t-xs t-mid t-muted">— üzerinde hiç uydurulmaz</text>
+
+  <text x="10" y="268" class="t-xs t-muted">Test üzerinde uydurulan her şey oracle diye etiketlenir ve sonuç olarak değil, yalnızca üst sınır olarak kullanılır.</text>
+</svg>
+```
+::: {.fig-cap}
+Orta katman, @sec-karsilastirma'nın ihtiyaç duymadığı şey. Bir modelin
+uydurulmuş tek bir nesnesi vardır — ağırlıkları. Bu bölümün dört tane var ve
+üçü eğitimden *sonra*, sınıflandırıcının hiç görmediği veri üzerinde
+uyduruluyor. `cal` dilimi olmasa, bu bölümdeki her eşik ve her kalibrasyon
+eğrisi kendi ayarlandığı veri üzerinde rapor veriyor olurdu.
+:::
+::::
+
+::: {.column-margin}
+8.000 belge keyfî bir boyut değil. @sec-siniflandirma-kalibrasyon bu dilim
+üzerinde izotonik regresyon uyduruyor ve Niculescu-Mizil ile Caruana, izotonik
+regresyonun parametrik bir sigmoid'i geçebilmesi için kabaca bin kalibrasyon
+noktasına ihtiyaç duyduğunu, altında ise aşırı uydurduğunu raporluyor
+[@niculescu2005predicting]. 8.000'de — üstelik azınlık sınıfından 506 örnekle —
+onların sonucunun izotonik için güvenli dediği bölgede rahatça duruyoruz. Kendi
+ölçümümüz de aynı şeyi söylüyor; bunu söylememizin tek nedeni de bu.
+:::
+
+Baseline birebir yeniden üretiliyor:
+
+```text
+tf-idf 1-2 gram + LogisticRegression, 101,659 features, 31.7 non-zeros per row
+
+accuracy      92.57
+macro-F1      76.21
+complaint P   44.84    R 76.27    F1 56.47
+
+                 predicted
+              complaint  satisfied
+ complaint         482        150
+ satisfied         593      8,775
+```
+
+### Bu bölüm nereye varıyor
+
+| ne sorduk | ne geldi |
+|:--|:--|
+| Fine-tuning, 40.000 etiketlik tf-idf'i geçiyor mu? | [Evet — 2.000 etiketle]{.pro} |
+| Öyleyse seyrek baseline devre dışı mı? | [Hayır. ~1.000 etiketin altında kazanıyor ve 1,2 saniyede eğitiliyor]{.con} |
+| Yeniden örnekleme sınıf dengesizliğini çözüyor mu? | [Hayır. Tek bir eşiği oynatmak bütün yeniden örnekleme yöntemlerini geçti]{.con} |
+| Sınıf ağırlıklandırma bir bedel ödetiyor mu? | [Evet: kalibrasyon hatasını 3,6× katladı]{.con} |
+| Modelin "olasılığı" gerçekten olasılık mı? | [Siz düzeltene kadar hayır — ve düzeltmesi iki parametre]{.con} |
+| Ders kitabındaki maliyet-optimal eşik işe yarıyor mu? | [Yalnızca kalibre puanlarda. Ham puanlarda %56'ya varan fazla harcama]{.con} |
+| Doğruluk size hangi eşiği seçeceğinizi söylüyor mu? | [Hayır. Recall 48 puan oynarken o 1,3 puan oynadı]{.con} |
+| 7,35 puanlık bir model yükseltmesi saf kazanç mı? | [Hayır. 332 test belgesini düzeltti, 149'unu bozdu]{.con} |
+| Encoder tf-idf'ten baştan sona iyi mi? | [Hayır — uzun belgelerde daha iyi, 1,88×'e karşı 1,18×]{.con} |
+| Geriye kalan hatalar modelin suçu mu? | [Çoğu zaman değil. En kendinden emin olanlar etiket hatası]{.con} |
+| Prompt'lanan bir LLM, fine-tune edilmiş bir encoder'ı geçebiliyor mu? | [Evet — ~1.000 etiketin altında. 2.000'de 0,08 puan farkla berabere]{.pro} |
+| Prompt'u İngilizce yazmak yardım ediyor mu? | [Yalnızca model zayıfsa: 3B'de +16,90 puan, 9B'de +0,54]{.con} |
+| Modelin kelimelerle yazdığı bir güven bir şey ifade ediyor mu? | [Ortalamada evet, +0,58. Dedektör olarak, 0,843'e karşı AUROC 0,667]{.con} |
+| 2.000 etiketteki beraberlik gerçek bir seçim mi? | [Fiyatını koyduğunuzda değil. LLM belge başına 142× pahalı]{.con} |
+
+: Bu bölümün ölçtükleri {tbl-colwidths="[54,46]"}
+
+## Geçilmesi zor baseline'lar {#sec-siniflandirma-baseline}
+
+Parametre eklemeden önce, ucuz olan şeyin başkasının sahip olduğu bütçede değil
+*sizin etiket bütçenizde* ne yaptığını öğrenin. @sec-karsilastirma bir eğrinin
+tek bir noktasını raporlamıştı. İşte eğrinin kendisi: aynı vektörleştirici, aynı
+sınıflandırıcı, aynı test kümesi, `train`'in tabakalandırılmış altkümeleri
+üzerinde eğitilerek:
+
+```{ojs}
+//| echo: false
+budgetRows = [
+  {n: 200,   tfidf: 55.46, tfidf_negf1: 14.63, tfidf_secs: 0.1, dims: 720},
+  {n: 500,   tfidf: 60.82, tfidf_negf1: 25.32, tfidf_secs: 0.1, dims: 1762},
+  {n: 1000,  tfidf: 61.60, tfidf_negf1: 27.03, tfidf_secs: 0.1, dims: 3458},
+  {n: 2000,  tfidf: 67.42, tfidf_negf1: 38.77, tfidf_secs: 0.2, dims: 6586},
+  {n: 5000,  tfidf: 72.77, tfidf_negf1: 49.18, tfidf_secs: 0.3, dims: 15828},
+  {n: 10000, tfidf: 73.44, tfidf_negf1: 50.87, tfidf_secs: 0.4, dims: 29149},
+  {n: 20000, tfidf: 75.00, tfidf_negf1: 54.03, tfidf_secs: 0.6, dims: 54822},
+  {n: 40000, tfidf: 76.21, tfidf_negf1: 56.47, tfidf_secs: 1.2, dims: 101659}
+]
+```
+
+```text
+labels   macro-F1   complaint-F1   features   fit time
+   200      55.46          14.63        720       0.1s
+   500      60.82          25.32      1,762       0.1s
+ 1,000      61.60          27.03      3,458       0.1s
+ 2,000      67.42          38.77      6,586       0.2s
+ 5,000      72.77          49.18     15,828       0.3s
+10,000      73.44          50.87     29,149       0.4s
+20,000      75.00          54.03     54,822       0.6s
+40,000      76.21          56.47    101,659       1.2s
+```
+
+O tablodaki üç şey, manşetten daha değerli.
+
+**Eğri 40.000'de hâlâ tırmanıyor.** 20.000 etiketten 40.000'e çıkmak 1,21
+macro-F1 puanı kazandırdı. Bir kez daha katlamak muhtemelen benzer bir şey
+kazandırırdı. Burada hiçbir şey doyuma ulaşmadı; dolayısıyla "bütün verimizi
+kullandık" cümlesi yöntem hakkında değil, bütçe hakkında bir cümle.
+
+**Kazancın neredeyse tamamı azınlık sınıfında.** Taramanın tamamında macro-F1
+20,75 puan yükseliyor; şikâyet-F1 ise 41,84. Çoğunluk sınıfı daha 200 etiketteyken
+esasen çözülmüştü ve çözülmüş kaldı. [Bir sınıf verinizin %93,7'siyse, ortalama
+metrik esasen kalan %6,3 hakkında rapor veriyordur]{.hl} — @sec-karsilastirma'nın
+doğruluğu değil macro-F1'i kullanmasının nedeni tam olarak budur ve
+@sec-siniflandirma-metrikler aynı noktaya daha sert biçimde geri dönüyor.
+
+**Taramanın tamamı dört saniyenin altında.** O sütundaki her uydurma, bir dizüstü
+CPU'sunda bir saniye ya da daha az. Seyrek baseline hakkında başka ne doğru
+olursa olsun, onu çalıştırmayı göze alabilirsiniz — ve daha pahalı herhangi bir
+şeyden gelen bir sayıya inanmadan önce çalıştırmalısınız.
+
+::: {.column-margin}
+`features` sütunu, tf-idf'in aslında ne olduğunu hatırlatıyor. 200 etikette
+hayatta kalan 720 n-gram var, çünkü `min_df=2` bir kez görülen her şeyi atıyor.
+Model tercihen "küçük" değil; görmesine izin verilen sözlük küçük olduğu için
+küçük. Bu kadar zarif biçimde bozulmasının nedeni de bu — aşırı uydurulacak bir
+şey yok.
+:::
+
+## Encoder modelleri fine-tune etmek {#sec-siniflandirma-fine-tuning}
+
+Rakip, `dbmdz/bert-base-turkish-cased` olarak yayımlanan Türkçe BERT, yani
+BERTurk [@schweter2020berturk]. Kabaca 35 GB ve 4,4 milyar token Türkçe metin
+üzerinde ön eğitildi — filtrelenmiş OSCAR, bir Wikipedia dökümü, OPUS
+derlemleri ve Kemal Oflazer'in katkıda bulunduğu bir derlem — 32.000 token'lık
+bir sözlükle, bir TPU v3-8 üzerinde.
+
+::: {.column-margin}
+Model kartı 2M eğitim adımı diyor; deponun kopya kâğıdı ise
+`--num_train_steps=3000000` geçiyor. Hangisinin doğru olduğunu çözemedik, bu
+yüzden bölüm buna hiçbir yerde dayanmıyor. Model kartı ayrıca token sayısını
+"44,04,976,662" diye basıyor; bu, 4.404.976.662 için bir basamak gruplama
+hatası — model kartlarının veri değil düzyazı olduğuna dair küçük bir
+hatırlatma.
+:::
+
+Checkpoint'i yükleyip saymak **110.618.882 parametre** veriyor: 24.972.288'i
+embedding tablosunda, 85.054.464'ü on iki encoder katmanında, 590.592'si
+pooler'da ve kalanı attığımız ön eğitim başlığında. O embedding sayısı üzerinde
+durmaya değer — modelin %22,6'sı bir arama tablosu ve bunun nedeni sözlüğün
+32.000 token genişliğinde olması.
+
+### Ölçümle verilmiş bir dizi uzunluğu kararı
+
+Attention, dizi uzunluğunda karesel (@sec-transformerlar); dolayısıyla
+`max_length` eğitim maliyeti üzerindeki tek en büyük kol. Alışılmış tavsiye 512,
+yani modelin sınırı. Derlemin gerçekte neye ihtiyacı olduğu, BERTurk alt
+kelimeleri cinsinden şöyle:
+
+```text
+median    29 subwords
+p95       86
+p99      146
+max      466
+
+truncated at max_length=64    10.97% of documents
+truncated at max_length=128    1.54%
+truncated at max_length=192    0.36%
+truncated at max_length=256    0.11%
+truncated at max_length=512    0.00%
+```
+
+Bu sayılar 40.000 belgelik eğitim dilimi üzerinde ve `[CLS]` ile `[SEP]`
+token'larını içeriyor, çünkü GPU'nun gerçekte doldurup kırptığı şey bu. Test
+dilimi de aynı davranıyor — medyan 29, p95 87 — dolayısıyla karar hangi dilimi
+ölçtüğünüze bağlı değil.
+
+Biz 128 kullanıyoruz. Yorumların %1,54'ünü kırpıyor ve 512'nin attention
+hesabının *on altıda birine* mal oluyor. [512'yi "garanti olsun diye" seçmek,
+yüzde ikiden az belgeyi korumak uğruna dizi uzunluğunu dörde katlardı; üstelik o
+belgeler tam da dağınık oldukları için uzun.]{.hl} Bu tabloyu üreten beş
+dakikalık ölçüm, bölümdeki getirisi en yüksek beş dakika.
+
+### Öğrenme eğrisi
+
+Aynı bütçeler, aynı altkümeler, aynı test kümesi. Sınıf ağırlıklı çapraz
+entropi, 2e-5'te AdamW, batch 32, `max_length` 128, adımların ilk %10'unda
+doğrusal ısınma. 2.000 ve altındaki bütçeler 20 epoch alıyor, daha büyük
+bütçeler 3 — aksi hâlde küçük koşular o kadar az gradyan güncellemesi görürdü ki
+bütçeyi değil, bütçe takvimini ölçüyor olurduk.
+
+```text
+labels   macro-F1   complaint-F1   complaint-P   complaint-R   steps
+   200      54.31          12.83         20.49          9.33     140
+   500      56.46          16.37         40.12         10.29     320
+ 1,000      71.57          45.95         63.76         35.92     640
+ 2,000      79.61          61.63         66.48         57.44   1,260
+ 5,000      81.27          65.12         60.22         70.89     471
+10,000      82.71          67.50         71.30         64.08     939
+20,000      83.71          69.41         72.26         66.77   1,875
+40,000      85.02          71.92         72.32         71.52   3,750
+```
+
+Üç okuma çıkıyor ve üçüncüsü bir projeyi planlama şeklinizi değiştiren okuma.
+
+**Encoder eğrinin dibinde kaybediyor.** 200 etikette BERTurk, tf-idf'in
+55,46'sına karşı 54,31 alıyor; 500'de 60,82'ye karşı 56,46. 4,4 milyar token
+Türkçe üzerinde ön eğitilmiş 110 milyon parametreli bir model, Türkçede, 500
+örnekle bir kelime torbasından *daha kötü*. Ortada bir bozukluk yok:
+sınıflandırma başlığı rastgele ilklendiriliyor ve içinde 32 şikâyet bulunan 500
+örnek, o boyuttaki bir ağı önce aşırı uydurmadan yararlı bir bölgeye taşımaya
+yetecek sinyal değil.
+
+**Kesişme 500 ile 1.000 etiket arasında** ve ani. Bu tek katlamada BERTurk 15,1
+macro-F1 puanı kazanıyor, tf-idf 0,8. Şikâyet recall'ı %10,29'dan %35,92'ye
+çıkıyor. Bir yerde model, arada bir kaza yaparak çoğunluk sınıfını tahmin etmeyi
+bırakıp bir şikâyetin ne olduğuna dair bir temsile sahip olmaya başlıyor.
+
+**2.000 etiketteki BERTurk, 40.000 etiketteki tf-idf'i geçiyor.** [76,21'e karşı
+79,61 — yirmi kat az etiketle daha iyi bir model.]{.hl} Etiketleme sizin darboğazınızsa,
+ki genellikle öyledir, bu oran bir planlama toplantısına götürülecek sayıdır.
+Eşit bütçede fark 8,81 macro-F1 puanı ve **15,45 puan şikâyet-F1** — insanın
+gerçekte deneyimlediği sayı ikincisi.
+
+```{ojs}
+//| echo: false
+bertRows = [
+  {n: 200,   bert: 54.31, bert_negf1: 12.83, tfidf: 55.46, tfidf_negf1: 14.63, steps: 140},
+  {n: 500,   bert: 56.46, bert_negf1: 16.37, tfidf: 60.82, tfidf_negf1: 25.32, steps: 320},
+  {n: 1000,  bert: 71.57, bert_negf1: 45.95, tfidf: 61.60, tfidf_negf1: 27.03, steps: 640},
+  {n: 2000,  bert: 79.61, bert_negf1: 61.63, tfidf: 67.42, tfidf_negf1: 38.77, steps: 1260},
+  {n: 5000,  bert: 81.27, bert_negf1: 65.12, tfidf: 72.77, tfidf_negf1: 49.18, steps: 471},
+  {n: 10000, bert: 82.71, bert_negf1: 67.50, tfidf: 73.44, tfidf_negf1: 50.87, steps: 939},
+  {n: 20000, bert: 83.71, bert_negf1: 69.41, tfidf: 75.00, tfidf_negf1: 54.03, steps: 1875},
+  {n: 40000, bert: 85.02, bert_negf1: 71.92, tfidf: 76.21, tfidf_negf1: 56.47, steps: 3750}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof curveMetric = Inputs.radio(
+  new Map([
+    ["Macro-F1 — iki sınıfın ortalaması", "macro"],
+    ["Şikâyet F1 — azınlık sınıfı tek başına", "negf1"]
+  ]),
+  { value: "macro", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+curvePlot = {
+  const suffix = curveMetric === "macro" ? "" : "_negf1";
+  const long = bertRows.flatMap(d => [
+    {n: d.n, model: "tf-idf + LR", y: curveMetric === "macro" ? d.tfidf : d.tfidf_negf1},
+    {n: d.n, model: "BERTurk fine-tune", y: curveMetric === "macro" ? d.bert : d.bert_negf1}
+  ]);
+  return Plot.plot({
+    width: 700,
+    height: 360,
+    marginLeft: 60,
+    marginBottom: 48,
+    x: { label: "etiketli eğitim belgesi", type: "log",
+         ticks: [200, 500, 1000, 2000, 5000, 10000, 20000, 40000],
+         tickFormat: d => d.toLocaleString("tr-TR"), grid: true },
+    y: { label: curveMetric === "macro" ? "10.000 belgelik test kümesinde macro-F1"
+                                        : "10.000 belgelik test kümesinde şikâyet F1",
+         domain: [0, 90], grid: true },
+    color: { legend: true, domain: ["tf-idf + LR", "BERTurk fine-tune"],
+             range: ["#1F4E79", "#B3453E"] },
+    marks: [
+      curveMetric === "macro"
+        ? Plot.ruleY([48.37], { stroke: "#9AA3AE", strokeDasharray: "4 3" })
+        : null,
+      curveMetric === "macro"
+        ? Plot.text([{n: 300, y: 48.37}], { x: "n", y: "y", text: ["her zaman “memnun”"],
+            dy: -9, fill: "#9AA3AE", textAnchor: "start" })
+        : null,
+      Plot.ruleX([700], { stroke: "#2E7D6F", strokeDasharray: "3 3", strokeOpacity: 0.6 }),
+      Plot.line(long, { x: "n", y: "y", stroke: "model", strokeWidth: 2.5 }),
+      Plot.dot(long, { x: "n", y: "y", fill: "model", r: 4,
+        title: d => `${d.model}\n${d.n.toLocaleString("tr-TR")} etiket\n${d.y.toFixed(2)}` })
+    ].filter(d => d)
+  });
+}
+```
+
+::: {.column-margin}
+Teal çizgi kesişme bölgesini işaretliyor. **Şikâyet F1**'e geçin ve iki eğrinin
+aynı yerde kesiştiğini ama sonrasındaki açıklığın kabaca iki kat geniş olduğunu
+fark edin: 40.000 etikette macro-F1 8,81 puan, şikâyet-F1 ise 15,45 puan
+ayrışıyor. %93,7'lik bir çoğunluk sınıfı üzerinden ortalama almak, encoder'ın
+size kazandırdığının çoğunu gizliyor.
+:::
+
+### Taramanın maliyeti ve o sayıların hangilerine güveniyoruz
+
+Eğitim maliyeti, yeniden üretilebilir olan optimizasyon adımlarıyla ve yeniden
+üretilebilir olmayan saniyelerle ölçülüyor — ve bu koşu, ayrımın neden önemli
+olduğunun iyi bir örneği.
+
+```text
+labels   steps   wall-clock   s/step
+ 1,000     640       525.5s    0.821   ← first GPU run after a cold start
+ 2,000   1,260       387.0s    0.307
+ 5,000     471       147.5s    0.313
+10,000     939       289.5s    0.308
+20,000   1,875       581.5s    0.310
+40,000   3,750     6,303.1s    1.681   ← machine slowed mid-run
+```
+
+Ardışık dört koşu, batch 32 ve `max_length` 128'de **adım başına 0,307 ile 0,313
+saniye** üzerinde anlaşıyor. Bu gerçek bir ölçüm: veri kümesi boyutunda sekiz
+kata yayılan dört bağımsız koşu, %2 içinde anlaşıyor. Diğer ikisi değil.
+1.000 etiketli koşu bir defalık bir Metal çekirdek derleme bedeli ödedi;
+40.000 etiketli koşu ise ilk epoch'u için 386 saniye, ikincisi için 386 ve
+**üçüncüsü için 5.531** saniye harcadı — yapılan işte hiçbir değişiklik yokken
+14× yavaşlama.
+
+Dolayısıyla dürüst ifade şu: [adım başına 0,31 saniyede sekiz noktalı taramanın
+tamamı 9.395 adım, yani yaklaşık 49 dakika GPU zamanı; 40.000 etiketli model tek
+başına yaklaşık 19 dakika.]{.hl} Gerçekte gözlediğimiz 6.303 saniye, model
+hakkında değil o akşam dizüstünün hâli hakkında bir olgu ve onu bir eğitim
+maliyeti diye aktarmak, yeniden üretmeye çalışan her okuru yanıltırdı.
+
+::: {.column-margin}
+Çıkarım çok daha uslu davranıyor: her seferinde aynı 10.000 belge üzerinde yedi
+koşuda saniyede 499, 434, 462, 472, 466, 475 ve 510 belge. **Saniyede 470 belge**
+deyin — tek süreç, batch'lenmiş, bir dizüstü GPU'sunda. Yalnızca 200 etiketli
+koşu 17,5 ile anlaşmıyor — o, bütün oturumun ilk çıkarım geçişiydi ve kendinden
+sonraki her şeyin adına çekirdek derlemesinin bedelini ödüyordu. [Bir seri
+içindeki tek bir ölçüm 27× sapıyorsa, modelinizden önce ölçüm düzeneğinizden
+şüphelenin.]{.hl}
+:::
+
+Bunu, sekiz noktalı taramasının tamamı üç saniyelik dizüstü CPU zamanına sığan
+seyrek baseline ile karşılaştırın. En üst bütçede bu, 3.750 adım × 0,31 saniye — yani
+düzeltilmiş 1.162 saniye GPU zamanı, kirlenmiş koşunun kaydettiği 6.303 *değil*
+— vektörleştiricinin 1,2 saniyesine karşı. Encoder, 8,81 macro-F1 puanı için
+eğitimi kabaca **970× daha pahalı** ve on binlerceye karşı saniyede yaklaşık 470
+belge servis ediyor. Bunun iyi bir takas olup olmadığı bir makine öğrenmesi
+sorusu değil; @sec-siniflandirma-kesisim, cevabı parayla vermeye çalıştığımız
+yer.
+
+## Doğruluğun ötesindeki metrikler {#sec-siniflandirma-metrikler}
+
+Şimdiye kadarki her sayı macro-F1'di; dayanağı @sec-karsilastirma'dan devralınan
+bir sav: bu derlemde doğruluk işe yaramaz. Artık bunu iddia etmek yerine
+göstermenin vakti geldi.
+
+Tek bir modeli, düzeltilmemiş tf-idf baseline'ını alın ve bir yorumu şikâyet ilan
+ettiği eşik dışında hiçbir şeyi oynatmayın:
+
+```text
+   t      acc   bal-acc    prec     rec   compF1   macroF1     MCC
+0.05    68.98     81.53   16.46   95.89    28.09     54.16   0.318
+0.10    89.21     85.76   34.91   81.80    48.94     71.45   0.490
+0.15    94.23     81.06   53.53   65.98    59.11     78.00   0.564
+0.20    95.00     73.28   63.75   48.42    55.04     76.19   0.530
+0.25    95.16     68.57   72.16   38.13    49.90     73.68   0.503
+0.30    95.00     64.57   77.05   29.75    42.92     70.15   0.460
+0.40    94.59     58.90   83.21   18.04    29.65     63.42   0.372
+0.50    94.28     55.41   88.46   10.92    19.44     58.24   0.299
+0.60    94.07     53.31   93.33    6.65    12.41     54.67   0.240
+0.70    93.94     52.13   96.43    4.27     8.18     52.52   0.196
+0.80    93.77     50.71  100.00    1.42     2.81     49.79   0.116
+0.95    93.70     50.16  100.00    0.32     0.63     48.69   0.054
+```
+
+Doğruluk sütununu $t \geq 0,2$ aralığında yukarıdan aşağı okuyun. 95,00'ten
+93,70'e iniyor — **1,3 puan**. Aynı aralıkta, birinin harekete geçmesi gereken
+sınıftaki recall %48,42'den %0,32'ye düşüyor ve şikâyet-F1 55,04'ten 0,63'e
+iniyor. [Sistem şikâyetlerin yarısını yakalamaktan hiçbirini yakalamamaya
+geçerken bir puan değişen bir metrik, sistemi ölçmüyordur.]{.hl}
+
+İşe yaramaz olmaktan da kötüsü, aktif olarak yanıltıcı. Tablodaki *en yüksek*
+doğruluk $t = 0,25$'te 95,16. Tablodaki en iyi model ise $t = 0,15$'te; orada
+macro-F1 78,00 ve doğruluk 0,93 puan *daha düşük*. Doğruluk üzerinden ayar
+yapmak yanlış çalışma noktasını seçiyor, üstelik bunu kendinden emin yapıyor.
+
+Aşağıdaki widget tablonun tamamını çiziyor. Doğruluk, her seçimin arkasında gri
+çiziliyor; böylece neye geçerseniz geçin, ona kıpırdamayan metriğe karşı bakmış
+oluyorsunuz.
+
+```{ojs}
+//| echo: false
+threshRows = [
+  {t: 0.05, acc: 68.98, bal: 81.53, prec: 16.46, rec: 95.89, cf1: 28.09, mf1: 54.16, mcc: 0.318, tp: 606, fp: 3076, fn: 26},
+  {t: 0.10, acc: 89.21, bal: 85.76, prec: 34.91, rec: 81.80, cf1: 48.94, mf1: 71.45, mcc: 0.490, tp: 517, fp: 964, fn: 115},
+  {t: 0.15, acc: 94.23, bal: 81.06, prec: 53.53, rec: 65.98, cf1: 59.11, mf1: 78.00, mcc: 0.564, tp: 417, fp: 362, fn: 215},
+  {t: 0.20, acc: 95.00, bal: 73.28, prec: 63.75, rec: 48.42, cf1: 55.04, mf1: 76.19, mcc: 0.530, tp: 306, fp: 174, fn: 326},
+  {t: 0.25, acc: 95.16, bal: 68.57, prec: 72.16, rec: 38.13, cf1: 49.90, mf1: 73.68, mcc: 0.503, tp: 241, fp: 93, fn: 391},
+  {t: 0.30, acc: 95.00, bal: 64.57, prec: 77.05, rec: 29.75, cf1: 42.92, mf1: 70.15, mcc: 0.460, tp: 188, fp: 56, fn: 444},
+  {t: 0.35, acc: 94.79, bal: 61.36, prec: 80.66, rec: 23.10, cf1: 35.92, mf1: 66.60, mcc: 0.415, tp: 146, fp: 35, fn: 486},
+  {t: 0.40, acc: 94.59, bal: 58.90, prec: 83.21, rec: 18.04, cf1: 29.65, mf1: 63.42, mcc: 0.372, tp: 114, fp: 23, fn: 518},
+  {t: 0.45, acc: 94.36, bal: 56.71, prec: 82.69, rec: 13.61, cf1: 23.37, mf1: 60.22, mcc: 0.322, tp: 86, fp: 18, fn: 546},
+  {t: 0.50, acc: 94.28, bal: 55.41, prec: 88.46, rec: 10.92, cf1: 19.44, mf1: 58.24, mcc: 0.299, tp: 69, fp: 9, fn: 563},
+  {t: 0.55, acc: 94.18, bal: 54.32, prec: 91.67, rec: 8.70, cf1: 15.90, mf1: 56.44, mcc: 0.273, tp: 55, fp: 5, fn: 577},
+  {t: 0.60, acc: 94.07, bal: 53.31, prec: 93.33, rec: 6.65, cf1: 12.41, mf1: 54.67, mcc: 0.240, tp: 42, fp: 3, fn: 590},
+  {t: 0.65, acc: 93.99, bal: 52.53, prec: 96.97, rec: 5.06, cf1: 9.62, mf1: 53.26, mcc: 0.214, tp: 32, fp: 1, fn: 600},
+  {t: 0.70, acc: 93.94, bal: 52.13, prec: 96.43, rec: 4.27, cf1: 8.18, mf1: 52.52, mcc: 0.196, tp: 27, fp: 1, fn: 605},
+  {t: 0.75, acc: 93.85, bal: 51.42, prec: 94.74, rec: 2.85, cf1: 5.53, mf1: 51.18, mcc: 0.159, tp: 18, fp: 1, fn: 614},
+  {t: 0.80, acc: 93.77, bal: 50.71, prec: 100.00, rec: 1.42, cf1: 2.81, mf1: 49.79, mcc: 0.116, tp: 9, fp: 0, fn: 623},
+  {t: 0.85, acc: 93.77, bal: 50.71, prec: 100.00, rec: 1.42, cf1: 2.81, mf1: 49.79, mcc: 0.116, tp: 9, fp: 0, fn: 623},
+  {t: 0.90, acc: 93.75, bal: 50.55, prec: 100.00, rec: 1.11, cf1: 2.19, mf1: 49.48, mcc: 0.102, tp: 7, fp: 0, fn: 625},
+  {t: 0.95, acc: 93.70, bal: 50.16, prec: 100.00, rec: 0.32, cf1: 0.63, mf1: 48.69, mcc: 0.054, tp: 2, fp: 0, fn: 630}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof threshMetric = Inputs.radio(
+  new Map([
+    ["Şikâyetlerde recall — 632'nin kaçını bulduk?", "rec"],
+    ["Şikâyetlerde precision — işaretlediklerimizin ne kadarı doğruydu?", "prec"],
+    ["Şikâyet F1 — bu ikisinin harmonik ortalaması", "cf1"],
+    ["Macro-F1 — bu bölümün en iyilediği metrik", "mf1"],
+    ["Dengelenmiş doğruluk — sınıflar eşit ağırlıklı doğruluk", "bal"],
+    ["Matthews korelasyonu × 100 — şans düzeltmeli özet", "mcc100"]
+  ]),
+  { value: "rec", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+threshLabels = ({
+  rec: "şikâyet recall (%)", prec: "şikâyet precision (%)",
+  cf1: "şikâyet F1", mf1: "macro-F1",
+  bal: "dengelenmiş doğruluk (%)", mcc100: "MCC × 100"
+})
+```
+
+```{ojs}
+//| echo: false
+threshPlot = {
+  const pick = d => threshMetric === "mcc100" ? d.mcc * 100 : d[threshMetric];
+  return Plot.plot({
+    width: 700,
+    height: 340,
+    marginLeft: 56,
+    marginBottom: 46,
+    x: { label: "karar eşiği t — puan bunu aştığında yorumu işaretle", grid: true },
+    y: { label: threshLabels[threshMetric], domain: [0, 100], grid: true },
+    marks: [
+      Plot.line(threshRows, { x: "t", y: "acc", stroke: "#9AA3AE", strokeWidth: 2, strokeDasharray: "5 3" }),
+      Plot.dot(threshRows, { x: "t", y: "acc", fill: "#9AA3AE", r: 2.5,
+        title: d => `t = ${d.t}\ndoğruluk: ${d.acc}%` }),
+      Plot.text([threshRows[13]], { x: "t", y: "acc", text: ["doğruluk"],
+        dy: -12, fill: "#9AA3AE", fontWeight: 600 }),
+      Plot.ruleY([48.37], { stroke: "#B3453E", strokeDasharray: "3 3", strokeOpacity: 0.5 }),
+      Plot.line(threshRows, { x: "t", y: pick, stroke: "#1F4E79", strokeWidth: 2.5 }),
+      Plot.dot(threshRows, { x: "t", y: pick, fill: "#1F4E79", r: 3.5,
+        title: d => `t = ${d.t}\n${threshLabels[threshMetric]}: ${pick(d).toFixed(2)}\n` +
+                    `${d.tp} yakalandı, ${d.fp} yanlış alarm, ${d.fn} kaçtı` })
+    ]
+  });
+}
+```
+
+::: {.column-margin}
+48,37'deki soluk kırmızı çizgi, her zaman "memnun" diyen bir modelin macro-F1'i.
+Radyo düğmesini **macro-F1**'e getirin ve eşik yükseldikçe mavi çizginin ona
+doğru daldığını izleyin: $t = 0,8$'i geçtikten sonra model fiilen sınıflandırıcı
+olmayı bırakmış durumda ve doğruluk hâlâ 93,77.
+:::
+
+Nedeni felsefe değil, aritmetik:
+
+```text
+call everything satisfied      acc 93.68   macroF1 48.37   bal-acc 50.00   MCC  0.000
+guess at the base rate         acc 87.98   macroF1 49.76   bal-acc 49.76   MCC -0.005
+call everything a complaint    acc  6.32   macroF1  5.94   bal-acc 50.00   MCC  0.000
+coin flip                      acc 50.21   macroF1 38.57   bal-acc 51.44   MCC  0.014
+```
+
+Hiç öznitelik görmemiş bir model %93,68 doğruluk alıyor — yani
+[base rate](#gloss-base-rate){#term-base-rate .term-ref}. Bu bölümdeki her
+doğruluk rakamı o tabana karşı okunmak zorunda ve çoğu ondan iki puan içinde.
+Buna karşılık Matthews korelasyonu üç yozlaşmış baseline'a da düpedüz sıfır
+veriyor — bir özet istatistikten isteyeceğiniz şey de budur.
+
+::: {#gloss-base-rate .column-margin .term-gloss}
+**base rate** (taban oran) — derlemin ne kadarının bir sınıfa ait olduğu. Aynı
+zamanda her zaman çoğunlukla cevap veren bir modelin doğruluğudur; bu da onu
+hesaplanacak ilk, raporlanan son sayı yapar.
+[↩](#term-base-rate){.term-back}
+:::
+
+### ROC ile precision-recall birbirinin yerine geçmez
+
+İki eğri de tam olarak aynı
+[confusion matrix](#gloss-confusion-matrix){#term-confusion-matrix .term-ref}
+sayılarından hesaplanıyor. Anlaşamamalarının nedeni farklı şeylere bölmeleri:
+yanlış pozitif oranı 9.368 memnun yoruma bölüyor, precision ise kaç belge
+işaretlediyseniz ona bölüyor [@davis2006relationship].
+
+::: {#gloss-confusion-matrix .column-margin .term-gloss}
+**confusion matrix** (karışıklık matrisi) — ikili bir sınıflandırıcının ürettiği
+dört sayı: doğru pozitifler, yanlış pozitifler, yanlış negatifler, doğru
+negatifler. Bu bölümdeki her metrik o dört sayı üzerinde bir aritmetiktir; iki
+metriğin, ikisi de yanlış olmadan anlaşamamasının nedeni budur.
+[↩](#term-confusion-matrix){.term-back}
+:::
+
+```text
+model                          AP      AUC   AP/base   bal-acc     MCC
+tf-idf, uncorrected         60.30    93.24     9.54x     55.41   0.299
+tf-idf, class-weighted      60.81    93.44     9.62x     84.34   0.545
+tf-idf, SMOTE               58.05    92.81     9.19x     82.03   0.514
+BERTurk n=200               12.78    70.12     2.02x     53.45   0.100
+BERTurk n=500               26.98    83.00     4.27x     54.62   0.178
+BERTurk n=1,000             45.72    82.76     7.23x     67.27   0.454
+BERTurk n=2,000             62.34    92.51     9.86x     77.74   0.594
+BERTurk n=5,000             66.37    93.98    10.50x     83.86   0.628
+```
+
+93,24'lük bir AUC çözülmüş bir problem gibi geliyor kulağa. Aynı modelin aynı
+puanları için
+[average precision](#gloss-average-precision){#term-average-precision .term-ref}
+ise 60,30. İkisi de doğru. AUC yüksek, çünkü model sıralamanın kolay çoğunluk
+kısmında çok iyi ve yanlış pozitif oranının paydasında hataları saklayabileceği
+9.368 belge var.
+
+::: {#gloss-average-precision .column-margin .term-gloss}
+**average precision** (ortalama kesinlik) — precision-recall eğrisinin altında
+kalan alan, kısaca *AP*. AUC'nin aksine sınıf dengesiyle birlikte kıpırdar;
+dolayısıyla 60,30'luk bir AP, rastgele tahminin 6,32 alacağını bilene kadar
+hiçbir şey ifade etmez.
+[↩](#term-average-precision){.term-back}
+:::
+
+Bunların farklı ölçümler olduğunun en açık kanıtı, BERTurk'ün 500 ile 1.000
+etiket arası: [AUC **düşüyor** (83,00 → 82,76), average precision ise 18,7 puan
+**yükseliyor** (26,98 → 45,72)]{.hl} ve macro-F1 15,1 puan yükseliyor. AUC'yi
+izliyor olsaydınız, fazladan 500 etiketin modeli kötüleştirdiği sonucuna
+varırdınız.
+
+Aşağıdaki widget tam da o iki anlaşmaz görüşü çiziyor. Aynı modeller seçiliyken
+ROC uzayı ile PR uzayı arasında geçiş yapın ve eğrilerin sıralamasının
+değiştiğini izleyin.
+
+```{ojs}
+//| echo: false
+curveRows = {
+  // [model, curve space, x, y] — thinned from the full curves for the page
+  const raw = [
+    ["tfidf","roc",0.000,0.000], ["tfidf","roc",0.001,0.122], ["tfidf","roc",0.003,0.185], ["tfidf","roc",0.005,0.263],
+    ["tfidf","roc",0.006,0.320], ["tfidf","roc",0.009,0.359], ["tfidf","roc",0.011,0.391], ["tfidf","roc",0.014,0.415],
+    ["tfidf","roc",0.016,0.457], ["tfidf","roc",0.019,0.495], ["tfidf","roc",0.023,0.524], ["tfidf","roc",0.026,0.552],
+    ["tfidf","roc",0.029,0.587], ["tfidf","roc",0.033,0.619], ["tfidf","roc",0.037,0.649], ["tfidf","roc",0.042,0.679],
+    ["tfidf","roc",0.047,0.699], ["tfidf","roc",0.051,0.725], ["tfidf","roc",0.061,0.745], ["tfidf","roc",0.072,0.766],
+    ["tfidf","roc",0.081,0.786], ["tfidf","roc",0.096,0.810], ["tfidf","roc",0.118,0.832], ["tfidf","roc",0.141,0.850],
+    ["tfidf","roc",0.164,0.872], ["tfidf","roc",0.197,0.891], ["tfidf","roc",0.220,0.908], ["tfidf","roc",0.275,0.929],
+    ["tfidf","roc",0.306,0.946], ["tfidf","roc",0.387,0.970], ["tfidf","roc",0.561,0.987], ["tfidf","roc",1.000,1.000],
+    ["tfidf","pr",1.000,0.063], ["tfidf","pr",1.000,0.065], ["tfidf","pr",1.000,0.067], ["tfidf","pr",0.997,0.070],
+    ["tfidf","pr",0.995,0.072], ["tfidf","pr",0.995,0.075], ["tfidf","pr",0.994,0.078], ["tfidf","pr",0.992,0.081],
+    ["tfidf","pr",0.992,0.084], ["tfidf","pr",0.991,0.088], ["tfidf","pr",0.991,0.092], ["tfidf","pr",0.991,0.097],
+    ["tfidf","pr",0.991,0.102], ["tfidf","pr",0.986,0.107], ["tfidf","pr",0.984,0.112], ["tfidf","pr",0.981,0.120],
+    ["tfidf","pr",0.978,0.127], ["tfidf","pr",0.975,0.136], ["tfidf","pr",0.968,0.145], ["tfidf","pr",0.964,0.155],
+    ["tfidf","pr",0.954,0.169], ["tfidf","pr",0.940,0.182], ["tfidf","pr",0.922,0.200], ["tfidf","pr",0.903,0.218],
+    ["tfidf","pr",0.883,0.246], ["tfidf","pr",0.861,0.277], ["tfidf","pr",0.835,0.317], ["tfidf","pr",0.797,0.386],
+    ["tfidf","pr",0.744,0.468], ["tfidf","pr",0.590,0.571], ["tfidf","pr",0.394,0.707], ["tfidf","pr",0.000,1.000],
+    ["b500","roc",0.000,0.000], ["b500","roc",0.012,0.122], ["b500","roc",0.026,0.233], ["b500","roc",0.050,0.342],
+    ["b500","roc",0.072,0.427], ["b500","roc",0.100,0.513], ["b500","roc",0.129,0.570], ["b500","roc",0.154,0.623],
+    ["b500","roc",0.189,0.682], ["b500","roc",0.210,0.720], ["b500","roc",0.244,0.747], ["b500","roc",0.268,0.769],
+    ["b500","roc",0.295,0.804], ["b500","roc",0.319,0.826], ["b500","roc",0.340,0.847], ["b500","roc",0.368,0.854],
+    ["b500","roc",0.391,0.869], ["b500","roc",0.420,0.883], ["b500","roc",0.445,0.899], ["b500","roc",0.470,0.910],
+    ["b500","roc",0.501,0.921], ["b500","roc",0.530,0.932], ["b500","roc",0.565,0.943], ["b500","roc",0.602,0.956],
+    ["b500","roc",0.648,0.965], ["b500","roc",0.693,0.972], ["b500","roc",0.746,0.978], ["b500","roc",0.812,0.986],
+    ["b500","roc",0.865,0.994], ["b500","roc",0.929,0.997], ["b500","roc",0.964,0.997], ["b500","roc",1.000,1.000],
+    ["b500","pr",1.000,0.063], ["b500","pr",0.997,0.065], ["b500","pr",0.995,0.069], ["b500","pr",0.986,0.077],
+    ["b500","pr",0.975,0.084], ["b500","pr",0.960,0.093], ["b500","pr",0.945,0.101], ["b500","pr",0.929,0.107],
+    ["b500","pr",0.911,0.114], ["b500","pr",0.899,0.121], ["b500","pr",0.877,0.128], ["b500","pr",0.861,0.133],
+    ["b500","pr",0.850,0.142], ["b500","pr",0.828,0.148], ["b500","pr",0.807,0.155], ["b500","pr",0.774,0.161],
+    ["b500","pr",0.753,0.169], ["b500","pr",0.731,0.179], ["b500","pr",0.717,0.189], ["b500","pr",0.687,0.196],
+    ["b500","pr",0.653,0.206], ["b500","pr",0.622,0.215], ["b500","pr",0.581,0.228], ["b500","pr",0.533,0.235],
+    ["b500","pr",0.506,0.260], ["b500","pr",0.464,0.276], ["b500","pr",0.413,0.292], ["b500","pr",0.351,0.316],
+    ["b500","pr",0.280,0.328], ["b500","pr",0.214,0.385], ["b500","pr",0.125,0.418], ["b500","pr",0.000,1.000],
+    ["b1000","roc",0.000,0.000], ["b1000","roc",0.005,0.174], ["b1000","roc",0.010,0.299], ["b1000","roc",0.021,0.427],
+    ["b1000","roc",0.033,0.519], ["b1000","roc",0.058,0.597], ["b1000","roc",0.083,0.639], ["b1000","roc",0.110,0.669],
+    ["b1000","roc",0.138,0.682], ["b1000","roc",0.157,0.691], ["b1000","roc",0.180,0.699], ["b1000","roc",0.198,0.714],
+    ["b1000","roc",0.223,0.722], ["b1000","roc",0.245,0.728], ["b1000","roc",0.267,0.737], ["b1000","roc",0.294,0.745],
+    ["b1000","roc",0.317,0.747], ["b1000","roc",0.341,0.752], ["b1000","roc",0.362,0.755], ["b1000","roc",0.382,0.763],
+    ["b1000","roc",0.403,0.774], ["b1000","roc",0.422,0.785], ["b1000","roc",0.448,0.815], ["b1000","roc",0.467,0.837],
+    ["b1000","roc",0.487,0.858], ["b1000","roc",0.505,0.878], ["b1000","roc",0.529,0.889], ["b1000","roc",0.569,0.903],
+    ["b1000","roc",0.627,0.921], ["b1000","roc",0.732,0.960], ["b1000","roc",0.892,0.986], ["b1000","roc",1.000,1.000],
+    ["b1000","pr",1.000,0.063], ["b1000","pr",0.976,0.073], ["b1000","pr",0.927,0.090], ["b1000","pr",0.891,0.100],
+    ["b1000","pr",0.872,0.105], ["b1000","pr",0.848,0.108], ["b1000","pr",0.824,0.109], ["b1000","pr",0.802,0.110],
+    ["b1000","pr",0.783,0.112], ["b1000","pr",0.771,0.115], ["b1000","pr",0.761,0.120], ["b1000","pr",0.753,0.126],
+    ["b1000","pr",0.748,0.136], ["b1000","pr",0.744,0.147], ["b1000","pr",0.736,0.158], ["b1000","pr",0.725,0.174],
+    ["b1000","pr",0.720,0.189], ["b1000","pr",0.699,0.205], ["b1000","pr",0.695,0.224], ["b1000","pr",0.687,0.242],
+    ["b1000","pr",0.677,0.268], ["b1000","pr",0.665,0.293], ["b1000","pr",0.647,0.324], ["b1000","pr",0.631,0.354],
+    ["b1000","pr",0.606,0.395], ["b1000","pr",0.585,0.442], ["b1000","pr",0.547,0.489], ["b1000","pr",0.479,0.543],
+    ["b1000","pr",0.408,0.600], ["b1000","pr",0.288,0.650], ["b1000","pr",0.174,0.728], ["b1000","pr",0.000,1.000],
+    ["b5000","roc",0.000,0.000], ["b5000","roc",0.004,0.274], ["b5000","roc",0.007,0.384], ["b5000","roc",0.012,0.495],
+    ["b5000","roc",0.017,0.581], ["b5000","roc",0.026,0.660], ["b5000","roc",0.034,0.718], ["b5000","roc",0.056,0.766],
+    ["b5000","roc",0.076,0.820], ["b5000","roc",0.122,0.866], ["b5000","roc",0.192,0.910], ["b5000","roc",0.253,0.937],
+    ["b5000","roc",0.331,0.956], ["b5000","roc",0.388,0.965], ["b5000","roc",0.431,0.970], ["b5000","roc",0.478,0.972],
+    ["b5000","roc",0.518,0.973], ["b5000","roc",0.551,0.978], ["b5000","roc",0.584,0.981], ["b5000","roc",0.617,0.983],
+    ["b5000","roc",0.646,0.984], ["b5000","roc",0.679,0.984], ["b5000","roc",0.718,0.986], ["b5000","roc",0.743,0.987],
+    ["b5000","roc",0.773,0.991], ["b5000","roc",0.802,0.995], ["b5000","roc",0.827,0.995], ["b5000","roc",0.851,0.997],
+    ["b5000","roc",0.881,0.998], ["b5000","roc",0.916,1.000], ["b5000","roc",0.942,1.000], ["b5000","roc",1.000,1.000],
+    ["b5000","pr",1.000,0.063], ["b5000","pr",1.000,0.065], ["b5000","pr",1.000,0.067], ["b5000","pr",0.998,0.070],
+    ["b5000","pr",0.997,0.072], ["b5000","pr",0.995,0.076], ["b5000","pr",0.992,0.078], ["b5000","pr",0.991,0.082],
+    ["b5000","pr",0.986,0.085], ["b5000","pr",0.984,0.089], ["b5000","pr",0.984,0.094], ["b5000","pr",0.981,0.098],
+    ["b5000","pr",0.981,0.104], ["b5000","pr",0.976,0.110], ["b5000","pr",0.972,0.115], ["b5000","pr",0.972,0.124],
+    ["b5000","pr",0.970,0.132], ["b5000","pr",0.965,0.142], ["b5000","pr",0.960,0.151], ["b5000","pr",0.956,0.163],
+    ["b5000","pr",0.951,0.178], ["b5000","pr",0.940,0.193], ["b5000","pr",0.927,0.213], ["b5000","pr",0.915,0.235],
+    ["b5000","pr",0.900,0.268], ["b5000","pr",0.880,0.302], ["b5000","pr",0.853,0.346], ["b5000","pr",0.818,0.421],
+    ["b5000","pr",0.758,0.507], ["b5000","pr",0.644,0.663], ["b5000","pr",0.413,0.789], ["b5000","pr",0.000,1.000]
+  ];
+  return raw.map(([model, space, x, y]) => ({model, space, x, y}));
+}
+```
+
+```{ojs}
+//| echo: false
+viewof rocSpace = Inputs.radio(
+  new Map([
+    ["ROC uzayı — recall'a karşı yanlış pozitif oranı", "roc"],
+    ["Precision-recall uzayı — recall'a karşı precision", "pr"]
+  ]),
+  { value: "roc", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+rocNames = ({
+  tfidf: "tf-idf + LR, 40.000 etiket", b500: "BERTurk, 500 etiket",
+  b1000: "BERTurk, 1.000 etiket", b5000: "BERTurk, 5.000 etiket"
+})
+```
+
+```{ojs}
+//| echo: false
+rocPlot = {
+  const data = curveRows.filter(d => d.space === rocSpace);
+  const isRoc = rocSpace === "roc";
+  return Plot.plot({
+    width: 640,
+    height: 440,
+    marginLeft: 60,
+    marginBottom: 48,
+    x: { label: isRoc ? "yanlış pozitif oranı — 9.368 memnun yorumun işaretlenen payı"
+                      : "recall — 632 şikâyetin yakalanan payı",
+         domain: [0, 1], grid: true },
+    y: { label: isRoc ? "doğru pozitif oranı — 632 şikâyetin yakalanan payı"
+                      : "precision — işaretlenenlerin doğru çıkan payı",
+         domain: [0, 1], grid: true },
+    color: { legend: true, domain: ["tfidf", "b500", "b1000", "b5000"],
+             range: ["#1F4E79", "#C08A3E", "#B3453E", "#0E7C7B"],
+             tickFormat: k => rocNames[k] },
+    marks: [
+      isRoc
+        ? Plot.line([[0, 0], [1, 1]], { stroke: "#9AA3AE", strokeDasharray: "5 4" })
+        : Plot.ruleY([0.0632], { stroke: "#9AA3AE", strokeDasharray: "5 4" }),
+      Plot.line(data, { x: "x", y: "y", stroke: "model", strokeWidth: 2 })
+    ]
+  });
+}
+```
+
+::: {.column-margin}
+Kesik çizgi her uzayda farklı bir şey demek. ROC uzayında yazı-tura atmanın
+çizdiği köşegen. PR uzayında ise **0,0632**'deki yatay çizgi — yani taban oran,
+belgeleri rastgele işaretlediğinizde precision'ın eşit olduğu değer. ROC
+grafiğinin ne kadarının kendi baseline'ının çok üstünde durduğuna, PR grafiğinin
+ise ne kadar azının durduğuna dikkat edin. Aynı modeller, aynı puanlar.
+:::
+
+`AP/base` sütunu, average precision'ı okumanın dürüst yolu: %6,32'lik bir taban
+orana karşı 60,30, rastgeleden 9,54× daha iyi demek — "60"ın kendi başına
+aktarmadığı, gerçek bir başarı.
+
+## Sınıf dengesizliği {#sec-siniflandirma-dengesizlik}
+
+Derlemin %93,68'i memnun. Bu
+[class imbalance](#gloss-class-imbalance){#term-class-imbalance .term-ref}
+durumuna verilen standart cevap menüsü şöyle: hiçbir şey yapmamak, sınıfları
+ağırlıklandırmak, azınlığı fazla örneklemek, çoğunluğu eksik örneklemek ya da
+SMOTE ile yeni azınlık noktaları sentezlemek [@chawla2002smote]. Bir de
+genellikle en sona yazılan ve bir kolaycılık muamelesi gören altıncı bir seçenek
+var — kazanan o.
+
+::: {#gloss-class-imbalance .column-margin .term-gloss}
+**class imbalance** (sınıf dengesizliği) — tek bir etiket derleme hâkim olur;
+böylece doğruluk bilgi taşımayı bırakır ve loss fonksiyonu sistemi kendisi için
+kurduğunuz sınıfı umursamayı bırakır. Verinin bir özelliğidir, içindeki bir
+bozukluk değil. [↩](#term-class-imbalance){.term-back}
+:::
+
+Aşağıdaki her şey 32.000 belgelik `fit` dilimi üzerinde uyduruldu, her eşik
+tutulan `cal` dilimi üzerinde seçildi ve `test` üzerinde puanlandı.
+
+```text
+treatment                     acc   macroF1   compF1   comp-P   comp-R      AP     AUC
+no correction, t=0.5        94.28     58.24    19.44     88.5     10.9   60.30   93.24
+threshold moved to 0.834    94.64     77.66    58.19     57.4     59.0   60.30   93.24
+class_weight=balanced       92.63     76.09    56.21     45.0     74.8   60.81   93.44
+random oversampling         93.63     77.63    58.72     49.7     71.7   61.46   93.45
+random undersampling        81.08     62.98    37.10     23.5     88.3   52.49   92.15
+SMOTE                       92.32     74.72    53.62     43.4     70.3   58.05   92.81
+```
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Beş yöntem sıralamayı değiştiriyor. Biri kararı değiştiriyor.</div>
+<svg viewBox="0 0 764 268" style="max-width:744px" role="img"
+     aria-label="Sınıf dengesizliğine karşı altı yöntemin test kümesindeki macro-F1 değerlerini gösteren yatay çubuk grafiği; eksen 0'dan değil 45'ten başlıyor. 48,37'deki kesik dikey referans çizgisi, her zaman memnun cevabını veren bir modelin macro-F1'ini işaretliyor. Çubuklar şöyle: eşik yarımda bırakılarak düzeltme yapılmaması, 58,24, 32.000 satır üzerinde eğitilmiş, average precision 60,30; eşiğin 0,834'e taşınması, 77,66, aynı 32.000 satır ve tıpatıp aynı 60,30 average precision, kazanan olarak vurgulanmış; class_weight=balanced, 76,09, 32.000 satır, average precision 60,81; rastgele aşırı örnekleme, 77,63, 59.954 satır, average precision 61,46; rastgele eksik örnekleme, 62,98, yalnızca 4.046 satır, average precision 52,49, uyarı rengiyle çizilmiş; ve SMOTE, 74,72, 59.954 satır, average precision 58,05. Alt satır, ilk iki satırın average precision değerinin özdeş olduğunu, çünkü ikisinin iki farklı eşikte okunan aynı uydurulmuş model olduğunu belirtiyor.">
+  <text x="10" y="18" class="t-xs t-b t-muted">YÖNTEM</text>
+  <text x="200" y="18" class="t-xs t-b t-muted">TESTTE MACRO-F1</text>
+  <text x="650" y="18" class="t-xs t-b t-muted t-mid">SATIR</text>
+  <text x="725" y="18" class="t-xs t-b t-muted t-mid">AP</text>
+
+  <line x1="257" y1="26" x2="257" y2="204" class="ln-thin"/>
+  <line x1="371" y1="26" x2="371" y2="204" class="ln-thin"/>
+  <line x1="486" y1="26" x2="486" y2="204" class="ln-thin"/>
+  <line x1="600" y1="26" x2="600" y2="204" class="ln-thin"/>
+  <line x1="239" y1="26" x2="239" y2="212" class="ln-dash"/>
+
+  <rect x="200" y="34" width="151" height="18" rx="4" class="box"/>
+  <text x="10" y="47" class="t-xs">düzeltme yok, t = 0,5</text>
+  <text x="359" y="47" class="t-xs t-b">58,24</text>
+  <text x="650" y="47" class="t-xs t-mid t-muted">32.000</text>
+  <text x="725" y="47" class="t-xs t-mid t-b">60,30</text>
+
+  <rect x="200" y="62" width="373" height="18" rx="4" class="box-accent"/>
+  <text x="10" y="75" class="t-xs t-b t-accent">eşik 0,834'e taşındı</text>
+  <text x="581" y="75" class="t-xs t-b t-accent">77,66</text>
+  <text x="650" y="75" class="t-xs t-mid t-muted">32.000</text>
+  <text x="725" y="75" class="t-xs t-mid t-b t-accent">60,30</text>
+
+  <rect x="200" y="90" width="355" height="18" rx="4" class="box"/>
+  <text x="10" y="103" class="t-xs">class_weight=balanced</text>
+  <text x="563" y="103" class="t-xs t-b">76,09</text>
+  <text x="650" y="103" class="t-xs t-mid t-muted">32.000</text>
+  <text x="725" y="103" class="t-xs t-mid">60,81</text>
+
+  <rect x="200" y="118" width="373" height="18" rx="4" class="box"/>
+  <text x="10" y="131" class="t-xs">rastgele aşırı örnekleme</text>
+  <text x="581" y="131" class="t-xs t-b">77,63</text>
+  <text x="650" y="131" class="t-xs t-mid t-muted">59.954</text>
+  <text x="725" y="131" class="t-xs t-mid">61,46</text>
+
+  <rect x="200" y="146" width="205" height="18" rx="4" class="box-rose"/>
+  <text x="10" y="159" class="t-xs t-rose">rastgele eksik örnekleme</text>
+  <text x="413" y="159" class="t-xs t-b t-rose">62,98</text>
+  <text x="650" y="159" class="t-xs t-mid t-muted">4.046</text>
+  <text x="725" y="159" class="t-xs t-mid t-rose">52,49</text>
+
+  <rect x="200" y="174" width="340" height="18" rx="4" class="box"/>
+  <text x="10" y="187" class="t-xs">SMOTE</text>
+  <text x="548" y="187" class="t-xs t-b">74,72</text>
+  <text x="650" y="187" class="t-xs t-mid t-muted">59.954</text>
+  <text x="725" y="187" class="t-xs t-mid">58,05</text>
+
+  <text x="200" y="224" class="t-xs t-muted">45</text>
+  <text x="257" y="224" class="t-xs t-mid t-muted">50</text>
+  <text x="371" y="224" class="t-xs t-mid t-muted">60</text>
+  <text x="486" y="224" class="t-xs t-mid t-muted">70</text>
+  <text x="600" y="224" class="t-xs t-mid t-muted">80</text>
+  <text x="239" y="240" class="t-xs t-mid t-rose">48,37</text>
+  <text x="239" y="254" class="t-xs t-mid t-rose t-b">her zaman “memnun”</text>
+
+  <text x="330" y="248" class="t-xs t-muted">1. ve 2. satır aynı model. Özdeş AP, sıralamanın hiç kıpırdamadığını kanıtlıyor.</text>
+</svg>
+```
+::: {.fig-cap}
+Eksen 0'dan değil 45'ten başlıyor, çünkü hiç özniteliği olmayan bir model 48,37
+alıyor ve ilginç olan her şey onun üstünde oluyor. `AP` sütunu kontrol
+değişkeni: average precision yalnızca sıralamaya bağlıdır, dolayısıyla dört
+anlamlı basamağa kadar aynı AP'yi paylaşan iki satır aynı modeldir.
+:::
+::::
+
+İkinci satır bu bölümün tamamı. **Birinci satırdakiyle aynı model** — yeniden
+eğitilmedi, yeniden ağırlıklandırılmadı, yeniden örneklenmedi, birebir aynı
+uydurulmuş katsayılar — 58,24'ten 77,66 macro-F1'e çıkıyor; çünkü puanını 0,5
+yerine 0,834 ile karşılaştırdık.
+
+Modelde hiçbir şeyin değişmediğinin kanıtı son iki sütunda. Birinci ve ikinci
+satırda average precision ile AUC dört anlamlı basamağa kadar *özdeş*, çünkü
+ikisi de sıralamadan hesaplanıyor ve bir eşiği oynatmak hiçbir şeyin sırasını
+değiştiremez. [Diğer beş yöntemin hepsi, bir kararı düzeltmek için bir
+sıralamayı değiştirme girişimi. Yalnızca sonuncusu kararı doğrudan
+düzeltiyor.]{.hl}
+
+Buna karşı, yeniden eğitim yöntemleri pahalı görünüyor:
+
+- **Sınıf ağırlıkları** 76,09'a ulaşıyor, bedava seçeneğin 1,57 puan *altında*,
+  üstelik yeniden uydurma maliyetiyle.
+- **Rastgele aşırı örnekleme** 77,63'e ulaşıyor; eşiği oynatmaktan istatistiksel
+  olarak ayırt edilemez, ama 32.000 yerine 59.954 satır üzerinde — beraberlik
+  için neredeyse iki katı eğitim süresi.
+- **Rastgele eksik örnekleme** bir felaket: 62,98. Eşitlik sağlamak için 32.000
+  belgenin 27.954'ünü çöpe attı ve attığı çoğunluk sınıfı, bir şikâyet
+  *olmayan*ın neye benzediğine dair bilginin çoğunu taşıyordu. Precision
+  %23,5'e çöküyor.
+- **SMOTE** 74,72'ye ulaşıyor; hiçbir şey yapmayıp eşiği oynatmaktan da, sınıf
+  ağırlıklarından da kötü.
+
+::: {.column-margin}
+SMOTE'un buradaki kötü performansı makaleyi çürütmüyor ve bölüm çürüttüğü
+numarasını yapmamalı. Chawla ve arkadaşları düşük boyutlu, yoğun, sayısal dokuz
+veri kümesini değerlendirdi — Pima, Phoneme, Adult, Satimage vb. — ve metni
+açıkça *gelecek çalışma* diye listeleyip "bir öznitelik seçme algoritmasıyla
+birlikte uygulanması gerekirdi" dedi [@chawla2002smote]. Seyrek, 83.281 boyutlu
+iki tf-idf satırı arasında ara değer bulmak, kimsenin yazamayacağı bir belgeye
+karşılık gelen bir nokta üretiyor. Bunu, yazarlar burada işe yarayacağını iddia
+ettiği için değil, uygulamacıların uzandığı şey olduğu için ölçtük.
+:::
+
+Bu, bu derleme özgü bir tuhaflık değil. Van den Goorbergh ve arkadaşları aynı
+şeyi klinik risk modellerinde buldu ve bizim cüret edeceğimizden daha sert
+söyledi: dengesizlik düzeltmeleri ayırt etme gücünde hiçbir şey kazandırmıyor ve
+başka yerlerde gerçek hasar veriyor [@vandengoorbergh2022harm].
+@sec-siniflandirma-kalibrasyon hasarı ölçüyor.
+
+Bu konunun civarında herkesin andığı makale — Elkan'ınki — aynı şekilde savunuyor
+ve tavsiyeyi doğru aktarmakta fayda var, çünkü rutin olarak tersine çevriliyor.
+Elkan'ın tavsiyesi, *sınıflandırıcıyı eğitim kümesinden verildiği hâliyle
+öğrenmek ve sonra en iyi kararları açıkça hesaplamak* [@elkan2001foundations].
+Bu, yeniden örnekleme **lehine** değil, **aleyhine** bir sav.
+
+## O sayı bir olasılık mı? {#sec-siniflandirma-kalibrasyon}
+
+Eşiği oynatmak işe yarıyor. Ama bu, bir önceki bölümün sessizce atladığı bir
+soruyu doğuruyor: 0,834 sayısı, tutulan veri üzerindeki bir taramadan geldi.
+Bunun yerine bir eşiği *türetmek* isteseydiniz — diyelim ki bir maliyet
+matrisinden — modelin çıktısının bir anlam taşıması gerekirdi. Öyleyse:
+sınıflandırıcı 0,834 dediğinde, bu bir olasılık mı?
+
+Buradaki her şey 8.000 belgelik `cal` dilimi üzerinde uyduruldu — bu bölümdeki
+hiçbir model onun üzerinde eğitilmedi — ve `test` üzerinde puanlandı. Bütün mesele
+o ayrım; aşağıdaki BERTurk satırının, öğrenme eğrisini üreten 40.000 belgelik
+`train` yerine 32.000 belgelik `fit` dilimi üzerinde eğitilmiş bir model
+olmasının nedeni de bu. Sınıflandırıcının zaten iyi uyduğu belgeler üzerinde
+uydurulan bir kalibratör, sınıflandırıcı kalibre değilken kalibre olduğunu
+raporlar.
+
+```text
+model / method                       ECE    MCE    Brier   logloss   mean p
+tf-idf, no correction — raw         3.96  39.32   0.0421    0.1514    0.940
+  — temperature                     3.20  39.36   0.0426    0.1489    0.952
+  — Platt                           0.94  16.58   0.0368    0.1318    0.935
+  — isotonic                        0.69  32.96   0.0367    0.1309    0.935
+  — isotonic fitted on TRAIN        2.39  24.66   0.0387    0.1487    0.942
+
+tf-idf, class-weighted — raw       14.18  35.93   0.0675    0.2448    0.795
+  — temperature                     7.80  43.29   0.0568    0.1974    0.859
+  — Platt                           0.93  15.28   0.0364    0.1300    0.935
+  — isotonic                        0.88  72.20   0.0364    0.1295    0.935
+
+BERTurk, class-weighted — raw       2.53  49.84   0.0318    0.1442    0.933
+  — temperature                     2.58  50.02   0.0303    0.1224    0.913
+  — Platt                           1.25  31.65   0.0275    0.1062    0.936
+  — isotonic                        0.56  45.84   0.0265    0.0984    0.936
+```
+
+Bu sayılar bir resmin özeti ve resim özetten daha bilgilendirici. Aşağıdaki her
+nokta on beş kutucuktan biri; kutucuğun ortalama öngörülen olasılığına karşı, o
+kutucuğun gerçekte memnun çıkan payına yerleştirilmiş. Kusursuz kalibrasyon
+köşegendir. Nokta alanı kutucuktaki belge sayısı, çünkü üç belge tutan bir
+kutucukla 7.317 belge tutan bir kutucuk aynı derecede önemli görünmemeli.
+
+```{ojs}
+//| echo: false
+relRows = {
+  // [model, calibration method, mean predicted probability in bin,
+  //  observed frequency of the satisfied class, documents in bin]
+  const raw = [
+    ["plain","raw",0.0447,0.0000,3], ["plain","raw",0.0864,0.0000,5], ["plain","raw",0.1473,0.0000,1],
+    ["plain","raw",0.2326,0.0769,13], ["plain","raw",0.2951,0.0000,10], ["plain","raw",0.3722,0.1538,13],
+    ["plain","raw",0.4298,0.2222,18], ["plain","raw",0.5023,0.2258,31], ["plain","raw",0.5692,0.2093,43],
+    ["plain","raw",0.6352,0.2419,62], ["plain","raw",0.7024,0.4074,108], ["plain","raw",0.7732,0.5318,173],
+    ["plain","raw",0.8387,0.6644,444], ["plain","raw",0.9082,0.9312,1759], ["plain","raw",0.9727,0.9923,7317],
+    ["plain","temp",0.0443,0.0000,6], ["plain","temp",0.0938,0.0000,3], ["plain","temp",0.1865,0.2000,5],
+    ["plain","temp",0.2315,0.0000,12], ["plain","temp",0.2913,0.0000,7], ["plain","temp",0.3667,0.2000,15],
+    ["plain","temp",0.4337,0.1667,18], ["plain","temp",0.5056,0.2593,27], ["plain","temp",0.5726,0.2051,39],
+    ["plain","temp",0.6367,0.2653,49], ["plain","temp",0.7022,0.3086,81], ["plain","temp",0.7680,0.5276,127],
+    ["plain","temp",0.8390,0.5750,320], ["plain","temp",0.9093,0.8784,1135], ["plain","temp",0.9776,0.9882,8156],
+    ["plain","platt",0.0269,0.0984,61], ["plain","platt",0.1025,0.2683,41], ["plain","platt",0.1661,0.2105,38],
+    ["plain","platt",0.2322,0.2439,41], ["plain","platt",0.3034,0.3023,43], ["plain","platt",0.3688,0.3571,42],
+    ["plain","platt",0.4285,0.4600,50], ["plain","platt",0.5047,0.5098,51], ["plain","platt",0.5703,0.5806,62],
+    ["plain","platt",0.6338,0.5545,101], ["plain","platt",0.7033,0.5946,111], ["plain","platt",0.7656,0.6789,190],
+    ["plain","platt",0.8388,0.8457,337], ["plain","platt",0.9061,0.9261,852], ["plain","platt",0.9866,0.9893,7980],
+    ["plain","iso",0.0892,0.0323,31], ["plain","iso",0.1562,0.2329,73], ["plain","iso",0.2561,0.2695,141],
+    ["plain","iso",0.3296,0.0000,1], ["plain","iso",0.3415,0.4308,65], ["plain","iso",0.4074,0.4138,29],
+    ["plain","iso",0.4906,0.6197,71], ["plain","iso",0.6315,0.5768,241], ["plain","iso",0.7186,0.6600,150],
+    ["plain","iso",0.7568,0.7547,53], ["plain","iso",0.8515,0.8487,476], ["plain","iso",0.9112,0.9442,573],
+    ["plain","iso",0.9885,0.9888,8096], ["plain","leak",0.0378,0.1818,143], ["plain","leak",0.0817,0.2353,17],
+    ["plain","leak",0.1542,0.3386,127], ["plain","leak",0.2234,0.4545,22], ["plain","leak",0.2952,0.4918,61],
+    ["plain","leak",0.3815,0.5588,136], ["plain","leak",0.4200,0.6667,9], ["plain","leak",0.4800,0.6111,18],
+    ["plain","leak",0.5866,0.5902,61], ["plain","leak",0.6180,0.6575,73], ["plain","leak",0.7546,0.6000,70],
+    ["plain","leak",0.8202,0.7264,106], ["plain","leak",0.9000,0.8484,343], ["plain","leak",0.9953,0.9834,8814],
+    ["weighted","raw",0.0347,0.1389,72], ["weighted","raw",0.1005,0.2653,98], ["weighted","raw",0.1649,0.3107,103],
+    ["weighted","raw",0.2351,0.4211,114], ["weighted","raw",0.2988,0.5641,156], ["weighted","raw",0.3674,0.6514,175],
+    ["weighted","raw",0.4362,0.7535,215], ["weighted","raw",0.5028,0.8271,266], ["weighted","raw",0.5693,0.9286,392],
+    ["weighted","raw",0.6347,0.9570,512], ["weighted","raw",0.7033,0.9475,648], ["weighted","raw",0.7694,0.9747,868],
+    ["weighted","raw",0.8357,0.9903,1243], ["weighted","raw",0.9030,0.9955,1994], ["weighted","raw",0.9684,0.9981,3144],
+    ["weighted","temp",0.0216,0.2646,291], ["weighted","temp",0.1013,0.4615,143], ["weighted","temp",0.1657,0.5487,113],
+    ["weighted","temp",0.2337,0.6667,108], ["weighted","temp",0.2972,0.6633,98], ["weighted","temp",0.3667,0.7563,119],
+    ["weighted","temp",0.4334,0.7983,119], ["weighted","temp",0.5023,0.8080,125], ["weighted","temp",0.5670,0.9018,163],
+    ["weighted","temp",0.6340,0.9126,206], ["weighted","temp",0.7018,0.9643,280], ["weighted","temp",0.7704,0.9474,323],
+    ["weighted","temp",0.8362,0.9470,453], ["weighted","temp",0.9039,0.9681,877], ["weighted","temp",0.9870,0.9953,6582],
+    ["weighted","platt",0.0281,0.0909,55], ["weighted","platt",0.1045,0.2093,43], ["weighted","platt",0.1615,0.3143,35],
+    ["weighted","platt",0.2340,0.2500,52], ["weighted","platt",0.2976,0.2564,39], ["weighted","platt",0.3674,0.3721,43],
+    ["weighted","platt",0.4388,0.4400,50], ["weighted","platt",0.5015,0.4364,55], ["weighted","platt",0.5678,0.5000,86],
+    ["weighted","platt",0.6336,0.5745,94], ["weighted","platt",0.7026,0.6818,132], ["weighted","platt",0.7708,0.7072,181],
+    ["weighted","platt",0.8372,0.8199,311], ["weighted","platt",0.9056,0.9413,801], ["weighted","platt",0.9872,0.9889,8023],
+    ["weighted","iso",0.0702,0.0345,29], ["weighted","iso",0.1406,0.1951,41], ["weighted","iso",0.2215,0.2850,200],
+    ["weighted","iso",0.2780,1.0000,1], ["weighted","iso",0.3349,0.4250,40], ["weighted","iso",0.4622,0.0000,1],
+    ["weighted","iso",0.4706,0.4222,45], ["weighted","iso",0.5909,0.5161,93], ["weighted","iso",0.6570,0.5674,141],
+    ["weighted","iso",0.6934,0.6837,196], ["weighted","iso",0.7660,0.7853,191], ["weighted","iso",0.8598,0.8161,174],
+    ["weighted","iso",0.9043,0.9410,814], ["weighted","iso",0.9893,0.9889,8034],
+    ["bert","raw",0.0056,0.2210,525], ["bert","raw",0.1029,0.5500,20], ["bert","raw",0.1690,0.5833,12],
+    ["bert","raw",0.2289,0.7273,11], ["bert","raw",0.2826,0.4286,7], ["bert","raw",0.3778,0.8462,13],
+    ["bert","raw",0.4267,0.5000,10], ["bert","raw",0.5041,0.8462,13], ["bert","raw",0.5681,0.6429,14],
+    ["bert","raw",0.6310,0.5833,12], ["bert","raw",0.7014,0.6842,19], ["bert","raw",0.7704,0.6000,25],
+    ["bert","raw",0.8351,0.8077,52], ["bert","raw",0.9056,0.7759,116], ["bert","raw",0.9950,0.9857,9151],
+    ["bert","temp",0.0194,0.1917,480], ["bert","temp",0.0944,0.5946,37], ["bert","temp",0.1588,0.3333,18],
+    ["bert","temp",0.2310,0.7059,17], ["bert","temp",0.2977,0.6000,15], ["bert","temp",0.3549,0.5556,9],
+    ["bert","temp",0.4320,0.6500,20], ["bert","temp",0.5041,0.7895,19], ["bert","temp",0.5676,0.6000,20],
+    ["bert","temp",0.6356,0.6957,23], ["bert","temp",0.7035,0.6250,40], ["bert","temp",0.7679,0.8507,67],
+    ["bert","temp",0.8399,0.7973,148], ["bert","temp",0.9065,0.9020,490], ["bert","temp",0.9787,0.9915,8597],
+    ["bert","platt",0.1149,0.0485,227], ["bert","platt",0.1576,0.2281,171], ["bert","platt",0.2254,0.4524,42],
+    ["bert","platt",0.2930,0.5750,40], ["bert","platt",0.3636,0.5263,19], ["bert","platt",0.4335,0.7500,16],
+    ["bert","platt",0.4935,0.2667,15], ["bert","platt",0.5724,0.6000,15], ["bert","platt",0.6348,0.6250,16],
+    ["bert","platt",0.6918,0.6000,15], ["bert","platt",0.7690,0.7179,39], ["bert","platt",0.8397,0.6471,51],
+    ["bert","platt",0.9091,0.7750,200], ["bert","platt",0.9833,0.9860,9134], ["bert","iso",0.0220,0.0427,164],
+    ["bert","iso",0.1050,0.0000,2], ["bert","iso",0.1676,0.1479,169], ["bert","iso",0.3018,0.1250,16],
+    ["bert","iso",0.3333,0.3966,58], ["bert","iso",0.4762,0.5248,101], ["bert","iso",0.5416,1.0000,1],
+    ["bert","iso",0.6419,1.0000,2], ["bert","iso",0.7228,0.6591,220], ["bert","iso",0.7975,0.8108,74],
+    ["bert","iso",0.8237,0.7143,42], ["bert","iso",0.9168,0.9276,1105], ["bert","iso",0.9931,0.9937,8046]
+  ];
+  return raw.map(([model, method, conf, freq, n]) => ({model, method, conf, freq, n}));
+}
+```
+
+```{ojs}
+//| echo: false
+viewof relModel = Inputs.radio(
+  new Map([
+    ["dengesizlik düzeltmesi yapılmamış tf-idf", "plain"],
+    ["aynı model, class_weight=balanced", "weighted"],
+    ["BERTurk, fit dilimi üzerinde fine-tune edilmiş", "bert"]
+  ]),
+  { value: "plain", label: "model" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof relPick = Inputs.checkbox(
+  new Map([
+    ["ham — modelin dediği", "raw"],
+    ["sıcaklık — tek parametre", "temp"],
+    ["Platt — eğim ve kesim noktası", "platt"],
+    ["izotonik — serbest monoton eşleme", "iso"],
+    ["TRAIN üzerinde uydurulmuş izotonik (sızıntı)", "leak"]
+  ]),
+  { value: ["raw", "platt"], label: "kalibrasyon" }
+)
+```
+
+```{ojs}
+//| echo: false
+relPlot = {
+  // yalnızca düzeltilmemiş doğrusal modelin kasıtlı sızdırılmış kalibratörü var
+  const avail = relModel === "plain"
+    ? ["raw", "temp", "platt", "iso", "leak"]
+    : ["raw", "temp", "platt", "iso"];
+  const keep = relPick.filter(m => avail.includes(m));
+  const data = relRows.filter(d => d.model === relModel && keep.includes(d.method));
+  const names = {raw: "ham", temp: "sıcaklık", platt: "Platt",
+                 iso: "izotonik", leak: "TRAIN üzerinde izotonik"};
+  return Plot.plot({
+    width: 640,
+    height: 440,
+    marginLeft: 60,
+    marginBottom: 48,
+    x: { label: "kutucuktaki ortalama öngörülen P(memnun)", domain: [0, 1], grid: true },
+    y: { label: "kutucukta gözlenen memnun payı", domain: [0, 1], grid: true },
+    r: { range: [2, 14] },
+    color: { legend: true, domain: ["raw", "temp", "platt", "iso", "leak"],
+             range: ["#B3453E", "#C08A3E", "#1F4E79", "#0E7C7B", "#6B7280"],
+             tickFormat: k => names[k] },
+    marks: [
+      Plot.line([[0, 0], [1, 1]], { stroke: "#9AA3AE", strokeDasharray: "5 4" }),
+      Plot.line(data, { x: "conf", y: "freq", stroke: "method", strokeWidth: 1.5, strokeOpacity: 0.55 }),
+      Plot.dot(data, { x: "conf", y: "freq", fill: "method", r: "n", fillOpacity: 0.75,
+        title: d => `${names[d.method]}\nöngörülen ${(100*d.conf).toFixed(1)}%\n` +
+                    `gözlenen ${(100*d.freq).toFixed(1)}%\n${d.n.toLocaleString("tr-TR")} belge` })
+    ]
+  });
+}
+```
+
+::: {.column-margin}
+Modeli **class_weight=balanced**'a çevirin ve yalnızca **ham**'ı işaretli
+bırakın. Eğrinin tamamı köşegenin üstünde duruyor: her kutucuk, modelin
+öngördüğünden daha fazla memnun yorum içeriyor. Bu gürültü değil, her olasılığın
+sistematik olarak aşağı kaymasıdır — ve sonraki birkaç paragrafın konusu da bu.
+:::
+
+Test üzerindeki gerçek taban oran 0,9368. Beş bulgu, şaşırtıcılık sırasıyla.
+
+**Sınıf ağırlıklandırma kalibrasyonu yok ediyor.** ECE 3,96'dan 14,18'e çıkıyor,
+yani 3,6× artış; modelin ortalama öngörülen olasılığı da gerçek oran 0,9368
+iken 0,795'e düşüyor. Yeniden ağırlıklandırılmış model macro-F1 bakımından
+*daha iyi* (58,24'e karşı 76,09) ve olasılıkları çok daha kötü. [Modelinizin
+çıktısı bir insana gösterilecekse, bir maliyetle çarpılacaksa ya da başkasının
+yazdığı bir kuralla eşiklenecekse, sınıf ağırlıklandırma üçünü de sessizce
+bozar.]{.hl} Bu, van den Goorbergh ve arkadaşlarının sonucunun metin üzerinde
+yeniden üretilmiş hâli.
+
+**Sıcaklık ölçekleme burada neredeyse hiç yardım etmiyor** ve bu, kötü şanstan
+çok yapısal bir olgu. Sıcaklığın tek bir parametresi var; bir dağılımı
+keskinleştirebilir ya da yumuşatabilir ama ortalamasını pek oynatamaz. Sınıf
+ağırlıklı modelde bozuk olan şey ise *kaymış bir önsel* — model şikâyetleri
+olduklarından yaygın sanıyor. Platt ölçeklemenin iki parametresi var, bir eğim
+ve bir kesim noktası [@platt1999probabilistic]; kesim noktası da tam olarak bir
+önsel kaymasını düzelten düğme. ECE'yi 14,18'den 0,93'e indiriyor.
+
+::: {.column-margin}
+Sıcaklık ölçeklemeyi yaygınlaştıran Guo ve arkadaşları, onu görüntü
+sınıflandırıcılarında güçlü bir baseline olarak buldu [@guo2017calibration]. Bu,
+buradaki sonuçla çelişmiyor: onların ağları aşırı kendinden emindi ama
+sistematik olarak kaymış değildi — sıcaklığın tasarlandığı başarısızlık türü de
+bu. Burada sıcaklık ölçeklemeye uzanmak, iki parametreli bir soruna tek
+parametreli bir çözüme uzanmak demek.
+:::
+
+**ECE ile MCE anlaşamıyor ve ikisine de ihtiyacınız var.** Sınıf ağırlıklı model
+üzerinde
+[isotonic regression](#gloss-isotonic-regression){#term-isotonic-regression .term-ref},
+tablodaki en iyi beklenen kalibrasyon hatasını (0,88) ve *en kötü* maksimum
+kalibrasyon hatasını (72,20) alıyor. ECE bir $n$ ağırlıklı ortalama; dolayısıyla
+felaket ölçüsünde açığı olan tek bir seyrek kutucuk onu neredeyse hiç
+oynatmıyor. Kararlarınız kuyrukta yaşıyorsa — maliyete duyarlı kararlar
+genellikle orada yaşar — ortalama yanlış özettir.
+
+::: {#gloss-isotonic-regression .column-margin .term-gloss}
+**isotonic regression** (izotonik regresyon) — kalibrasyon eşlemesini, yalnızca
+hiç aşağı inmemesi istenen serbest bir merdiven olarak uydurur. Bir sigmoid'in
+bükülemediği her monoton şekle bükülebilir; yeterli tutulan veriyle
+kazanmasının, onsuz aşırı uydurmasının nedeni budur.
+[↩](#term-isotonic-regression){.term-back}
+:::
+
+**Kalibratörü eğitim verisi üzerinde uydurmak bozuk görünmüyor.** "isotonic
+fitted on TRAIN" diye işaretli satır, bu bölümün uyarmak için var olduğu hata:
+izotonik eşlemeyi, sınıflandırıcının eğitildiği aynı 32.000 belge üzerinde
+uydurduk. ECE 2,39 alıyor. Bu, tutulan veri üzerinde düzgünce uydurmaktan (0,69)
+3,5× daha kötü — ve yine de *hiçbir şey yapmamaktan iyi* (3,96). [Sızıntı,
+bariz biçimde yanlış bir sayı üretmiyor. Elde edebileceğinizden sessizce birkaç
+kat kötü, makul görünen bir sayı üretiyor]{.hl}; kod incelemesinden sağ
+çıkmasının nedeni de bu.
+
+**Transformer ortalamada daha iyi, kuyrukta daha kötü kalibre.** BERTurk'ün ham
+ECE'si, doğrusal modelin 3,96'sına karşı 2,53; Brier puanı 0,0421'e karşı
+0,0318; ortalama öngörüsü olan 0,933 ise gerçek taban orandan dört binde bir
+uzakta. Yani derin ağların çılgınca kendinden emin olduğuna dair halk inancı
+burada toplamda yeniden üretilmiyor. Yeniden üretilen şey öbür sütunda:
+[BERTurk'ün *maksimum* kalibrasyon hatası 49,84, tablodaki en kötü ham
+değer]{.hl}. Bir yerde, modelin bir şey dediği ve verinin 50 puan ötede başka bir
+şey dediği bir kutucuk var — @sec-siniflandirma-hata-analizi size orada tam
+olarak hangi belgelerin yaşadığını gösterecek. Kalibre etmek ortalamayı
+düzeltiyor (izotonik ECE'yi 0,56'ya indiriyor; bölümdeki en iyi sayı, üstelik en
+iyi Brier ve log loss ile birlikte) ve kuyruğu 45,84'te bırakıyor.
+
+::: {.column-margin}
+Bu BERTurk, 40.000'lik `train` üzerinde değil 32.000 belgelik `fit` dilimi
+üzerinde fine-tune edildi; tam da `cal` dokunulmamış kalsın diye. Bu, onu
+@sec-siniflandirma-fine-tuning'dekinden biraz daha zayıf bir sınıflandırıcı
+yapıyor — 85,02'ye karşı 84,45 macro-F1, yani 8.000 eksik etiketin bedeli — ve
+kalibre edilmesi dürüst olan tek model o. 40.000 etiketli modeli burada yeniden
+kullanmak, kalibratörü zaten üzerinde eğitilmiş olduğu 8.000 belge üzerinde
+uydurmak olurdu — "isotonic on TRAIN" satırının ölçtüğü sızıntının tam olarak
+kendisi.
+:::
+
+::: {.column-margin}
+Bu, Platt'ın kendi uyarısı ve genellikle abartılıyor. Asla eğitim kümesi
+üzerinde uydurmayın demiyor; *doğrusal olmayan* SVM'ler için bunun "bazen
+felaket ölçüsünde yanlı uydurmalara yol açtığını", doğrusal modeller içinse
+"sigmoid'i doğrudan eğitim kümesi üzerinde uydurmanın çoğu zaman mümkün
+olduğunu" söylüyor. Bizim modelimiz doğrusal ve gerçekten de buradaki sızıntı
+kötü ama felaket değil. Önerdiği çare üç katlı çapraz doğrulama; daha ucuz
+alternatif olarak da "tipik olarak %30"luk bir tutulan küme
+[@platt1999probabilistic].
+:::
+
+### Hangi ECE üzerine bir not
+
+Beklenen kalibrasyon hatası tek bir istatistik değil. Guo ve arkadaşları
+**en üst etiket** güveni $\max_k p_k$ üzerinden kutucuklara ayırıyor ve
+`argmax`'ın ne sıklıkta doğru olduğunu soruyor [@guo2017calibration]. İkili bir
+problemde o nicelik $[0{,}5, 1]$ aralığında yaşar; dolayısıyla kutucukların
+yarısı kuruluş gereği boştur ve sayı, doğrudan $P(\text{sınıf } 1)$ üzerinden
+kutucuklamayla karşılaştırılabilir değildir. Ölçüm kodumuz ikisini de
+raporluyor; yukarıdaki tablo ikili sürümü kullanıyor ve en üst etiket sürümü
+sistematik olarak daha küçük — sınıf ağırlıklı model için 14,18 yerine 8,98.
+
+Seçim süs değil ve BERTurk'e sıcaklık ölçekleme uygulamak bunun nedenini
+gösteriyor. İkili istatistikte işleri kıl payı kötüleştiriyor, 2,53 → **2,58**.
+En üst etiket istatistiğinde ise büyük bir kazanç gibi görünüyor,
+2,47 → **0,73**. Aynı model, aynı uydurulmuş sıcaklık, aynı test kümesi, tek bir
+işlem — hangi ECE'yi bastığınıza göre 3,4× iyileşme ya da küçük bir gerileme
+diye raporlanıyor. İki sayı da doğru ve farklı sorulara cevap veriyorlar:
+*memnun* olasılığının ne kadar iyi kalibre olduğu ile hangi etiket kazandıysa
+ona duyulan güvenin ne kadar iyi kalibre olduğu. [Hangisini hesapladığınızı
+söylemeden bir ECE aktarmak yanlıştır.]{.hl}
+
+## Eşiği bir maliyet matrisinden seçmek {#sec-siniflandirma-maliyetler}
+
+Şimdi ödül kısmı. Modelin çıktısı bir olasılıksa, eşik için tarama yapmak zorunda
+değilsiniz — türetebilirsiniz.
+
+$q = P(\text{şikâyet} \mid x)$ olsun ve bir yanlış alarmın maliyeti $C_{FP}$,
+kaçırılan bir şikâyetin maliyeti $C_{FN}$ olsun. İşaretlemenin maliyeti
+$(1-q) \cdot C_{FP}$; geçmesine izin vermenin maliyeti $q \cdot C_{FN}$.
+İşaretlemek şu durumda değer:
+
+$$q > \frac{C_{FP}}{C_{FN} + C_{FP}} = \frac{1}{1+r}, \qquad r = \frac{C_{FN}}{C_{FP}}$$
+
+Bu, Elkan'ın eşiği [@elkan2001foundations] ve her aktarılışında düşürülen bir
+koşulla birlikte geliyor: [$q$'nun bir olasılık olması gerekiyor]{.hl}. Olmadığında
+ne olduğu aşağıda. Maliyetler $C_{FP} = 1$ birimiyle, 10.000 belgelik test
+kümesi üzerinde; "oracle", test'in kendisi üzerinde tarayarak bulunan mümkün olan
+en iyi eşik — dolayısıyla her satırın bir pişmanlığı var.
+
+```text
+  r    Elkan q*    raw    calibrated   swept    oracle | regret: raw   calib   swept
+  1      0.5000    572           501     498       483 |      18.4%    3.7%    3.1%
+  2      0.3333    980           797     792       776 |      26.3%    2.7%    2.1%
+  5      0.1667   1575          1357    1357      1342 |      17.4%    1.1%    1.1%
+ 10      0.0909   2218          2173    2167      2052 |       8.1%    5.9%    5.6%
+ 25      0.0385   4395          3551    3558      3479 |      26.3%    2.1%    2.3%
+ 50      0.0196   6764          4626    4546      4345 |      55.7%    6.5%    4.6%
+100      0.0099   8373          5645    5647      5416 |      54.6%    4.2%    4.3%
+```
+
+Doğru formülü kalibre edilmemiş puanlara uygulamak %8 ile %56 arasında fazla
+harcatıyor. Aynı modelin izotonik kalibre edilmiş puanlarına uygulamak %1 ile %7
+arasında fazla harcatıyor. Sorun hiçbir zaman formül değildi.
+
+Mekanizma işaretleme sayılarında görünüyor. $r = 100$'de ham model, 9.368 memnun
+yoruma karşı 8.073 yanlış alarm çıkarıyor — mutlu müşterilerin %86'sını
+işaretliyor — çünkü puanları, 0,0099'luk bir eşiğin neredeyse her şeyi yakaladığı
+bir bölgeye sıkışmış durumda. Kalibre model ise 3.345 yanlış alarm çıkarıyor ve
+3 yerine 23 şikâyet kaçırıyor. İkisi de neredeyse her şikâyeti yakalıyor; biri
+bunu yaparken ekibi yanlış alarmda boğuyor.
+
+```{ojs}
+//| echo: false
+costRows = [
+  {r: 1,   qstar: 0.5000, raw: 572,  cal: 501,  swept: 498,  oracle: 483,  none: 632,   all: 9368, fpRaw: 9,    fnRaw: 563, fpCal: 140,  fnCal: 361, regRaw: 18.4, regCal: 3.7, regSwept: 3.1},
+  {r: 2,   qstar: 0.3333, raw: 980,  cal: 797,  swept: 792,  oracle: 776,  none: 1264,  all: 9368, fpRaw: 38,   fnRaw: 471, fpCal: 279,  fnCal: 259, regRaw: 26.3, regCal: 2.7, regSwept: 2.1},
+  {r: 5,   qstar: 0.1667, raw: 1575, cal: 1357, swept: 1357, oracle: 1342, none: 3160,  all: 9368, fpRaw: 270,  fnRaw: 261, fpCal: 492,  fnCal: 173, regRaw: 17.4, regCal: 1.1, regSwept: 1.1},
+  {r: 10,  qstar: 0.0909, raw: 2218, cal: 2173, swept: 2167, oracle: 2052, none: 6320,  all: 9368, fpRaw: 1198, fnRaw: 102, fpCal: 1083, fnCal: 109, regRaw: 8.1,  regCal: 5.9, regSwept: 5.6},
+  {r: 25,  qstar: 0.0385, raw: 4395, cal: 3551, swept: 3558, oracle: 3479, none: 15800, all: 9368, fpRaw: 4020, fnRaw: 15,  fpCal: 2051, fnCal: 60,  regRaw: 26.3, regCal: 2.1, regSwept: 2.3},
+  {r: 50,  qstar: 0.0196, raw: 6764, cal: 4626, swept: 4546, oracle: 4345, none: 31600, all: 9368, fpRaw: 6464, fnRaw: 6,   fpCal: 2776, fnCal: 37,  regRaw: 55.7, regCal: 6.5, regSwept: 4.6},
+  {r: 100, qstar: 0.0099, raw: 8373, cal: 5645, swept: 5647, oracle: 5416, none: 63200, all: 9368, fpRaw: 8073, fnRaw: 3,   fpCal: 3345, fnCal: 23,  regRaw: 54.6, regCal: 4.2, regSwept: 4.3}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof costRatio = Inputs.radio(
+  new Map([
+    ["r = 1 — bir yanlış alarm ile kaçırılan bir şikâyet aynı maliyette", 1],
+    ["r = 2", 2],
+    ["r = 5 — kaçırılan bir şikâyet beş yanlış alarma bedel", 5],
+    ["r = 10", 10],
+    ["r = 25", 25],
+    ["r = 50", 50],
+    ["r = 100 — kaçırılan bir şikâyet yüz yanlış alarma bedel", 100]
+  ]),
+  { value: 25, label: "maliyet oranı" }
+)
+```
+
+```{ojs}
+//| echo: false
+costPlot = {
+  const row = costRows.find(d => d.r === costRatio);
+  const bars = [
+    {policy: "hiçbir şeyi işaretleme", cost: row.none, kind: "trivial"},
+    {policy: "her şeyi işaretle", cost: row.all, kind: "trivial"},
+    {policy: "ham puanlarda Elkan q*", cost: row.raw, kind: "bad"},
+    {policy: "kalibre puanlarda Elkan q*", cost: row.cal, kind: "good"},
+    {policy: "cal üzerinde taranmış eşik", cost: row.swept, kind: "good"},
+    {policy: "oracle — test üzerinde taranmış", cost: row.oracle, kind: "oracle"}
+  ];
+  return Plot.plot({
+    width: 700,
+    height: 300,
+    marginLeft: 210,
+    marginBottom: 50,
+    x: { label: `10.000 belgelik test kümesinde toplam maliyet, bir yanlış alarm birimiyle — q* = ${row.qstar.toFixed(4)}`,
+         grid: true },
+    y: { label: null, domain: bars.map(d => d.policy) },
+    color: { domain: ["trivial", "bad", "good", "oracle"],
+             range: ["#9AA3AE", "#B3453E", "#0E7C7B", "#1F4E79"], legend: false },
+    marks: [
+      Plot.barX(bars, { y: "policy", x: "cost", fill: "kind", rx: 3,
+        title: d => `${d.policy}\n${d.cost.toLocaleString("tr-TR")} maliyet birimi` }),
+      Plot.text(bars, { y: "policy", x: "cost", text: d => d.cost.toLocaleString("tr-TR"),
+        dx: 6, textAnchor: "start", fontWeight: 600 }),
+      Plot.ruleX([row.oracle], { stroke: "#1F4E79", strokeDasharray: "4 3" })
+    ]
+  });
+}
+```
+
+::: {.column-margin}
+Oranı 1'den 100'e doğru adımlayın ve kırmızı çubuğu izleyin. $r = 1$ ve
+$r = 10$'da ham puan politikası saygıdeğer. $r = 50$'de ise mevcut en iyi eşikten
+%56 daha pahalıya mal oluyor. [Kalibre edilmemiş puanlar tam da riskin en yüksek
+olduğu yerde en kötü başarısız oluyor]{.hl}, çünkü $q^*$ orada modelin sıkıştırmış
+olduğu puan aralığına giriyor.
+:::
+
+::: {.column-margin}
+$r = 1$'de olanlara dikkat edin; orada Elkan'ın eşiği tanıdık 0,5. Ham model 78
+belge işaretliyor ve 632 şikâyetin 563'ünü kaçırıyor. Bu,
+@sec-siniflandirma-dengesizlik'teki 58,24 macro-F1 ile aynı patoloji, maliyet
+tarafından bakılmış hâli: eşit maliyetlerde ders kitabı eşiği 0,5'tir ve kalibre
+edilmemiş, dengesiz bir modelde 0,5 durulacak doğru yerin yanına bile yaklaşmaz.
+:::
+
+Maliyeti en aza indiren eşik için doğrudan `cal` üzerinde tarama yapmak, kalibre
+edip sonra formülü uygulamakla aşağı yukarı aynı iş görüyor — %1 ile %6 arası
+pişmanlığa karşı %1 ile %7. Bu, gerçekten yararlı ve pratik bir bulgu: tek bir
+sabit maliyet oranı için tek bir çalışma noktası gerekiyorsa, kalibrasyonu atlayıp
+tarama yapabilirsiniz. Kalibrasyon yerini, maliyetler değişebiliyorsa, sayı bir
+insana gösteriliyorsa ya da akış aşağısında bir şey onu çarpıyorsa hak eder.
+
+Ölçek için iki önemsiz politika: hiçbir şeyi işaretlememek $632r$ maliyetinde,
+yani $r=100$'de 63.200; her şeyi işaretlemek ise $r$'den bağımsız olarak 9.368.
+$r = 100$'de ham modelin 8.373'ü, derlemin tamamını işaretlemekten kıl payı iyi.
+
+## LLM'lerle zero-shot ve few-shot {#sec-siniflandirma-llm}
+
+Buraya kadar her şey elinizde etiket olduğunu varsaydı. Çoğu proje hiç etiketi
+olmadan başlar. Bu bölümün ölçümle cevapladığı soru şu: genel amaçlı bir modele
+sadece *sorduğunuzda* kaç puan alıyor — ve gerçek projeleri asıl belirleyen
+kısım — bu, sahip olabileceğiniz her etiket bütçesinde fine-tune edilmiş bir
+encoder'la nasıl karşılaştırılıyor?
+
+[**Zero-shot classification**](#gloss-zero-shot-classification){#term-zero-shot-classification .term-ref}
+bariz bir nedenle çekici: etiketleme bütçesi sıfır ve model bugün yayına
+girebilir. Aynı zamanda bu bölümün kurduğu her aracın çalışmayı bıraktığı
+ayardır — sayıları dikkatle okumanın daha az bariz olan nedeni de bu.
+
+O ilk cümleye bir düzeltme, ki bu bölümün kendisi zaten onun kanıtı. *Eğitim*
+için etiketleme bütçesi sıfır. Çalışıp çalışmadığını öğrenmenin bütçesi değil:
+aşağıdaki her sayı 2.000 etiketli belgeye dayanıyor ve sizin de kendinize ait
+bir değerlendirme kümesine ihtiyacınız olacak.
+
+::: {#gloss-zero-shot-classification .column-margin .term-gloss}
+**zero-shot classification** (sıfır atışlı sınıflandırma) — yalnızca bir
+talimattan, hiç örnek ve hiç eğitim olmadan etiketleme. Model bir puan değil bir
+*kelime* döndürür, dolayısıyla kaydırılacak bir eşik ve uydurulacak bir
+kalibrasyon eşlemesi yoktur. @sec-siniflandirma-dengesizlik,
+@sec-siniflandirma-kalibrasyon ve @sec-siniflandirma-maliyetler bölümlerindeki
+her teknik 0 ile 1 arasında bir sayıya ihtiyaç duyuyor; bu ayar size o sayıyı
+vermiyor. [↩](#term-zero-shot-classification){.term-back}
+:::
+
+### Karşılaştırmayı dürüst tutmak
+
+Prompt'lanan bir modelle fine-tune edilmiş bir modelin karşılaştırması, ikisi de
+aynı belgeler üzerinde puanlanmadıkça hiçbir işe yaramaz. 10.000 yorumu 27B'lik
+bir modelden geçirmek, dizüstü bilgisayarın ne kadar meşgul olduğuna göre koşul
+başına 1,6 ile 2,4 saat arası sürüyor — düşük rakam medyandan, yüksek rakam fiilen
+gözlediğimiz duvar saatinden — bu yüzden LLM koşuları aynı `test` diliminin
+*tabakalandırılmış 2.000 belgelik bir altörneklemini* kullanıyor: 1.874 memnun ve
+126 şikâyet, yani tam dilimin %6,32'sine karşılık %6,30'luk bir azınlık oranı.
+
+Bunu meşru kılan kural, geri kalan her şeyin de o özdeş altörneklem üzerinde
+yeniden puanlanmış olması. Bu bölümdeki tf-idf ve BERTurk sayıları önceki
+bölümlerin sayıları değil; aynı modellerin, LLM'lerin gördüğü aynı 2.000 belge
+üzerinde, aynı sırayla okunmuş hâlleri.
+
+```text
+re-scored on the 2,000-document subsample     acc   macro-F1  95% CI
+
+always "satisfied"                           93.70    48.37
+tf-idf + LR, class-weighted                  93.40    78.20   [74.77, 81.36]
+tf-idf + LR, threshold moved to 0.834        95.40    80.23   [76.35, 83.60]
+BERTurk fine-tuned,    200 labels            92.25    52.65   [49.77, 55.93]
+BERTurk fine-tuned,    500 labels            93.70    59.47   [55.04, 63.97]
+BERTurk fine-tuned,  1,000 labels            94.95    72.78   [68.12, 77.02]
+BERTurk fine-tuned,  2,000 labels            96.05    82.00   [78.13, 85.42]
+BERTurk fine-tuned,  5,000 labels            95.35    81.21   [77.57, 84.51]
+BERTurk fine-tuned, 10,000 labels            96.65    84.97   [81.40, 88.07]
+BERTurk fine-tuned, 20,000 labels            96.50    84.84   [81.21, 87.94]
+BERTurk fine-tuned, 40,000 labels            96.85    86.81   [83.42, 89.60]
+```
+
+Bunlar @sec-siniflandirma-baseline ve @sec-siniflandirma-fine-tuning
+bölümlerindeki sayılar *değil* ve olmamaları da gerekiyor. Oradakiler 10.000'in
+tamamı üzerinde okunmuştu; buradakiler ise aynı uydurulmuş modellerin, o
+10.000'in 2.000'i üzerinde okunmuş hâlleri. 500 etiketli BERTurk burada 59,47, orada 56,46
+alıyor — aynı model, farklı dilim. [Bu iki bölümde geçen her rakam altörneklemi
+yanında taşıyor]{.hl}, dolayısıyla hiçbirini bölümün önceki kısımlarındaki bir
+sayıyla karşılaştırmayın.
+
+Çoğunluk sınıfı baseline'ının burada %93,70 doğruluk olduğuna dikkat edin. Bu
+bölümde 9 ile başlayan her doğruluk rakamını sezgilerinize karşı değil, o sayıya
+karşı okuyun.
+
+::: {.column-margin}
+Aralıklar, 2.000 belge üzerinde 2.000 yeniden örneklemeli bootstrap'lar. Genişler
+— kabaca ±3,5 puan — çünkü 126 şikâyet fazla bir sayı değil ve macro-F1'in asıl
+ölçtüğü şey azınlık sınıfı. [Altörneklem size karşılanabilir LLM koşuları
+kazandırır ve bunu çözünürlükle öder]{.hl}; dürüst tepki de nokta tahminini bulgu
+gibi sunmak yerine aralığın kendisini raporlamaktır.
+:::
+
+Dört model koştu, hepsi tek bir dizüstü bilgisayarda `ollama` üzerinden 4 bit'e
+niceleştirilmiş (`Q4_K_M`) hâlde — bunu açıkça söylemekte fayda var: bunlar bir
+API'nin arkasındaki sınır modelleri değil. Yanınızda taşıyabileceğiniz bir
+makineye sığan şeyler.
+
+| model | parametre | diskte | not |
+|:--|--:|--:|:--|
+| `llama3.2:3b` | 3,2B | 2,0 GB | aralığın küçük model ucu |
+| `qwen3.5:9b` | 9,7B | 6,6 GB | yoğun, iş atı |
+| `gemma3:27b` | 27,4B | 17,4 GB | yoğun, buradaki en büyüğü |
+| `qwen3.6:35b-a3b` | 36,0B toplam, ~3B aktif | 23,9 GB | mixture-of-experts (@sec-moe) |
+
+: Dört yerel model, hepsi `Q4_K_M` niceleştirilmiş {tbl-colwidths="[30,22,16,32]"}
+
+::: {.column-margin}
+**4 bit'e niceleştirilmiş** demek, her ağırlığın on altı bit yerine dört bitte
+saklanması demek — kabaca dörtte bir bellek, sadakatte genelde küçük ama asla
+sıfır olmayan bir bedel karşılığında. 27B'lik bir modelin dizüstü bilgisayara
+sığmasının sebebi de bu. Ayrıca bu karşılaştırmanın prompt'lanan tarafa pek de
+adil olmadığı anlamına geliyor: BERTurk tam hassasiyette koştu, bunlar koşmadı.
+Niceleştirilmemiş sürümleri ölçemedik çünkü makineye sığmıyorlar; o hâlde
+[kesişimi yerel olarak koşturabileceğiniz modeller için ölçülmüş kabul edin]{.hl}
+ve tam hassasiyetli ya da barındırılan bir modelin onu sağa iteceğini bekleyin.
+:::
+
+### %93,75 alan ve tamamen bozuk olan koşu
+
+Sonuçlardan önce, neredeyse yayımlanan hata — çünkü bu bölümdeki en faydalı şey o.
+
+Bu matrisin ilk geçişinde `qwen3.5:9b`, öldürülmeden önce yetiştirdiği 400 belge
+üzerinde %93,75 doğruluk ve 48,39 macro-F1 aldı. Bu iki sayıyı yukarıdaki
+tabloya karşı okuyun: 93,70 ve 48,37. Model her belgede "memnun" tahmin ediyordu
+ve bunun karşılığında kazandığı puan, yuvarlama hatası kadar bir farkla,
+çoğunluk sınıfı baseline'ı.
+
+Aşağıdaki, o koşudan arşivlenmiş tek bir kayıt, birebir — ve 400 kaydın hepsi
+buna benziyor:
+
+```text
+{"i": 0, "y": 1, "pred": 1, "conf": null, "ok": false, "raw": "",
+ "secs": 2.408, "eval_count": 24, "prompt_eval_count": 99}
+
+           raw : ''    <- what the parser reads. Empty, on all 400.
+    eval_count : 24    <- tokens generated: exactly the cap, on all 400.
+    parse rate : 0.0%  <- the field nobody was looking at.
+```
+
+`qwen3.5` bir akıl yürüten model. `ollama` onun düşünce zincirini ayrı bir
+`thinking` alanında döndürüyor ve düşünme bitene kadar `response` alanı boş
+kalıyor. `num_predict` 24 token'da sınırlıyken bütçenin tamamı akıl yürütme
+bloğunun içinde harcandı, `response` hiç yazılmadı, her cevap ayrıştırmada
+başarısız oldu ve [her belge yedek etikete düştü]{.hl} — ki o da çoğunluk sınıfı,
+sonucun bir çökme gibi değil de makul gibi görünmesinin sebebi bu.
+
+Arşivlenmiş kaydın neyi *içermediğine* dikkat edin: düşünme alanına dair hiçbir
+iz yok, üretimin neden durduğuna dair de. Koşum takımı bunları kaydetmiyordu; bu
+yüzden teşhis için log'a bakmak değil, modele yeni bir sorgu atmak gerekti.
+`think_chars` ve `done_reason` artık şemada — *bu yüzden* eklendiler, ki bir log
+alanının doğmasının olağan yolu da budur.
+
+Bu derlemde %93,75 doğruluk bir sonuç değil. Yedeği çoğunluk sınıfı olan bozuk
+bir koşum takımının aldığı biçim bu. Bu matristeki on koşunun altısı aynı kusuru
+taşıyor olacaktı.
+
+Üç değişiklik sorunu çözdü ve yalnızca ilki hatayla ilgili:
+
+1. `think: false` gönder, alanı reddeden modeller için alansız yeniden deneyen
+   bir yedekle birlikte. Ayrıştırma oranı %0,0'dan %100,0'a çıktı ve düşünme kipi
+   olmayan `llama3.2:3b` üzerindeki çıktı bayt bayt aynı kaldı — bayrağın olması
+   gereken yerde etkisiz olduğunu doğrulayarak.
+2. İlk 40 cevabı %50'nin altında ayrıştıran bir koşuyu iptal et; dokuz saatlik
+   GPU zamanını çoğunluk sınıfı baseline'larından oluşan bir tablo üretmeye
+   harcamak yerine.
+3. Makineyi bir gecelik kuyruğa bağlamadan önce altı model/koşul kombinasyonunun
+   hepsini 24'er belge üzerinde duman testinden geçir.
+
+::: {.column-margin}
+Bu, @sec-siniflandirma-fine-tuning bölümündeki 27 katlık çıkarım aykırı
+değeriyle aynı ders, ters yönden geliyor. Orada sayı inanılmayacak kadar *kötüydü*
+ve kabahat koşum takımındaydı. Burada sayı rahatlatıcı ölçüde *iyiydi* ve kabahat
+yine koşum takımındaydı. [Kötü sayı soruşturulur; iyi sayı yayımlanır.]{.hl}
+Tasarımla karşı durulması gereken şey hatanın kendisi değil, bu asimetri — iptal
+koruması da tam olarak bunu yapıyor.
+:::
+
+Aşağıda raporlanan her koşu %100,0 oranında ayrıştı.
+
+### Sonuçlar
+
+```text
+2,000 documents, temperature 0, seed 42, single process. Every run parsed 100%.
+                             acc  macroF1   95% CI       cP     cR    cF1   s/doc  prompt
+                                                                                    tokens
+llama3.2:3b      zero/tr   66.35    52.32  [50.10,54.68]  15.34  96.03  26.45  0.121   140
+llama3.2:3b      zero/en   87.80    69.21  [65.98,72.38]  31.56  80.16  45.29  0.124   123
+gemma3:27b       zero/tr   88.65    72.28  [69.18,75.28]  35.01  93.65  50.97  0.592   124
+qwen3.5:9b       conf/tr   92.95    78.10  [74.85,81.25]  46.70  84.13  60.06  0.475   188
+gemma3:27b        few/tr   93.20    79.45  [76.26,82.51]  47.90  90.48  62.64  0.560   549
+qwen3.5:9b       zero/tr   93.70    79.53  [76.18,82.67]  50.00  83.33  62.50  0.365   136
+qwen3.5:9b       zero/en   93.65    80.07  [76.88,83.18]  49.78  88.10  63.61  0.357   113
+qwen3.5:9b        few/tr   94.35    80.75  [77.38,83.93]  53.37  81.75  64.58  0.290   584
+qwen3.6:35b-a3b  zero/tr   94.65    81.56  [78.22,84.83]  55.03  82.54  66.03  0.353   136
+qwen3.6:35b-a3b   few/tr   94.95    82.08  [78.62,85.31]  56.98  80.95  66.89  0.302   584
+
+cP / cR / cF1 are precision, recall and F1 on the complaint class.
+s/doc is the median; see @sec-siniflandirma-kesisim for why not the mean.
+```
+
+Aşağıdaki widget aynı tablonun sıralanmış ve çizdirilmiş hâli. Gösterdiği her şey
+yukarıdaki blokta var, dolayısıyla buradaki hiçbir şey widget'ı koşturabilmenize
+bağlı değil.
+
+Bulgulardan önce adı konması gereken iki sınır. Prompt tasarımı başlı başına
+ciddi bir konu; bu bölüm yalnızca prompt'lamanın eğitilmiş bir alternatife karşı
+*kaç puan aldığını* soruyor, nasıl daha iyi prompt yazılacağını değil. İkincisi,
+"modelden ayrıştırılabilir bir cevap almak" kendi başına bir problem — bir önceki
+alt bölümün gösterdiği gibi, hem de fena hâlde.
+
+```{ojs}
+//| echo: false
+llmRows = [
+  {tag: "llama3.2:3b zero/tr", model: "llama3.2:3b", cond: "zero", lang: "tr",
+   acc: 66.35, mf1: 52.32, lo: 50.10, hi: 54.68, cp: 15.34, cr: 96.03, cf1: 26.45, secs: 0.121, ptok: 140},
+  {tag: "llama3.2:3b zero/en", model: "llama3.2:3b", cond: "zero", lang: "en",
+   acc: 87.80, mf1: 69.21, lo: 65.98, hi: 72.38, cp: 31.56, cr: 80.16, cf1: 45.29, secs: 0.124, ptok: 123},
+  {tag: "gemma3:27b zero/tr", model: "gemma3:27b", cond: "zero", lang: "tr",
+   acc: 88.65, mf1: 72.28, lo: 69.18, hi: 75.28, cp: 35.01, cr: 93.65, cf1: 50.97, secs: 0.592, ptok: 124},
+  {tag: "qwen3.5:9b conf/tr", model: "qwen3.5:9b", cond: "conf", lang: "tr",
+   acc: 92.95, mf1: 78.10, lo: 74.85, hi: 81.25, cp: 46.70, cr: 84.13, cf1: 60.06, secs: 0.475, ptok: 188},
+  {tag: "gemma3:27b few/tr", model: "gemma3:27b", cond: "few", lang: "tr",
+   acc: 93.20, mf1: 79.45, lo: 76.26, hi: 82.51, cp: 47.90, cr: 90.48, cf1: 62.64, secs: 0.560, ptok: 549},
+  {tag: "qwen3.5:9b zero/tr", model: "qwen3.5:9b", cond: "zero", lang: "tr",
+   acc: 93.70, mf1: 79.53, lo: 76.18, hi: 82.67, cp: 50.00, cr: 83.33, cf1: 62.50, secs: 0.365, ptok: 136},
+  {tag: "qwen3.5:9b zero/en", model: "qwen3.5:9b", cond: "zero", lang: "en",
+   acc: 93.65, mf1: 80.07, lo: 76.88, hi: 83.18, cp: 49.78, cr: 88.10, cf1: 63.61, secs: 0.357, ptok: 113},
+  {tag: "qwen3.5:9b few/tr", model: "qwen3.5:9b", cond: "few", lang: "tr",
+   acc: 94.35, mf1: 80.75, lo: 77.38, hi: 83.93, cp: 53.37, cr: 81.75, cf1: 64.58, secs: 0.290, ptok: 584},
+  {tag: "qwen3.6:35b-a3b zero/tr", model: "qwen3.6:35b-a3b", cond: "zero", lang: "tr",
+   acc: 94.65, mf1: 81.56, lo: 78.22, hi: 84.83, cp: 55.03, cr: 82.54, cf1: 66.03, secs: 0.353, ptok: 136},
+  {tag: "qwen3.6:35b-a3b few/tr", model: "qwen3.6:35b-a3b", cond: "few", lang: "tr",
+   acc: 94.95, mf1: 82.08, lo: 78.62, hi: 85.31, cp: 56.98, cr: 80.95, cf1: 66.89, secs: 0.302, ptok: 584}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof llmMetric = Inputs.radio(
+  new Map([
+    ["Macro-F1, bootstrap aralığıyla", "mf1"],
+    ["Şikâyet F1 — yalnızca azınlık sınıfı", "cf1"],
+    ["Şikâyet precision ve recall, ayrı ayrı", "pr"]
+  ]),
+  { value: "mf1", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+llmPlot = {
+  const refs = [
+    {label: "BERTurk, 40.000 etiket", mf1: 86.81, cf1: 75.29, colour: "#1F4E79"},
+    {label: "BERTurk, 2.000 etiket",  mf1: 82.00, cf1: 66.09, colour: "#2E7D6F"},
+    {label: "tf-idf, eşik kaydırılmış", mf1: 80.23, cf1: 62.90, colour: "#B3453E"},
+    {label: "hep “memnun”",            mf1: 48.37, cf1: 0.00,  colour: "#9AA3AE"}
+  ];
+  const order = llmRows.map(d => d.tag);
+  if (llmMetric === "pr") {
+    const long = llmRows.flatMap(d => [
+      {tag: d.tag, kind: "precision", v: d.cp},
+      {tag: d.tag, kind: "recall", v: d.cr}
+    ]);
+    return Plot.plot({
+      width: 700, height: 400, marginLeft: 175, marginBottom: 46,
+      x: {label: "şikâyet sınıfında yüzde", domain: [0, 100], grid: true},
+      y: {label: null, domain: order},
+      color: {domain: ["precision", "recall"], range: ["#1F4E79", "#B3453E"], legend: true},
+      marks: [
+        Plot.ruleX([74.42], {stroke: "#1F4E79", strokeDasharray: "4 3", strokeOpacity: 0.7}),
+        Plot.ruleX([76.19], {stroke: "#B3453E", strokeDasharray: "4 3", strokeOpacity: 0.7}),
+        Plot.dot(long, {y: "tag", x: "v", fill: "kind", r: 5,
+          title: d => `${d.tag}\nşikâyet ${d.kind}: ${d.v.toFixed(2)}%`}),
+        Plot.ruleY(llmRows, {y: "tag", x1: "cp", x2: "cr", stroke: "#9AA3AE", strokeWidth: 1})
+      ]
+    });
+  }
+  const key = llmMetric;
+  return Plot.plot({
+    width: 700, height: 400, marginLeft: 175, marginBottom: 46,
+    x: {label: key === "mf1" ? "2.000 belgelik altörneklemde macro-F1"
+                             : "2.000 belgelik altörneklemde şikâyet F1",
+        domain: [0, 100], grid: true},
+    y: {label: null, domain: order},
+    marks: [
+      ...refs.map(r => Plot.ruleX([r[key]], {stroke: r.colour, strokeDasharray: "4 3", strokeOpacity: 0.8})),
+      ...refs.map(r => Plot.text([{y: order[0], x: r[key]}], {
+        y: "y", x: "x", text: [r.label], dy: -14, dx: 3, rotate: 0,
+        fill: r.colour, textAnchor: "start", fontSize: 9})),
+      key === "mf1"
+        ? Plot.ruleY(llmRows, {y: "tag", x1: "lo", x2: "hi", stroke: "#9AA3AE", strokeWidth: 6, strokeOpacity: 0.35})
+        : null,
+      Plot.dot(llmRows, {y: "tag", x: key, fill: "#0E7C7B", r: 5,
+        title: d => `${d.tag}\nmacro-F1 ${d.mf1.toFixed(2)} [${d.lo.toFixed(2)}, ${d.hi.toFixed(2)}]`
+                  + `\nşikâyet P ${d.cp.toFixed(1)} R ${d.cr.toFixed(1)} F1 ${d.cf1.toFixed(2)}`
+                  + `\nbelge başına ${d.secs.toFixed(3)}s (medyan)`}),
+      Plot.text(llmRows, {y: "tag", x: key, text: d => d[key].toFixed(2),
+        dx: 9, textAnchor: "start", fontSize: 10, fontWeight: 600})
+    ].filter(d => d)
+  });
+}
+```
+
+::: {.column-margin}
+**Şikâyet precision ve recall**'a geçin. İki noktayı birleştiren gri çubuk
+aralarındaki fark ve her koşu aynı tarafa yatıyor: recall yüksek, precision
+düşük. İki kesik çizgi 40.000 etiketli BERTurk — 74,42 precision, 76,19 recall —
+grafikte iki noktası neredeyse üst üste oturan tek model o.
+:::
+
+Üç bulgu; her biri, yukarıdaki aralıkların çakışıp çakışmadığına göz kararı
+bakarak değil, özdeş 2.000 belge üzerinde **eşleştirilmiş** bir bootstrap ile
+sınandı. Çakışan aralıklar bir test değildir: aynı belgeler üzerinde puanlanan
+iki model örneklem gürültüsünün büyük kısmını paylaşır ve marjinal aralıklar
+fazlasıyla çakışırken fark anlamlı olabilir. Aşağıdaki her $p$, farkın 10.000
+eşleştirilmiş yeniden örneklemesinden geliyor.
+
+#### Prompt'u İngilizce yazmak işe yarıyor — model zayıfsa
+
+```text
+                        tr       en      difference        p
+llama3.2:3b           52.32    69.21   +16.90 [+14.59, +19.13]   0.0000
+qwen3.5:9b            79.53    80.07    +0.54 [ -1.14,  +2.25]   0.5382
+```
+
+Halk bilgisi diyor ki: veri Türkçe olsa bile talimatı İngilizce yaz. 3B'lik
+modelde bunun bedeli **+16,90 macro-F1** ve bir ölçümün olabileceği kadar
+tartışmasız. 9B'lik modelde aynı değişiklik [+0,54 puan, gürültüden ayırt
+edilemez]{.hl}.
+
+`llama3.2:3b` üzerindeki Türkçe talimat başarısızlığı ince bir bozulma değil.
+Şikâyetlerin %96,03'ünü doğru etiketliyor ve bunu yaparken %15,34 precision'a
+ulaşıyor — yani neredeyse her şeye şikâyet diyor. İngilizce talimat ona Türkçe
+öğretmiyor; tek bir etikete çökmesini engelliyor.
+
+::: {.column-margin}
+"İngilizce prompt kullan" tavsiyesinin ayakta kalmasının sebebi bu. İnsanların
+ilk denediği modellerde *doğruydu* ve şu an kullandıkları modeller için doğru
+olmaktan çıktıktan çok sonra bile tekrarlanıyor. Kontrolün maliyeti fazladan bir
+koşu. [LLM'lerle ilgili tavsiyelerin raf ömrü model kuşaklarıyla ölçülür]{.hl} ve
+bir kuralın hâlâ geçerli olup olmadığını bilmenin tek yolu, gerçekten
+kullanacağınız model üzerinde bir saat harcayıp yeniden ölçmek.
+:::
+
+#### Sekiz örnek işe yarıyor — model zayıfsa
+
+```text
+                       zero      few     difference        p
+gemma3:27b            72.28    79.45    +7.17 [ +5.35,  +9.04]   0.0000
+qwen3.5:9b            79.53    80.75    +1.22 [ -1.15,  +3.60]   0.3222
+qwen3.6:35b-a3b       81.56    82.08    +0.51 [ -1.51,  +2.48]   0.6164
+```
+
+Dil sonucuyla aynı şekil. 8 etiketli örnekle
+[**in-context learning**](#gloss-in-context-learning){#term-in-context-learning .term-ref}
+— her sınıftan dört tane, hiçbir test belgesi hiçbir prompt'a girmesin diye
+`fit`'ten çekilmiş — `gemma3:27b`'yi 7,17 puan oynatıyor, iki `qwen3` modelini
+ise kendi gürültülerini aşamayan miktarlarda.
+
+::: {#gloss-in-context-learning .column-margin .term-gloss}
+**in-context learning** (bağlam içi öğrenme) — bir görevi, prompt'un içine
+yerleştirilmiş örneklerden öğrenmek. Hiçbir ağırlık güncellenmez ve çağrıdan
+geriye hiçbir şey kalmaz: sınıflandırdığınız her belge için aynı sekiz örnek
+yeniden gönderilir, yeniden okunur ve yeniden faturalanır. Maliyet yapısı budur
+ve fine-tuning'in tam tersidir; fine-tuning bir kez öder, sonra ucuza servis
+eder. [↩](#term-in-context-learning){.term-back}
+:::
+
+İki pratik not. Birincisi, o 8 örnek 136'ya karşı 584 prompt token'ına mal
+oluyor; yani sonsuza kadar, belgelerinizin her birinde 4,3× daha büyük bir
+prompt. İkincisi, örneklerin sırası ve seçimi başlı başına, etkiyi boğacak
+büyüklükte bir varyans kaynağı — Zhao ve arkadaşları, aynı görevde aynı sayıda
+örnekle, sadece sıraları değiştirilerek doğruluğun şans düzeyine yakından
+neredeyse en iyi bilinen sonuca kadar hareket ettiğini gösterdi
+[@zhao2021calibrate]. Biz sabit, tohumlanmış tek bir seçim kullandık; dolayısıyla
+`gemma3:27b` üzerindeki +7,17'yi, örnek eklemenin beklenen değeri olarak değil, o
+dağılımdan *tek bir çekiliş* olarak okuyun.
+
+#### Buradaki her prompt'lu koşu recall'a yatkındı ve bunu düzeltecek bir eşik yok
+
+Bu, operasyonel sonucu en ağır olan bulgu ve yukarıdaki widget'ta
+**şikâyet precision ve recall** seçeneği altında görünüyor:
+
+```text
+                              complaint P    complaint R
+llama3.2:3b zero/tr              15.34          96.03
+gemma3:27b zero/tr               35.01          93.65
+qwen3.5:9b zero/tr               50.00          83.33
+qwen3.6:35b-a3b few/tr           56.98          80.95
+BERTurk, 40,000 labels           74.42          76.19
+```
+
+Prompt'lu her koşu olması gerekenden çok daha fazla belgeyi şikâyet olarak
+işaretliyor. En iyisi %80,95 recall'da %56,98 precision'a ulaşıyor; BERTurk ise
+74,42 ve 76,19'da, neredeyse dengeli. Bir modele "bu bir şikâyet mi?" diye
+sorun, fazlaca sık evet diyor.
+
+[Sorun çalışma noktasının yanlış olması değil. Sorun kaydırılacak bir çalışma
+noktasının olmaması.]{.hl} @sec-siniflandirma-dengesizlik tam bu patolojiyi
+doğrusal modelde tek bir eşiği kaydırarak düzeltmiş ve bedava 19,42 macro-F1
+puanı kazanmıştı. O alet burada yok. Zero-shot bir model bir sayı değil,
+`ŞİKAYET` *kelimesini* döndürüyor ve bir kelimeye eşik uygulayamazsınız.
+
+Bu bölümün bir puanın üzerine kurduğu her şey de onunla birlikte gidiyor: ROC
+eğrisi yok, PR eğrisi yok, isotonic kalibrasyon yok, bir maliyet oranından gelen
+$q^*$ yok, maliyeti en aza indiren tarama yok. Bir kısmını geri kazanabilirsiniz
+— servis yazılımınız açığa çıkarıyorsa modelin iki aday cevap kelimesi için,
+`MEMNUN`'a karşı `ŞİKAYET` için, kendi log-olasılıklarını okuyabilirsiniz; bu
+kelimeyi tekrar bir puana çevirir. Ya da bir sonraki alt bölümdeki gibi, güveni
+kelimeyle isteyebilirsiniz. Ama varsayılan hâlde, prompt'lu bir model seçmek
+eşikten vazgeçmeyi seçmektir.
+
+Bu bulgunun bir sınırı: modelleri bundan vazgeçirmeye çalışmadık. "`ŞİKAYET`
+cevabını yalnızca yorumcu somut bir kusur belirtiyorsa ver" diyen bir prompt
+çalışma noktasını makul biçimde oynatabilirdi ve biz bunu ölçmedik. Hiçbir
+prompt'un size vermediği şey bir *kadran* — maliyet oranı değiştiğinde ve aynı
+eğri üzerinde farklı bir noktaya ihtiyacınız olduğunda, yayına aldıktan sonra
+çevirebileceğiniz bir düğme.
+
+#### Modelin yazdığı bir güven, olasılık mıdır?
+
+`conf` koşulu `qwen3.5:9b`'den `ETİKET|GÜVEN` biçiminde, 0–100 arası bir tam sayı
+istedi. 2.000 cevabın hepsi ayrıştı. Bu
+[**verbalised confidence**](#gloss-verbalised-confidence){#term-verbalised-confidence .term-ref},
+ve zero-shot ayarın sunduğu bir puana en yakın şey.
+
+::: {#gloss-verbalised-confidence .column-margin .term-gloss}
+**verbalised confidence** (sözelleştirilmiş güven) — modelin puanlarından okunan
+bir olasılık değil, modelin metin olarak yazdığı bir sayı.
+@sec-siniflandirma-kalibrasyon başka her güveni nasıl yargılıyorsa onu da öyle
+yargılayın: haklı çıkma sıklığıyla örtüşüyor mu ve doğruyu yanlıştan ayırıyor mu?
+[↩](#term-verbalised-confidence){.term-back}
+:::
+
+```text
+stated confidence      n      actually right
+     50                3          100.0%
+     60                1          100.0%
+     70                1          100.0%
+     75               62           80.6%
+     85               25           76.0%
+     90              286           83.2%
+     92               23           82.6%
+     95            1,549           95.4%
+    100               50          100.0%
+
+mean stated confidence  93.53      overall accuracy  92.95      gap  +0.58
+expected calibration error (over stated values)                 1.80
+```
+
+İnsanların fiilen raporladığı testte — ortalama beyan edilen güven, ortalama
+doğrulukla örtüşüyor mu? — sonuç dikkat çekici derecede iyi. Ortalama beyan
+edilen güven %93,53 ve model zamanın %92,95'inde haklı; aradaki fark **+0,58
+puan**. Dokuz beyan değeri üzerinde kutulandığında ECE'si **1,80**, sınıf
+ağırlıklı tf-idf modelinin 8,98'ine karşı. Bu karşılaştırmayı gevşek okuyun:
+@sec-siniflandirma-kalibrasyon'un ısrarla belirttiği gibi, bir ECE kutulama
+şeması olmadan hiçbir şey ifade etmez ve buradaki, on beş eşit genişlikli kutu
+değil, *modelin* seçtiği dokuz kutu kullanıyor. Doğru büyüklük mertebesi, birebir
+karşılaştırılabilir bir sayı değil. Lin ve arkadaşları bir modelin belirsizliği
+kelimelerle kalibre biçimde ifade etmek üzere eğitilebileceğini gösterdi
+[@lin2022teaching]; bu görevde, kutudan çıktığı gibi, öyle.
+
+Sonra ikinci sütuna bakın. **2.000 belgenin 1.549'u — %77,45'i — aynı sayıyı,
+95'i aldı.** Koşunun tamamında 9 farklı değer var. Neredeyse hep 95 olan bir
+güven, hangi belgelerin bir insana yönlendirileceği konusunda size fazla bir şey
+söyleyemez.
+
+Kendi hatalarının dedektörü olarak ölçüldüğünde beyan edilen güven
+[0,667'lik bir AUROC]{.hl} alıyor. BERTurk'ün kendi en üst etiket olasılığı, aynı
+2.000 belge üzerinde, 1.325 farklı değer boyunca **0,843** alıyor. İki model de
+kendi hatalarını bir ölçüde işaretleyebiliyor; eğitilmiş olan bunu belirgin
+biçimde daha iyi yapıyor ve size bir anahtar değil bir kadran veriyor.
+
+Yine de tek işe yarar ayrım gerçek: beyan edilen güven ≥ 95 olduğunda model
+zamanın %95,56'sında haklı (n = 1.599), 95'in altında ise %82,54'ünde
+(n = 401). İş akışınızın tek ihtiyacı "bunların beşte birini bir insana gönder"
+ise, bu üzerine bina edilecek kadar yeterli — bölümün geri kalanının ısrar
+edeceği kayıtla birlikte. 95'i o tabloya bakarak seçtik ve o tablo değerlendirme
+kümesi. @sec-siniflandirma-kurulum'da konan kurala göre, [82,54'e karşı 95,56 bu
+yüzden bir **kâhin** ayrımı ve bir üst sınır]{.hl}, bir sonuç değil. Kesme
+noktasını, üzerinden bir şey yönlendirmeden önce ayrı tutulmuş belgelerde seçin.
+
+::: {.column-margin}
+Xiong ve arkadaşları kara kutu güven çıkarımını modeller ve görevler boyunca
+değerlendirdi ve 0,522–0,605 bandında AUROC'lar raporladı; buna, modellerin
+insanların kesinliği ifade ediş biçimini taklit etmesine bağladıkları sistematik
+bir aşırı güven eğilimi eşlik ediyor [@xiong2024llmsexpress]. Bizim 0,667'miz
+onların aralığının biraz üstünde ve *ortalama* farkımız küçük — ama tek bir
+değerde %77,5'lik yığılma, tam olarak tarif ettikleri başarısızlık kipi.
+[Bir güven, ortalamada doğru olup neredeyse hiçbir şeyi ayırmıyor olabilir.]{.hl}
+:::
+
+## Küçük model mü LLM mi: kesişim {#sec-siniflandirma-kesisim}
+
+Şimdi karar. Önceki iki bölüm aynı 2.000 belge üzerinde birer sayı üretti,
+dolayısıyla nihayet doğrudan karşılaştırılabilirler. Kararı iki eksen veriyor ve
+hiçbiri kaliteye karşı kalite değil: **kaç etiketiniz var** ve **bir belgeyi
+sınıflandırmak neye mal oluyor**.
+
+### Kesişim 2.000 etikette ve bir galibiyet değil, bir beraberlik
+
+```text
+paired bootstrap, same 2,000 documents, 10,000 resamples
+
+BERTurk  1,000 labels  vs  qwen3.6:35b-a3b zero-shot    -8.79 [-13.53,  -4.24]   p = 0.0002
+BERTurk  2,000 labels  vs  qwen3.6:35b-a3b zero-shot    +0.43 [ -3.17,  +3.85]   p = 0.8030
+BERTurk  2,000 labels  vs  qwen3.6:35b-a3b 8-shot       -0.08 [ -3.78,  +3.61]   p = 0.9728
+BERTurk 40,000 labels  vs  qwen3.6:35b-a3b 8-shot       +4.73 [ +1.56,  +7.90]   p = 0.0028
+```
+
+[2.000 etikette fine-tune edilmiş encoder ile en iyi prompt'lu model başa baş —
+0,08 macro-F1 puanlık bir fark, p = 0,97.]{.hl} 1.000 etikette LLM 8,79 puanla
+kazanıyor ve sonuç yakın bile değil. 40.000'de encoder 4,73 puanla kazanıyor ve o
+sonuç da yakın değil.
+
+Yani bu görevde kesişim kabaca **2.000 etiketli belgede** duruyor ve bunu bir
+hüküm olarak değil, üç rejim olarak tutmak daha faydalı:
+
+- **~1.000 etiketin altı.** Prompt'layın. Encoder henüz şikâyetin ne olduğunu
+  öğrenmemiş — 500 etikette bu altörneklemde 48,37'lik çoğunluk baseline'ına
+  karşı 59,47 macro-F1 alıyor ve şikâyetlerin %14,29'unu yakalıyor — ve hiçbir
+  *öğrenme oranı taraması* bunu değiştirmiyor. Farklı bir reçete değiştirebilir:
+  `setfit` (@sec-siniflandirma-araclar) tam olarak bu bütçe için tasarlanmış ve
+  biz onu ölçmedik; bu maddenin dürüst sınırı da bu.
+- **2.000 civarı.** Kalite açısından gerçekten yazı tura. Kararı maliyet,
+  gecikme, operasyonel denetim ve bir eşiğe ihtiyacınız olup olmadığı üzerinden
+  verin. Dördü de aynı yönü gösteriyor; bir sonraki alt bölümün konusu bu.
+- **2.000'in üstü.** Fine-tune edin. Elimizde ölçülmüş tam olarak bir nokta daha
+  var — 40.000'de encoder 4,73 puanla kazanıyor — dolayısıyla 2.000 ile 40.000
+  arasında farkın *nerede* belirleyici hâle geldiği bir ölçüm değil, encoder'ın
+  kendi öğrenme eğrisinden yapılan bir ara değerleme. Ölçülmüş olan şey yön; bir de
+  encoder'ın, ikisinden size bir puan veren tek taraf olduğu.
+
+Bu, yayımlanmış tabloyla çelişmiyor, onunla tutarlı. Edwards ve
+Camacho-Collados, 16 veri kümesi boyunca tam eğitim verisiyle fine-tuning'i
+0,119 micro-F1 önde buldu, ama one-shot rejimde prompt'lamayı açık ara önde
+[@edwards2024incontext]; Bucher ve Martini kesişimi kabaca 200 eğitim gözleminin
+üstüne koydu, gerçi modern bir talimat ayarlı modele karşı değil, zero-shot
+BART-large-MNLI'ye karşı [@bucher2024finetuned]. Bizim kesişimimiz onlarınkinden
+bir büyüklük mertebesi yukarıda; prompt'lanan model 2019 çıkarım modeli değil de
+2026 model bir 36B mixture-of-experts olduğunda beklenecek şey de bu.
+[Kesişim, karşılaştırdığınız çiftin bir özelliğidir, bir sabit değil]{.hl} — bu
+da onu bizimki dahil kimsenin sayısını alıntılamak yerine kendi göreviniz
+üzerinde ölçmenin gerekçesi.
+
+### Bir belge neye mal oluyor
+
+Tartışma kaliteyle başlıyor. Genelde maliyetle bitiyor.
+
+```text
+option                              docs/sec    seconds per 1,000 docs
+
+tf-idf + LR, batched                  72,972              0.014
+tf-idf + LR, one at a time             6,543              0.153
+BERTurk fine-tuned, batched              470              2.128
+llama3.2:3b  zero-shot, one at a time      8.3           121.0
+qwen3.6:35b-a3b  8-shot, one at a time     3.3           301.5
+qwen3.6:35b-a3b  zero-shot, one at a time  2.8           352.6
+qwen3.5:9b  zero-shot, one at a time       2.7           365.0
+gemma3:27b  zero-shot, one at a time       1.7           592.5
+```
+
+Sağdaki sütunu bir oran olarak okuyun; tartışma yakın olmaktan çıkıyor.
+[Bir milyon belgeyi sınıflandırmak vektörleştiriciyle 14 saniye, fine-tune
+edilmiş encoder'la 35 dakika, en iyi prompt'lu modelle üç buçuk gün sürüyor.]{.hl}
+Encoder, 2.000 etikette berabere kaldığı prompt'lu modelden **belge başına 142×
+daha ucuz**; vektörleştirici ise kabaca **22.000× daha ucuz**.
+
+Bu oranın ne olduğu ve ne olmadığı üzerine iki not. Bu, tek akışlı yerel bir
+sunucuya karşı batch'lenmiş bir encoder — küçük ekiplerin fiilen karşılaştığı
+karşılaştırma da bu. Prompt'lu taraf için *en elverişli* düzenleme değil:
+tablonun kendi tf-idf çifti tek başına batch'lemenin 11× ettiğini gösteriyor
+(6.543'e karşı 72.972) ve düzgün batch'leyen barındırılan bir API bunun iyi bir
+kısmını geri kazanırdı. Batch'lemenin geri kazanamayacağı şey, altındaki
+mekanizma. Encoder belgeyi bir kez okuyup bir sayı çıkarıyor. Prompt'lu model ise
+cevabını her seferinde bir token yazmak zorunda ve her token, yirmi ila üç yüz
+kat daha büyük bir ağdan tam bir geçişe mal oluyor. [Batch'leme ek yükü
+amorti eder; aritmetiği değiştirmez.]{.hl}
+
+::: {.column-margin}
+O tablonun bir satırı sizi durdurmalı: **8-shot, karşılaştırılabildiği üç çiftin
+üçünde de zero-shot'tan hızlı** — `qwen3.6`'da 352,6'ya karşı 301,5, `qwen3.5`'te
+365,0'a karşı 289,9, `gemma3`'te 592,5'e karşı 559,8 — prompt 4,3× uzun olmasına
+rağmen. Bunun bir kısmı, gecikmenin paralel işlenen prompt token'larını değil,
+teker teker üretilen *çıktı* token'larını izlemesinden; `conf` koşusu 4,1'e karşı
+7,1 token üretiyor ve hakkıyla en yavaş `qwen3.5` koşulu oluyor. Ama `qwen3.5`
+zero ve few'un ikisi de 4,1 token üretiyor, dolayısıyla bu, bu çifti açıklamıyor.
+Geriye kalan muhtemel açıklama, 8-shot önekinin 2.000 isteğin hepsinde özdeş
+olması ve sunucunun onu önbelleğe alması. [Bunu ölçmedik, dolayısıyla iddia
+etmiyoruz]{.hl} — ve bu kadar gürültülü bir dizüstü bilgisayarda, farklı
+zamanlarda yapılmış iki koşu arasındaki %20'lik bir fark üzerine argüman
+kurulmaz.
+:::
+
+Her LLM rakamı bir **medyan** ve bu seçim süs değil. `qwen3.5:9b` zero-shot
+koşusunun belge başına ortalaması 3,371 saniye, medyanı ise 0,365 — 18 belgenin
+takılmasının ürettiği 9× bir uyuşmazlık; en kötüsü 980 saniye takıldı. Bu
+takılmalar, modelin değil, bir süreliğine başka bir şey yapmaya karar vermiş bir
+dizüstü bilgisayarın özelliği. Ortalamayı alıntılamak bu modelin maliyetini bir
+büyüklük mertebesi şişirir ve yukarıdaki karşılaştırmayı modelin lehine
+anlamsızlaştırırdı.
+
+::: {.column-margin}
+Mixture-of-experts modelinin nereye düştüğüne dikkat edin. `qwen3.6:35b-a3b`'nin
+36B parametresi var ama token başına yaklaşık 3B'sini etkinleştiriyor ve bir
+belgeyi 0,353s'de servis ediyor — yoğun 9,7B'lik modelin 0,365s'sinden *daha
+hızlı* ve yoğun 27,4B'lik modelin 0,592s'sinden 1,7× hızlı, üstelik ikisinden de
+yüksek puan alarak. Bu, @sec-moe'nin argümanının bir servis faturası olarak
+gelmesi: [çıkarımda parasını ödediğiniz şey toplam parametreler değil, etkin
+parametrelerdir]{.hl}.
+:::
+
+İkinci bir asimetri var ve o ters yönde işliyor. Prompt'lu modeller belge başına
+sonsuza kadar ödüyor, encoder ise bir kez ödüyor: en iyi prompt'la berabere kalan
+2.000 etiketli model 1.260 optimizasyon adımı, yaklaşık **6,5 dakika**
+düzeltilmiş GPU zamanı ve kabaca **1.300 belgeden** sonra kendini amorti ediyor.
+
+Ama 6,5 dakika *GPU* faturası ve küçük olan yarısı. Encoder'ın ayrıca 2.000
+etiketli belgeye ihtiyacı var; 8-shot prompt'un sekiz taneye. Bu bölüm sizin
+etiketlemenizi fiyatlandıramaz — belge başına on saniyeden bu, birinin beş buçuk
+saatlik dikkati; belge başına bir dakikadan ise bir çalışma haftası. [GPU
+faturası bir sabahta kapanır. Asıl maliyet etiketlerdir ve
+@sec-siniflandirma-fine-tuning'in etiketlemeye darboğaz demesinin sebebi
+onlardır.]{.hl} Etiketlerin satın aldığı şey, bu karşılaştırmada yer alma hakkı.
+
+### Karar, onu belirleyen iki eksen üzerinde
+
+```{ojs}
+//| echo: false
+crossRows = [
+  {name: "tf-idf + LR, eşik kaydırılmış", mf1: 80.23, s1k: 0.014, kind: "trained", labels: 40000},
+  {name: "BERTurk, 1.000 etiket",     mf1: 72.78, s1k: 2.128, kind: "trained", labels: 1000},
+  {name: "BERTurk, 2.000 etiket",     mf1: 82.00, s1k: 2.128, kind: "trained", labels: 2000},
+  {name: "BERTurk, 40.000 etiket",    mf1: 86.81, s1k: 2.128, kind: "trained", labels: 40000},
+  {name: "llama3.2:3b zero/tr",       mf1: 52.32, s1k: 121.0, kind: "llm", labels: 0},
+  {name: "llama3.2:3b zero/en",       mf1: 69.21, s1k: 124.0, kind: "llm", labels: 0},
+  {name: "qwen3.5:9b zero/tr",        mf1: 79.53, s1k: 365.0, kind: "llm", labels: 0},
+  {name: "qwen3.5:9b few/tr",         mf1: 80.75, s1k: 289.9, kind: "llm", labels: 8},
+  {name: "gemma3:27b zero/tr",        mf1: 72.28, s1k: 592.5, kind: "llm", labels: 0},
+  {name: "gemma3:27b few/tr",         mf1: 79.45, s1k: 559.8, kind: "llm", labels: 8},
+  {name: "qwen3.6:35b-a3b zero/tr",   mf1: 81.56, s1k: 352.6, kind: "llm", labels: 0},
+  {name: "qwen3.6:35b-a3b few/tr",    mf1: 82.08, s1k: 301.5, kind: "llm", labels: 8}
+]
+```
+
+```{ojs}
+//| echo: false
+crossPlot = Plot.plot({
+  width: 700,
+  height: 420,
+  marginLeft: 62,
+  marginBottom: 52,
+  marginRight: 20,
+  x: {label: "1.000 belgeyi sınıflandırma süresi, saniye  (log ölçek, düşük olan iyi)",
+      type: "log", grid: true,
+      ticks: [0.01, 0.1, 1, 10, 100, 1000],
+      tickFormat: d => d < 1 ? String(d).replace(".", ",") : d.toLocaleString("tr-TR")},
+  y: {label: "2.000 belgelik altörneklemde macro-F1", domain: [40, 95], grid: true},
+  color: {domain: ["trained", "llm"],
+          range: ["#1F4E79", "#B3453E"],
+          legend: true,
+          tickFormat: d => ({trained: "etiketlerle eğitilmiş",
+                             llm: "prompt'lu, eğitimsiz"})[d]},
+  marks: [
+    Plot.ruleY([48.37], {stroke: "#9AA3AE", strokeDasharray: "4 3"}),
+    Plot.text([{x: 0.02, y: 48.37}], {x: "x", y: "y", text: ["hep “memnun” — 48,37"],
+      dy: -8, fill: "#9AA3AE", textAnchor: "start", fontSize: 9}),
+    Plot.dot(crossRows, {x: "s1k", y: "mf1", fill: "kind", r: 6,
+      title: d => `${d.name}\nmacro-F1 ${d.mf1.toFixed(2)}\n1.000 belge başına ${d.s1k}s`
+                + `\n${d.labels.toLocaleString("tr-TR")} etiket kullanıldı`}),
+    Plot.text(crossRows, {x: "s1k", y: "mf1", text: "name", dy: -12,
+      fontSize: 9, textAnchor: "middle"})
+  ]
+})
+```
+
+::: {.column-margin}
+Aşağı ve sağa gitmek iki eksende birden kötü. Eğitilmiş olan her şey grafiğin sol
+yarısında, iki ila dört büyüklük mertebesi farkla; prompt'lu olan her şey sağda.
+[En iyi prompt'lu model (82,08) ile 2.000 etiketli BERTurk (82,00) aynı
+yükseklikte ve yatayda 142× uzakta]{.hl} — bu bölümün bütün argümanı, tek bir
+nokta çiftinde. Her noktanın iki koordinatı da yukarıdaki iki `text` tablosunda
+var, dolayısıyla grafik bilgi değil kolaylık ekliyor.
+:::
+
+### İki model farklı belgelerde başarısız oluyor
+
+@sec-siniflandirma-hata-analizi tf-idf ile BERTurk'ü belge belge çapraz
+tablolayacak ve farklı belgeleri ıskaladıklarını bulacak; o örtüşmeme, iki modeli
+birleştirmenin işe yarayabileceği koşul. İşte aynı çapraz tablo, paylaşılan
+2.000 belge üzerinde, `qwen3.6:35b-a3b` 8-shot'a karşı 40.000 etiketli BERTurk
+için:
+
+```text
+                          BERTurk right    BERTurk wrong
+LLM right                     1,871              28
+LLM wrong                        66              35
+
+they agree on 95.30% of documents
+an oracle picking the better of the two per document: 92.62 macro-F1
+BERTurk alone:                                       86.81
+```
+
+Sağ üst köşedeki 28 belge gerçek: fine-tune edilmiş encoder'ın yanlış, prompt'lu
+modelin doğru yaptığı vakalar. Her seferinde kazananı seçebilen bir kâhin,
+BERTurk'ün 86,81'ine karşı 92,62 alırdı — **masada 5,81 puan**.
+
+Bunu yayına almıyoruz ve sebebi bir dipnot değil, bu bölümün asıl noktası. O 28
+belgeyi yakalamak için belgeleri LLM'e göndermek zorundasınız ve LLM belge başına
+142× pahalı. Her şeyi BERTurk'le puanlayıp trafiğin %10'unu bile prompt'lu modele
+ileten bir yönlendirici 1.000 belgeyi 2,1 saniye yerine 32,3 saniyede işliyor —
+2.000 belgedeki 28 belgeyi kovalamak için **15× servis faturası**.
+[5,81 puan gerçek ve onları toplayacak mekanizma karşılanabilir değil]{.hl}; çoğu
+topluluk (ensemble) fırsatının dürüst şekli de bu: çevrimdışı bir çapraz tabloda
+görünür, maliyet sütunuyla silinir.
+
+*Karşılığını veren* sürüm, yukarıdaki güven ölçümünün işaret ettiği sürüm: ucuz
+modelin kendi hatalarına karşı 0,843 AUROC'a sahip olan kendi puanını kullanarak
+belirsiz kuyruğu daha büyük bir modele değil, bir insana yönlendirin. Bu,
+@sec-siniflandirma-maliyetler'in makinesinin farklı bir karara uygulanmış hâli ve
+ikinci bir modele hiç ihtiyaç duymuyor.
+
+## Bir disiplin olarak hata analizi {#sec-siniflandirma-hata-analizi}
+
+Buraya kadarki her sayı size modelin *ne sıklıkla* yanıldığını söylüyor. Hiçbiri
+*ne konuda* yanıldığını söylemiyor; oysa yayına alıp almayacağınıza karar veren
+soru bu. Bu bölüm bir alışkanlık: metriklerden sonra hataları okuyun.
+
+İki *eğitilmiş* modeli, zaten seçilmiş çalışma noktalarında karşılaştırıyoruz —
+tf-idf memnun tarafında $t = 0,834$'te, ki şikâyet tarafında $0,166$ eder, ve
+40.000 etiketli BERTurk $0,5$'te okunmuş hâlde. 10.000 belgelik test kümesinde
+bu, tf-idf için 632 şikâyetin 373'ünün, BERTurk için 452'sinin yakalanması
+demek; sırasıyla %57,38 ve %72,32 precision'la.
+
+### Kimsenin kurmadığı, kurması gereken 2×2
+
+Bu iki çalışma noktasında toplam fark 7,35 macro-F1 puanı — yeniden eşiklenmiş
+vektörleştiricinin 77,66'sına karşı BERTurk'ün 85,02'si — ve o tek sayı bir takası
+gizliyor. Takası görmenin tek yolu iki modeli belge belge çapraz tablolamak.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Model değiştirmek bir takas, bir yükseltme değil</div>
+<svg viewBox="0 0 764 300" style="max-width:744px" role="img"
+     aria-label="10.000 test belgesinin her birinde iki modelden hangisinin doğru olduğunu çapraz tablolayan iki-çarpı-iki bir ızgara. Sütunlar BERTurk doğru ve BERTurk yanlış; satırlar tf-idf doğru ve tf-idf yanlış. Sol üstte, ikisi de doğru: 9.315 belge, yüzde 93,15, bunların 330'u şikâyet. Sağ üstte, yalnızca tf-idf doğru: 149 belge, yüzde 1,49, bunların 43'ü şikâyet; bunlar geçişte kaybedilen belgeler. Sol altta, yalnızca BERTurk doğru: 332 belge, yüzde 3,32, bunların 122'si şikâyet; bunlar kazanılan belgeler. Sağ altta, ikisi de yanlış: 204 belge, yüzde 2,04, bunların 137'si şikâyet; iki model de bunlara ulaşamıyor. Altbilgi, net kazancın 332 eksi 149 eşittir 183 belge olduğunu, yani 1,83 doğruluk puanı ve 7,35 macro-F1 puanı ettiğini; ikisi de yanlış hücresindeki 137 şikâyetin test kümesindeki her şikâyetin yüzde 21,7'si olduğunu; ve tf-idf'in şikâyet tarafında 0,166 eşiğinde, 40.000 etiketli BERTurk modelinin ise 0,5'te okunduğunu kaydediyor.">
+  <text x="284" y="22" class="t-sm t-b t-mid">BERTurk doğru</text>
+  <text x="592" y="22" class="t-sm t-b t-mid">BERTurk yanlış</text>
+
+  <rect x="136" y="34" width="296" height="86" rx="6" class="box"/>
+  <text x="126" y="72" class="t-sm t-b t-end">tf-idf</text>
+  <text x="126" y="88" class="t-sm t-b t-end">doğru</text>
+  <text x="284" y="66" class="t-mid t-b">ikisi de doğru</text>
+  <text x="284" y="90" class="t-mid t-b t-mono">9.315</text>
+  <text x="284" y="108" class="t-xs t-mid t-muted">%93,15 &#183; 330'u şikâyet</text>
+
+  <rect x="448" y="34" width="296" height="86" rx="6" class="box-rose"/>
+  <text x="592" y="66" class="t-mid t-b t-rose">geçişte kaybedilen</text>
+  <text x="592" y="90" class="t-mid t-b t-mono t-rose">149</text>
+  <text x="592" y="108" class="t-xs t-mid t-muted">%1,49 &#183; 43'ü şikâyet</text>
+
+  <rect x="136" y="132" width="296" height="86" rx="6" class="box-accent"/>
+  <text x="126" y="170" class="t-sm t-b t-end">tf-idf</text>
+  <text x="126" y="186" class="t-sm t-b t-end">yanlış</text>
+  <text x="284" y="164" class="t-mid t-b t-accent">geçişte kazanılan</text>
+  <text x="284" y="188" class="t-mid t-b t-mono t-accent">332</text>
+  <text x="284" y="206" class="t-xs t-mid t-muted">%3,32 &#183; 122'si şikâyet</text>
+
+  <rect x="448" y="132" width="296" height="86" rx="6" class="box-warm"/>
+  <text x="592" y="164" class="t-mid t-b t-warm">iki model de ulaşamıyor</text>
+  <text x="592" y="188" class="t-mid t-b t-mono t-warm">204</text>
+  <text x="592" y="206" class="t-xs t-mid t-muted">%2,04 &#183; 137'si şikâyet</text>
+
+  <line x1="136" y1="238" x2="744" y2="238" class="ln-thin"/>
+  <text x="136" y="258" class="t-sm">net <tspan class="t-b t-mono">332 &#8722; 149 = 183</tspan> belge &#8212; 1,83 doğruluk puanı, 7,35 macro-F1 puanı</text>
+  <text x="136" y="278" class="t-sm t-muted">sağ alt hücredeki 137 şikâyet, <tspan class="t-b">test kümesindeki her şikâyetin %21,7'si</tspan></text>
+  <text x="136" y="294" class="t-xs t-muted">tf-idf şikâyet tarafında t = 0,166'da okundu; BERTurk (40.000 etiket) 0,5'te okundu</text>
+</svg>
+```
+::: {.fig-cap}
+Manşetteki 7,35 puan bir net rakam. Model değiştirmek 332 belgeyi düzeltiyor,
+149'unu bozuyor — gerçek bir kazanç, ama üçte biri geri veriliyor. O 149 belge
+sizin en değerli vakalarınızsa, toplam sayı size yalan söylüyor demektir.
+:::
+::::
+
+O ızgaradan, liderlik tablosunun size gösteremeyeceği üç şey çıkıyor.
+
+**Kazanç göründüğünden küçük ve bir takas.** 332 belge düzeliyor; tf-idf'in
+hakkından geldiği 149 belge bozuluyor. [7,35 puanlık bir iyileşme raporlayan
+kimse yalan söylemiyor, ama onu raporlayan kimse 149 belgeyi bozduğunu da size
+söylemiyor.]{.hl} Şikâyetleriniz bir insan kuyruğuna gidiyorsa ve o 149 belge o
+kuyruğun etrafında ayarlandığı belgelerse, "yükseltme" o ekip için bir gerileme.
+
+**Sert bir taban var ve yüksek.** 204 belge iki modeli birden yeniyor ve
+bunların 137'si şikâyet — [test kümesindeki her şikâyetin %21,7'si seyrek bir
+doğrusal model tarafından da fine-tune edilmiş bir transformer tarafından da
+ıskalanıyor]{.hl}. Bu, daha büyük bir encoder'la çözeceğiniz bir kapasite sorunu
+değil. Ya gerçekten belirsiz metin ya da bozuk bir etiket; sonraki iki alt bölüm
+ağırlıkla ikincisi olduğunu savunuyor.
+
+**İki model farklı şeylerde başarısız oluyor.** 685 belge iki modelden en az biri
+tarafından ıskalanıyor ve bunların yalnızca 204'ü ikisi tarafından birden;
+kalan 481'de modeller anlaşamıyor. Bu örtüşmeme tam olarak bir topluluğun
+(ensemble) işe yaradığı koşul — ve burada daha faydalısı, *anlaşmazlıkları
+okumanın* size bir şey öğrettiği koşul, çünkü her modelin hatalarının bir şekli
+var.
+
+::: {.column-margin}
+Anlaşmazlık 2×2'si tek bir `numpy` satırına mal oluyor ve beş saniye sürüyor.
+Üretimde bir modeli her değiştirdiğinizde kurun. Asıl önemlisi bu değil,
+umursadığınız sınıfla sınırlandırılmış olanı: 122 şikâyet kazanıldı, 43 şikâyet
+kaybedildi.
+:::
+
+### Sonuca varmadan önce dilimleyin
+
+İkinci ucuz alışkanlık: test kümesini etiketleme gerektirmeden ölçebileceğiniz
+herhangi bir şeye göre bölün ve toplamın her dilimin içinde de geçerli olup
+olmadığına bakın. Belge uzunluğu bedava.
+
+```text
+length (chars)      n    complaints   tf-idf err   BERTurk err   ratio
+<50             1,644         6.14%        5.29%         4.50%    1.18
+50–99           2,253         6.39%        5.77%         3.99%    1.44
+100–199         3,499         6.09%        4.86%         3.12%    1.56
+200–399         2,096         7.16%        5.82%         3.10%    1.88
+400+              508         4.72%        5.31%         2.95%    1.80
+```
+
+[tf-idf'in hata oranı düz.]{.hl} Hiçbir eğilim göstermeden %4,86 ile %5,82
+arasında geziniyor — daha uzun bir yorum, kelime torbası modeline daha fazla
+kelime verir, ama aynı zamanda neşeli bir kelimenin şikâyeti oy çokluğuyla
+bastırması için daha fazla şans verir. BERTurk'ün hata oranı ise neredeyse
+monoton düşüyor: 50 karakterin altındaki yorumlarda %4,50'den 200–399
+karakterlik yorumlarda %3,10'a. Üstünlük en kısa belgelerde 1,18×, en uzun ikinci
+kovada 1,88×.
+
+Encoder'ın asıl satış argümanı tam olarak bu: **her yerde daha iyi değil, uzun
+belgelerde daha iyi**, çünkü olumsuzlama, ödün ve kapsam orada yaşıyor ve bir
+kelime torbasının bunların hiçbiri hakkında söyleyecek sözü yok. Üretim
+trafiğiniz ağırlıkla tek satırlık yorumlardan oluşuyorsa, bütçenizi 1,88×'e göre
+değil 1,18×'e göre yapmalısınız.
+
+::: {.column-margin}
+400+ satırını şüpheyle okuyun. Kabaca 24 şikâyet barındıran 508 belge, dolayısıyla
+BERTurk'ün %2,95'i yaklaşık 15 hata demek. Tek bir belge onu 0,2 puan oynatıyor.
+Bulgu, ilk dört kovadaki eğilim; son satır onunla tutarlı, onun kanıtı değil.
+:::
+
+### Hataları rastgele değil, güvene göre sıralayın
+
+Rastgele bir hata örneklemi okumak size çoğunlukla zor vakaların zor olduğunu
+öğretir. Bilgi, modelin *en emin olduğu* hataları okumakta, çünkü kendinden emin
+biçimde yanılan bir model genellikle haklı olduğu için cezalandırılıyordur.
+
+İşte BERTurk'ün en emin olduğu hatalar. Yorumlar, arşiv kaydındaki İngilizce
+çevirileriyle veriliyor; olasılıklar modelin, şikâyet tarafında.
+
+```text
+gold        p(complaint)   review (glossed)
+complaint         0.0011   "I chose it because the price was right, but I was
+                            very pleased once I used it … definitely worth it."
+complaint         0.0012   "Thank you so much, prettier than the picture, I
+                            loved it, an anniversary gift for my wife :-)"
+satisfied         0.9988   "It broke within two months and became unusable
+                            (I'm giving five stars so my review shows up at the
+                            top, normally it doesn't deserve a star)"
+satisfied         0.9986   "The suction was weak and it burned out after 5–6
+                            months."
+satisfied         0.9986   "Friends, it does nothing for belly fat, that's
+                            certain … so if you're buying it for your belly,
+                            don't."
+satisfied         0.9988   "You'll regret it if you don't buy it."
+satisfied         0.9987   "A so-so product."
+```
+
+Üçüncü satır hakemliğe hiç ihtiyaç duymayan satır ve üzerinde durmaya değer.
+**Yorumcu, yorumun içinde, yıldız puanının değerlendirici değil stratejik
+olduğunu belirtiyor** — şikâyet listenin başına çıksın diye beş yıldız.
+Etiketlerimiz yıldız puanlarından türetiliyor. Yani etiket, yıldızların sadık
+bir kaydı ve duygunun yanlış bir kaydı; yorumcu da yer gerçeğimizin bozulduğu
+mekanizmayı bize nazikçe belgelemiş.
+
+Üstündeki ve altındaki satırlar da bize aynı şekilde okunuyor: yanan bir
+süpürge, "hiçbir işe yaramayan" bir ürün, *almayın* diye biten bir yorum — hepsi
+memnun olarak dosyalanmış. Ters yönde de, şikâyet olarak dosyalanmış iki övgü
+dolu yorum. [Bunu bir ölçüm olarak değil, kendi okumamız olarak
+söylüyoruz]{.hl}: bağımsız hiçbir Türkçe konuşan etiketleyici bunları yeniden
+hakemlemedi, dolayısıyla ortak 204 başarısızlığın kaçının etiket hatası olduğuna
+bir sayı koymayacağız. Söyleyeceğimiz şey şu: güvene göre sıralanmış hata
+listesinin tepesine, modelin etiketten daha haklı göründüğü vakalar hâkim — ki
+bu tam olarak @frenay2014classification'ın tarif ettiği teşhis ve
+@sec-etiket-denetimi'nin size aramanızı söylediği şey.
+
+Son iki satır gerçek model hataları ve başka bir açıdan öğretici.
+*"Almazsanız pişman olursunuz"* bir şikâyetin bütün sözcüksel işaretlerini
+taşıyor — pişmanlık, olumsuzlama, bir uyarı — ama tersini söyleyecek şekilde
+dizilmiş. *"İdare eder bir ürün"* bir omuz silkme; beş yıldızın yanındaki bir
+omuz silkme ise bir dil sorunu değil, bir etiketleme uzlaşımı.
+
+::: {.callout-tip}
+## Bunun ürettiği kural
+
+Hatalarınızı model güvenine göre azalan sırada dizin ve ilk elliyi elle okuyun.
+Çoğu etiket hatasına benziyorsa modeli ayarlamayı bırakın — artık etiketleme
+sürecinizi ölçüyorsunuz ve hiçbir mimari değişikliği o sayıyı oynatmaz. Bunun
+yerine yeniden etiketleyin ya da etiketleme fonksiyonunu değiştirin.
+:::
+
+### Encoder'ın satın aldığı şey, cümlelerle
+
+BERTurk'ün yakalayıp tf-idf'in ıskaladığı 122 şikâyetin bir şekli var ve o şekil
+kelime dağarcığı değil. Bunların hepsi, tf-idf'in 0,166 eşiğinin epey altında,
+BERTurk'ün ise 0,9'un üstünde puanladığı belgeler:
+
+```text
+p_lin   p_bert   review (glossed)
+0.135    0.9987  "After one month's use it snapped in the middle."
+0.143    0.9976  "The reception isn't anything to write home about,
+                  normal for the price."
+0.152    0.9801  "The numbers on the parts are printed wrong; assembling
+                  it into a whole is exhausting."
+0.143    0.9976  "I put it downstairs in my duplex and it doesn't reach
+                  upstairs; upstairs and it doesn't reach downstairs.
+                  Very weak … I read the reviews and can't believe it's
+                  the same modem."
+```
+
+Bunların hiçbirinde, bir kelime torbasının anladığı anlamda bir şikâyet kelimesi
+yok. Birincisi bütün anlamını tek bir seyrek fiilde taşıyor: *koptu*. İkincisi
+bir ödün cümlesi: şikâyet ilk yan cümlede, ikinci yan cümle onu kısmen geri
+alıyor — tf-idf'in temsil edemeyeceği bir yapı, çünkü sırayı çöpe atmış.
+Dördüncüsü bir *anlatı* olarak ifade edilmiş bir şikâyet — hiç değerlendirici
+kelime dağarcığı yok, sadece ürünün işini iki kez yapamayışının betimlemesi.
+[Seyrek öznitelikler kelimeye ihtiyaç duyar; encoder cümleye.]{.hl}
+
+İki modelin de paylaştığı hatalar ise, aynı şekilde çevrilmiş hâlleriyle, iki
+aileye düşüyor:
+
+```text
+"It drops out now and then, but it'll do."          lukewarm
+"It'll do, for the money it's fine."                lukewarm
+"A so-so product."                                  lukewarm
+"You'll regret it if you don't buy it."             negated regret
+"The hose looks low quality."                       hedged
+"Downside:"                                         empty
+```
+
+İlgi çekici olan "idare eder" ailesi, çünkü aslında bir modelleme başarısızlığı
+değil. *İdare eder*, Türk yorumcuların rutin olarak dört ya da beş yıldızla
+eşleştirdiği bir omuz silkme; dolayısıyla etiket memnun diyor, metin ise ikisini
+de demiyor. Hiçbir sınıflandırıcı, etiketlerin kodlamadığı bir ayrımı geri
+kazanamaz. Son satır daha kötü: bütün metni, iki nokta üst üste ile takip eden
+*eksisi* kelimesinden ibaret bir yorum. Bir yer gerçeği etiketi var. Hiç bilgi
+içermiyor. [Her test kümesinin bir kısmı etiketlenemezdir ve metriklerden
+göremeyeceğiniz bir tavan koyar.]{.hl}
+
+### Dört alışkanlık
+
+Yukarıdaki her şey, sırayla yapılmış dört ucuz şey ve yayına alacağınız her
+sınıflandırıcıya genelleniyor:
+
+1. **Yerine geçtiğiniz modele karşı çapraz tablolayın.** Toplam bir iyileşme net
+   bir rakamdır. Neyi bozduğunuzu öğrenin.
+2. **Bedava olan bir şeye göre dilimleyin.** Uzunluk, kaynak, tarih, ürün
+   kategorisi, belge dili. Kazancı ilan etmeden önce her dilimin içinde de ayakta
+   kaldığını kontrol edin.
+3. **Hataları güvene göre sıralayın ve listenin tepesini okuyun.** Kendinden emin
+   hatalar etiket hatalarını yoğunlaştırır; rastgele örneklemler gerçek
+   belirsizliği yoğunlaştırır.
+4. **Kendi hatalarınızı veri kümesininkilerden ayırın.** Her hata için şunu
+   sorun: dikkatli bir insan bunu yalnızca metinden doğru yapabilir miydi? Cevap
+   hayırsa bu bir model sorunu değildir ve ayar yapmak onu düzeltmez.
+
+## Sezgi kontrolleri {#sec-siniflandirma-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün bir tartışmayla değil
+bir ölçümle kapattığı sorular, dolayısıyla cevaplar kontrol edebileceğiniz
+sayılar taşıyor.
+
+::: {.callout-note collapse="true"}
+## 1. Bir meslektaşınız bu derlemde %94,3 doğruluk raporluyor. Ne kadar etkilenmelisiniz?
+
+Hiç, ve bunu başka hiçbir şeye bakmadan söyleyebilirsiniz. Her girdiye "memnun"
+cevabını veren bir model burada **%93,68** alıyor, çünkü taban oran bu. %94,3,
+hiç özniteliği, hiç eğitimi ve hiç parametresi olmayan bir modelin 0,6 puan
+üstünde.
+
+@sec-siniflandirma-metrikler'deki düzeltilmemiş baseline $t = 0,5$'te tam olarak
+%94,28 alıyor — ve **632 şikâyetin 69'unu** yakalıyor. Hiç yoktan biraz iyi bir
+model değil; saygın bir sayı giymiş, neredeyse hiçbir şey olan bir model.
+
+Edinmeye değer alışkanlık: herhangi bir doğruluk rakamına bakmadan önce çoğunluk
+sınıfı oranını hesaplayın ve çıkarın. Fark küçükse başka bir metrik isteyin.
+Matthews korelasyonu en ucuz dürüst ikame — üç yozlaşmış baseline'ın üçüne de
+düz 0,000 veriyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Macro-F1'iniz 58,24'ten 77,66'ya çıkıyor ve tek değişen bir sabit. Hile mi yaptınız?
+
+Hayır — sıralamanın oynamadığını gösterebiliyorsanız ve sabit ayrı tutulmuş veri
+üzerinde seçildiyse.
+
+Kanıt @sec-siniflandirma-dengesizlik'te: average precision *hem* önce *hem*
+sonra 60,30 ve AUC 93,24. Bu iki istatistik yalnızca modelin belgeleri koyduğu
+sıraya bağlı. Dört anlamlı basamağa kadar özdeş olmaları, modelin bayt bayt aynı
+olduğu anlamına geliyor; değişen tek şey nereden kestiğimiz.
+
+Hile, 0,834'ü test kümesi üzerinde eşik tarayarak seçmek olurdu. Bu bölümdeki her
+eşiğin 8.000 belgelik `cal` dilimi üzerinde seçilip ancak ondan sonra teste
+uygulanmasının sebebi bu. Bölüm test üzerinde taranmış eşikler de raporluyor —
+**kâhin** etiketiyle — ama yalnızca pişmanlığı ölçecek bir üst sınır olarak,
+asla bir sonuç olarak değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. 800 etiketiniz ve iki gününüz var. BERTurk'ü fine-tune mu edersiniz, tf-idf mi uydurursunuz?
+
+800 etikette bu gerçekten yakın ve dürüst cevap: *önce, bugün, tf-idf'i
+uydurun, sonra karar verin*.
+
+Ölçülmüş eğriler sizi kıskaca alıyor. 500 etikette tf-idf **60,82**, BERTurk
+**56,46** alıyor — seyrek model kazanıyor. 1.000 etikette tf-idf **61,60**,
+BERTurk **71,57** alıyor — encoder on puanla kazanıyor. Sizin 800'ünüz, encoder
+tarafında dik, seyrek tarafta düz olan bir kesişimin içinde oturuyor.
+
+Terazinin dilini kaydıran şey doğruluk değil, maliyet asimetrisi. tf-idf'i
+uydurmak yaklaşık saniyenin onda birini alıyor. İhtiyacınız olan yere düşerse
+öğle yemeğinden önce bitirdiniz. Düşmezse hiçbir şey kaybetmediniz ve artık
+elinizde aşılacak bir taban ile hâlihazırda yüklenmiş etiketli bir küme var.
+[Ucuz olanı önce koşturun; genelde kazandığı için değil, öğrenmenin hiçbir
+maliyeti olmadığı için.]{.hl}
+
+Şimdi sorunun size sunmadığı seçeneğe dikkat edin. @sec-siniflandirma-kesisim bu
+bütçenin yakınında üçüncü bir cevap ölçtü ve dürüstçe alıntılanabilmesi için
+kendi değerlendirme kümesine ihtiyaç duyuyor: paylaşılan 2.000 belgelik
+altörneklemde prompt'lanan 36B'lik bir model *sıfır* etiketle **81,56** macro-F1
+alıyor; BERTurk aynı belgeler üzerinde 1.000 etiketle **72,78** alıyor —
+eşleştirilmiş bootstrap bu farkı prompt'un lehine **8,79 puana** koyuyor. Yine de
+tf-idf'i uydurun; saniyenin onda biri ve sizin tabanınız. Ama "bu ikisinden
+hangisini eğiteyim" artık sorunun tamamı değil ve kararı vermesi gereken şey,
+özgün cevabın hiç sahip olmadığı sütun: prompt, vektörleştiricinin 0,014
+saniyesine karşı **1.000 belge başına 352 saniyeye** mal oluyor ve size
+kaydıracak bir eşik vermiyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. 500 etiket eklemek AUC'yi düşürdü. Geri mi almalısınız?
+
+Önce başka nelerin oynadığına bakın. 500'den 1.000 etikete geçerken BERTurk'ün
+AUC'si 83,00 → 82,76 düşüyor; aynı adımda average precision 26,98 → 45,72 ve
+macro-F1 56,46 → 71,57 yükseliyor.
+
+Bu bir çelişki değil, iki metriğin farklı bölgeleri ölçmesi. Yanlış pozitif oranı
+9.368 memnun yoruma bölüyor, dolayısıyla kolay çoğunluk içindeki hatalar zar zor
+kaydediliyor; precision ise fiilen işaretlediğiniz belge sayısına bölüyor ki bu
+çok daha küçük bir sayı [@davis2006relationship]. Fazladan etiketler modeli tam
+olarak kararın verildiği yerde iyileştirdi ve sıralamanın kimsenin çalışmadığı
+bir kısmını hafifçe bozdu.
+
+Ürününüz sıralamanın tamamı boyunca düşük eşiklerde yaşıyorsa geri alın. Bizimki
+yaşamıyor — kimse 10.000 yorumun hepsini okumuyor — o hâlde yayına alın. Genel
+kural: dengesiz bir problemde **average precision'ı taban orana karşı** alıntılayın
+(burada %6,32'ye karşı 60,30, yani 9,54× kaldıraç) ve AUC'yi ikincil sayın.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Sınıf ağırlıklandırma F1'inizi yükseltti. Bunun bedeli ne oldu?
+
+Kalibrasyonu, ve muhtemelen ödemek istediğinizden fazlasını.
+
+`class_weight="balanced"` macro-F1'i 58,24'ten 76,09'a çıkarıyor ve beklenen
+kalibrasyon hatasını **3,96'dan 14,18'e** taşıyor — 3,6× bir artış. Yeniden
+ağırlıklandırılmış modelin ortalama öngörülen olasılığı, gerçek oran 0,9368 iken
+0,795. İçinde koşacağı dünyanın önselini olmayan bir önsel öğrenmiş.
+
+Çıktıyla yaptığınız tek şey `argmax` ise bu bedava. Sayı bir insana gösterildiği
+("%87 ihtimalle şikâyet"), bir maliyetle çarpıldığı, akış aşağısındaki bir
+kurala verildiği ya da model sürümleri arasında karşılaştırıldığı anda bedava
+olmaktan çıkıyor. Ve bunu ödemek zorunda olmadığınıza dikkat edin:
+*ağırlıklandırılmamış* modelde eşiği kaydırmak 77,66'ya ulaşıyor — sınıf
+ağırlıklandırmadan iyi — ve ECE 3,96'da hiç kıpırdamıyor.
+
+Van den Goorbergh ve arkadaşları klinik risk modellerinde aynı takası buldu ve
+bunun nadiren yapmaya değer olduğunu savundu [@vandengoorbergh2022harm].
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Ders kitabındaki maliyet-optimal eşiği uyguladınız ve inceleme kuyruğu patladı. Ne yanlış gitti?
+
+Formül neredeyse kesinlikle sorunsuz. Ona verdiğiniz girdi bir olasılık değildi.
+
+Elkan'ın $q^* = C_{FP}/(C_{FN}+C_{FP})$'si doğru ve $q$'nun kalibre bir olasılık
+olduğunu varsayıyor [@elkan2001foundations]. 100'lük bir maliyet oranında o eşik
+0,0099. Ona ham lojistik regresyon puanlarını verin, model 9.368 memnun yorumun
+8.073'ünü işaretler; çünkü puanları, 0,0099'un neredeyse her şeyi yakaladığı bir
+banda sıkışmıştır. *Aynı modelden* gelen isotonic kalibre edilmiş puanları verin,
+3.345 işaretler.
+
+Ölçtüğümüz yedi maliyet oranı boyunca formül ham puanlarda %8 ile %56 arası fazla
+harcıyor; kalibre puanlarda %1 ile %7 arası. Teşhis aracı bir kod incelemesi
+değil, bir güvenilirlik grafiği — hata aritmetikte değil, sayılarda.
+:::
+
+## Mülakat soruları {#sec-siniflandirma-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Atıf üzerine — @sec-metin-veri'dekiyle aynı uyarı.** Bunlar, ikisi de ücretsiz
+olan iki güvenilir kamuya açık kaynakta tekrar tekrar geçen sorular: Chip
+Huyen'in
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+kitabı [@huyen2021interviews] ve
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews).
+"X şirketinin sorduğu sorular" diye liste veren her sayfayı pazarlama sayın.
+:::
+
+1. **Sınıf dengesizliğiyle nasıl başa çıkarsınız?** Beklenen cevap aşırı
+   örnekleme, eksik örnekleme, SMOTE ve sınıf ağırlıklarını sıralar. Daha iyi
+   cevap neyin bozulduğunu sorarak başlar, çünkü cevap genellikle model değil
+   *eşiktir*. Ölçümü verin: %6,32'lik bir azınlık sınıfında, tek bir eşiği
+   kaydırmak — yeniden uydurma yok, fazladan satır yok — sınıf ağırlıklarının
+   76,09'una, SMOTE'un 74,72'sine ve eksik örneklemenin 62,98'ine karşı 77,66
+   macro-F1'e ulaştı. Sonra SMOTE'un dokuz düşük boyutlu yoğun sayısal veri
+   kümesinde değerlendirildiğini ve yazarlarının metni gelecek çalışma olarak
+   listelediğini ekleyin [@chawla2002smote] — makaleyi, hakkındaki blog yazısını
+   değil, okuduğunuzu gösteren cümle bu.
+
+2. **Precision, recall, F1, ROC-AUC, PR-AUC — hangisini ne zaman kullanırsınız?**
+   Her birinin neye böldüğünü söyleyin. Yanlış pozitif oranı çoğunluk sayısına
+   bölüyor; precision işaretlediğiniz şeye bölüyor. Dengesiz bir problemde bu
+   paydalar büyüklük mertebeleriyle ayrışır, dolayısıyla iki eğri modelleri
+   farklı sıralar [@davis2006relationship] — bizimkiler iki BERTurk kontrol
+   noktası arasında yön olarak bile anlaşmadı. Pratik kuralla bitirin: PR-AUC'yi
+   taban orana karşı alıntılayın ki okur kaldıracı görebilsin ve doğruluğu asla
+   yanında çoğunluk sınıfı oranı olmadan alıntılamayın.
+
+3. **Kalibrasyon nedir ve nasıl test edersiniz?** Bir model, 0,8 puanladığı
+   vakaların yaklaşık %80'i gerçekten pozitifse kalibredir. Bir güvenilirlik
+   diyagramı ve bir beklenen kalibrasyon hatasıyla test edin, sonra da — çoğu
+   adayın kaçırdığı kısım bu — *hangi* ECE olduğunu söyleyin. Guo ve
+   arkadaşlarınınki en üst etiket güvenini $\max_k p_k$ kutuluyor ve `argmax`'ın
+   ne sıklıkla haklı olduğunu soruyor [@guo2017calibration]; $P(\text{sınıf }1)$
+   üzerinden kutulamak farklı bir istatistiktir. Bizim sınıf ağırlıklı
+   modelimizde bunlar 8,98 ve 14,18 okundu. İkisi de doğru; tanımı olmayan bir
+   sayı ise değil.
+
+4. **Platt ölçekleme mi isotonic regression mı?** Isotonic parametrik değil ve
+   herhangi bir monoton bozulmayı uydurabilir; Platt iki parametreli bir sigmoid
+   ve uyduramaz [@platt1999probabilistic; @zadrozny2002transforming]. Karar,
+   elinizde ne kadar ayrı tutulmuş veri olduğuyla ilgili: Niculescu-Mizil ve
+   Caruana, kabaca 200–1.000 kalibrasyon noktasının altında Platt'ı önde, üstünde
+   ise isotonic'i eşit ya da daha iyi buldu [@niculescu2005predicting].
+   Kalibrasyon kümenizin boyutunu söyleyin. Bizimki 8.000 ve isotonic 0,94'e
+   karşı 0,69 ile kazandı — onların bulgusuyla tutarlı, ki bunu varsaymak yerine
+   söyleyebilmemizin sebebi de bu.
+
+5. **Üretimdeki bir sınıflandırıcı için karar eşiğini nasıl seçersiniz?**
+   Varsayılan olarak asla 0,5. Sonuçların sahibi kim ise ondan bir maliyet oranı
+   alın, ondan $q^*$ türetin ve — bunun işe yarayıp yaramayacağına karar veren
+   adım — türetmeye güvenmeden önce puanların kalibre olduğunu doğrulayın.
+   Maliyetler sabitse ve tek bir çalışma noktası yeterliyse, eşiği doğrudan ayrı
+   tutulmuş veri üzerinde taramak meşru bir kestirme; bizim ölçümlerimizde
+   kalibre-et-sonra-türet yoluyla bir iki puan içinde örtüştü. Kalibrasyon,
+   maliyetler değişebiliyorsa ya da sayı bir insana gösteriliyorsa hakkını
+   veriyor.
+
+6. **Sınıflandırma için ne zaman LLM kullan*maz*sınız?** Etiketiniz olduğunda,
+   hacminiz olduğunda ve bir kelime değil bir sayıya ihtiyacınız olduğunda. Bir
+   hüküm değil, eğriyi verin: bizim görevimizde prompt'lanan 36B'lik bir
+   mixture-of-experts, fine-tune edilmiş BERTurk'ü **1.000 etikette 8,79
+   macro-F1** ile yendi, **2.000'de 0,08 puanla** berabere kaldı ($p = 0,97$) ve
+   **40.000'de 4,73 ile** kaybetti — hepsi aynı 2.000 belge üzerinde
+   eşleştirilmiş bootstrap'lı. Sonra beraberliği fiyatlandırın: encoder bir
+   belgeyi **142× ucuza** sınıflandırıyor, dolayısıyla kalitede başa baş olmak
+   başa baş olmak değil. Çoğu adayın kaçırdığı kısım üçüncü eksen. Zero-shot bir
+   model `ŞİKAYET` *kelimesini* döndürür, dolayısıyla ROC eğrisinden, kalibrasyon
+   eşlemesinden, maliyetten türetilmiş eşikten ve taramadan — bu bölümdeki her
+   aletten — vazgeçersiniz. Bizim en iyi prompt'lu koşumuz %56,98 precision ve
+   %80,95 recall'da oturuyordu ve çevrilecek hiçbir şey yoktu. Literatürü ve
+   sınırlarını adlandırarak kapatın: @edwards2024incontext 16 veri kümesi boyunca
+   tam veriyle fine-tuning'i 0,119 micro-F1 önde buldu ama one-shot rejimde
+   prompt'lamayı önde; @bucher2024finetuned ise kesişimi kabaca 200 gözlemin
+   üstüne koydu, modern bir talimat ayarlı modele karşı değil zero-shot
+   BART-large-MNLI'ye karşı ölçerek. Bizimki onlarınkinden bir büyüklük mertebesi
+   yukarıda ve asıl mesele bu — kesişim, karşılaştırdığınız çiftin bir
+   özelliğidir, bir sabit değil.
+
+7. **Modeliniz çevrimdışı %94 doğru ve kullanıcılar her şeyi kaçırdığını
+   söylüyor. Hatayı bulun.** Neredeyse her zaman eşik, taban oran ya da bir
+   dağılım kayması; olasılık sırası da bu. Skalere değil, karışıklık matrisine
+   bakın: bizimki %94,28 doğrulukta 632 şikâyetin 69'unu yakalıyordu. Sonra
+   çevrimdışı taban oranın üretimle örtüşüp örtüşmediğine bakın — %6,32 şikâyet
+   üzerinde kalibre edilmiş bir model, %15'te akan bir akışta sistematik olarak
+   az işaretler. Sonra çevrimdışı sayıya sızıntı olup olmadığına, özellikle de
+   herhangi bir eşiğin ya da kalibratörün değerlendirme kümesi üzerinde uydurulup
+   uydurulmadığına bakın.
+
+## 2026 alet çantası {#sec-siniflandirma-araclar}
+
+Bu bölümdeki her şey tek bir dizüstü bilgisayarda, aşağıdaki sürümlerle koştu.
+Bir kitapta sürüm sabitlemek kaderin cilvesine davetiye çıkarmak, ama
+sabitlememek daha kötü — buradaki sayılar ancak beyan edilmiş bir yığına karşı
+yeniden üretilebilir.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `scikit-learn` | 1.9.0 | `TfidfVectorizer`, `LogisticRegression`, `IsotonicRegression`, bütün metrikler ve eğriler |
+| `transformers` | 5.15.0 | BERTurk'ü yükleme ve fine-tune etme |
+| `torch` | 2.13.0 | fine-tuning'in üzerinde koştuğu MPS arka ucu |
+| `imbalanced-learn` | 0.14.2 | `RandomOverSampler`, `RandomUnderSampler`, `SMOTE` |
+| `scipy` | 1.18.0 | sıcaklığı uyduran sınırlı skaler minimize edici |
+| `numpy` / `pandas` | 2.5.2 / 3.0.5 | dizi işleri, Parquet gidiş-dönüşü, ayrım |
+| `ollama` | 0.24.0 | @sec-siniflandirma-llm'deki dört yerel LLM'i servis etme — `llama3.2:3b`, `qwen3.5:9b`, `gemma3:27b`, `qwen3.6:35b-a3b`, hepsi `Q4_K_M` niceleştirilmiş |
+
+: Bu sayıların çıktığı yığın. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[26,16,58]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `setfit` | 1.1.3 | @tunstall2022setfit'in karşıtsal few-shot reçetesi, tek bir nesne hâlinde. Sınıf başına yüzlerce değil onlarca etiketiniz varken doğru ilk deneme |
+| `sentence-transformers` | 5.7.0 | dondurulmuş embedding'ler artı doğrusal bir kafa — eğitim maliyetinin çok küçük bir kısmıyla, çoğu zaman tam fine-tuning'in bir iki puan yakınında |
+| `peft` / `accelerate` | 0.20.0 / 1.14.0 | encoder buradaki gibi sığmamaya başladığında LoRA ve dağıtık eğitim (@sec-egitim-sonrasi) |
+| `netcal` | 1.4.0 | `scikit-learn`'ün getirdiğinin ötesinde kalibrasyon yöntemleri ve diyagramlar; kutulama ve beta kalibrasyonu dahil |
+| `mapie` | 1.5.0 | conformal prediction — kalibre bir olasılık yerine, kapsama oranı garantili bir etiket *kümesi*. "Bilmiyorum"un geçerli bir çıktı olması gerektiğinde doğru araç |
+| `cleanlab` | 2.9.0 | eğitim verinizdeki etiket hatalarını buluyor. Etiketleri yıldız puanlarından gelen bir derlemde bu, genellikle harcayabileceğiniz en yüksek getirili saat |
+| `optuna` | 4.9.0 | tarama artık bir `for` döngüsüne sığmadığında hiper-parametre araması |
+| `onnxruntime` | 1.28.0 | fine-tune edilmiş bir encoder'ı CPU servisi için dışa aktarma; çıkarımda tipik olarak PyTorch eager kipinden 2–4× hızlı |
+| `skops` | 0.14.0 | `scikit-learn` modellerini `pickle` olmadan kalıcılaştırma — ki denetiminizde olmayan hiçbir yerden `pickle` çözmemelisiniz |
+| `shap` | 0.52.0 | biri *neden* diye sorduğunda tahmin başına katkı payları — daha ucuz alternatif için @sec-siniflandirma-hata-analizi'ne bakın |
+
+: Daha geniş ekosistem, yazım anındaki sürümlerle {tbl-colwidths="[18,14,68]"}
+
+::: {.column-margin}
+İki eksik kasıtlı. `xgboost` (3.4.1) ve `lightgbm` (4.7.0) tablo verisinde mükemmel
+ve yüksek boyutlu seyrek metinde nadiren rekabetçi; orada L2 cezalı doğrusal bir
+model zaten doğru tümevarımsal önyargıya yakın. `fasttext` (0.9.3) ise gerçekten
+hızlı bir gözetimli baseline olmayı sürdürüyor, ama fiilen bakımsız;
+`scikit-learn` bu boyuttaki bir derlemde sizi aynı yere götürüyor.
+:::
+
+## Lab: gerçek bir servis bütçesiyle bir sınıflandırıcı yayına alın {#sec-siniflandirma-lab}
+
+Teslim edilecek şey şu biçimde tek bir paragraf: *"gelen belgelerin %X'ini
+işaretliyoruz, Z'lerin %Y'sini yakalıyoruz, belge başına W milisaniye maliyetle —
+ve seçtiğimiz eşik şu, sebebi de bu"*. Her cümleciğin, yaptığınız bir ölçümden
+savunulabilir olması gerekiyor.
+
+### Neye ihtiyacınız var
+
+Elle oluşturmadığınız ikili bir etikete sahip, birkaç bin belgelik bir derlem —
+yıldız puanları, çözülmüş/çözülmemiş talepler, spam işaretleri, moderasyon
+sonuçları. **Dengesiz** olmalı; azınlık sınıfınız %30'un üstündeyse olmayana
+kadar altörnekleyin, çünkü bu bölümün bütün disiplini ancak sınıflar dengesiz
+olduğunda önem taşıyor. 1'den 5'e kadarki adımlar için tek başına `scikit-learn`
+yeterli.
+
+### Adım 1 — hiçbir şey eğitmeden önce tabanı yazın
+
+Çoğunluk sınıfı oranını ve üç önemsiz politikanın doğruluğunu ve macro-F1'ini
+raporlayın: hep-çoğunluk, hep-azınlık ve yazı tura. Bu dört satır sürüyor ve
+raporunuzdaki tek en faydalı tablo, çünkü sonraki her sayı ona karşı okunuyor.
+Bizimkiler doğrulukta 93,68 / 6,32 / 50,21 ve macro-F1'de 48,37 / 5,94 / 38,57
+idi.
+
+### Adım 2 — ikiye değil, üçe ayırın
+
+`fit`, `cal`, `test` — 64 / 16 / 20 makul bir varsayılan ve bu bölümün
+kullandığı ayrım. Devam etmeden önce, hangi niceliklerin `cal`'a dokunmasına
+izin verildiğini yazın: eşik, kalibratör, maliyet-optimal çalışma noktası. 7.
+adıma kadar hiçbir şey `test`'e dokunamaz.
+
+Bir kalibrasyon dilimi ayıramıyorsanız bunu açıkça söyleyin ve bunun yerine
+çapraz doğrulamalı kalibrasyon kullanın — ama kalibratörü sessizce eğitim verisi
+üzerinde uydurmayın. Burada bunu yapmanın ölçülmüş cezası 0,69'a karşı 2,39 ECE
+idi ve tehlikeli olmasının sebebi, 2,39'un yanlış görünmemesi.
+
+### Adım 3 — seyrek baseline'ı ve etiket bütçesi eğrisini kurun
+
+1–2 gram üzerinde tf-idf, oradan lojistik regresyona. Sonra 200, 500, 1.000,
+2.000 ve bütün etiketlerinizde yeniden uydurun ve macro-F1'i bütçeye karşı
+çizdirin. İki şey arıyorsunuz: eğrinin düzleşip düzleşmediği (bizimki 40.000'de
+bile düzleşmemişti) ve kazancın ne kadarının azınlık sınıfında olduğu (bizde:
+41,84 azınlık F1'ine karşı 20,75 macro-F1 puanı).
+
+### Adım 4 — eşiği `cal` üzerinde tarayın ve tabloyu raporlayın
+
+$t$ için 0,05'ten 0,95'e, doğruluğu, precision'ı, recall'ı, azınlık F1'ini,
+macro-F1'i ve MCC'yi kaydedin. Tablodan cevaplanacak iki soru: $t \ge 0,2$
+aralığında doğruluk ne kadar oynadı ve en yüksek doğruluk veren eşikle en yüksek
+macro-F1 veren eşik aynı mı? Bu derlemde cevaplar *1,3 puan* ve *hayır* idi.
+(0,2'nin altını da tarayın; doğruluk 68,98'e çöküyor — ilginç aralığın, doğruluğun
+düz göründüğü aralık olmasının sebebi de bu.)
+
+### Adım 5 — puanlarınızın olasılık olup olmadığını kontrol edin
+
+Öngörülen puanları kutulayın, gözlenen sıklığı ortalama öngörülen olasılığa karşı
+çizdirin ve ECE ile MCE'yi hesaplayın. Hangi ECE'yi hesapladığınızı belirtin.
+Sonra `cal` üzerinde Platt ve isotonic uydurup yeniden ölçün. ECE'niz zaten
+1'in altındaysa durabilirsiniz; 5'in üstündeyse, puanı olasılık gibi kullanan
+akış aşağısındaki her şey artık niceleyebileceğiniz bir farkla yanlış.
+
+### Adım 6 — bir maliyeti eşiğe çevirin
+
+Sonuçların sahibi olan birinden bir $r = C_{FN}/C_{FP}$ oranı isteyin. "İkisi de
+kötü"yü kabul etmeyin; kaba da olsa bir sayı seçmelerini sağlayın, çünkü
+alternatifi sayının 0,5'i yazan kişi tarafından seçilmesi. $q^* = 1/(1+r)$'yi
+hesaplayın, kalibre puanlarınıza uygulayın ve toplam maliyeti iki önemsiz
+politikaya karşı raporlayın. Modeliniz *her şeyi işaretle*yi yenemiyorsa bu,
+projeniz hakkında yayımlanabilir bir bulgu.
+
+### Adım 7 — `test`'i bir kez açın
+
+Seçilmiş her eşiği ve kalibratörü koşturun, karışıklık matrisini üretin ve
+paragrafı yazın. Sonra bir şey daha koşturun: **süresini ölçün.** Saniyede belge,
+tek işlem, fiilen servis edeceğiniz batch boyutunda. Koşturmayı göze
+alamayacağınız bir model, model değildir ve bu, insanların yayına alacakları
+haftaya kadar ölçmeyi unuttuğu sayıdır.
+
+### Ne teslim edilecek
+
+Önemsiz baseline tablosu, etiket bütçesi eğrisi, eşik taraması, kalibrasyon
+öncesi ve sonrası güvenilirlik grafiği, maliyet tablosu ve paragraf. Kabaca iki
+sayfa. Paragraftaki herhangi bir sayı tablolardan birinde geçmiyorsa, o sayıyı
+silin.
+
+## Alıştırmalar {#sec-siniflandirma-alistirmalar}
+
+1. **Tabanı yeniden üretin.** Elinizdeki herhangi bir dengesiz derlemde, her
+   zaman çoğunluk sınıfını tahmin eden bir sınıflandırıcının doğruluğunu
+   hesaplayın. Sonra o derlem üzerinde yayımlanmış bir sonuç bulun ve tabanın ne
+   kadar üstünde durduğunu kontrol edin. İki sayıyı birlikte raporlayın.
+
+2. **Bir eşiği bozun.** Eğitilmiş ikili bir sınıflandırıcı alın ve eşiğini
+   0,05'ten 0,95'e tarayın. Doğruluğu ve azınlık sınıfı recall'ını aynı eksenlere
+   çizdirin. Doğruluğu en büyükleyen eşiği ve macro-F1'i en büyükleyen eşiği
+   raporlayın ve neden farklı olduklarını tek cümleyle açıklayın.
+
+3. **Sıralamanın oynamadığını kanıtlayın.** @sec-siniflandirma-dengesizlik'teki
+   deneyi kendi verinizde tekrarlayın: "düzeltme yok artı ayarlanmış bir eşik"i
+   `class_weight="balanced"`a karşı karşılaştırın. İkisi için de macro-F1 *ve*
+   average precision raporlayın. Average precision'lar eşit olsaydı bunun ne
+   anlama geleceğini, eşit olmasaydı ne anlama geleceğini açıklayın.
+
+4. **Hataları fiyatlandırın.** Bir yanlış negatifin bir yanlış pozitiften 10×
+   pahalı olduğu bir görev için maliyet matrisi kurun. $q^*$'yi türetin, ham ve
+   kalibre puanlara uygulayın ve her birinin toplam maliyetini her şeyi
+   işaretlemenin maliyetine karşı raporlayın. Kalibrasyonun sizin biriminizde
+   kaç ettiğini belirtin.
+
+5. **Kalibratörü bilerek bozun.** Bir isotonic kalibratörü ayrı tutulmuş puanlar
+   yerine *eğitim* puanlarınız üzerinde uydurun ve ECE'yi iki şekilde de ölçün.
+   Alıştırmanın amacı, sızdırılmış sayının ne kadar sıradan göründüğünü görmek.
+
+6. **Kesişimi bulun.** Bir encoder'ı 200, 500, 1.000 ve 2.000 etikette fine-tune
+   edin ve aynı eksenlerde seyrek baseline'ınıza karşı çizdirin. Eğrilerin
+   kesiştiği bütçeyi ve her noktanın duvar saati maliyetini raporlayın. Bizim
+   kesişimimizle karşılaştırın ve farkı açıklayın — derlem boyutu, dil, belge
+   uzunluğu ya da sınıf dengesi.
+
+7. **Elli hata okuyun.** En iyi modelinizin yanlış yaptığı elli belgeyi güvene
+   göre tabakalandırarak örnekleyin ve her birinin başarısızlık kipini elle
+   etiketleyin. En yaygın üç kipi sayılarıyla raporlayın. En büyük kategori
+   "etiket yanlış" ise, herhangi bir mimari değişikliğinden daha değerli bir şey
+   öğrendiniz.
+
+8. **Halk bilgisini yeniden ölçün.** Bir yerel model alın ve 500 belgede
+   zero-shot sınıflandırmayı iki kez koşturun: bir kez talimat derleminizin
+   dilinde, bir kez İngilizce. Farkı, iki ayrı aralıkla değil, aynı belgeler
+   üzerinde *eşleştirilmiş* bir bootstrap ile raporlayın. Sonra en az 3× büyük
+   bir modelle tekrarlayın. "Prompt'ları İngilizce yazın" tavsiyesinin
+   hangisinde ayakta kaldığını belirtin.
+
+9. **Puanı kontrol etmeden önce ayrıştırma oranını kontrol edin.** Bir zero-shot
+   koşusunu, belge başına ham cevabı, bitiş sebebini ve ayrıştırıcınızın başarılı
+   olup olmadığını kaydedecek şekilde donatın. Şimdi çıktıyı 8 token'da
+   sınırlayın ve yeniden koşturun. Doğruluğu *ve* ayrıştırma oranını raporlayın ve
+   yalnızca doğruluğu loglasaydınız doğruluğun nasıl görüneceğini söyleyin. Akıl
+   yürütme ya da düşünme kipi olan bir model kullanın — başarısızlık böyle bir
+   modele ihtiyaç duyuyor, ki dersin kendisi de bu.
+
+10. **Beraberliği fiyatlandırın.** Prompt'lanan bir modelle fine-tune edilmiş
+    birinin sizin görevinizde birbirinin gürültüsü içinde puan aldığını varsayın.
+    İkisi için de, fiilen servis edeceğiniz batch boyutunda, 1.000 belge başına
+    saniyeyi ölçün. Fine-tuning'in bir defalık eğitim maliyetinin kendini amorti
+    ettiği hacmi ve gerçek trafiğinizde her birinin aylık faturasını hesaplayın.
+    Sonra hangisini yayına alacağınızı ve nedenini söyleyin — cevap yavaş olan
+    olabilir. Amorti hacminizin etiketleri *üretme* maliyetini sayıp saymadığını
+    belirtin. Saymıyorsa, bunu sayıyla aynı cümlede söyleyin.
+
+## Akılda kalması gerekenler {#sec-siniflandirma-ozet}
+
+- **Başka bir şey hesaplamadan önce tabanı hesaplayın.** Bu derlem %93,68 memnun,
+  dolayısıyla hiç özniteliği, hiç parametresi ve hiç eğitimi olmayan bir model
+  **%93,68 doğruluk ve 48,37 macro-F1** alıyor. Bir sınıflandırma makalesindeki
+  her doğruluk rakamı o sayıdan uzaklık olarak okunmalı ve dengesiz veride bu
+  uzaklık genellikle utandıracak kadar küçük.
+- **Bir eşik bedava 19 puandır.** Özdeş uydurulmuş model — aynı katsayılar, bayt
+  bayt — **58,24'ten 77,66 macro-F1'e** çıkıyor, çünkü puanını 0,5 yerine 0,834
+  ile karşılaştırdık. Değişiklik boyunca average precision 60,30'da, AUC 93,24'te
+  kaldı; modelle ilgili hiçbir şeyin oynamadığının kanıtı da bu.
+- **Veriye dokunmadan önce eşiği deneyin.** Beş dengesizlik yöntemi boyunca
+  kesme noktasını kaydırmak (77,66) aşırı örneklemeye (77,63), sınıf
+  ağırlıklandırmaya (76,09) ve SMOTE'a (74,72) eşit ya da üstün geldi; eksik
+  örnekleme ise modeli fiilen yok etti (62,98; average precision 60,30'dan
+  52,49'a düştü çünkü eğitim satırlarının %87,4'ü çöpe atıldı). Rutin olarak
+  dengeleme *lehine* alıntılanan @elkan2001foundations tam tersini savunuyor:
+  veriden verildiği hâliyle öğrenin, sonra kararı hesaplayın.
+- **Yeniden örnekleme işe yaradığında bile bedava değil.** @vandengoorbergh2022harm
+  dengesizlik düzeltmelerinin kalibrasyona zarar verirken ayırt etme gücüne pek
+  bir şey katmadığını buldu; biz de bunu metinde yeniden ürettik: sınıf
+  ağırlıklandırma ECE'yi **3,96'dan 14,18'e** taşıdı ve bir eşiğin veremeyeceği
+  hiçbir şey kazandırmadı.
+- **Sınıflandırıcınızın bastığı sayı, siz kontrol edene kadar bir olasılık
+  değildir.** Kalibratörü modelin hiç görmediği veri üzerinde uydurun. 8.000 ayrı
+  tutulmuş belgeyle isotonic regression kazandı (Platt'ın 0,94'üne karşı ECE
+  **0,69**), ki @niculescu2005predicting'in kabaca 1.000 kalibrasyon noktasının
+  üstünde öngördüğü şey de bu — altında Platt ölçekleme daha güvenli seçim.
+  Isotonic'i bunun yerine eğitim puanlarında uydurmak 2,39 verdi: daha kötü, ama
+  bariz biçimde yanlış değil; hatayı tehlikeli kılan da tam olarak bu.
+- **İki tane ECE var ve karşılaştırılabilir değiller.** @guo2017calibration en
+  üst etiket güveni $\max_k p_k$ üzerinden kutuluyor, ki ikili bir problemde bu
+  $[0,5, 1]$ aralığında yaşıyor; $P(\text{sınıf }1)$ üzerinden kutulamak farklı
+  bir istatistik. Hangisini hesapladığınızı söyleyin.
+- **Bir maliyet matrisi eşiği sizin için seçer.** $q^* = C_{FP} / (C_{FN} +
+  C_{FP})$. Ayrı tutulmuş veri üzerinde doğrudan maliyeti en aza indiren kesme
+  noktası için tarama yapmak, kalibre edip formülü uygulamakla aşağı yukarı aynı
+  işi gördü (%1–7'ye karşı %1–6 pişmanlık), dolayısıyla tek bir sabit maliyet
+  oranı için tek bir çalışma noktasına ihtiyacınız varsa kalibrasyonu
+  atlayabilirsiniz. Maliyetler değişebiliyorsa, sayıyı bir insan okuyorsa ya da
+  akış aşağısında bir şey onu çarpıyorsa kalibre edin.
+- **Encoder kesişimi ani ve erken.** BERTurk 200 ve 500 etikette tf-idf'e
+  kaybediyor, **500 ile 1.000** arasında kesişiyor ve 2.000 etikette 79,61 alıyor
+  — tf-idf'i **40.000**'in tamamı üzerinde eğitilmiş hâlini (76,21) yenerek. Daha
+  iyi bir model için yirmi kat az etiket. Eşit bütçede fark 8,81 macro-F1 ve
+  15,45 şikâyet-F1.
+- **O farkı dürüstçe fiyatlandırın.** Encoder o 8,81 puan için eğitimde kabaca
+  **970× daha pahalı** ve saniyede yaklaşık 470 belge servis ediyor; bütün
+  eğitim koşusu 1,2 saniye süren bir vektörleştiriciye karşı. Buna değip
+  değmediği bir modelleme değil bütçe sorusu ve iki sayı olmadan
+  cevaplayamazsınız.
+- **Prompt'lu-mu-eğitilmiş-mi kesişimi bir eğridir ve bu görevde ~2.000 etikette
+  duruyor.** 1.000'in altında prompt'lu model 8,79 macro-F1 puanıyla kazanıyor;
+  2.000'de ikisi başa baş (0,08 puan, $p = 0,97$); 40.000'de encoder 4,73 puanla
+  kazanıyor. Kimsenin sayısını alıntılamak yerine kendi çiftinizde ölçün, çünkü
+  kesişim *hangi iki modeli* eksene koyduğunuzun bir özelliği.
+- **İki modeli iki aralığa göz kararı bakarak değil, eşleştirilmiş bir testle
+  karşılaştırın.** Aynı belgeler üzerinde puanlanan modeller örneklem
+  gürültüsünün büyük kısmını paylaşır, dolayısıyla çakışan marjinal aralıklar
+  hiçbir şey kanıtlamaz. Yukarıdaki her karşılaştırma, *farkın* 10.000
+  eşleştirilmiş bootstrap yeniden örneklemesi.
+- **LLM halk bilgisi zayıf modeller için doğru, güçlü modeller için gürültü.**
+  Talimatı İngilizce yazmak 3B'lik bir modelde **+16,90** macro-F1, 9B'likte
+  **+0,54** ($p = 0,54$) etti; sekiz örnek `gemma3:27b`'de **+7,17**,
+  `qwen3.6:35b-a3b`'de **+0,51** ($p = 0,62$) etti. İki kural da bir zamanlar
+  gerçekti. Yayına alacağınız modelde yeniden ölçün.
+- **Prompt'lamak size eşiğe mal olur.** Buradaki her prompt'lu koşu azınlık
+  sınıfında recall'a yatkındı — en iyisi BERTurk'ün 74,42/76,19'una karşı %80,95
+  recall'da %56,98 precision'a ulaştı — ve hiçbiri düzeltilebilir değil, çünkü
+  zero-shot bir model bir *kelime* döndürüyor. ROC yok, isotonic eşleme yok,
+  $q^*$ yok, tarama yok. Bu, macro-F1 farkından daha büyük bir kayıp.
+- **Beyan edilen bir güven ortalamada doğru olup hiçbir şeyi ayırmıyor
+  olabilir.** `qwen3.5:9b` %92,95 gerçeğe karşı %93,53 beyan ortalaması tutturdu
+  — +0,58'lik bir fark ve kendi seçtiği dokuz kutu üzerinde 1,80 ECE — ama
+  **2.000 belgenin 1.549'unu tek bir değere, 95'e** koydu. Hata dedektörü olarak
+  encoder'ın 0,843'üne karşı 0,667 AUROC alıyor ve faydalı görünen ≥95
+  yönlendirme kesme noktası değerlendirme kümesinden okundu; dolayısıyla ayrı
+  tutulmuş veride yeniden seçene kadar onu bir kâhin sayın.
+- **Topluluk fırsatı gerçek ve genelde karşılanabilir değil.** En iyi LLM ile
+  BERTurk 2.000 belgenin 94'ünde anlaşamıyor ve her seferinde kazananı seçen bir
+  kâhin 5,81 macro-F1 puanı kazandırırdı. Onları toplamak belge başına 142× fazla
+  ödemek demek. Fırsatı bulmak için çapraz tablolayın; ona inanmadan önce
+  fiyatlandırın.
+- **Model değiştirmek bir takastır.** BERTurk 332 test belgesini düzeltiyor ve
+  tf-idf'in hakkından geldiği 149'unu bozuyor — net 183, yani 1,83 doğruluk
+  puanı. Bir modeli her değiştirdiğinizde anlaşmazlık 2×2'sini kurun, çünkü
+  toplam fark hangi belgelerden vazgeçtiğinizi gizler.
+- **Encoder'ın üstünlüğü beklenecek yerde yoğunlaşıyor.** tf-idf'in hata oranı
+  belge uzunluğu boyunca düz (%4,86–%5,82, eğilim yok); BERTurk'ünki en kısa
+  yorumlarda %4,50'den 200–399 karakterde %3,10'a düşüyor. Her yerde daha iyi
+  değil — uzun belgelerde daha iyi, çünkü olumsuzlama, ödün ve kapsam orada
+  yaşıyor.
+- **Hatalarınızı rastgele değil, güvene göre sıralayın.** O listenin tepesi,
+  etiket hatalarının yoğunlaştığı yer. Bizimkinde ürünün iki ayda bozulduğunu
+  söyleyen *ve şikâyetin listenin başında görünmesi için beş yıldız verdiğini
+  açıklayan* bir yorum var — memnun olarak etiketlenmiş, çünkü etiketlerimiz
+  yıldız puanlarından geliyor. Model etiketten daha haklı göründüğünde ayar
+  yapmayı bırakın ve @sec-etiket-denetimi'ni yeniden okuyun;
+  @frenay2014classification da bu konudaki derleme.
+- **Test kümenizin bir kısmı etiketlenemez.** 204 belge iki modeli birden
+  yeniyor ve bunların 137'si şikâyet — test kümesindeki her şikâyetin %21,7'si.
+  Bunlardan biri, bütün metni iki nokta üst üste ile takip eden "eksisi"
+  kelimesinden ibaret bir yorum. Hiçbir mimari onlara ulaşamıyor ve varlıkları,
+  dürüstçe kovalayabileceğiniz puana bir tavan koyuyor.
+- **Modelinizden önce koşum takımınızdan şüphelenin — özellikle sayı iyiyken.**
+  Zamanlama taramamızda bir çıkarım koşusu diğer yedisinden 27× yavaş geldi ve
+  bir eğitim epoch'u iki kardeşinden 14× yavaştı. İkisi de modelin bir özelliği
+  değildi. Ama pahalı başarısızlık ters yönde koştu: bir LLM %93,75 doğruluk ve
+  48,39 macro-F1 aldı, ki bu *tam olarak* çoğunluk sınıfı baseline'ı — çünkü akıl
+  yürüten bir model 24 token'lık bütçesini ayrıştırıcının hiç okumadığı bir
+  `thinking` alanının içinde harcadı ve ayrıştırılamayan her cevap çoğunluk
+  etiketine düştü. Kötü sayı soruşturulur; iyi sayı yayımlanır. Bu asimetriye
+  karşı tasarlayın — düşük ayrıştırma oranında iptal edin, gecelik kuyruktan önce
+  duman testi yapın — çünkü sonuç umduğunuz şey olduğunda kendi şüpheciliğiniz
+  devreye girmeyecek.
