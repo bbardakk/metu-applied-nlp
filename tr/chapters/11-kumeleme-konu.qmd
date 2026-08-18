@@ -1,6 +1,2080 @@
 # Benzerlik, Kümeleme ve Konu Keşfi {#sec-kumeleme-konu}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Bölüm durumu: çevriliyor.** Bu bölümün Türkçesi hazırlanıyor. Tam ve güncel
-metin için [İngilizce sürüme](../../en/chapters/11-clustering-topics.html) bakabilirsiniz.
+**Bölüm durumu: taslak yazıldı.** Bu sayfadaki her sayı, @sec-karsilastirma ile
+aynı Türkçe ürün yorumu derlemi ve aynı tohum üzerinde ölçüldü; duygu etiketleri
+ise son bölüme kadar kilit altında tutuldu. Yazılım: `scikit-learn` 1.9.0,
+`sentence-transformers` 5.7.0, `datasketch` 2.0.0, `umap-learn` 0.5.12, Python
+3.14.5 üzerinde PyTorch 2.13.0; encoder'lar bir Apple M serisi GPU'da. Tek bir
+sonuç — @sec-benzerlik-ne-demek'teki beş çiftlik sonda — bir benchmark değil elle
+yazılmış bir teşhis aracı ve geçtiği yerde de öyle etiketlendi.
 :::
+
+**Öğrenme hedefleri.** Bu bölümden sonra şunları yapabilirsiniz:
+
+- vektörlerinizin gerçekte neyi kodladığına uyan bir uzaklık seçmek ve ondan bir
+  anlam çıkarmadan önce onu *rastgele* iki belgenin benzerliğine karşı kalibre
+  etmek;
+- okunamayacak kadar büyük bir derlemde yakın kopyaları bulmak ve sayının,
+  seçtiğiniz eşiğe nasıl bağlı olduğunu söylemek;
+- k-means çalıştırmak ve onun sizin adınıza yaptığı dört varsayımı adlandırmak;
+- silhouette, Calinski-Harabasz ve Davies-Bouldin'i okumak ve üçünün birden işe
+  yaramadığı durumları tanımak;
+- "bu belge hiçbir kümeye ait değil" cevabını vermesine izin verilen, yoğunluk
+  tabanlı bir yöntem kullanmak;
+- LDA, NMF ve önce-kümele-sonra-betimle yaklaşımlarını coherence üzerinden *ve*
+  coherence'ın ölçemediği şey üzerinden karşılaştırmak;
+- kümeleme, umduğunuz yapıyı geri getirmediğinde dürüst bir hüküm bildirmek —
+  daha iyisini bulduğu durum da dâhil;
+- bir kümelemeyi, hiç görmediği bir etiket kümesine karşı değil, desteklemesi
+  gereken kararın kendisine karşı ölçmek.
+
+## Okuyamadığınız derlem {#sec-kumeleme-kurulum}
+
+@sec-karsilastirma, 40.000 etiketli Türkçe yorum üzerinde yedi temsili
+yarıştırıp bir lider tablosu üretti. @sec-veri-etiketleme ardından o etiketlerin
+nereden geldiğini sordu ve etiketlerdeki %2'lik bir oynamanın lider tablosunu
+ters çevirdiğini buldu. İki bölümün de etiketi vardı. Bu bölüm ise ikisinden de
+*önce* gelen soruyu soruyor: [belgeler elinizde, hiç etiket yok ve birinin neyin
+etiketlenmeye değer olduğuna karar vermesi gerekiyor]{.hl}.
+
+Olağan durum budur. Bir destek gelen kutusu, bir yıllık anket serbest metni, bir
+ürün yorumu kazıması — belgeler bir `sentiment` sütunu olmadan gelir ve
+@sec-veri-etiketleme'deki bütçe konuşması ("1.000 temiz etiket, 40.000 gürültülü
+etiketi yener") birileri içeride ne olduğunu bilmeden başlayamaz bile.
+
+Yani kurulum bilinçli olarak aynı derlem, aynı tohum ve etiketler bir çekmecede
+kilitli:
+
+```text
+rows as downloaded   235,165
+after de-duplication 233,508   (1,657 exact duplicates)
+label 1 (positive)   218,747   93.7%
+label 0 (negative)    14,761    6.3%
+
+stratified subsample  50,000   46,839 positive   3,161 negative
+length, words         median 19   mean 22.1   p95 55   max 305
+length, characters    median 132  mean 157.3  p95 393
+distinct word forms   86,245
+```
+
+::: {.column-margin}
+Aynı kaynak, aynı tohum, @sec-karsilastirma'yla aynı tekrar temizliği — ve
+@sec-siniflandirma'yı kurarken keşfettiğimiz üzere, **aynı** 50.000 satır
+*değil*. O bölüm alt örneklemini tek bir katmanlı `train_test_split` ile
+çekmişti; bu bölüm grup grup çekti. İkisi de katmanlı, ikisi de 42 tohumunu
+kullanıyor, ikisi de tam olarak 46.839 olumlu ve 3.161 olumsuz veriyor — ve
+23.819 belgeyi, yani %47,6'sını paylaşıyorlar. "Aynı tohum" ile "aynı örneklem"
+aynı şey değil ve bunu öğrenmenin tek yolu ikisini kesiştirip saymak.
+:::
+
+::: {.column-margin}
+Tokenizer da farklı, bu kez bilerek. @sec-karsilastirma Türkçe farkındalığı olan
+bir `tr_lower` ve `[a-zçğıöşü]+` örüntüsünü kullanıyordu; bu bölüm bilinçli
+olarak standart `str.lower()` ve çıplak bir `\w+` kullanıyor — yani hiç
+düşünmezseniz elinize geçecek olan şeyi. Buradaki (86.245) ve oradaki (74.317)
+biçim sayılarının karşılaştırılabilir olmamasının sebebi bu fark — ve
+@sec-noktali-i bölümünün konusunun tamamı da bu.
+:::
+
+Etiketler mevcut. Tam olarak bir kez, @sec-kumeleme-getiri'de, kümelemenin ne
+bulduğunu puanlamak için kullanılıyorlar. O ana kadar bu sayfadaki hiçbir
+algoritmanın hiçbir girdisinde görünmüyorlar. Deneyin tamamı bu disiplin:
+"denetimsiz" bir hattı, gizlice baktığınız bir etiketi yeniden üretene kadar
+ayarlamak çok kolaydır ve sonuç, etiketi olmayan bir derlemle temas ettiğinde
+ayakta kalamayacak bir sayıdır.
+
+Bölümün sonunda neyi bildireceği aşağıda; böylece ortasını, nereye gittiğini
+bilerek okuyabilirsiniz:
+
+| ne sorduk | ne geldi |
+|:--|:--|
+| Birebir tekrar temizliğinden kaç yakın kopya sağ çıkıyor? | Belgelerin %0,30'u; ama eşiği 0,1 oynatırsanız %1,06 |
+| Kümeleme duygu etiketlerini geri getiriyor mu? | [Hayır. Herhangi bir yerdeki en iyi ARI: 0,0083]{.con} |
+| İçsel geçerlilik indeksleri kaç küme olduğunda anlaşıyor mu? | [Hayır. Üç temsil 50, 4 ve 2 dedi]{.con} |
+| Yoğunluk tabanlı bir yöntem küme buluyor mu? | [Hayır. Hiçbir zaman 3'ten fazla değil, %53–100 gürültüyle]{.con} |
+| En iyi topic coherence puanı en iyi konuyu işaretliyor mu? | [Hayır. En yüksek puanlı konu tokenizer enkazıydı]{.con} |
+| Demek ki kümeleme değersizdi? | [Hayır — ve asıl ilginç kısım da bu]{.pro} |
+| Peki gerçekte ne buldu? | [Üretime çıkmış bir Unicode hatası ve okumanın %13'ü karşılığında şikâyetlerin %56'sı]{.pro} |
+
+: Bu bölümün ölçtükleri {tbl-colwidths="[52,48]"}
+
+Son iki satır retorik bir numara değil. Bu bölümün yedi manşet ölçümünden beşi
+olumsuz ve bölüm yine de gerçek iş gören bir kümeleme hattıyla bitiyor. Birinden
+diğerine geçmek soruyu değiştirmeyi gerektiriyor; sorunun ne zaman yanlış
+olduğunu fark etmeyi öğrenmek ise aşağıdaki algoritmaların hepsinden daha çok
+işinize yarar.
+
+## Kümeleyebilmeniz için "benzer"in ne anlama gelmesi gerekir {#sec-benzerlik-ne-demek}
+
+Bu bölümdeki her algoritma, birbirine yakın olan noktaları gruplamanın bir yolu.
+Hiçbiri "yakın"ı tanımlamıyor. Onu siz tanımlıyorsunuz — bir temsil ve bir
+uzaklık seçtiğinizde; [ve bu seçim, cevabı kümeleme algoritması seçiminden çok
+daha fazla belirliyor]{.hl}.
+
+### Üç uzaklık ve her birinin varsayımı
+
+Vektör olarak temsil edilen belgeler için üç ölçüt neredeyse bütün pratiği
+kapsıyor.
+
+$$
+\operatorname{cos}(a, b) = \frac{a \cdot b}{\lVert a \rVert \, \lVert b \rVert}
+\qquad
+d_{\text{euc}}(a, b) = \lVert a - b \rVert_2
+\qquad
+J(A, B) = \frac{|A \cap B|}{|A \cup B|}
+$$
+
+[**Cosine**](#gloss-cosine-similarity){#term-cosine-similarity .term-ref} açıyı
+ölçer, uzunluğu görmezden gelir. Metin için genellikle istediğiniz de budur:
+aynı şey hakkındaki 300 kelimelik bir yorumla 30 kelimelik bir yorumun benzer
+olması gerekir, oysa ham sayım vektörlerinin büyüklükleri on kat farklıdır.
+**Öklit** uzaklığı ise uzunluğu ciddiye alır; büyüklüğün anlam taşıdığı yerde
+dürüst seçim odur — ve şuna dikkat edin: *birim uzunluktaki iki vektör arasında*
+ikisi aynı sıralamayı üretir, yani sıralama amacıyla aradaki ayrım ortadan
+kalkar.[^normeq] **Jaccard** ise vektörler yerine *kümeler* üzerinde çalışır; onu
+@sec-yakin-kopyalar'daki yakın kopya makinesinin temeli yapan şey de budur.
+
+[^normeq]: $\lVert a \rVert = \lVert b \rVert = 1$ ise
+$d_{\text{euc}}(a,b)^2 = 2 - 2\cos(a,b)$ olur; yani birine göre sıralamak
+diğerine göre sıralamaktır. Bunu fazla uzatmayın. Size "aynı en yakın komşular"
+hakkını verir, "aynı algoritma" hakkını değil: Lloyd'un k-means'i her merkezi
+üyelerinin aritmetik ortalamasıyla değiştirir ve birim vektörlerin ortalaması
+kendisi birim vektör olmadığı için, ikinci yinelemeden itibaren normalleştirilmiş
+embedding'ler üzerindeki Öklit k-means ile küresel k-means gerçekten farklı
+işlemlerdir. Metinde genellikle benzer yerlere düşerler. O cümlede "genellikle"
+gerçek bir iş yapıyor. Bu bölümdeki her embedding kümelemeden önce
+$\ell_2$-normalleştiriliyor ve her silhouette `metric="cosine"` ile hesaplanıyor;
+böylece atama adımı puanlama adımıyla anlaşıyor ve silhouette sayıları temsiller
+arasında karşılaştırılabilir oluyor. Küçük ama bilinmeye değer bir istisna:
+49.849 LSA satırının 51'i tam olarak sıfır, çünkü `min_df=3, max_df=0.5` o 51
+belgenin içerdiği bütün token'ları sildi ve sıfır vektörü normalleştirilemez. Bu
+satırlar başlangıç noktasında oturuyor, oraya en yakın küme hangisiyse ona
+süpürülüyor ve bu bölümdeki her tabloda sayılıyorlar. Elli bin içinden elli bir
+tane hiçbir sayıyı oynatmaz, ama "bütün vektörlerim birim uzunlukta" cümlesi yine
+de yanlıştı ve bunu yalnızca kontrol ettiğim için biliyorum.
+
+::: {#gloss-cosine-similarity .column-margin .term-gloss}
+**cosine similarity** (kosinüs benzerliği) — iki vektör arasındaki açının
+kosinüsü; 1 aynı yön, 0 dik demektir. Vektörlerin ne kadar uzun olduğunu
+görmezden gelir; bu da metin için genelde bir özellik, arada bir de bir hatadır.
+[↩](#term-cosine-similarity){.term-back}
+:::
+
+### 0,98'lik bir kosinüs sandığınız anlama gelmiyor
+
+Pratikte en çok zamana mal olan tuzak burada. [Bir cosine similarity değerinin
+ham hâli tek başına yorumlanabilir değildir]{.hl}. Yalnızca, *aynı modelin*
+*ilgisiz* belgeler için ürettiği benzerlik dağılımına karşı yorumlanabilir.
+
+3.000 rastgele yorum aldık ve aralarındaki 4.498.500 çiftin hepsini dört ayrı
+uzayda puanladık:
+
+| uzay | boyut | ortalama kosinüs | ss | 1.–99. yüzdelik |
+|:--|--:|--:|--:|:--:|
+| tf-idf (seyrek) | 23.971 | 0,0182 | 0,0287 | 0,000 – 0,130 |
+| LSA (SVD ile 256'ya) | 256 | 0,0654 | 0,0794 | −0,026 – 0,330 |
+| MiniLM | 384 | 0,3051 | 0,1503 | −0,009 – 0,669 |
+| multilingual-E5 | 768 | [0,8547]{.con} | 0,0278 | [0,783 – 0,916]{.con} |
+
+: Birbiriyle *ilgisiz* iki Türkçe yorumun dört temsile göre puanı
+{tbl-colwidths="[28,12,15,15,30]"}
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Aynı kosinüs dört farklı anlama geliyor</div>
+<svg viewBox="0 0 764 372" style="max-width:744px" role="img"
+     aria-label="Her temsil için bir tane olmak üzere dört yatay sayı doğrusu; hepsi 0'dan 1'e uzanan aynı kosinüs ölçeğinde. Her doğru, birbiriyle ilgisiz iki rastgele yorum arasındaki benzerliklerin 1. ile 99. yüzdeliğini kapsayan gölgeli bir bant ve ortalamada bir çentik taşıyor. tf-idf için bant 0,000'dan 0,130'a uzanıyor, ortalama 0,0182; en solda dar bir bant. LSA için bant eksi 0,026'dan 0,330'a uzanıyor, ortalama 0,0654. MiniLM için bant eksi 0,009'dan 0,669'a uzanıyor, ortalama 0,3051; ölçeğin ortasının çoğunu kaplayan geniş bir bant. multilingual E5 için bant 0,783'ten 0,916'ya uzanıyor, ortalama 0,8547; en sağda dar bir bant, yani ilgisiz belgeler daha şimdiden 0,78'in üstünde puan alıyor. Kosinüs 0,8'de dikey kesikli bir çizgi çizilmiş ve benzer belgeleri işaretlemek için tipik bir pano eşiği olarak etiketlenmiş. Bu çizgi tf-idf, LSA ve MiniLM bantlarının çok sağında kalıyor ama E5 bandının tam ortasından geçiyor; yani aynı eşik E5 altında neredeyse bütün derlemi, diğerlerinde ise neredeyse hiçbir şeyi işaretlerdi.">
+  <text x="14" y="24" class="t-xs t-b t-muted">UZAY</text>
+  <text x="140" y="24" class="t-xs t-b t-muted">İLGİSİZ İKİ YORUM NEREYE DÜŞÜYOR</text>
+
+  <line x1="140" y1="300" x2="660" y2="300" class="ln-thin"/>
+  <text x="140" y="322" class="t-xs t-mid t-muted">0,0</text>
+  <text x="270" y="322" class="t-xs t-mid t-muted">0,25</text>
+  <text x="400" y="322" class="t-xs t-mid t-muted">0,50</text>
+  <text x="530" y="322" class="t-xs t-mid t-muted">0,75</text>
+  <text x="660" y="322" class="t-xs t-mid t-muted">1,0</text>
+  <text x="400" y="344" class="t-xs t-mid t-muted">kosinüs benzerliği</text>
+
+  <line x1="556" y1="52" x2="556" y2="292" class="ln-thin ln-dash"/>
+  <text x="556" y="42" class="t-xs t-mid t-b t-rose">0,8 “benzer” eşiği</text>
+
+  <text x="14" y="76" class="t-xs t-b">tf-idf</text>
+  <text x="14" y="92" class="t-xs t-muted">23.971 boyut</text>
+  <rect x="140" y="62" width="68" height="20" rx="4" class="box-accent"/>
+  <line x1="149" y1="58" x2="149" y2="86" class="ln"/>
+  <text x="218" y="77" class="t-xs t-muted">ort. 0,018</text>
+
+  <text x="14" y="140" class="t-xs t-b">LSA</text>
+  <text x="14" y="156" class="t-xs t-muted">256 boyut</text>
+  <rect x="126" y="126" width="186" height="20" rx="4" class="box-accent"/>
+  <line x1="174" y1="122" x2="174" y2="150" class="ln"/>
+  <text x="322" y="141" class="t-xs t-muted">ort. 0,065</text>
+
+  <text x="14" y="204" class="t-xs t-b">MiniLM</text>
+  <text x="14" y="220" class="t-xs t-muted">384 boyut</text>
+  <rect x="135" y="190" width="353" height="20" rx="4" class="box-warm"/>
+  <line x1="299" y1="186" x2="299" y2="214" class="ln"/>
+  <text x="498" y="205" class="t-xs t-muted">ort. 0,305</text>
+
+  <text x="14" y="268" class="t-xs t-b t-rose">E5</text>
+  <text x="14" y="284" class="t-xs t-muted">768 boyut</text>
+  <rect x="547" y="254" width="69" height="20" rx="4" class="box-rose"/>
+  <line x1="584" y1="250" x2="584" y2="278" class="ln"/>
+  <text x="626" y="268" class="t-xs t-b t-rose">ort. 0,855</text>
+
+  <text x="140" y="366" class="t-xs t-muted">Bantlar 4.498.500 rastgele çiftin 1.–99. yüzdeliğini kapsıyor. Çentik = ortalama.</text>
+</svg>
+```
+::: {.fig-cap}
+Kesikli çizgiyi okuyun. 0,8'in üstündeki belge çiftlerini "benzer" diye
+işaretleyen bir pano, tf-idf, LSA ya da MiniLM altında **hiçbir şeyi**; E5
+altında ise — ilgisiz iki yorumun daha şimdiden 0,855 aldığı yerde —
+**neredeyse bütün derlemi** işaretler. Eşik değişmedi. Geometri değişti.
+:::
+::::
+
+Ortak hiçbir yanı olmayan iki yorum E5 altında **0,855** alıyor ve bütün
+rastgele çiftlerin %98'i 0,78 ile 0,92 arasına düşüyor. 0,8'in üstünü "benzer
+belgeler" diye işaretleyen bir pano, neredeyse bütün derlemi işaretlerdi. Mutlak
+sayı, encoder'ın nasıl eğitildiğinin bir özelliği — *anizotropisi*, yani
+@sec-gommeler'in bağlamsal vektörler için ölçtüğü aynı koni biçimli embedding
+geometrisi — ve belgelerinizin hiçbir özelliği değil.
+
+Ayrıca *kullanılabilir aralığın*, nominal aralıkla aynı olmadığına dikkat edin.
+Hem E5 hem tf-idf, rastgele çiftlerinin %98'ini yaklaşık 0,13 genişliğinde bir
+pencerenin içine koyuyor — ama E5'in penceresi nominal olarak 2 uzunluğunda bir
+aralığın içinde ve bunun %6,6'sını kullanıyor, üstelik en sağda sıkışmış hâlde.
+tf-idf'in penceresi ise sıfırdan başlıyor; yani 0,13'lük bir puan gerçekten de o
+uzayın ürettiğinin tepesine yakın. Aynı genişlik, bambaşka anlam — ve ikisinden
+yalnızca biri, benzediği o kesir gibi davranıyor.
+
+::: {.callout-important appearance="simple"}
+**Eşik koymadan önce kalibre edin.** Herhangi bir benzerlik kesme noktası
+seçmeden önce kendi derleminizden birkaç bin *rastgele* çifti kendi
+encoder'ınızla puanlayın ve dağılıma bakın. Bunu atlarsanız, ölçmediğiniz bir
+ölçeğe karşı eşik seçmiş olursunuz. @steck2024cosine bu argümanın daha güçlü
+sürümünü kuruyor: bazı modellerde cosine similarity, anlamlı hiçbir benzerlik
+kavramına karşılık gelmiyor; $[-1, 1]$ aralığıyla sınırlı olması ise ona sahte
+bir yüzde havası veriyor.
+:::
+
+### Artık üç bölümü yenmiş olan çift
+
+@sec-karsilastirma bir başarısızlıkla bitmişti. Dörder kelimelik, anlamları zıt
+iki Türkçe yorum ve bütün kelime torbası temsilleri bunları birebir aynı
+puanlamıştı:
+
+```text
+a = "kalite iyi fiyat kötü"      (quality good, price bad)
+b = "kalite kötü fiyat iyi"      (quality bad, price good)
+```
+
+@sec-dil-modelleri bunu düzeltti, çünkü bir n-gram modeli sırayı okur, kelime
+torbası okumaz. Bariz beklenti, cümle embedding'lerinin — anlam üzerinde,
+yüzlerce dilde, cümlenin tamamına attention uygulanarak eğitilmiş olanların —
+bunu da düzeltmesi.
+
+Düzeltmiyorlar. Bir kümeleme hattının ayırmaya ihtiyaç duyduğu şeyleri ayırmak
+üzere tasarlanmış, elle yazılmış beş çift ölçtük. Her puan iki kez bildiriliyor:
+ham kosinüs olarak ve yukarıdaki tablodan gelen, o modelin kendi rastgele çift
+dağılımına karşı bir $z$-skoru olarak — ölçekleri bu kadar farklı modelleri
+karşılaştırmanın tek yolu bu.
+
+::: {.column-margin}
+Bir **$z$-skoru**, ham bir sayıyı "bu, ortalamanın kaç standart sapma üstünde?"
+diye yeniden ifade eder: $z = (x - \mu)/\sigma$. Burada $\mu$ ve $\sigma$,
+yukarıdaki tablodaki rastgele çift kosinüslerinin ortalaması ve yayılımı. Yani
+$z = 4$, modelin ham ölçeği ne olursa olsun, çiftin rastgele seçilmiş iki
+belgeden çok daha benzer olduğu anlamına gelir. E5'in 0,9894'ü ile tf-idf'in
+1,0000'i kosinüs olarak birbirine benziyor, $z$-skoru olarak ise dünyalar kadar
+uzaklar.
+:::
+
+| çift | | tf-idf | | MiniLM | | E5 | |
+|:--|:--|--:|--:|--:|--:|--:|--:|
+| | | kos | $z$ | kos | $z$ | kos | $z$ |
+| **çelişki** | *aynı kelimeler, zıt iddialar* | 1,0000 | 34,2 | 0,9649 | 4,4 | 0,9894 | 4,8 |
+| başka sözcüklerle anlatım | *aynı iddia, farklı kelimeler* | 0,5349 | 18,0 | 0,9479 | 4,3 | 0,9827 | 4,6 |
+| kutup değişimi | *tek kelime hükmü değiştiriyor* | 0,5687 | 19,2 | 0,6518 | 2,3 | 0,9525 | 3,5 |
+| olumsuzlama | *tek ek hükmü değiştiriyor* | 0,4999 | 16,8 | 0,7201 | 2,8 | 0,9528 | 3,5 |
+| ilgisiz | *farklı konu, aynı duygu* | 0,1626 | 5,0 | 0,1871 | −0,8 | 0,8785 | 0,9 |
+
+: Beş çiftlik bir teşhis. Elle yazılmış beş çift bir sondadır, benchmark değil —
+ondalıkları değil, yönü okuyun.
+{tbl-colwidths="[16,26,10,8,10,8,10,12]"}
+
+Birinci satırı ikinciyle karşılaştırarak okuyun. [Üç temsilde de çelişki çifti,
+gerçek anlamdaş çiftten **daha yüksek** puan alıyor.]{.hl} Zıt şeyler öne süren
+iki cümle, aynı şeyi farklı kelimelerle söyleyen iki cümleden daha benzer kabul
+ediliyor — tf-idf'e göre de, MiniLM'e göre de, E5'e göre de.
+
+Davranışınızı ne kadar değiştirmeleri gerektiğine göre artan sırayla üç gözlem:
+
+1. **Cümle embedding'leri @sec-karsilastirma'daki başarısızlığı onarmadı.** E5
+   çelişki çiftine 0,9894 veriyor. Sorun hiçbir zaman seyreklik değildi, hiçbir
+   zaman söz dağarcığı da değildi. Anlamı hâlâ kelime sırası taşıyor ve
+   havuzlanmış cümle vektörü hâlâ çoğunlukla taşımıyor.
+2. **Bu beş çiftte MiniLM, kutupluluğu E5'ten daha keskin ayırıyor.** MiniLM
+   anlamdaş puanından kutup değişimine 2,0 $z$, olumsuzlamaya 1,5 $z$ düşüyor;
+   E5 ikisine de 1,1 $z$ düşüyor. Bariz sonuca direnin. Beş çift iki modeli
+   sıralayamaz ve @sec-kumeleme-getiri derlem ölçeğinde tam *tersini* ölçüyor:
+   E5 olumsuz yorumları 4,23× yoğunlaştırırken MiniLM 2,79× yoğunlaştırıyor.
+   Bu, bölümün kendi kuralının bölümü ısırması — bir sonda ile bir ölçüm
+   anlaşmadığında ölçüme inanın. Ayakta kalan şey daha zayıf ama daha yararlı
+   iddia: bir model genel olarak daha iyi, sizin önemsediğiniz tek eksende ise
+   daha kötü olabilir; dolayısıyla o ekseni ayrıca ölçmeye değer.
+3. **tf-idf, kutup değişimini anlamdaş çiftin üstüne koyuyor** (0,5349'a karşı
+   0,5687) ve o çifti ters çeviren tek temsil o; kelime anlamı diye bir kavramı
+   olmayan bir yöntemin yapması gereken tam olarak da bu: *kargo çok hızlı
+   geldi* ile *kargo çok yavaş geldi* dört kelimenin üçünü paylaşıyor.
+
+1. maddeye tutunun. Daha tek bir kümeleme algoritması çalıştırmadan şunu
+öngörüyor: bu geometrilerin hiçbirinin ilk ayrılacağı yön duygu olmayacak — ve
+o öngörünün sınandığı yer @sec-kmeans.
+
+::: {.callout-note appearance="simple"}
+**Bu tablonun dürüstlüğü üzerine.** Bir noktayı göstermek için tek bir kişinin
+yazdığı beş çift, bu kitaptaki en zayıf kanıt türü ve burada olmasının sebebi,
+derlem ölçeğindeki bir sonucun yerini almak değil onu *açıklaması*. Yukarıdaki
+üç gözlemden yalnızca birincisi, derlem ölçeğindeki sayılarla temas ettiğinde
+sağ çıkıyor: @sec-kmeans üç geometriden hiçbirinin duyguya göre ayrılmadığını
+doğruluyor; @sec-kumeleme-getiri ise 2. gözlemdeki model sıralamasıyla doğrudan
+çelişiyor. Bir sonda için doğru sonuç budur. Hipotez üretir, onları karara
+bağlamaz. **Bir sonda ile bir ölçüm anlaşmadığında ölçüme inanın** — sondayı siz
+yazmış ve seviyor olsanız bile.
+:::
+
+## Yakın kopyalar: elde edilebilecek en ucuz kazanç {#sec-yakin-kopyalar}
+
+Herhangi bir şeyi kümelemeden önce, zaten birbirinin kopyası olan belgeleri
+çıkarın. @sec-kumeleme-kurulum, karakter dizilerini karşılaştırarak 1.657
+**birebir** tekrarı çıkardı. Birebir eşleşme zayıf bir sınavdır — değişen tek
+karakter onu yener — ve tekrarlanan kalıp metin üzerine kurulmuş bir küme,
+kalıp metni ölçüyordur.
+
+### Shingling, MinHash ve neden her çifti karşılaştırmadığınız
+
+50.000 belgenin bütün çiftlerini karşılaştırmak $1{,}25 \times 10^9$
+karşılaştırma demek. Standart kaçış yolunun üç adımı var
+[@broder1997resemblance]:
+
+1. **Shingle'lama.** Her belgeyi, örtüşen $k$-gram'lardan oluşan bir *kümeye*
+   çevirin. Kelime shingle'ları yerine bilerek karakter 5-gram'ları kullandık:
+   Türkçenin eklemeli yapısı yüzünden neredeyse birebir aynı iki yorum birkaç
+   kelime biçiminde farklılaşırken hemen hemen bütün karakter dizilerini
+   paylaşabiliyor.
+2. [**MinHash.**](#gloss-minhash){#term-minhash .term-ref} Kümeyi 128 kez
+   hash'leyin ve her hash altındaki en küçük değeri saklayın. İki belgenin belirli
+   bir minimumu paylaşma olasılığı, Jaccard benzerliklerine eşittir; yani 128
+   sayı, kümeleri saklamadan $J$'yi kestirir.
+3. **Bantlama ve kovalama (LSH).** 128 değeri bantlara bölün, her bandı
+   hash'leyin ve yalnızca en az bir bantta çakışan belgeleri karşılaştırın.
+   Eşiğin altındaki çiftler neredeyse hiç çakışmaz; dolayısıyla $10^9$
+   karşılaştırmanın neredeyse tamamı hiç yapılmaz.
+
+::: {#gloss-minhash .column-margin .term-gloss}
+**MinHash** — bir kümenin sabit uzunluktaki taslağı; iki taslağın bir konumda
+uyuşma şansı, özgün kümelerin Jaccard benzerliğine eşit olacak şekilde
+kuruluyor. Kümeleri saklamadan örtüşmeyi kestirmenizi sağlar.
+[↩](#term-minhash){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">1,25 milyar karşılaştırma neden hiç yapılmıyor</div>
+<svg viewBox="0 0 764 316" style="max-width:744px" role="img"
+     aria-label="Beş aşamalı, soldan sağa bir hat. Birinci aşama, kargo çok hızlı geldi yazan bir yorum metni. İkinci aşama olan shingle'lama, bunu kargo, argo boşluk, rgo boşluk ç gibi örtüşen karakter 5-gram'larından oluşan bir kümeye çeviriyor. Üçüncü aşama olan MinHash, o kümeyi 128 kez hash'leyip her hash altındaki en küçük değeri saklıyor ve 128 tam sayıdan oluşan bir imza üretiyor; altyazı, iki imzanın belirli bir konumda uyuşma şansının özgün kümelerin Jaccard benzerliğine eşit olduğunu belirtiyor. Dördüncü aşama olan bantlama, 128 değeri bantlara bölüyor, her bandı hash'liyor ve belgeleri kovalara düşürüyor; böylece yalnızca en az bir bantta çakışan belgeler aday çift oluyor. Beşinci aşama olan doğrulama, sağ kalan adaylar üzerinde tam Jaccard'ı hesaplıyor ve ardından union-find çalıştırıyor; böylece yakın kopyalardan oluşan bir zincir tek bir grup olarak sayılıyor. Hattın altındaki bir karşılaştırma çubuğu, tüm çiftlerin karşılaştırılmasını 1,25 çarpı 10 üzeri 9 karşılaştırma olarak gösteriyor ve bunun karşısına, bunun çok küçük bir kısmına dokunup 27,4 saniyede biten LSH yolunu koyuyor.">
+  <defs>
+    <marker id="lsh-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="10" y="34" width="132" height="96" rx="8" class="box"/>
+  <text x="76" y="56" class="t-xs t-mid t-b">1 · belge</text>
+  <text x="76" y="82" class="t-xs t-mid t-mono">kargo çok</text>
+  <text x="76" y="98" class="t-xs t-mid t-mono">hızlı geldi</text>
+  <text x="76" y="120" class="t-xs t-mid t-muted">bunlardan 50.000</text>
+
+  <line x1="146" y1="82" x2="168" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="172" y="34" width="132" height="96" rx="8" class="box-accent"/>
+  <text x="238" y="56" class="t-xs t-mid t-b t-accent">2 · shingle</text>
+  <text x="238" y="80" class="t-xs t-mid t-mono">{“kargo”,</text>
+  <text x="238" y="96" class="t-xs t-mid t-mono">“argo ”, …}</text>
+  <text x="238" y="120" class="t-xs t-mid t-muted">karakter 5-gram'ı</text>
+
+  <line x1="308" y1="82" x2="330" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="334" y="34" width="132" height="96" rx="8" class="box-accent"/>
+  <text x="400" y="56" class="t-xs t-mid t-b t-accent">3 · MinHash</text>
+  <text x="400" y="80" class="t-xs t-mid t-mono">[17, 4, 92, …]</text>
+  <text x="400" y="102" class="t-xs t-mid t-muted">128 tam sayı,</text>
+  <text x="400" y="118" class="t-xs t-mid t-muted">P(uyuşma) = J</text>
+
+  <line x1="470" y1="82" x2="492" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="496" y="34" width="132" height="96" rx="8" class="box-warm"/>
+  <text x="562" y="56" class="t-xs t-mid t-b t-warm">4 · bant + kova</text>
+  <text x="562" y="80" class="t-xs t-mid t-muted">her bandı hash'le,</text>
+  <text x="562" y="96" class="t-xs t-mid t-muted">yalnızca çakışan</text>
+  <text x="562" y="112" class="t-xs t-mid t-b">çiftleri karşılaştır</text>
+
+  <line x1="632" y1="82" x2="654" y2="82" class="ln" marker-end="url(#lsh-a)"/>
+
+  <rect x="646" y="34" width="108" height="96" rx="8" class="box-rose"/>
+  <text x="700" y="56" class="t-xs t-mid t-b t-rose">5 · doğrula</text>
+  <text x="700" y="80" class="t-xs t-mid t-muted">tam Jaccard,</text>
+  <text x="700" y="96" class="t-xs t-mid t-muted">sonra union-find</text>
+  <text x="700" y="118" class="t-xs t-mid t-b">131 grup</text>
+
+  <text x="14" y="184" class="t-xs t-b t-muted">GERÇEKTE YAPILAN KARŞILAŞTIRMALAR</text>
+
+  <text x="14" y="216" class="t-xs t-b">tüm çiftler</text>
+  <rect x="140" y="202" width="600" height="20" rx="4" class="box-rose"/>
+  <text x="440" y="217" class="t-xs t-mid t-b t-rose">1,25 × 10⁹ çift</text>
+
+  <text x="14" y="256" class="t-xs t-b">LSH adayları</text>
+  <rect x="140" y="242" width="7" height="20" rx="3" class="box-accent"/>
+  <text x="160" y="257" class="t-xs t-b t-accent">bunun kırıntısı — 27,4 saniye, tek çekirdek</text>
+
+  <text x="14" y="296" class="t-xs t-muted">Numaranın tamamı bantlarda: eşiğin altındaki çiftler neredeyse hiç çakışmaz, dolayısıyla hiç puanlanmazlar.</text>
+</svg>
+```
+::: {.fig-cap}
+2. ve 3. aşamalar, büyüklüğü bilinmeyen bir kümeyi sabit 128 sayıya çeviriyor;
+4. aşamayı mümkün kılan şey de bu. 5. aşama, sağ kalanlar üzerinde tam Jaccard'ı
+hesaplıyor; yani LSH size verdiği bir çift hakkında vardığınız sonucu asla
+değiştirmiyor — değiştirdiği şey, *size hangi çiftleri verdiği*.
+:::
+::::
+
+::: {.callout-warning appearance="simple"}
+**Yaklaşıklığın gerçekte nerede yaşadığı — ve orası tahmin edeceğiniz yer
+değil.** 4. aşama, 5. aşamadan sağ çıkacak hiçbir yanlış pozitif üretmiyor; ama
+**yanlış negatif** üretiyor: gerçekten benzer bir çift her bantta çakışmayı
+kaçırabilir ve o zaman hiç puanlanmaz. Ne sıklıkta? `datasketch`, 128 hash'imizi
+$r$ satırlık $b$ banda bölerek iki hata türünü sizin istediğiniz eşikte
+dengeliyor ve Jaccard benzerliği $J$ olan bir çift $1 - (1 - J^{r})^{b}$
+olasılıkla çakışıyor. `threshold=0.8`'de $b=9$, $r=13$ seçiyor:
+
+```text
+   J     P(pair is even looked at)
+  0.9              0.93
+  0.8              0.40
+  0.7              0.08
+```
+
+*Tam olarak* eşikte oturan bir çiftin bulunma şansı %40. Bu bir hata değil —
+bilinçli tasarım noktası, S eğrisinin en dik yeri; yöntemin, kendisini mümkün
+kılan hız uğruna recall'dan feragat ettiği yer. Ama bu, sonraki tablodaki
+sayıların **alt sınır** olduğu ve tam da sizin işaret ettiğiniz sınırda en gevşek
+oldukları anlamına geliyor. Yakın kopya sayılarını her zaman "en az" diye
+bildirin, asla "tam olarak" diye değil.
+:::
+
+Ardından sağ kalan aday çiftler üzerinde union-find çalıştırdık; böylece yakın
+kopyalardan oluşan bir zincir birkaç çift yerine tek bir grup olarak sayılıyor.
+**Union-find**, "bunların hepsi birbirine bağlı" için standart defter tutma
+yöntemi: her belge kendi grubunda başlar, sağ kalan her çift iki grubu birleştirir
+ve $a \sim b \sim c$ zinciri, $a$ ile $c$ hiç karşılaştırılmamış olsa bile üç
+üyeli tek bir grup olarak biter.
+
+### Sayı eşiğe bağlı, hem de nazikçe değil
+
+| Jaccard eşiği | grup | fazlalık belge | derlemdeki pay | en büyük grup | süre |
+|--:|--:|--:|--:|--:|--:|
+| ≥ 0,9 | 57 | 60 | %0,12 | 3 | 28,0sn |
+| ≥ 0,8 | 131 | 151 | %0,30 | 6 | 27,4sn |
+| ≥ 0,7 | 265 | 529 | [%1,06]{.con} | [61]{.con} | 28,4sn |
+
+: Birebir tekrar temizliğinden sağ çıkan yakın kopyalar, 50.000 belge
+{tbl-colwidths="[22,14,18,18,16,12]"}
+
+Eşiği 0,8'den 0,7'ye çekmek, fazlalık belge sayısını 3,5 katına, en büyük grubu
+ise on katına çıkarıyor. Bu, yöntemin bir hatası değil; derlemin görünüşü bu.
+$J \ge 0{,}8$'de üç grup:
+
+```text
+group 1   "teşekkürler hepsiburada.com ;)"
+          "teşekkürler hepsiburada!"
+          "teşekkürler hepsiburada....."
+
+group 2   "güzel tavsiye ederim"
+          "ürün çok güzel tavsiye ederim."
+          "isıtması çok güzel tavsiye ederim"
+
+group 3   "herkese tavsiye ederim"
+          "herkese tavsiye ederim,fiy"
+          "herkese tavsiye ederim :)"
+```
+
+1. grup kalıp metin ve gitmesi gerekiyor. 2. grup ise üç *farklı* ürün hakkında
+genel geçer bir şey söyleyen üç *farklı* insan; ikisini silmek gerçek veriyi
+çöpe atmak demek. [Yeterince düşük bir eşikte "yakın kopya" ile "kısa ve genel
+geçer" aynı kategori hâline geliyor]{.hl}; en büyük grubun $J \ge 0{,}7$'de
+61'e sıçramasının sebebi de bu.
+
+::: {.callout-tip appearance="simple"}
+**Savunulabilir bir varsayılan.** $J \ge 0{,}8$'de tekrar temizliği yapın, sonra
+sonucu kabul etmeden önce en büyük beş grubu *okuyun*. En büyük grup kalıp metin
+değil de kısa ve genel geçer metinse eşiği yükseltin. Bu bölüm $J \ge 0{,}8$'de
+kaldı ve geriye **49.849** belge bıraktı; bu noktadan sonraki her sayı o küme
+üzerinde hesaplandı.
+:::
+
+@sec-on-egitim-veri, tekrar temizliğini ön eğitim derlemleri için ölçülmüş bir
+kalite kolu olarak ele alıyor — riskin çok daha yüksek olduğu ve
+@lee2022deduplicating'in gerçek kazanımlar bulduğu yerde; ayrıca
+@penedo2024fineweb'in en agresif tekrar temizliğinin veriyi *kötüleştirdiğini*
+bulduğu yerde. Aynı gerilim burada, beş kat daha küçük bir derlemde, minyatür
+hâlinde karşımıza çıkıyor.
+
+SimHash [@charikar2002similarity] aynı problemi farklı bir taslakla çözüyor:
+belge başına tek bir bit vektörü üretiyor ve Hamming uzaklığını ölçüyor; bu da
+onu saklaması ucuz kılıyor ve yeni bir belgeyi büyük ve mevcut bir indeksle
+karşılaştırmanız gerektiğinde doğal bir seçim yapıyor. @manku2007detecting,
+bunu web ölçeğinde çalıştırmanın anlatısı. Tek seferlik bir derlem denetimi için
+ise LSH'li MinHash üzerine düşünmek daha kolay ve `datasketch` onu bir düzine
+satırda gerçekleştiriyor.
+
+## Üç temsil ve maliyetleri {#sec-kumeleme-temsiller}
+
+Buradan sonrası, bir uygulayıcının 2026'da gerçekten arasında seçim yaptığı
+aralığı kapsasın diye seçilmiş üç geometride, aynı 49.849 belge üzerinde
+çalışıyor.
+
+| temsil | boyut | kurma süresi | notlar |
+|:--|--:|--:|:--|
+| tf-idf → LSA | 256 | 2,6sn | kelime tf-idf, SVD ile 256'ya; GPU yok, tamamen belirlenimci |
+| MiniLM | 384 | 40sn | `paraphrase-multilingual-MiniLM-L12-v2`, 117,7M parametre, 1.246 belge/sn |
+| multilingual-E5 | 768 | 104sn | `intfloat/multilingual-e5-base`, 278,0M parametre, 478 belge/sn |
+
+: Üç geometri, tek bir dizüstü GPU'sunda {tbl-colwidths="[26,10,14,50]"}
+
+Sonuçları değiştirdikleri ve atlanması kolay olduğu için söylenmeye değer iki
+ayrıntı.
+
+**SVD isteğe bağlı değil.** Buradaki ham tf-idf, belge başına 19,3 sıfır olmayan
+girdiyle 23.971 boyutlu. Önemli olan teşhis *göreli kontrast*: belirli bir belge
+için, en uzak komşusunun en yakın komşusundan ne kadar daha uzakta olduğu,
+$(d_{\max} - d_{\min}) / d_{\min}$. Bu sayı sıfıra yakınsa "en yakın", "en
+uzak"tan anlamlı biçimde farklı değildir ve uzaklık tabanlı her yöntem gürültü
+üzerinde çalışıyordur. 300 sorgu belgesi üzerinde ölçüldüğünde:
+
+```text
+                 median relative contrast
+tf-idf                   0.539
+LSA (256)                2.116
+MiniLM                   4.911
+E5                       3.009
+```
+
+tf-idf sorgularının %0,6'sında *başka* bir belge tam olarak 0 kosinüs
+uzaklığında oturuyor — 19 kelimelik yorumlarda ortak terim bulunmaması olağan
+durum ve sıfırdaki bir beraberlik oranı sonsuz yapıyor. Bunlar bir epsilon ile
+yamanmak yerine medyandan çıkarıldı, çünkü uzayın gerçek bir özelliğiler.
+Kesilmiş SVD ile 256 boyuta indirmek varyansın %29,9'unu geri kazanıyor ve
+kontrastı dört katına çıkarıyor. Bu indirgeme kendi başına bir konu modeli ve
+bir adı da var — latent semantic analysis [@deerwester1990indexing] — bu yüzden
+@sec-konu-modelleri onu bedavaya yeniden kullanabiliyor.
+
+::: {.column-margin}
+E5'in 1.–99. bandının 0,133 genişliğinde, yani tf-idf'in 0,130'uyla kabaca aynı
+olmasına rağmen böyle bir onarıma ihtiyaç duymadığına dikkat edin. Problemi tek
+başına bant genişliği teşhis etmiyor; kontrast ediyor. E5'in bandı sıfırdan çok
+uzakta oturuyor, dolayısıyla küçük bir mutlak yayılım yine de büyük bir *göreli*
+yayılım.
+:::
+
+**E5'in ön ekine ihtiyacı var.** multilingual-E5 modelleri `query: ` ve
+`passage: ` işaretleyicileriyle eğitiliyor ve bunlar olmadan ölçülebilir biçimde
+farklı davranıyorlar [@wang2024multilingual]. Kümeleme gibi simetrik bir görev
+için model kartı iki tarafa da `query: ` konmasını öngörüyor; biz de öyle
+yaptık. Bunu unutmak, embedding hatlarındaki en yaygın sessiz hatalardan biri:
+hiçbir şey çökmez, sayılar sadece daha kötü olur.
+
+## k-means ve sizin adınıza yaptığı dört varsayım {#sec-kmeans}
+
+[k-means](#gloss-k-means){#term-k-means .term-ref} boşuna varsayılan değil:
+basit, hızlı ve Lloyd'un algoritması [@lloyd1982least] birkaç geçişte
+yakınsıyor. $k$ tane merkez seçin, her noktayı en yakın merkeze atayın, her
+merkezi kendisine atanan noktaların ortalamasına taşıyın, tekrarlayın.
+
+Amaç fonksiyonunu yazmak varsayımları görünür kılıyor. k-means şunu en aza
+indiriyor:
+
+$$
+\sum_{i=1}^{k} \sum_{x \in C_i} \lVert x - \mu_i \rVert^2
+$$
+
+ve bunu yaparken sizi, hiçbirini kimsenin seçmediği dört şeye bağlıyor:
+
+1. **Kümeler küreseldir.** Amaç fonksiyonu yalnızca bir merkeze olan uzaklığı
+   ölçüyor, dolayısıyla uzamış ya da eğri bir grubu temsil edemiyor.
+2. **Kümelerin yayılımı benzerdir.** Sıkı bir küme ile dağınık bir küme aynı
+   ölçekte puanlanıyor; sonuçta dağınık olan parçalanıyor ve parçaları
+   komşularına dağıtılıyor.
+3. **Her nokta bir kümeye aittir.** Aykırı değer sınıfı yok. Hiçbir şeye
+   benzemeyen bir belge yine de atanıyor — en az yanlış olan merkeze.
+4. **$k$'yi zaten biliyorsunuz.** O bir girdi, çıktı değil.
+
+::: {#gloss-k-means .column-margin .term-gloss}
+**k-means** — her noktayı en yakın grup merkezine atayıp merkezleri yeniden
+hesaplamayı tekrarlayarak noktaları $k$ gruba bölüyor. Hızlı; karşılığında sizi
+küresel, benzer büyüklükte ve herkesi kapsayan gruplara mecbur bırakıyor.
+[↩](#term-k-means){.term-back}
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Dört varsayım, çizilmiş hâliyle</div>
+<svg viewBox="0 0 764 268" style="max-width:744px" role="img"
+     aria-label="Dört panel; her biri bir veri şeklini ve k-means'in ona ne yaptığını gösteriyor. Birinci panel, küresel: gerçekte tek bir grup olan, uzamış çapraz bir nokta bandı; k-means bunu düz bir sınırla ikiye kesiyor ve iki merkez yerleştiriyor, çünkü amaç fonksiyonu yalnızca merkeze olan uzaklığı ölçüyor ve uzamış bir şekli temsil edemiyor. İkinci panel, benzer yayılım: solda sıkı ve yoğun bir yumak, sağda geniş ve dağınık bir bulut; k-means sıkı yumağı bütün bırakıyor ama dağınık bulutu parçalara ayırıyor, çünkü ikisi de aynı uzaklık ölçeğinde puanlanıyor. Üçüncü panel, aykırı değer yok: tek bir küme ve ondan çok uzakta duran tek bir nokta; bir ok, k-means'in gürültü etiketi olmadığı için aykırı değerin yine de kümeye atandığını gösteriyor. Dördüncü panel, k bir girdidir: soru işaretleriyle ve 2, 10, 50 değerleriyle işaretlenmiş bir kadran; küme sayısının keşfedilmediğini, kullanıcı tarafından verildiğini gösteriyor.">
+  <defs>
+    <marker id="km-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="8" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="97" y="52" class="t-xs t-mid t-b">1 · küresel</text>
+  <circle cx="46" cy="160" r="4" class="box-accent"/>
+  <circle cx="62" cy="148" r="4" class="box-accent"/>
+  <circle cx="76" cy="139" r="4" class="box-accent"/>
+  <circle cx="90" cy="128" r="4" class="box-accent"/>
+  <circle cx="106" cy="118" r="4" class="box-rose"/>
+  <circle cx="120" cy="107" r="4" class="box-rose"/>
+  <circle cx="136" cy="96" r="4" class="box-rose"/>
+  <circle cx="150" cy="86" r="4" class="box-rose"/>
+  <line x1="128" y1="72" x2="72" y2="150" class="ln-thin ln-dash"/>
+  <text x="97" y="192" class="t-xs t-mid t-muted">tek grup, ikiye bölündü</text>
+
+  <rect x="198" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="287" y="52" class="t-xs t-mid t-b">2 · benzer yayılım</text>
+  <circle cx="232" cy="120" r="4" class="box-accent"/>
+  <circle cx="240" cy="128" r="4" class="box-accent"/>
+  <circle cx="237" cy="112" r="4" class="box-accent"/>
+  <circle cx="246" cy="118" r="4" class="box-accent"/>
+  <circle cx="296" cy="92" r="4" class="box-warm"/>
+  <circle cx="330" cy="112" r="4" class="box-warm"/>
+  <circle cx="310" cy="146" r="4" class="box-rose"/>
+  <circle cx="348" cy="150" r="4" class="box-rose"/>
+  <circle cx="286" cy="132" r="4" class="box-warm"/>
+  <circle cx="342" cy="80" r="4" class="box-warm"/>
+  <line x1="320" y1="66" x2="300" y2="168" class="ln-thin ln-dash"/>
+  <text x="287" y="192" class="t-xs t-mid t-muted">dağınık olan parçalanıyor</text>
+
+  <rect x="388" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="477" y="52" class="t-xs t-mid t-b">3 · aykırı değer yok</text>
+  <circle cx="452" cy="140" r="4" class="box-accent"/>
+  <circle cx="464" cy="130" r="4" class="box-accent"/>
+  <circle cx="446" cy="126" r="4" class="box-accent"/>
+  <circle cx="462" cy="146" r="4" class="box-accent"/>
+  <circle cx="474" cy="138" r="4" class="box-accent"/>
+  <circle cx="534" cy="80" r="5" class="box-rose"/>
+  <line x1="528" y1="88" x2="482" y2="126" class="ln" marker-end="url(#km-a)"/>
+  <text x="477" y="192" class="t-xs t-mid t-muted">gürültü etiketi yok, atanıyor</text>
+
+  <rect x="578" y="30" width="178" height="176" rx="8" class="box"/>
+  <text x="667" y="52" class="t-xs t-mid t-b">4 · k'yi bilirsiniz</text>
+  <text x="667" y="122" class="t-sm t-mid t-b t-warm">k = ?</text>
+  <text x="667" y="150" class="t-xs t-mid t-mono t-muted">2 · 10 · 50</text>
+  <text x="667" y="192" class="t-xs t-mid t-muted">bir girdi, çıktı değil</text>
+
+  <text x="382" y="242" class="t-xs t-mid t-muted">Herkes 4. panel için endişeleniyor. Metin derlemlerinde asıl zararı 2. ve 3. paneller veriyor.</text>
+</svg>
+```
+::: {.fig-cap}
+Bunların hiçbiri hata değil — amaç fonksiyonunun doğru çalışması. Bir merkeze
+olan karesel uzaklığı en aza indirmek, grupların yuvarlak, eşit yayılımlı ve
+kapsayıcı olduğu varsayımının *ta kendisi*. Verileriniz buna katılmıyorsa
+algoritma size bunu söylemez; sadece bir bölümleme döndürür.
+:::
+::::
+
+Herkesin endişelendiği varsayım 4 numara; metin derlemlerini asıl bozansa 2 ve
+3 numaralı olanlar. `k-means++` başlatmasını kullanın [@arthur2007kmeanspp] —
+scikit-learn'ün varsayılanı ve rastgele yeniden başlatma piyangosunun en kötü
+kısmını ortadan kaldırıyor — ama dördünün hiçbirine çare olmadığını da unutmayın.
+
+### Tarama
+
+$k$'yi 2'den 50'ye kadar üç temsilin hepsinde çalıştırdık ve her bölümlemeyi
+dört ayrı şekilde puanladık. Puanların üçü **içsel**: yalnızca vektörleri
+kullanıyorlar, yani etiketi olmayan bir derlemde de hesaplanabiliyorlar — bu
+bölümün konusu tam olarak o durum. Dördüncüsü **dışsal**: bölümlemeyi gizli
+duygu etiketleriyle karşılaştırıyor ve cevap anahtarı o.
+
+```{ojs}
+//| echo: false
+kmRows = [
+  {rep: "lsa", k: 2, silh: 0.0174, ch: 728, db: 6.381, ari: -0.0471, nmi: 0.0118, big: 81.1},
+  {rep: "lsa", k: 3, silh: 0.0236, ch: 629, db: 6.533, ari: -0.0507, nmi: 0.0185, big: 67.6},
+  {rep: "lsa", k: 4, silh: 0.0246, ch: 566, db: 7.174, ari: -0.0243, nmi: 0.0153, big: 46.6},
+  {rep: "lsa", k: 5, silh: 0.0288, ch: 534, db: 6.410, ari: -0.0229, nmi: 0.0117, big: 50.1},
+  {rep: "lsa", k: 6, silh: 0.0262, ch: 491, db: 6.523, ari: -0.0171, nmi: 0.0117, big: 39.0},
+  {rep: "lsa", k: 8, silh: 0.0344, ch: 454, db: 5.873, ari: -0.0160, nmi: 0.0102, big: 35.8},
+  {rep: "lsa", k: 10, silh: 0.0391, ch: 423, db: 5.747, ari: -0.0094, nmi: 0.0100, big: 26.6},
+  {rep: "lsa", k: 12, silh: 0.0420, ch: 396, db: 5.565, ari: -0.0096, nmi: 0.0102, big: 22.9},
+  {rep: "lsa", k: 15, silh: 0.0440, ch: 360, db: 5.229, ari: -0.0083, nmi: 0.0099, big: 23.8},
+  {rep: "lsa", k: 20, silh: 0.0528, ch: 325, db: 4.921, ari: -0.0057, nmi: 0.0091, big: 16.4},
+  {rep: "lsa", k: 25, silh: 0.0560, ch: 288, db: 4.731, ari: -0.0052, nmi: 0.0101, big: 17.2},
+  {rep: "lsa", k: 30, silh: 0.0605, ch: 269, db: 4.554, ari: -0.0033, nmi: 0.0099, big: 12.7},
+  {rep: "lsa", k: 40, silh: 0.0647, ch: 241, db: 4.276, ari: -0.0014, nmi: 0.0081, big: 9.5},
+  {rep: "lsa", k: 50, silh: 0.0696, ch: 215, db: 4.105, ari: -0.0005, nmi: 0.0121, big: 8.7},
+  {rep: "minilm", k: 2, silh: 0.0977, ch: 2724, db: 4.240, ari: 0.0042, nmi: 0.0392, big: 51.2},
+  {rep: "minilm", k: 3, silh: 0.1018, ch: 2428, db: 3.741, ari: 0.0083, nmi: 0.0223, big: 42.7},
+  {rep: "minilm", k: 4, silh: 0.1042, ch: 2217, db: 3.583, ari: 0.0058, nmi: 0.0275, big: 34.9},
+  {rep: "minilm", k: 5, silh: 0.0770, ch: 1949, db: 3.603, ari: 0.0007, nmi: 0.0236, big: 25.7},
+  {rep: "minilm", k: 6, silh: 0.0808, ch: 1745, db: 3.563, ari: 0.0036, nmi: 0.0220, big: 24.4},
+  {rep: "minilm", k: 8, silh: 0.0621, ch: 1475, db: 3.553, ari: 0.0029, nmi: 0.0251, big: 17.3},
+  {rep: "minilm", k: 10, silh: 0.0736, ch: 1327, db: 3.331, ari: -0.0007, nmi: 0.0197, big: 16.0},
+  {rep: "minilm", k: 12, silh: 0.0744, ch: 1196, db: 3.427, ari: 0.0013, nmi: 0.0171, big: 12.7},
+  {rep: "minilm", k: 15, silh: 0.0720, ch: 1036, db: 3.401, ari: 0.0014, nmi: 0.0155, big: 9.7},
+  {rep: "minilm", k: 20, silh: 0.0704, ch: 867, db: 3.276, ari: 0.0013, nmi: 0.0159, big: 8.6},
+  {rep: "minilm", k: 25, silh: 0.0714, ch: 751, db: 3.242, ari: 0.0009, nmi: 0.0148, big: 5.8},
+  {rep: "minilm", k: 30, silh: 0.0718, ch: 667, db: 3.254, ari: 0.0010, nmi: 0.0152, big: 5.6},
+  {rep: "minilm", k: 40, silh: 0.0678, ch: 547, db: 3.233, ari: 0.0007, nmi: 0.0142, big: 4.9},
+  {rep: "minilm", k: 50, silh: 0.0605, ch: 468, db: 3.260, ari: 0.0007, nmi: 0.0142, big: 3.9},
+  {rep: "e5", k: 2, silh: 0.0936, ch: 2041, db: 4.757, ari: -0.0079, nmi: 0.0014, big: 63.8},
+  {rep: "e5", k: 3, silh: 0.0445, ch: 1679, db: 4.642, ari: -0.0000, nmi: 0.0327, big: 44.3},
+  {rep: "e5", k: 4, silh: 0.0438, ch: 1415, db: 4.439, ari: -0.0019, nmi: 0.0265, big: 40.1},
+  {rep: "e5", k: 5, silh: 0.0415, ch: 1220, db: 4.698, ari: 0.0007, nmi: 0.0183, big: 33.3},
+  {rep: "e5", k: 6, silh: 0.0223, ch: 1094, db: 4.765, ari: 0.0049, nmi: 0.0416, big: 29.6},
+  {rep: "e5", k: 8, silh: 0.0320, ch: 926, db: 4.479, ari: 0.0047, nmi: 0.0341, big: 24.2},
+  {rep: "e5", k: 10, silh: 0.0261, ch: 794, db: 4.566, ari: 0.0075, nmi: 0.0396, big: 19.4},
+  {rep: "e5", k: 12, silh: 0.0256, ch: 706, db: 4.598, ari: 0.0057, nmi: 0.0363, big: 16.0},
+  {rep: "e5", k: 15, silh: 0.0263, ch: 607, db: 4.670, ari: 0.0031, nmi: 0.0293, big: 12.5},
+  {rep: "e5", k: 20, silh: 0.0255, ch: 494, db: 4.651, ari: 0.0027, nmi: 0.0326, big: 9.4},
+  {rep: "e5", k: 25, silh: 0.0207, ch: 419, db: 4.703, ari: 0.0013, nmi: 0.0269, big: 8.2},
+  {rep: "e5", k: 30, silh: 0.0189, ch: 366, db: 4.663, ari: 0.0015, nmi: 0.0278, big: 5.5},
+  {rep: "e5", k: 40, silh: 0.0141, ch: 296, db: 4.584, ari: 0.0014, nmi: 0.0274, big: 4.4},
+  {rep: "e5", k: 50, silh: 0.0130, ch: 250, db: 4.572, ari: 0.0014, nmi: 0.0287, big: 4.6}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof kmMetric = Inputs.radio(
+  new Map([
+    ["Silhouette — yüksek olan iyi (içsel)", "silh"],
+    ["Calinski-Harabasz — yüksek olan iyi (içsel)", "ch"],
+    ["Davies-Bouldin — düşük olan iyi (içsel)", "db"],
+    ["Gizli etiketlere karşı adjusted Rand index (dışsal)", "ari"],
+    ["En büyük küme, derlemin yüzdesi", "big"]
+  ]),
+  { value: "silh", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+kmLabels = ({
+  silh: "silhouette (kosinüs)", ch: "Calinski-Harabasz",
+  db: "Davies-Bouldin", ari: "adjusted Rand index",
+  big: "en büyük küme, derlemin yüzdesi"
+})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700,
+  height: 330,
+  marginLeft: 70,
+  marginBottom: 46,
+  x: { label: "küme sayısı k", type: "log", ticks: [2,3,5,10,20,50], tickFormat: d => d, grid: true },
+  y: { label: kmLabels[kmMetric], grid: true },
+  color: { legend: true, domain: ["lsa", "minilm", "e5"],
+           range: ["#1F4E79", "#2E7D6F", "#B3453E"] },
+  marks: [
+    kmMetric === "ari" ? Plot.ruleY([0], { stroke: "#9AA3AE", strokeDasharray: "4 3" }) : null,
+    Plot.line(kmRows, { x: "k", y: kmMetric, stroke: "rep", strokeWidth: 2 }),
+    Plot.dot(kmRows, { x: "k", y: kmMetric, fill: "rep", r: 3.5,
+      title: d => `${d.rep}, k=${d.k}\n${kmLabels[kmMetric]}: ${d[kmMetric]}` })
+  ].filter(d => d)
+})
+```
+
+::: {.column-margin}
+Düğmeyi **adjusted Rand index**'e getirin ve sıfırdaki kesikli çizgiye bakın.
+ARI şansa göre düzeltilmiş, yani 0 *rastgele* bir bölümlemenin aldığı puan. Üç
+eğri de tam onun üstünde oturuyor.
+:::
+
+### Taramayı okumak
+
+**Önce dışsal karar, çünkü tartışmaya kapalı.** Taramanın tamamındaki en iyi
+adjusted Rand index **0,0083**; MiniLM'de $k=3$ noktasında. ARI şansa göre
+düzeltilmiş, yani 0,0 rastgele atamanın aldığı puan, 1,0 ise kusursuz eşleşme.
+Birkaç girdi *negatif*. Normalized mutual information en fazla 0,0416'ya
+çıkıyor. [42 kümeleme ve üç temsil boyunca hiçbiri duygu etiketini geri
+getiremedi.]{.hl}
+
+@sec-benzerlik-ne-demek bunu zaten öngörmüştü. Bir temsil çelişki çiftine
+anlamdaş çiftten daha yüksek puan veriyorsa, o geometride kutupluluk *baskın
+değişim ekseni* değildir — ve $k$-means baskın eksenler boyunca bölüyor,
+dolayısıyla başka bir şeyden kesecek. İddianın gücüne dikkat edin: kutupluluk
+geometriden yok olmuş değil. @sec-kumeleme-getiri aynı E5 vektörlerinden 4,23×
+sinyal çıkarıyor, @sec-karsilastirma da bir kelime torbasından 76,21 macro-F1
+almıştı. *Gözetimli* bir yöntem küçük bir yönü arayabilir, çünkü etiketler ona
+hangisini bulacağını söylüyor. Gözetimsiz bir yöntem bunu yapamaz, o yüzden
+bunun yerine baskın yönü raporlar. Kümeleme başarısız olmadı; kendisine verilen
+yapıyı sadakatle raporladı.
+
+**İçsel indeksler ne birbirleriyle ne de kendileriyle uyuşuyor.** Asıl rahatsız
+edici sonuç bu, çünkü gerçekten etiketsiz bir derlemde elinizdeki tek şey içsel
+indeksler:
+
+| temsil | silhouette'e göre $k$ = | Calinski-Harabasz'a göre | Davies-Bouldin'e göre |
+|:--|--:|--:|--:|
+| LSA | [50, ve hâlâ yükseliyor]{.con} | 2 | 50 |
+| MiniLM | 4 | 2 | 40 |
+| E5 | 2 | 2 | 4 |
+
+: Her içsel indeksin optimumunu $k \in [2, 50]$ aralığında nereye koyduğu
+{tbl-colwidths="[28,26,24,22]"}
+
+Calinski-Harabasz her seferinde $k=2$ seçiyor, çünkü güçlü bir küme yapısı
+olmayan veride $k$ büyüdükçe monoton düşen bir varyans oranı. Davies-Bouldin
+bunun tam aynası, bir nedenle ters yöne, büyük $k$'ye doğru sürükleniyor — ama
+yalnızca kıpırdadığı yerde. Argmin'ine değil, gerçek değerlerine bakın: E5'te
+$k=2$'den $k=50$'ye kadar bütün tarama 4,44 ile 4,77 arasında kalıyor, yani
+$k=4$'teki "optimum" düz bir çizgi üzerindeki %7'lik bir salınım; MiniLM'de de
+$k=20$'den yukarısı 3,23 ile 3,28 arasına sıkışıyor. [Bu üç optimumdan ikisi,
+karar kılığına girmiş gürültü.]{.hl} Yalnızca LSA'da gerçek bir eğilim var, o
+bile karar vermeden önce bir süre gezinip duruyor: $k=2$'de 6,38, $k=4$'te
+*yukarı* 7,17, geri 6,41'e, $k=6$'da yeniden 6,52 ve ancak ondan sonra
+kesintisiz düşerek $k=50$'de 4,105. Bu, diğer ikisindeki %7 ve %1'lik
+salınımlara karşı %43'lük bir düşüş — argmin'i almak yerine grafiği çizdiğinizde
+bir eğilimle bir gürültü arasındaki fark tam olarak böyle görünüyor.
+
+Tablonun asıl dersi bu ve mesele salt uyuşmazlıktan daha kötü: üç indeks yalnızca
+farklı $k$ seçmiyor, üçte iki durumda komşu değerlerden ayırt edilemeyen sayılar
+seçiyor. Argmin raporlayan bir indeks her zaman bir argmin raporlayacaktır. Onun
+en aza indirdiği yüzeyin herhangi bir şekli olup olmadığını kontrol etmek size
+düşüyor.
+
+**Bu tablodaki her silhouette küçük.** Ölçek 1,0'a kadar gidiyor; taramanın
+tamamındaki en iyi değer 0,1042. Sıfıra yakın bir silhouette, ortalama bir
+noktanın, komşu kümeye kendi kümesine olduğu kadar yakın olması demek. Bu vasat
+bir kümeleme değil, [bu geometride iyi ayrılmış kümeleri olmayan bir
+derlem]{.hl} — ve sayı size bunu söylüyor.
+
+**En büyük küme sütununu izleyin.** LSA'da $k=2$'de tek bir küme derlemin
+%81,1'ini tutuyor. Klasik yozlaşmış sonuç bu: aykırı değer ilan etmesi
+yasaklanmış k-means, kocaman bir torba ile bir avuç kırıntı üretiyor. Bölümleme
+teknik olarak geçerli ve tamamen işe yaramaz.
+
+## Kaç küme? {#sec-kac-kume}
+
+Yukarıdaki tablo göz önündeyken, bu derlem için "doğru $k$ nedir" sorusunun
+dürüst cevabı *öyle bir şey yok* — bu bölümün geri kalanı da bunu "yeterince
+aramadım"dan nasıl ayırt edeceğinizle ilgili.
+
+### İndeksler aslında neyi ölçüyor
+
+$$
+s(i) = \frac{b(i) - a(i)}{\max\{a(i),\, b(i)\}}
+$$
+
+$i$ noktasının [**silhouette**](#gloss-silhouette){#term-silhouette .term-ref}
+değeri, $a(i)$ ile $b(i)$'yi karşılaştırıyor: $a(i)$ noktanın kendi kümesindeki
+noktalara ortalama uzaklığı, $b(i)$ ise en yakın *diğer* kümedeki noktalara
+ortalama uzaklığı [@rousseeuw1987silhouettes]. $-1$ ile $1$ arasında değişiyor
+ve bir kümelemenin puanı, tüm noktalar üzerindeki ortalama. Sayıyı değiştiren
+ama neredeyse hiç raporlanmayan iki uygulama ayrıntısı var: hesap $O(n^2)$,
+dolayısıyla 49.849 belgede sabit rastgele bir 10.000'lik örneklem üzerinde
+hesapladık (seed 42) — bu da buradaki her silhouette'i, kendi hata payı olan bir
+kestirime dönüştürüyor; ve "uzaklık" baştan sona `metric="cosine"`, yani kümelemenin
+fiilen yapıldığı geometriyle aynı. Metriği ve örneklem büyüklüğü belirtilmemiş
+bir silhouette, yeniden üretilebilir bir sayı değil.
+
+::: {#gloss-silhouette .column-margin .term-gloss}
+**silhouette** — her nokta için, kendi kümesine bir sonraki en yakın kümeye
+kıyasla ne kadar daha yakın olduğu; $[-1, 1]$ aralığına ölçeklenmiş hâli.
+0'a yakın olması noktanın bir sınırda oturduğu anlamına geliyor; derlemin
+tamamının 0'a yakın olması ise ortada sınır olmadığı anlamına geliyor.
+[↩](#term-silhouette){.term-back}
+:::
+
+**Calinski-Harabasz**, kümeler arası dağılımın küme içi dağılıma oranı;
+**Davies-Bouldin** ise kümeler üzerinden, küme içi yayılımın kümeler arası
+ayrıma en kötü durum oranını ortalıyor. İkisi de ucuz, ikisi de nokta sayısında
+$O(n)$ ve — taramanın gösterdiği gibi — gerçek küme yapısı olmayan veride ikisi
+de $k$'de neredeyse monoton. Bu da onların "optimum"unu, aradığınız aralığın
+bir yan ürünü hâline getiriyor.
+
+### Dirsek yöntemi kötü ününü hak ediyor
+
+En eski tarif, **atalet** (inertia) değerini $k$'ye karşı çizip bükülmeyi
+aramak. Atalet, @sec-kmeans'teki k-means amaç fonksiyonunun çözümde
+hesaplanmış hâlinden başka bir şey değil —
+$\sum_i \sum_{x \in C_i} \lVert x - \mu_i \rVert^2$, yani her noktanın kendi
+merkezine toplam karesel uzaklığı. Popüler, çünkü her zaman bir cevap üretiyor;
+sorun da tam olarak bu: atalet kuruluşu gereği monoton düşüyor — daha çok merkez
+her noktayı en yakınına ancak daha da yaklaştırabilir — dolayısıyla her zaman
+*bir* bükülme vardır ve onu nerede gördüğünüz eksen sınırlarınıza bağlıdır.
+@schubert2023stop bu savı uzun uzun kuruyor ve özeti sert: dirsek ölçütü
+kullanılmamalı, hayatta kalmasının sebebi de bilgilendirici olması değil,
+çizmesinin kolay olması.
+
+::: {.callout-tip appearance="simple"}
+**Her indeksten daha iyi bir varsayılan.** Üç ya da dört $k$ değerinde kümeleyin,
+her kümeden 20 belge örnekleyin ve onları okuyun. Bir küme için, bir meslektaşın
+sonra yeni belgeleri ayıklamakta kullanabileceği tek satırlık bir tarif
+yazamıyorsanız, silhouette ne derse desin o küme gerçek değildir. "Bir insanın
+üzerine hareket edebileceği grup sayısı" ölçütü bir kaçamak değil — zaten neden
+kümelediğinizle bağlantısı olan tek ölçüt o.
+:::
+
+### Etiketiniz varsa, onları kullanın
+
+Etiketli bir altküme varsa, dışsal doğrulama her içsel indeksten çok daha
+bilgilendirici. İki standart ölçü:
+
+- **Adjusted Rand index** [@hubert1985comparing], iki bölümlemenin üzerinde
+  anlaştığı belge çiftlerini sayıyor; rastgele uyuşmanın 0 alacağı şekilde
+  düzeltilmiş. Negatif bir ARI, bölümlemelerin şanstan *daha az* uyuştuğu
+  anlamına geliyor.
+- **Normalized mutual information** ve simetrik kuzeni V-measure
+  [@rosenberg2007vmeasure], kümeyi bilmenin etiket hakkında ne kadar bilgi
+  verdiğini soruyor. NMI şansa göre düzeltilmemiş, dolayısıyla $k$ ile birlikte
+  yukarı sürükleniyor — taramada görünüyor: E5'in NMI'ı yükselirken ARI'ı
+  düşüyor.
+
+İkisi de şu soruyu cevaplıyor: *bu bölümleme, etiket bölümlemesi mi?* Bu ifadeyi
+aklınızda tutun, çünkü @sec-kumeleme-getiri bunun yanlış soru olduğunu
+gösterecek.
+
+## Şekil yanlış olduğunda: yoğunluk tabanlı kümeleme {#sec-yogunluk}
+
+Yukarıdaki her k-means sonucu 3. varsayıma tabi: *her nokta bir kümeye aittir*.
+Bir ürün yorumu derleminde bu açıkça yanlış. Yorumların çoğu üç kelimelik genel
+bir övgü ve hiçbir şeye ait değil. **Gürültü** demesine izin verilen bir yöntemin
+bu yüzden daha iyi iş çıkarması gerekir — ve tam olarak başarısız olma biçimi
+k-means'in başarısız olma biçiminden daha bilgilendirici olduğu için çalıştırmaya
+değer.
+
+[HDBSCAN](#gloss-hdbscan){#term-hdbscan .term-ref} bir yoğunluk seviyeleri
+hiyerarşisi kuruyor, sonra bu hiyerarşi boyunca en uzun süre ayakta kalan
+kümeleri çıkarıyor [@campello2013density; @mcinnes2017hdbscan]. $k$'si yok. Ana
+düğmesi `min_cluster_size`: küme demeye razı olduğunuz en küçük grup. Yeterince
+yoğun olmayan her şey $-1$ etiketini alıp dışarıda bırakılıyor.
+
+::: {#gloss-hdbscan .column-margin .term-gloss}
+**HDBSCAN** — kümeleri, her bölgenin kendi yoğunluğu neyse o yoğunlukta,
+çevresinden daha yoğun bölgeler olarak buluyor ve geri kalanını *gürültü* diye
+etiketliyor. $k$ istemiyor ve her noktayı atama zorunluluğu yok.
+[↩](#term-hdbscan){.term-back}
+:::
+
+Her temsilde üç `min_cluster_size` değeriyle çalıştırdık. Sonuç her hücrede aynı
+ve incelikli bir sonuç da değil.
+
+| temsil | `min_cluster_size` | küme | gürültü | en büyük küme | süre |
+|:--|--:|--:|--:|--:|--:|
+| LSA | 25 | 2 | %52,9 | %47,0 | 674sn |
+| LSA | 100 | 2 | %97,1 | %2,4 | 219sn |
+| LSA | 500 | 0 | %100,0 | — | 198sn |
+| MiniLM | 25 | 2 | %55,1 | %44,8 | 285sn |
+| MiniLM | 100 | 3 | %90,0 | %9,2 | 248sn |
+| MiniLM | 500 | 0 | %100,0 | — | 1495sn |
+| E5 | 25 | 2 | %99,5 | %0,3 | 612sn |
+| E5 | 100 | 0 | %100,0 | — | 1530sn |
+| E5 | 500 | 0 | %100,0 | — | 2631sn |
+
+: 49.849 belge üzerinde HDBSCAN. Her ayar ya derlemin yarısını tek bir yumakta
+yutuyor ya da neredeyse tamamını çöpe atıyor {tbl-colwidths="[22,18,12,14,18,16]"}
+
+Satırları ikişer ikişer okuyun. `min_cluster_size = 25`'te algoritma *iki* küme
+buluyor; biri her şeyin kabaca yarısını tutuyor, diğeri yuvarlama hatası
+düzeyinde; kalan yarı gürültü. Bu bir yapı keşfi değil, tek bir büyük yığının
+tarifi. Eşiği 100'e çıkarın, yığın yoğun sayılmayı bırakıyor ve derlemin
+%90–97'si gürültü oluyor. 500'e çıkarın, 49.849 belgenin hiçbir yoğunluk
+seviyesinde hiçbir yerinde küme kalmıyor.
+
+E5 uç durum ve en öğretici olanı. Denediğimiz en hoşgörülü ayar olan
+`min_cluster_size = 25`'te bile derlemin **%99,5**'ini gürültü ilan ediyor ve en
+büyük kümesi %0,3. Eşiği azıcık yükseltin, hiçbir şey bulamıyor — sıfır küme,
+%100 gürültü, üstelik `min_cluster_size = 500`'de 44 dakikalık bir çalışmanın
+ardından.
+
+@sec-benzerlik-ne-demek'in öngördüğü tam olarak buydu: E5'in rastgele çift
+kosinüsü 0,8547, standart sapması 0,0278 — yani her belge diğer her belgeye
+neredeyse aynı uzaklıkta oturuyor. Bu kadar tekdüze bir uzayda, komşuları
+sıralamakta ne kadar iyi olursa olsun, HDBSCAN'in bulabileceği bir yoğunluk
+değişimi yok. Üzerinde durulmaya değer ironiye dikkat edin: **E5,
+@sec-kumeleme-getiri'de *en iyi* başarımı gösteren temsil ve yoğunluk tabanlı
+kümelemenin en eksiksiz biçimde çuvalladığı temsil.** Bunlar çelişki değil —
+farklı şeyleri ölçüyorlar — ama yalnızca HDBSCAN deneyen bir uygulayıcı, kazanan
+modeli çöpe atmış olurdu.
+
+::: {.callout-important appearance="simple"}
+**%97'lik gürültü oranı bir ölçüm, bir başarısızlık değil.** HDBSCAN size doğru
+ve belirli bir şey söylüyor: yüzlerce belge ölçeğinde bu derlemin, çevresinden
+anlamlı biçimde daha yoğun bölgeleri yok. Bir ada takımı değil, gradyanları olan
+tek bir bulut. k-means size bunu söyleyemezdi, çünkü k-means var olsun olmasın
+$k$ küme döndürmek zorunda.
+:::
+
+Dürüst okuma bu ve k-means taramasını da açıklıyor. Silhouette'in 0,1042'nin
+üstüne hiç çıkmaması yanlış $k$'yi aradığımız için değil, bulunacak sınır olmadığı
+için. Varsayımları tamamen farklı iki yöntem aynı şeyi söylüyor; bu, sonuçların
+herhangi birinden tek başına daha değerli.
+
+Maliyete de dikkat edin. MiniLM üzerindeki `min_cluster_size = 500` koşusu,
+ortada bir şey olmadığı sonucuna varmak için 1.495 saniye — 25 dakika — sürdü.
+Yüksek boyutlu veride yoğunluk tabanlı kümeleme ucuz değil ve çalışma süresi de,
+beklediğiniz gibi ayara göre monoton değil, çünkü çıkarılan hiyerarşinin boyutu
+parametreye değil veriye bağlı.
+
+::: {.callout-tip appearance="simple"}
+**Standart geçici çözüm ve bedeli.** Alışılmış tavsiye, önce UMAP
+[@mcinnes2018umap] ile 5–15 boyuta inmek, sonra izdüşüm üzerinde HDBSCAN
+çalıştırmak. BERTopic varsayılan olarak bunu yapıyor [@grootendorst2022bertopic]
+ve gerçekten de küme üretiyor. Nedeni konusunda net olun: UMAP, komşuları
+birbirine çekip geri kalan her şeyi iterek yerel yoğunluğu *imal eden* doğrusal
+olmayan bir yöntem. Bir UMAP izdüşümünde bulunan kümeler kısmen UMAP'in bir
+özelliği. Yine de faydalı olabilirler — ama "UMAP'ten sonra HDBSCAN küme buldu",
+özgün uzayın küme içerdiğinin kanıtı değildir; yukarıdaki sayılar özgün uzayın
+gerçekte neye benzediğidir.
+:::
+
+## Klasik ve embedding çağı konu modelleri {#sec-konu-modelleri}
+
+Kümeleme size belge başına bir etiket veriyor. Bir **konu modeli** ise grup
+başına bir kelime listesi veriyor — paydaşa asıl gösterdiğiniz şey de bu. İkisi
+rakip olmaktan çok aynı teslimatın iki yarısı ve 2026'da, ne kadar kopya
+çektiklerine göre artan sırayla, bilmeye değer üç aile var.
+
+### LDA: üretici hikâye
+
+Latent Dirichlet allocation [@blei2003latent], her belgenin $K$ konu üzerinde
+bir karışım, her konunun da sözlük üzerinde bir dağılım olduğunu — ikisinin de
+Dirichlet önsellerinden çekildiğini — varsayıyor ve sonra gözlediğiniz
+kelimeleri en iyi hangi konuların açıkladığını soruyor. Gerçekten olasılıksal:
+bir belge tek bir kovaya atanmıyor, %60 konu 3 ve %30 konu 7 oluyor. On beş yıl
+boyunca konu modellemeye hükmetti ve insanlar "konu modeli" dediğinde hâlâ
+kastettikleri şey bu.
+
+Varsayımlarını da söylemekte fayda var, çünkü bizim derlemimize kötü oturuyorlar.
+LDA *belgeler* üzerinde bir kelime torbası modeli ve her belgenin, içinden bir
+karışım kestirmeye yetecek kadar kelime içermesine ihtiyaç duyuyor. Buradaki
+medyan yorum 19 kelime. 19 token'dan on yönlü bir karışım kestirmek epeyce şey
+istemek.
+
+### NMF: aynı şekil, önsel dağılımlar olmadan
+
+Non-negative matrix factorization [@lee1999learning], belge-terim matrisini
+$V \approx WH$ biçiminde, tek bir kısıtla çarpanlarına ayırıyor: $W$ ve $H$
+negatif girdi içeremez. Hiçbir şey birbirini götüremediği için bulduğu parçalar
+toplanabilir oluyor ve metinde bu, okunabilir kelime listeleri üretme
+eğiliminde. Üretici bir hikâyesi ve önsel dağılımları yok — bir matris ayrışımı
+sadece — ki bunun pratikte pek önemi olmadığı ortaya çıkıyor; ayrıca ham
+sayımlar yerine tf-idf üzerinde çalışıyor, bu da kısa belgelere daha uygun.
+
+### Önce kümele, sonra betimle: c-TF-IDF
+
+Üçüncü aile modellemeyi tamamen atlıyor. @sec-kmeans'ten gelen kümeleriniz zaten
+var. Her kümeyi tek bir uzun belge sayın, içindeki her şeyi birleştirin ve
+kelimelerini küme içi terim frekansına karşı kümeler arası ters frekansla
+puanlayın:
+
+$$
+W_{t,c} = \operatorname{tf}_{t,c} \times \log\!\left(1 + \frac{A}{\operatorname{tf}_t}\right)
+$$
+
+Burada $\operatorname{tf}_{t,c}$, $t$ teriminin $c$ kümesindeki frekansı; $A$
+küme başına ortalama kelime sayısı; $\operatorname{tf}_t$ ise terimin derlemin
+tamamındaki frekansı. Bu, BERTopic'in merkezindeki numara olan **c-TF-IDF**
+[@grootendorst2022bertopic]. En yükseğe koyduğu kelimeler, bu kümede sık ve
+derlem genelinde seyrek olanlar — ki bu *neredeyse* ama tam olarak "burada
+yaygın, başka yerde nadir" değil, çünkü $\operatorname{tf}_t$ içinde $c$
+kümesinin kendi katkısı da var. Küçük bir küme için fark ihmal edilebilir.
+Derlemin yarısını tutan bir küme için değil: kendisine has kelimeleri, tam da
+ona has oldukları için cezalandırılıyor. En büyük kümenizin etiketi neden bu
+kadar yavan diye şaşırmadan önce bilmekte fayda var.
+
+Burada ne olduğu konusunda net olmak gerek. c-TF-IDF bir konu modeli değil;
+başkasının kümelemesine uygulanan bir etiketleme yordamı. Modellemenin tamamını
+embedding ile k-means yaptı. Bu bir avantaj — anlamsal işin, sizin derleminizin
+içerdiğinden çok daha fazla metinle eğitilmiş bir model tarafından yapıldığı
+anlamına geliyor — ama aynı zamanda konuların, kümelemenin her kusurunu miras
+aldığı anlamına da geliyor; @sec-noktali-i bunu birazdan bizim hesabımıza
+gösterecek.
+
+### Puanlamak
+
+Karşılaştırmak için bir sayıya ihtiyacımız var. **Konu tutarlılığı** (topic
+coherence), bir konunun en üstteki kelimelerinin gerçek belgelerde gerçekten bir
+arada geçip geçmediğini ölçüyor. Standart varyantı NPMI [@bouma2009normalized]:
+
+$$
+\operatorname{NPMI}(w_i, w_j) =
+\frac{\log \dfrac{P(w_i, w_j)}{P(w_i)\,P(w_j)}}{-\log P(w_i, w_j)}
+$$
+
+Bir konunun ilk 10 kelimesindeki tüm kelime çiftleri üzerinden, sonra da konular
+üzerinden ortalanıyor. $-1$ ile $1$ arasında değişiyor; pozitif olması,
+kelimelerin şanstan daha sık birlikte göründüğü anlamına geliyor.
+
+Formül, "birlikte"nin ne demek olduğunu söyleyene kadar hesaplanabilir değil ve
+cevap sayıları ciddi biçimde değiştiriyor; o yüzden söyleyelim: **buradaki
+birlikte geçme belge düzeyinde.** $P(w_i)$, 49.849 yorumun $w_i$'yi en az bir
+kez içeren kesri; $P(w_i, w_j)$ ise ikisini birden içeren kesri — bir yorum tek
+bir bağlam ve içindeki tekrarlar iki kez sayılmıyor. Alternatif gelenek olan
+10 ya da 20 token'lık kayan pencere uzun belgeler için standart ama 19 kelimelik
+bir yorumda hiçbir anlam ifade etmiyor. Hiç birlikte geçmeyen çiftler
+ıraksamaya bırakılmak yerine $\varepsilon$ ile yumuşatılıp $-1$'e çekiliyor.
+Bütün olasılıklar, elle yazılmış bir Türkçe durak kelime listesiyle oluşturulmuş
+8.651 terimlik sabit bir sözlük üzerinden derlemin kendisinden geliyor;
+dolayısıyla beş yöntem tam olarak aynı zeminde puanlanıyor.
+
+| yöntem | NPMI | eğitim süresi | neye ihtiyaç duyuyor |
+|:--|--:|--:|:--|
+| LDA, $K=10$ | +0,0737 | 133,1sn | ham sayımlar |
+| NMF, $K=10$ | +0,1183 | 1,0sn | tf-idf |
+| LSA $k$=10 üzerinde c-TF-IDF | +0,1340 | 0,03sn | mevcut bir kümeleme |
+| MiniLM $k$=10 üzerinde c-TF-IDF | +0,1002 | 0,02sn | mevcut bir kümeleme |
+| E5 $k$=10 üzerinde c-TF-IDF | +0,1064 | 0,02sn | mevcut bir kümeleme |
+
+: On konu, bir derlem, bir tutarlılık ölçüsü. LDA hem en yavaşı hem de en az
+tutarlısı {tbl-colwidths="[34,14,14,38]"}
+
+Manşet klasik yöntem için rahatsız edici. **LDA, NMF'ten 133× daha yavaş ve
+tutarlılıkta daha düşük puan alıyor.** Bu ince bir fark değil ve insanların
+yıllardır kısa metin derlemlerinde raporladıklarıyla tutarlı: belgeleriniz
+kısaysa Dirichlet karışımının kestireceği bir şey kalmıyor ve tf-idf üzerindeki
+düz bir matris ayrışımı, maliyetin çok küçük bir kısmına onu geçiyor. Kısa metin
+üzerinde bir LDA hattı devraldıysanız, yanına NMF çalıştırmak bir öğleden sonra
+alır ve tartışmayı büyük ihtimalle bitirir.
+
+Üç c-TF-IDF satırı fiilen bedava, çünkü kümelemenin bedeli zaten ödenmişti. Ve
+gözle görülür biçimde farklı kelime listeleri üretiyorlar. E5 artı c-TF-IDF'in
+on kümesinden üçü için döndürdüğü şey:
+
+``` text
+topic 2  koku  kokusu  parfüm  kalıcı  güzel  tavsiye  parfümü  aldım
+topic 3  kitap kitabı  tavsiye  güzel  ederim  sürükleyici  okudum  akıcı
+topic 9  telefon  iyi  şarj  yok  güzel  telefonu  gayet  ürün  var
+```
+
+Parfüm, kitap, telefon. Bu kategorilerin var olduğunu modele kimse söylemedi.
+Kümelemenin gerçekten iyi olduğu şey bu; ayrıca dikkat edin, bulunan yapı bir
+*ürün kategorisi* yapısı — @sec-kmeans'te gizliden gizliye umduğumuz duygu
+yapısı değil. ARI'ın sıfır olmasının sebebi de bu.
+
+::: {.callout-warning appearance="simple"}
+**Tutarlılık bir vekil ölçü ve zayıf bir vekil.** @chang2009reading, herkesin
+en başta yapması gereken deneyi yaptı: insanlardan bir konunun kelime
+listesindeki yabancı kelimeyi bulmalarını istediler ve tutulan veri üzerinde en iyi
+olabilirliği alan modellerin *en az* yorumlanabilir konuları ürettiğini
+buldular. Otomatik konu metrikleri kullanışlıdır, güvenilir değil. Bir sonraki
+bölüm, bizim kendi tutarlılık sayımızın yalnızca hatalı değil, tam ters yönü
+gösterdiği bir vaka.
+:::
+
+## Kümelemenin bulduğu hata {#sec-noktali-i}
+
+Sonuç tablosuna bir daha bakın. LSA üzerindeki c-TF-IDF beşin en iyisi olan
+**+0,1340** aldı. Tutarlılığın, kelimeleri gerçekten birlikte giden konuları
+ödüllendirmesi gerekiyor; o hâlde doğal bir sonraki adım, bu puanı kazandıran
+konuyu okumak. O koşunun konu başına puanları:
+
+``` text
+topic    0       1       2       3       4       5       6       7       8       9
+NPMI  .1095   .0654   .0566   .0591   .1059   .0933   .1022   .5075   .1879   .0523
+```
+
+7 numaralı konu **+0,5075** alıyor — ikinci en iyinin neredeyse üç katı ve deneyin
+tamamındaki en yüksek konu başına tutarlılık. Kelimeleri:
+
+``` text
+topic 7   bi  ye  fi  tavsi  çi  ederi  si  ni  li  yi
+```
+
+Bunlar kelime değil. Parça. Ve yöntem onları bölümdeki en tutarlı konu olarak
+puanladı, çünkü gerçekten de son derece tutarlılar — neredeyse kusursuz biçimde
+birlikte geçiyorlar, çünkü hepsi aynı belgelerdeki aynı kusur tarafından
+üretiliyor.
+
+### İzini sürmek
+
+Zincir kısa ve her halkası bir REPL'de kontrol edilebilir:
+
+``` text
+>>> "TAVSİYE".lower()
+'t a v s i ̇ y e'                     # 8 codepoints, not 7
+>>> [f"U+{ord(c):04X}" for c in "TAVSİYE".lower()]
+['U+0074','U+0061','U+0076','U+0073','U+0069','U+0307','U+0079','U+0065']
+```
+
+`İ`, U+0130 — LATIN CAPITAL LETTER I WITH DOT ABOVE; noktalı ve noktasız `i`'nin
+farklı harfler olduğu Türkçede gayet normal bir harf. Python'ın `str.lower()`
+metodu yerel duyarlı değil. U+0130'u `i`'ye (U+0069) ve ardından gelen
+**U+0307, COMBINING DOT ABOVE**'a küçültüyor; çünkü düz bir `i` zaten bir nokta
+taşıyor ve Unicode'da içine katlanacak "üstünde fazladan nokta olan i" diye
+önceden birleştirilmiş bir karakter yok.
+
+Şimdi ikinci halka. Normalleştirme sizi kurtarmıyor:
+
+``` text
+>>> "̇" in unicodedata.normalize("NFC",  "TAVSİYE".lower())    # True
+>>> "̇" in unicodedata.normalize("NFKC", "TAVSİYE".lower())    # True
+```
+
+Yukarıdaki nedenle hem NFC hem NFKC diziyi olduğu gibi bırakıyor:
+normalleştirilecek bir birleşik biçim yok. "Her şeyi NFKC'leyelim gitsin"
+alışkanlığı, bunun ta üretime kadar hayatta kalmasını sağlayan şeyin ta kendisi.
+
+Üçüncü halka tokenizer. scikit-learn'ün varsayılan token deseni
+`(?u)\b\w\w+\b` ve birleştirici işaret bir kelime karakteri değil, dolayısıyla:
+
+``` text
+>>> re.findall(r"(?u)\b\w\w+\b", "TAVSİYE".lower())
+['tavsi', 'ye']
+>>> re.findall(r"(?u)\b\w\w+\b", "tavsiye")
+['tavsiye']
+```
+
+*Tavsiye* — bu derlemdeki belgelerin %19,8'inde geçen, derleme özgü en sık
+kelime — sessizce ikiye bölünüyor; ama yalnızca birinin onu büyük harfle yazdığı
+belgelerde.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir büyük harften bozuk bir sözlüğe dört adım</div>
+<svg viewBox="0 0 764 348" style="max-width:744px" role="img"
+     aria-label="Soldan sağa dört adımlık bir zincir. Birinci adım, kaynak kelime: Türkçe noktalı büyük İ ile yazılmış TAVSİYE, kod noktası U+0130. İkinci adım, Python'ın str.lower metodu uygulanıyor; yerel duyarlı olmadığı için noktalı büyük İ, düz bir i'ye (kod noktası U+0069) ve ardından ayrı bir birleştirici üst noktaya (kod noktası U+0307) dönüşüyor, yani kelime artık yedi yerine sekiz kod noktası. Üçüncü adım, Unicode normalleştirmesi uygulanıyor ve işe yaramıyor: hem NFC hem NFKC birleştirici işareti yerinde bırakıyor, çünkü normalleştirilecek, üstünde fazladan nokta taşıyan önceden birleştirilmiş bir i yok. Dördüncü adım, tokenizer'ın varsayılan kelime deseni olan ters bölü w ters bölü w artı, birleştirici işareti kelime karakteri saymıyor, dolayısıyla token ikiye bölünüyor: tavsi ve ye. Zincirin altında iki yatay çubuk, birleştirici nokta içeren belgelerin LSA temsilinin k-means kümesi 7 içinde ne sıklıkta göründüğünü, o kümenin 1.365 belgesinin yüzde 94,7'si olarak, derlemin geri kalanındaki yüzde 6,0 ile karşılaştırıyor; 15,8 kat zenginleşme.">
+  <defs>
+    <marker id="dot-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="8" y="30" width="170" height="112" rx="8" class="box"/>
+  <text x="93" y="52" class="t-xs t-mid t-b">1 · kaynak</text>
+  <text x="93" y="84" class="t-sm t-mid t-b t-mono">TAVSİYE</text>
+  <text x="93" y="108" class="t-xs t-mid t-muted">İ = U+0130</text>
+  <text x="93" y="126" class="t-xs t-mid t-muted">7 kod noktası</text>
+
+  <line x1="182" y1="86" x2="200" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="204" y="30" width="170" height="112" rx="8" class="box-warm"/>
+  <text x="289" y="52" class="t-xs t-mid t-b t-warm">2 · .lower()</text>
+  <text x="289" y="80" class="t-xs t-mid t-mono">t a v s i</text>
+  <text x="289" y="100" class="t-xs t-mid t-b t-rose">+ U+0307</text>
+  <text x="289" y="126" class="t-xs t-mid t-muted">7 değil, 8 kod noktası</text>
+
+  <line x1="378" y1="86" x2="396" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="400" y="30" width="170" height="112" rx="8" class="box-warm"/>
+  <text x="485" y="52" class="t-xs t-mid t-b t-warm">3 · normalleştir</text>
+  <text x="485" y="80" class="t-xs t-mid t-mono">NFC → değişmez</text>
+  <text x="485" y="100" class="t-xs t-mid t-mono">NFKC → değişmez</text>
+  <text x="485" y="126" class="t-xs t-mid t-muted">birleşecek bir şey yok</text>
+
+  <line x1="574" y1="86" x2="592" y2="86" class="ln" marker-end="url(#dot-a)"/>
+
+  <rect x="596" y="30" width="158" height="112" rx="8" class="box-rose"/>
+  <text x="675" y="52" class="t-xs t-mid t-b t-rose">4 · token'la</text>
+  <text x="675" y="78" class="t-xs t-mid t-mono t-muted">\w\w+</text>
+  <text x="675" y="102" class="t-xs t-mid t-b t-mono">['tavsi','ye']</text>
+  <text x="675" y="126" class="t-xs t-mid t-muted">tek kelime ikiye çıktı</text>
+
+  <text x="14" y="196" class="t-xs t-b t-muted">VE k-MEANS BUNU KENDİLİĞİNDEN BULDU</text>
+
+  <text x="14" y="230" class="t-xs t-b">LSA kümesi 7</text>
+  <text x="14" y="246" class="t-xs t-muted">1.365 belge</text>
+  <rect x="150" y="216" width="568" height="20" rx="4" class="box-rose"/>
+  <text x="434" y="231" class="t-xs t-mid t-b t-rose">%94,7'sinde U+0307 var</text>
+
+  <text x="14" y="282" class="t-xs t-b">geri kalanı</text>
+  <text x="14" y="298" class="t-xs t-muted">48.484 belge</text>
+  <rect x="150" y="268" width="36" height="20" rx="4" class="box-accent"/>
+  <text x="198" y="283" class="t-xs t-b t-accent">%6,0  →  15,8× zenginleşme</text>
+
+  <text x="14" y="336" class="t-xs t-muted">Kümelemeye 256 LSA boyutu verildi; Unicode hakkında hiçbir bilgi verilmedi.</text>
+</svg>
+```
+::: {.fig-cap}
+İnsanları yakalayan adım 3. "Biz her şeyi NFKC'ye normalleştiriyoruz" cümlesi
+bunu kapsıyormuş gibi geliyor, kapsamıyor — fazladan nokta taşıyan bir `i` için
+önceden birleştirilmiş bir karakter yok, dolayısıyla normalleştirmenin yapacak
+bir işi yok ve başarı raporluyor.
+:::
+::::
+
+::: {.callout-note appearance="simple"}
+**Tek satırlık düzeltme ve neden `.lower()` olmadığı.** Küçültmeden sonra
+U+0307'yi silmek (`s.replace("i̇", "i")`) `['tavsiye']`'yi geri getiriyor. Daha
+iyi düzeltme, problemi hiç yaratmamak: Türkçe farkındalığı olan bir casefold
+kullanın ya da küçültmeden önce `İ → i` ve `I → ı` dönüşümlerini açıkça yapın.
+Hangisini seçerseniz seçin, test paketinizde tutmanız gereken test şu:
+`assert tokenize("TAVSİYE") == tokenize("tavsiye")`.
+:::
+
+### Neye mal oldu
+
+| ölçüm | değer |
+|:--|--:|
+| U+0307 içeren belge | 4.183 (derlemin %8,39'u) |
+| bunların LSA kümesi 7 içindeki payı | %30,9 |
+| küme 7'nin büyüklüğü | 1.365 belge |
+| küme 7'de etkilenen belgeler | %94,7 |
+| geri kalan her yerde etkilenenler | %6,0 |
+| küme içindeki zenginleşme | 15,8× |
+| yalnızca bu hata yüzünden var olan sözlük türleri | 1.607 |
+| düzeltildiğinde net sözlük değişimi | 86.196 → 85.224 |
+
+: Hasar, ölçülmüş hâliyle {tbl-colwidths="[62,38]"}
+
+::: {.column-margin}
+Buradaki sözlük büyüklüğü 86.196; bölümün başında raporlanan 86.245 değil.
+İlgisiz iki sebebi var ve ayırt etmek için yeniden koşmak gerekti: 49'un 45'i,
+scikit-learn'ün gerçek varsayılan deseni `\b\w\w+\b`'nin attığı ama kurulumdaki
+çıplak `\w+`'nın tuttuğu tek karakterlik token'lar (`0`–`9`, `_`, `a`); kalan 4
+tanesi de @sec-yakin-kopyalar'da çıkarılan 151 yakın kopyayla birlikte öldü.
+İki karar da bilinçli alınmamıştı. Sözlüğünüzü iki kez aynı şekilde sayın, ya da
+sayıları karşılaştırmayın.
+:::
+
+Ortadaki satırları dikkatle okuyun, çünkü bu bölümün bütün meselesi onlar.
+k-means'e Unicode hakkında hiçbir bilgi verilmedi. Ona 256 LSA boyutu verildi.
+Buna rağmen **%6,0'lık bir arka plana karşı %94,7 etkilenmiş** bir küme
+topladı — hatayı, kesin biçimde ve kimse söylemeden buldu. Bunu yapabildi,
+çünkü sistematik bir metin kusuru veride gerçek bir değişim ekseni *oluşturuyor*
+ve kümelemenin işi gerçek değişim eksenlerini bulmak.
+
+Uydurulmuş sözlük, hiçbir Türkçe konuşurun yazmadığı 1.607 tür:
+`alişveri`, `acti`, `alternati`, `alabi`. Bu, tf-idf matrisinin hiçliğe harcanan
+1.607 satırı demek ve her biri, kesilip çıkarıldığı gerçek kelimenin belge
+frekansını seyreltiyor.
+
+Net değişim 1.607'den küçük ve aradaki fark bir cümleyi hak ediyor, çünkü ters
+anlaşılması kolay. Metni onarmak o 1.607 parçayı kaldırıyor ve daha önce hiç tek
+parça hâlinde görünmemiş 635 tür *yaratıyor* — `alişverişim`, `acemiliğini`,
+`admin` — bu derlemde yalnızca bozuk hâlde var olan kelimeler. Böylece sözlük
+86.196 → 85.224'e iniyor; net 972 küçülme, yani kaldırılan 1.607 eksi geri gelen
+635. Düzeltme yalnızca silmiyor; eksik olduğunu bilmediğiniz kelimeleri size
+geri veriyor.
+
+::: {.callout-important appearance="simple"}
+**Kümelemenin savunması, dürüstçe ifade edilmiş hâli budur.** Kümeleme,
+etiketlere karşı ARI ≈ 0 aldı. @sec-kac-kume'nin ölçütüne göre hiçbir şey
+bulamadı. Aynı kümeleme, belge başına 256 sayıdan ve aramasını söyleyen kimse
+olmadan, 80 milyon konuşuru olan bir dilde metindeki gerçek bir kusuru da ayırıp
+çıkardı. **Gözetimsiz yöntemler, verinizde ne olduğunu — bilerek koymadığınız
+parçalar dahil — böyle öğrenirsiniz.**
+:::
+
+Burada etkileyici olanın ne olduğu konusunda kesin olun, çünkü bu hikâyenin
+cazip versiyonu yanlış. @sec-karsilastirma bu hatayı kaçırmış **değil**.
+`"İYİ".lower()` arızasını açıkça belgeliyor, düzeltmek için `tr_lower` tanımlıyor
+ve hasarı ölçmenizi isteyen bir alıştırma veriyor. O bölüm biliyordu, çünkü
+Türkçe bilen bir insan biliyor ve yazmıştı.
+
+Fark edilmeye değer olan şey, kümelemenin bunu *yeniden keşfetmesi*. 4. bölümün
+Türkçe konuşan birine ihtiyacı vardı; $k$-means'e vektörlerden başka hiçbir şey
+gerekmedi ve aynısını, takımınızdaki kimsenin okuyamadığı bir dildeki derlemde
+de yapacak. Aktarılabilir iddia bu ve ikisinden küçük olanı — tam da bu yüzden
+akılda tutulması gereken o. Yalnızca zaten bildiğiniz hataları bulan bir yöntem
+değersizdir; bir hatanın neye benzediği söylenmeden onları bulan bir yöntem ise
+her şeye doğrultabileceğiniz bir alettir.
+
+Ayrıca @chang2009reading bulgusunun, alıntıyla değil kendi sayılarımızla temiz
+bir gösterimi. Bölümün tamamındaki en yüksek tutarlılığa sahip konu, hiçbir
+anlamı olmayan konuydu. Onu atıp kalan dokuzu ortalayın: LSA'nın c-TF-IDF
+tutarlılığı **+0,1340'tan +0,0925'e** düşüyor — hem MiniLM'in (+0,1002) hem de
+E5'in (+0,1064) altına — bu da onu üç c-TF-IDF satırı arasında birincilikten
+sonunculuğa taşıyor. Metrik çöpü fark etmemekle kalmadı; yöntemi *o çöp
+sayesinde* birinci sıraya koydu.
+
+::: {.column-margin}
+Kesin konuşmak gerekirse +0,0925 dokuz konuluk bir ortalama ve on konuluk
+ortalamalarla karşılaştırılıyor, yani birebir bir takas değil. Olmasına da gerek
+yok: mesele hareketin *büyüklüğü*. Ondan biri — üstelik bir insanın iki saniyede
+eleyeceği türden biri — ortalamanın, sıralamayı tersine çevirmeye yetecek kadarını taşıyordu.
+:::
+
+## Getiri: "başarısız" bir kümeleme ne işe yarar {#sec-kumeleme-getiri}
+
+Bölümün iki kez ertelediği soruyu cevaplama vakti. ARI ≈ 0, bölümlemenin etiket
+bölümlemesi olmadığını söylüyor. Bölümlemenin işe yaramaz olduğunu söylemiyor;
+bu ikisini birbirine karıştırmak da insanların kendilerine yarayacak bir sonuçtan
+kendilerini caydırmasının en yaygın yolu.
+
+O yüzden bir uygulayıcının gerçekten sorduğu bir soruyu sorun. **Bir etiketleme
+bütçeniz var. Bu 49.849 yorumun 5.000'ini okuyabilirsiniz. Bir belgenin hangi
+kümede olduğunu bilmek, hangi 5.000'i okumanız gerektiğini değiştiriyor mu?**
+
+Derlem %93,66 olumlu, yani %6,34 olumsuz. Rastgele okuyun, okuduğunuzun %6,34'ü
+şikâyet olur. Şimdi etiketleri açın ve $k=10$'da *her kümenin içindeki* olumlu
+oranı ölçün — bu tanıyı ancak bu derlemin tesadüfen etiketleri olduğu için
+koşabildik; kümeleme onları hiç görmedi.
+
+Son sütundaki sayı **lift**: bir kümenin içindeki olumsuz oranın, derlemin
+tamamındaki olumsuz orana bölümü. Lift 1,0, kümenin rastgele okumaktan daha iyi
+olmadığı anlamına geliyor; lift 4,0 ise ondan çekilen bir belgenin şikâyet olma
+olasılığının dört katı olduğu anlamına geliyor. "Okuma bütçemi nereye
+harcamalıyım" sorusunun doğrudan cevabı bu; ARI'ı değil onu istememizin sebebi
+de bu.
+
+| temsil | olumlu oran, en düşük küme → en yüksek | en kötü kümedeki olumsuz lift |
+|:--|:--|--:|
+| LSA | %89,4 → %98,9 | 1,67× |
+| MiniLM | %82,3 → %99,4 | 2,79× |
+| E5 | %73,2 → %99,5 | 4,23× |
+
+: Kümeler etiket bakımından saf olmaktan çok uzak — ama bilgisiz olmaktan da
+çok uzak {tbl-colwidths="[22,46,32]"}
+
+E5'in en kötü kümesi, **%6,34'lük taban orana karşı %26,8 olumsuz**. Ondan
+çektiğiniz her belgenin şikâyet olma olasılığı, rastgele çekilmiş bir belgeye
+göre 4,23× daha yüksek. Bu büyük bir etki ve ARI bunun hiçbirini göremedi, çünkü
+ARI bölümlemenin tamamının etiketlemenin tamamını yeniden üretip üretmediğini
+soruyor — bunun cevabı da hayır.
+
+::: {.callout-note appearance="simple"}
+**Model sıralamasına az önce ne olduğuna dikkat edin.** ARI altında üç temsil
+ayırt edilemezdi — hepsi ≈ 0, en iyisi 0,0083. Kararla ilgili ölçü altında ise
+temiz biçimde ve beklediğiniz sırada ayrışıyorlar: 1,67× / 2,79× / 4,23×.
+Metrik hiçbir şey ölçmüyor değildi; yanlış şeyi ölçüyordu.
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Aynı üç kümeleme, iki soru, zıt cevaplar</div>
+<svg viewBox="0 0 764 316" style="max-width:744px" role="img"
+     aria-label="Yan yana iki panel, k eşittir 10'daki tıpatıp aynı üç k-means kümelemesini puanlıyor. Sol panel şunu soruyor: bu bölümleme etiket bölümlemesi mi? Cevabı adjusted Rand index ile veriyor: LSA eksi 0,0094, MiniLM eksi 0,0007 ve E5 artı 0,0075 alıyor; hepsi esasen sıfır. Karar: üç temsil ayırt edilemez ve üçü de rastgele bölümleme gibi görünüyor. Sağ panel şunu soruyor: kümeyi bilmek nereyi okumam gerektiğini değiştirir mi? Cevabı en kötü kümedeki olumsuz lift ile veriyor: LSA 1,67 kat, MiniLM 2,79 kat ve E5 4,23 kat; giderek uzayan çubuklar hâlinde çiziliyor. Karar: üçü temiz biçimde ayrışıyor ve beklenen sırada diziliyor. Altındaki not, her iki sütunun da tıpatıp aynı küme atamalarından hesaplandığını söylüyor.">
+  <rect x="8" y="28" width="366" height="212" rx="10" class="box"/>
+  <text x="191" y="54" class="t-xs t-mid t-b t-muted">ARI'NİN SORDUĞU SORU</text>
+  <text x="191" y="78" class="t-sm t-mid t-b">“bu, etiket bölümlemesi mi?”</text>
+
+  <text x="34" y="118" class="t-xs t-b">LSA</text>
+  <text x="34" y="152" class="t-xs t-b">MiniLM</text>
+  <text x="34" y="186" class="t-xs t-b">E5</text>
+  <line x1="196" y1="96" x2="196" y2="200" class="ln-thin ln-dash"/>
+  <text x="196" y="214" class="t-xs t-mid t-muted">0</text>
+  <rect x="184" y="106" width="12" height="16" rx="3" class="box-rose"/>
+  <rect x="195" y="140" width="2" height="16" rx="1" class="box-rose"/>
+  <rect x="196" y="174" width="10" height="16" rx="3" class="box-accent"/>
+  <text x="252" y="118" class="t-xs t-mono t-muted">−0,0094</text>
+  <text x="252" y="152" class="t-xs t-mono t-muted">−0,0007</text>
+  <text x="252" y="186" class="t-xs t-mono t-muted">+0,0075</text>
+
+  <text x="191" y="232" class="t-xs t-mid t-b t-rose">karar: ayırt edilemez</text>
+
+  <rect x="390" y="28" width="366" height="212" rx="10" class="box-accent"/>
+  <text x="573" y="54" class="t-xs t-mid t-b t-muted">UYGULAYICININ SORDUĞU SORU</text>
+  <text x="573" y="78" class="t-sm t-mid t-b">“okumayı nereye harcamalıyım?”</text>
+
+  <text x="416" y="118" class="t-xs t-b">LSA</text>
+  <text x="416" y="152" class="t-xs t-b">MiniLM</text>
+  <text x="416" y="186" class="t-xs t-b">E5</text>
+  <rect x="494" y="106" width="72" height="16" rx="3" class="box-warm"/>
+  <rect x="494" y="140" width="120" height="16" rx="3" class="box-warm"/>
+  <rect x="494" y="174" width="182" height="16" rx="3" class="box-rose"/>
+  <text x="576" y="118" class="t-xs t-b">1,67×</text>
+  <text x="624" y="152" class="t-xs t-b">2,79×</text>
+  <text x="686" y="186" class="t-xs t-b t-rose">4,23×</text>
+
+  <text x="573" y="232" class="t-xs t-mid t-b t-accent">karar: temiz bir sıralama</text>
+
+  <text x="382" y="276" class="t-xs t-mid t-muted">Her iki sütun da tıpatıp aynı küme atamalarından hesaplandı. Hiçbir şey yeniden çalıştırılmadı.</text>
+  <text x="382" y="300" class="t-xs t-mid t-muted">Sol: k = 10'da adjusted Rand index.  Sağ: en kötü kümede olumsuzların ne kadar yoğunlaştığı.</text>
+</svg>
+```
+::: {.fig-cap}
+Bölümden akılda kalması gereken şekil bu. Aynı küme atamaları, standart
+değerlendirmeye göre değersiz ve sizin gerçek kararınıza bağlı değerlendirmeye
+göre değerli olabilir — hem de aynı anda. İkisinden hangisini raporladığınız
+sizin verdiğiniz bir karar ve çoğu insan bu kararı fark etmeden veriyor.
+:::
+::::
+
+### İlk noktası değil, eğrinin tamamı
+
+Bir küme, bir eğri üzerinde bir nokta. Asıl soru şu: *on kümenin hepsini*
+olumsuz oranlarına göre sıralayıp en kötüden başlayarak okusanız, her durma
+noktasında derlemin ne kadarını okumuş ve şikâyetlerinin ne kadarını bulmuş
+olurdunuz?
+
+```{ojs}
+//| echo: false
+triageRows = [
+  {rep: "lsa", read: 0.0, found: 0.0}, {rep: "lsa", read: 26.55, found: 44.41},
+  {rep: "lsa", read: 42.97, found: 65.46}, {rep: "lsa", read: 55.93, found: 79.90},
+  {rep: "lsa", read: 58.67, found: 82.46}, {rep: "lsa", read: 63.45, found: 86.67},
+  {rep: "lsa", read: 67.05, found: 89.84}, {rep: "lsa", read: 74.98, found: 93.80},
+  {rep: "lsa", read: 87.22, found: 97.25}, {rep: "lsa", read: 93.18, found: 98.80},
+  {rep: "lsa", read: 100.0, found: 100.0},
+  {rep: "minilm", read: 0.0, found: 0.0}, {rep: "minilm", read: 16.01, found: 44.70},
+  {rep: "minilm", read: 20.02, found: 50.71}, {rep: "minilm", read: 31.56, found: 64.42},
+  {rep: "minilm", read: 42.89, found: 75.63}, {rep: "minilm", read: 50.56, found: 82.59},
+  {rep: "minilm", read: 53.20, found: 84.49}, {rep: "minilm", read: 64.52, found: 91.01},
+  {rep: "minilm", read: 75.99, found: 96.90}, {rep: "minilm", read: 90.29, found: 99.02},
+  {rep: "minilm", read: 100.0, found: 100.0},
+  {rep: "e5", read: 0.0, found: 0.0}, {rep: "e5", read: 13.25, found: 56.03},
+  {rep: "e5", read: 21.20, found: 68.57}, {rep: "e5", read: 24.64, found: 73.31},
+  {rep: "e5", read: 32.39, found: 81.04}, {rep: "e5", read: 42.61, found: 88.79},
+  {rep: "e5", read: 45.18, found: 90.41}, {rep: "e5", read: 64.59, found: 94.81},
+  {rep: "e5", read: 77.67, found: 97.09}, {rep: "e5", read: 92.67, found: 99.43},
+  {rep: "e5", read: 100.0, found: 100.0}
+]
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700,
+  height: 380,
+  marginLeft: 62,
+  marginBottom: 46,
+  x: { label: "okunan derlem yüzdesi", domain: [0, 100], grid: true },
+  y: { label: "bulunan olumsuz yorum yüzdesi", domain: [0, 100], grid: true },
+  color: { legend: true, domain: ["lsa", "minilm", "e5"],
+           range: ["#1F4E79", "#2E7D6F", "#B3453E"] },
+  marks: [
+    Plot.line([{x: 0, y: 0}, {x: 100, y: 100}],
+      { x: "x", y: "y", stroke: "#9AA3AE", strokeDasharray: "4 3" }),
+    Plot.text([{x: 72, y: 63}], { x: "x", y: "y", text: ["rastgele okuma"],
+      fill: "#6B7280", fontSize: 12, rotate: -32 }),
+    Plot.line(triageRows, { x: "read", y: "found", stroke: "rep", strokeWidth: 2 }),
+    Plot.dot(triageRows, { x: "read", y: "found", fill: "rep", r: 3.5,
+      title: d => `${d.rep}\nokunan %${d.read} → bulunan %${d.found}` })
+  ]
+})
+```
+
+::: {.column-margin}
+Kesikli köşegen, rastgele sırayla okumanın size verdiği şey: derlemin %40'ını
+okuyun, şikâyetlerin %40'ını bulun. Onun üstündeki her eğri, kümelemenin
+yarattığı değer.
+:::
+
+Akılda tutulacak tek sayı:
+
+> Derlemin **%13,3**'ünü — E5'in en kötü olumlu orana sahip tek kümesini —
+> okumak, içindeki her olumsuz yorumun **%56,0**'ını yüzeye çıkarıyor.
+
+Bu, sabit bir okuma bütçesinin getirisinde 4,2× iyileşme demek; hem de gözetimsiz
+bir yöntemden, etiketlerini hiç görmediği bir derlemde. Gerçek işiniz "şikâyetleri
+bul ki ürünü düzeltelim" ise bu kümeleme işi yaptı ve yolda aldığı 0,0075'lik ARI
+o iş açısından ilgisiz.
+
+Sıralama yalnızca ilk noktada değil, eğrinin büyük kısmında da korunuyor. MiniLM
+her bütçede LSA'nın üstünde ve E5, kimsenin fiilen çalışacağı tüm aralık boyunca
+ikisinin de üstünde. LSA'nın, E5'in %13,3'te ulaştığı recall'a ulaşması için
+derlemin **%35,6**'sını okuması gerekiyor — aynı sonuç için iki buçuk katı okuma.
+
+Dürüst çekince kuyrukta: kabaca %76 ile %85 okuma arasında MiniLM, recall'da E5'in
+yaklaşık 0,1 puan üstüne çıkıyor. Bu veride gerçek bir kesişme ama üzerine karar
+verilecek bir şey değil, çünkü o noktada ikisi de olumsuzların %97'sini bulmuş
+oluyor ve siz derlemin dörtte üçünü okumakla beşte dördünü okumak arasında seçim
+yapıyorsunuz. Triyaj eğrileri sol uç için var.
+
+### Kümenin içinde gerçekte ne var
+
+Metrikler ucuz; belgeleri okuyun. E5'in en kötü kümesinden rastgele çekilmiş beş
+olumsuz yorum:
+
+``` text
+ürün paslandı. almanızı tavsiye etmem
+
+hiçbir işe yaramıyor. hatta dahada kötü hale getiriyor. kesinlikle alınmaz.
+
+ürün çok çabuk ısınıyor ve çok yavaş
+
+kalitesiz, arka plaka fotoğraftaki gibi tek parça değil, montajı zor.
+
+hiç beklediğim gibi değildi, yorumlardaki tüm olumsuzluklar aynen çıktı.
+```
+
+Bunlar ince ayrımlar değil. Bir ürün müdürünün pazartesi sabahı ihtiyaç duyduğu
+yorumlar bunlar ve kümeleme, "şikâyet" diye bir kategori olduğu kendisine
+söylenmeden onların orantısız bir kısmını tek bir kovaya koydu.
+
+::: {.callout-tip appearance="simple"}
+**Aktarılabilir ders.** Bir kümelemenin "başarısız olduğunu" raporlamadan önce,
+kümelemenin desteklemesi gereken kararı yazın ve *onu* ölçün. Saflık, ARI ve NMI
+"etiketlerimi geri getirdin mi" sorusunu cevaplıyor. Lift, belirli bir bütçedeki
+recall ve ilk içgörüye kadar geçen süre ise "yardımcı oldun mu" sorusunu
+cevaplıyor. Bunlar farklı sorular ve aynı koşuda zıt cevapları olabilir.
+:::
+
+## Kümeleri bir dil modeliyle adlandırmak {#sec-kume-adlandirma}
+
+c-TF-IDF size on kelime veriyor. Paydaş bir ifade istiyor. Hattın içinde bir LLM'in
+tartışmasız doğru araç olduğu tek yer burası ve nedeni konusunda kesin olmakta
+fayda var: adlandırma *düşük riskli, yüksek hacimli ve doğrulanabilir* bir görev.
+On etiket ve her biri belgelere karşı otuz saniyede kontrol edilebilir.
+
+Kalıp her zamanki kalıp — modele yalnızca görev tarifini değil, kanıtı verin:
+
+``` text
+Below are the 10 most distinctive words for a cluster of Turkish product
+reviews, and 8 reviews sampled from it.
+
+Distinctive words: koku, kokusu, parfüm, kalıcı, güzel, tavsiye, parfümü,
+aldım, ederim, var
+
+Reviews:
+1. ...
+2. ...
+
+Give a 2-5 word English label naming what this cluster is about. If the
+reviews do not share a coherent subject, answer exactly: NO COHERENT THEME.
+```
+
+Bunun faydalı olmasıyla bir yük olması arasındaki farkı üç ayrıntı belirliyor:
+
+1. **Belgeleri örnekleyin, yalnızca kelimeleri geçirmeyin.** Kelimeler zaten
+   kayıplı bir özet; yalnızca `bi ye fi tavsi çi` verilen bir LLM ona bir tema
+   uyduracaktır — @sec-noktali-i'nin konusu tam olarak bu.
+2. **Ona bir kaçış kapısı bırakın.** `NO COHERENT THEME` seçeneği, modeli bir
+   etiket üretecinden çöp kümelerin zayıf bir dedektörüne çeviren şey. Modelin
+   adlandırmayı reddettiği bir küme, sizin kendinizin bakması gereken bir küme.
+3. **Merkezin yakınından değil, kümenin tamamından örnekleyin.** Merkeze yakın
+   belgeler en tipik olanlar; dolayısıyla yalnızca merkezden alınan bir örneklem
+   her kümeyi olduğundan derli toplu gösterir ve adlandırmadan önce bilmek
+   isteyeceğiniz heterojenliği tam olarak gizler.
+
+::: {.callout-warning appearance="simple"}
+**Üretilmiş bir etiket bir bulgu değil, bir hipotezdir.** Model beş binin
+içinden on kelime ve sekiz belge gördü. Aslında birbiriyle ilgisiz üç şeyin
+yapıştırılmasından ibaret bir küme için akıcı ve makul bir isim üretecektir,
+çünkü akıcı ve makul isimler üretmek onun yaptığı iş. Herhangi biri bir slayta
+düşmeden önce her etiketi, kendi örneklediğiniz 20 belgeye karşı kontrol edin.
+:::
+
+## Sezgi kontrolleri {#sec-kumeleme-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular, dolayısıyla cevapları kontrol edebileceğiniz sayılar
+taşıyor.
+
+::: {.callout-note collapse="true"}
+## 1. İki belge 0,91 kosinüs alıyor. Yakın kopya mıdırlar?
+
+Rastgele çift arka planı masaya gelene kadar bunu kimse söyleyemez, siz dahil.
+tf-idf altında bu derlemdeki *ilgisiz* iki yorum ortalama 0,0182 alıyor ve 4,5
+milyon rastgele çiftin 99. yüzdeliği 0,1300 — yani 0,91 ölçeğin çok ötesinde ve
+"yakın kopya" doğru okuma. E5 altında aynı derlemin rastgele çift ortalaması
+**0,8547**, standart sapması 0,0278 ve 99. yüzdeliği 0,9155. Orada 0,91,
+birbiriyle hiç ilgisi olmayan belgelerin ortalamasının yaklaşık iki standart
+sapma üstünde oturuyor ve 0,90'da eşiklenmiş bir kopya dedektörü, derlemdeki her
+çiftin büyük bir kısmını işaretlerdi.
+
+Aynı sayı, zıt sonuçlar. İkisini ayıran tek şey, tek bir benzerliğe bakmadan
+önce bir kez çalıştırılan dört satır kod.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Silhouette'iniz 0,10'u hiç geçmiyor ve ARI'ınız sıfır. Kümeleme başarısız mı oldu?
+
+Bu iki sayı, bölümlemenin iyi ayrılmamış olduğunu ve etiket bölümlemesi
+olmadığını söylüyor. Hiçbiri onun işe yaramaz olduğunu söylemiyor; söylüyormuş
+gibi davranmak da insanların kullanılabilir bir sonuçtan kendilerini caydırmasının
+en yaygın yolu.
+
+ARI **+0,0075** alan aynı $k=10$ E5 kümelemesinin, %6,34'lük taban orana karşı
+%26,8 olumsuz olan bir kümesi var — **4,23× lift** — ve derlemin %13,3'ünü küme
+sırasıyla okumak şikâyetlerinin %56,0'ını buluyor. Bu iki cümle arasında kümeleme
+değişmedi; soru değişti.
+
+Dolayısıyla dürüst teşhis nadiren "kümeleme başarısız oldu" olur. Genellikle
+"onu kimsenin sormadığı bir soruya karşı puanladım" olur. Kümelemenin desteklemesi
+gereken kararı yazın, *onu* ölçün ve ancak ondan sonra karar verin.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Neden kümelemeden sonra değil, önce tekrar temizliği?
+
+Çünkü k-means her merkezi üyelerinin **ortalamasına** taşıyor; yani tek bir
+cümlenin altmış kopyası, o merkezin nereye ineceği konusunda altmış oy kullanıyor.
+Bir kopya grubu bir satır değil, bir ağırlıktır. Aynı sav, uydurduğunuz her idf
+ve akış aşağısında çalıştırdığınız her konu modeli için de geçerli.
+
+İkinci sebep, sayının toplama hattınız hakkında bedava bir tanı olması. Bizimki
+$J \geq 0,8$'de 27 saniyede 151 fazlalık belge olarak döndü ve $1,25 \times 10^9$
+ikili karşılaştırmanın anlamlı bir kısmını hiç yapmadan. %20 olarak dönseydi
+durup scraper'ı okumaya giderdiniz ve bu, öğleden sonranızı herhangi bir
+kümelemeden daha iyi değerlendirmek olurdu.
+
+Sayıyı raporlarken her seferinde belirtilecek bir çekince: bu bir alt sınır.
+`threshold=0.8`'de `datasketch`, 128 hash'i öyle bantlıyor ki *tam olarak* 0,8'de
+oturan bir çift 0,40 olasılıkla inceleniyor. "En az 151", asla "tam olarak 151"
+değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. HDBSCAN derleminizin %97'sine gürültü diyor. Bir meslektaşınız önce UMAP ile beş boyuta inmeyi öneriyor, "çünkü o zaman küme buluyor." Ne dersiniz?
+
+Cümlenin doğru olduğunu ve kanıt olmadığını. UMAP, bir $k$-en yakın komşu
+grafiğini korumak için düşük boyutlu bir yerleşimi optimize ediyor ve bir derlemi
+beş boyuta sıkıştırmak, özgün uzayda olsun olmasın yoğunluk kontrastı imal
+ediyor. UMAP'ten sonra küme belirmesi, UMAP çalıştırmanın beklenen sonucudur;
+verinizle ilgili bir keşif değil.
+
+Bunu bir bulguya çevirecek şey, UMAP'in hiç görmediği bir kontrol: gruplar
+tutulan bir şeyi öngörüyor mu, `n_neighbors` ve `random_state` değişimine
+dayanıyor mu, derlemin rastgele bir yarısında ayakta kalıyorlar mı. Bizim kendi
+kanıtımız ters yönü gösteriyor — E5'in rastgele çift kosinüsü 0,8547, standart
+sapması 0,0278; yani her belge diğer her belgeye neredeyse aynı uzaklıkta
+oturuyor ve bu kadar tekdüze bir uzayda ortaya çıkarılacak bir yoğunluk değişimi
+yok.
+
+Bunların hiçbiri UMAP hattını sahaya çıkarmanızı yasaklamıyor. Sadece resmin
+gücüne değil, akış aşağısındaki sayının gücüne dayanarak çıkarın.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. En iyi konunuz, ikinci en iyinin üç katı tutarlılık alıyor. Önce ne yaparsınız?
+
+Onu okursunuz. Bizimki `bi ye fi tavsi çi ederi si ni li yi` idi — aynı
+belgelerdeki aynı Unicode kusurunun imal ettiği on tokenizer parçası. Neredeyse
+kusursuz biçimde birlikte geçmelerinin ve NPMI'ın onlara bölümdeki en yüksek konu
+başına tutarlılık olan **+0,5075**'i vermesinin sebebi tam olarak bu. Tutarlılık
+birlikte geçmeyi ödüllendiriyor ve sistematik bir hata, herhangi bir derlemdeki
+en güvenilir birlikte geçme.
+
+Hasar o tek konuyla da sınırlı değildi. Onu atmak LSA'nın ortalamasını +0,1340'tan
++0,0925'e indiriyor — üç c-TF-IDF satırı arasında birincilikten sonunculuğa.
+Ondan biri, üstelik bir insanın iki saniyede eleyeceği türden biri, sıralamayı tek
+başına taşıyordu. @chang2009reading bu sonucun genel biçimini 2009'da yayımladı;
+buradaki, kendi sayılarımızın ona katılmasından ibaret.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. 500 belge etiketleyip bir sınıflandırıcı eğitebilirdiniz. Kümeleme ne zaman hâlâ doğru araç?
+
+Sınıfların ne olduğunu henüz bilmediğinizde. Çekirdeği bu: bir sınıflandırıcı bir
+etiket kümesine ihtiyaç duyar ve kümeleme, o kümenin ne olması gerektiğini keşfetmenin
+sayılı dürüst yollarından biri. "k-means çalıştır, küme başına 20 belge oku,
+okuduğundan kılavuzu taslakla" bir etiketleme projesini açmanın gerçek ve ucuz bir
+yolu — @sec-veri-etiketleme de kılavuzun ayakta kalıp kalmadığını nasıl kontrol
+edeceğinizi anlatan bölüm.
+
+Üç durum daha: kimsenin okuyamayacağı kadar çok belgeniz var ve hangilerini
+okuyacağınızı seçmek zorundasınız (@sec-kumeleme-getiri); bir derlemi, onu yine
+okumayacak birine anlatmanız gerekiyor (@sec-konu-modelleri); ya da verinizde
+gerçekte ne olduğunu — kimsenin bilerek koymadığı parçalar dahil — bilmek
+istiyorsunuz (@sec-noktali-i).
+
+Ve en az onun kadar önemli olan tersi: sınıfları zaten biliyorsanız ve
+etiketlemeye gücünüz yetiyorsa, etiketleyin. Kümeleme daha ucuz bir sınıflandırıcı
+değildir ve olmayacaktır.
+:::
+
+## Mülakat soruları {#sec-kumeleme-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Atıf üzerine — @sec-metin-veri'dekiyle aynı uyarı.** Bunlar, ikisi de ücretsiz
+olan iki güvenilir açık kaynakta tekrar tekrar karşımıza çıkan sorular:
+Chip Huyen'in
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+kitabı [@huyen2021interviews] ve
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews).
+"X şirketinin sorduğu sorular" listesi olduğunu iddia eden her sayfayı pazarlama
+sayın.
+:::
+
+1. **Küme sayısını nasıl seçersiniz?** Mülakatçıların duymak istediği cevap,
+   önermeyi reddederek başlıyor. İçsel indeksler birbirini tutmuyor — bizimkiler
+   bir temsilde optimumu 50, 2 ve 50'ye, bir başkasında 2, 2 ve 4'e koydu — ve üç
+   durumun ikisinde "optimum" düz bir çizgi üzerindeki %1–7'lik bir salınımdı.
+   Bunun yerine ne yapacağınızı söyleyin: üç ya da dört $k$ değerinde kümeleyin,
+   küme başına 20 belge okuyun ve her kümesini tek satırda anlatabildiğiniz $k$'yi
+   tutun. Dirsek yöntemini de yalnızca kullanmadığınızı ve nedenini söylemek için
+   anın — atalet kuruluşu gereği monoton düşer, dolayısıyla her zaman bir bükülme
+   vardır ve konumu eksen sınırlarınıza bağlıdır [@schubert2023stop].
+
+2. **k-means mi HDBSCAN mi?** k-means küresel ve benzer yayılımlı kümeler, aykırı
+   değer olmaması ve bilinen bir $k$ varsayıyor; metinde canınızı yakan, herkesin
+   adını andığı varsayım değil, 2. ve 3. varsayımlar. HDBSCAN dördünü de bırakıyor
+   ve bir gürültü sınıfı ekliyor; bu da belgelerin çoğunun hiçbir şeye ait olmadığı
+   bir derlem için doğru şekil. Püf noktası, cevap vermeyi reddedebilmesi — ve bu
+   derlemde reddetti: `min_cluster_size`'a göre %53–100 gürültü, hiçbir ayarda
+   üçten fazla küme yok ve belgelerin çoğunu tuttuğu yerde onları her şeyin
+   %47'sini tutan tek bir yığında tuttu. Güçlü bir cevap, "ikisini de çalıştırın,
+   çünkü bilgilendirici biçimde anlaşamıyorlar" der — farklı varsayımlara sahip
+   iki yöntemin ikisinin birden yapı yok demesi, herhangi birinin tek başına
+   söylemesinden çok daha güçlü bir kanıt.
+
+3. **Metinde neden kosinüs de Öklit değil?** Çünkü ham uzunluk konuyu değil belge
+   uzunluğunu taşıyor ve neredeyse hiçbir zaman uzunluğa göre kümelemek
+   istemezsiniz. Ötesinde bilmeye değen kısım: $\ell_2$ ile normalleştirilmiş
+   vektörlerde ikisi monoton biçimde ilişkili, $d^2 = 2 - 2\cos$, dolayısıyla aynı
+   en yakın komşuları veriyorlar — ama aynı k-means'i vermiyorlar, çünkü birim
+   vektörlerin aritmetik ortalaması bir birim vektör değil; yani ikinci
+   yinelemeden itibaren iki yordam ayrışıyor. Pratik kural: normalleştirin, sonra
+   metriği algoritma ile raporladığınız her puan arasında tutarlı tutun. Kosinüsle
+   kurulmuş bir kümeleme üzerinde Öklit uzaklığıyla hesaplanan bir silhouette,
+   sizin kümelemenizi ölçmüyordur.
+
+4. **Bir milyar belgede yakın kopyaları bulun.** Shingle, MinHash, bant, kova,
+   doğrula — ve sonra yaklaşıklığın gerçekte neye mal olduğunu söyleyin; çoğu
+   cevabın eksik bıraktığı yer burası. LSH, tam doğrulamadan sağ çıkan yanlış
+   pozitif üretmiyor; ama yanlış negatif üretiyor: 0,8 eşiğinde 13'lük 9 banda
+   bölünmüş 128 hash ile $J = 0,9$'daki bir çift 0,93, $J = 0,8$'deki bir çift
+   0,40 ve $J = 0,7$'deki bir çift 0,08 olasılıkla inceleniyor. Bu bir kusur değil,
+   kasıtlı bir tasarım noktası ve kopya sayılarının neden alt sınır olarak
+   raporlandığının sebebi. Sabit bir derlemi denetlemek yerine yeni belgeleri
+   duran bir dizine karşı kontrol etmeniz gerektiğinde alternatif olarak SimHash'i
+   [@charikar2002similarity] anın.
+
+5. **Etiketiniz yokken bir kümelemeyi nasıl değerlendirirsiniz?** İçsel indeksler
+   ve sınırlarıyla başlayın, sonra asıl cevaba gelin: bölümlemeyi değil, kararı
+   değerlendirin. Örnekleyin ve okuyun; bir insanın her kümeyi adlandırabildiğini
+   kontrol edin; akış aşağısında bir kullanım varsa onu doğrudan ölçün. Kendi
+   sayılarımız savın kendisi — ARI üç temsili ayıramadı, hepsi ≈ 0; oysa en kötü
+   kümedeki lift, tıpatıp aynı atamalardan onları 1,67× / 2,79× / 4,23× diye
+   sıraladı. Ne kadar küçük olursa olsun etiketli bir altkümeniz varsa, o size
+   bütün içsel indekslerin toplamından daha fazlasını kazandırır.
+
+6. **LDA mı, daha yenisi mi?** Kararı veren varsayımı söyleyin: LDA, her belgede
+   bir karışım kestirmeye yetecek kadar kelime isteyen bir kelime torbası karışım
+   modeli. Bizim 19 kelime medyanlı yorumlarımızda **NMF'ten 133× daha yavaştı ve
+   daha az tutarlıydı** (+0,0737'ye karşı +0,1183). Kısa metin için tf-idf
+   üzerindeki NMF daha iyi klasik varsayılan; modern varsayılan ise önce kümele
+   sonra betimle — embed'leyin, kümeleyin ve c-TF-IDF ile etiketleyin
+   [@grootendorst2022bertopic]; kümeleme bir kez var olduktan sonra bu bedava.
+   Yüksek sesle söylenecek takas: c-TF-IDF, embedding'in bütün anlambilimini ve
+   kümelemenin bütün hatalarını miras alıyor ve bir konu modeli değil, bir
+   etiketleme yordamı. Belgeler uzunsa ve gerçekten bir atama değil belge başına
+   bir karışıma ihtiyacınız varsa LDA hâlâ doğru cevap.
+
+## 2026 alet çantası {#sec-kumeleme-araclar}
+
+Bu bölümdeki her şey tek bir dizüstü bilgisayarda, aşağıdaki sürümlerle
+çalıştırıldı. Bir kitapta sürüm sabitlemek talihe rehin vermek demek ama
+sabitlememek daha kötü — buradaki sayılar yalnızca belirtilmiş bir yığına karşı
+yeniden üretilebilir.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `scikit-learn` | 1.9.0 | `TfidfVectorizer`, `TruncatedSVD`, `KMeans`, `HDBSCAN`, `LatentDirichletAllocation`, `NMF` ve bütün metrikler |
+| `sentence-transformers` | 5.7.0 | MiniLM ve E5'i yükleme ve batch'leme |
+| `torch` | 2.13.0 | embedding'lerin üzerinde koştuğu MPS arka ucu |
+| `numpy` / `scipy` | 2.5.2 / 1.18.0 | yoğun ve seyrek doğrusal cebir |
+| `pandas` | 3.0.5 | derlem işleme, Parquet gidiş-dönüşü |
+| `datasketch` | 2.0.0 | @sec-yakin-kopyalar için MinHash ve LSH dizini |
+| `umap-learn` | 0.5.12 | @sec-yogunluk'ta tartışılan izdüşüm |
+
+: Bu sayıların geldiği yığın. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[26,16,58]"}
+
+Bilmeye değer, yukarıda kullanılmayanlar:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `bertopic` | 0.17.4 | embed → UMAP → HDBSCAN → c-TF-IDF hattının tamamı tek bir nesne olarak; konu birleştirme, hiyerarşi ve LLM ile adlandırma dahil. Bir demoya giden en hızlı yol; kümelere güvenmeden önce @sec-yogunluk'u okuyun |
+| `faiss-cpu` | 1.15.0 | derlem yoğun bir benzerlik matrisine sığmayı bıraktığında yaklaşık en yakın komşular — kabaca bir milyon belgeden sonrası |
+| `usearch` | 2.26.0 | aynı işi yapan, FAISS'e göre daha hafif ve daha yeni bir alternatif |
+| `gensim` | 4.4.0 | klasik konu modeli alet çantası; LDA türevleri ve `CoherenceModel` için hâlâ referans uygulama |
+| `top2vec` | 1.0.36 | otomatik konu sayısıyla ortak belge/kelime embedding'leri; kavramsal olarak BERTopic'e yakın ve ondan önce geliyor |
+| `chromadb` | 1.5.9 | vektörlerin bir betiğin değil bir uygulamanın sorgulayacağı biçimde kalıcı olması gerektiğinde — retrieval-augmented generation'a (RAG) giden köprü |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümlerle {tbl-colwidths="[16,14,70]"}
+
+::: {.callout-note appearance="simple"}
+**Seçim, her biri tek satırda.** ~100 bin belgenin altında scikit-learn bu
+bölümdeki her şeyi yapıyor ve yirmi satırı kendiniz yazmalısınız ki her adımın ne
+yaptığını görebilesiniz. Üstünde, komşu araması için FAISS ya da `usearch`
+ekleyin. Anlamak yerine cilalı bir çıktı istediğinizde BERTopic'e uzanın — ve
+@sec-noktali-i'yi okuduğunuza göre artık onun hangi varsayılanlarına
+güvenmeyeceğinizi biliyorsunuz.
+:::
+
+## Lab: sahibi olduğunuz bir derlem için triyaj eğrisi kurun {#sec-kumeleme-lab}
+
+Teslimat, *"derlemin %X'ini okumak Z'lerin %Y'sini buluyor"* biçiminde tek bir
+cümle ve onu haklı çıkaran eğri. Kümelemeyi fonlanabilir kılan cümle bu ve bir
+silhouette puanından çok daha değerli.
+
+### Neye ihtiyacınız var
+
+Anladığınız bir alanda birkaç bin kısa belgeden oluşan herhangi bir derlem —
+destek talepleri, anket açık uçlu cevapları, issue başlıkları, sınav cevapları.
+Tamamında değil, bir *örneklem* üzerinde etiketleyebileceğiniz, önemsediğiniz tek
+bir ikili özellik gerekiyor (şikâyet / değil, acil / değil, konu dışı / değil).
+300 belge etiketlemek yeterli ve zaten bütün mesele bu: lab, küçük bir bütçeye
+sahip olmayı simüle ediyor.
+
+`scikit-learn` ve `sentence-transformers` her şeyi hallediyor. 50 bin belgede E5
+geçişi bir dizüstü GPU'sunda (Apple Silicon, `mps`) 104 saniye sürdü; CPU'da
+kabaca bir mertebe fazlasını bekleyin, yani 5 bin belge için birkaç dakika ayırın
+ve bu bölümün geri kalanını okumadan önce başlatın.
+
+### Adım 1 — önce tekrar temizliği yapın ve neyi çıkardığınızı sayın
+
+Her şeyden önce, tam olarak @sec-yakin-kopyalar'daki gibi $J \geq 0,8$'de
+MinHash + LSH çalıştırın. Grup sayısını ve en büyük grubu raporlayın. Derleminizin
+kabaca %5'inden fazlası yakın kopyaysa durun ve nedenini bulun — büyük ihtimalle
+bir veri toplama hatası keşfetmişsinizdir ve bu zaten raporlanmaya değer bir
+sonuçtur.
+
+### Adım 2 — bilinçli olarak iki kez embed'leyin
+
+Hem bir tf-idf → SVD(256) temsili hem de bir cümle embedding'i temsili kurun. İki
+temsil, karşılaştırmalı bir şey söyleyebilmeniz için gereken asgari sayı ve asıl
+ilginç kısım karşılaştırma. Kümelemeden önce **rastgele çift arka planını**
+hesaplayın: 2.000 belge örnekleyin, bütün ikili kosinüsleri alın ve her uzay için
+ortalamayla standart sapmayı kaydedin. Sonrasında baktığınız her benzerliği
+yorumlamak için bunlara ihtiyacınız olacak ve hesaplamak dört satır sürüyor.
+
+### Adım 3 — $k$'yi tarayın ve hayal kırıklığına hazır olun
+
+Her iki temsilde $k \in \{2, 5, 10, 20, 50\}$ için k-means çalıştırın. Silhouette
+(derlem büyükse sabit bir örneklem üzerinde), en büyük kümenin boyutu ve eğitim
+süresini kaydedin. Silhouette'i $k$'ye karşı çizin.
+
+Eğriniz düz ve düşükse bizim sonucumuzu yeniden üretmişsinizdir ve bunu yanlış
+yaptığınız sonucuna **varmamalısınız**. En büyük küme sütununa dikkat edin: en
+büyük grubu derlemin %60'ını tutan bir "kümeleme", hangi $k$'yi istemiş olursanız
+olun tek bir yığın ve etrafa saçılmış kırıntılardır.
+
+### Adım 4 — kümeye göre tabakalandırarak 300 belge etiketleyin
+
+İnsanların atladığı adım bu. Seçtiğiniz $k$'de, rastgele 300 yerine **10 kümenin
+her birinden 30 belge** örnekleyin ve ikili özelliğinizi elle etiketleyin.
+Tabakalandırma, bir sonraki adımı bu bütçeyle mümkün kılan şey: rastgele 300'lük
+bir örneklem, en seyrek kümenize yalnızca birkaç belge koyar ve size
+güvenemeyeceğiniz bir küme başına oran verir.
+
+Küme başına olumlu oranı ve her biri için bir %95 aralığını yazın. $n=30$'da bu
+aralıklar geniş — %50 civarında kabaca $\pm 17$ puan — dolayısıyla onları nokta
+kestirimleri olarak değil, "bu küme derlemden hiç farklı mı?" sorusunun cevabı
+olarak görün.
+
+### Adım 5 — eğri ve cümle
+
+Kümeleri ölçtüğünüz orana göre, en kötüden başlayarak sıralayın. Tam olarak
+bildiğiniz küme boyutlarını ve kestirdiğiniz oranları kullanarak, okunan derlem
+payına karşı bulunan özellik payını biriktirerek listede aşağı yürüyün. Bunu,
+@sec-kumeleme-getiri'deki gibi köşegene karşı çizin.
+
+Sonra cümleyi yazın. Eğriniz köşegenin üzerinde duruyorsa dürüst cümle şu olur:
+*"kümeleme bu derlemde bu özelliğin triyajına yardım etmiyor"* — ki bu da bir
+bulgudur, size bir öğleden sonraya mal olmuştur ve üzerine bir hat kurmaktan sizi
+kurtarmıştır.
+
+### Daha ileri gitmek
+
+- **Adım 5'i diğer temsille yeniden koşun.** Bizim iki temsilimiz ARI altında
+  ayırt edilemezken lift'te 2,5× farklıydı. Sizinkiler de öyle olabilir; öyleyse
+  embedding modelinizi kanıta dayanarak seçmiş olursunuz.
+- **@sec-noktali-i'deki Unicode kontrolünü kendi metninizde**, hangi dilde olursa
+  olsun çalıştırın: küçültüp token'lamanın etkisiz eleman olduğunu doğrulayın ve
+  düzgün normalleştirdiğinizde yok olan sözlük türlerini sayın.
+- **Kümelerinizi @sec-kume-adlandirma'daki tarifle bir LLM'e adlandırtın**, sonra
+  her etiketi kendi örneklediğiniz 20 belgeye karşı kontrol edin. Kaç etiketin
+  ayakta kaldığını sayın. O oran, bir sonraki partiye ne kadar güveneceğinizin
+  kalibrasyonudur.
+
+## Alıştırmalar {#sec-kumeleme-alistirmalar}
+
+1. **Hiçbir şey ölçmeyen metrik.** @sec-kmeans'te taramanın tamamındaki en iyi
+   adjusted Rand index 0,0083'tü; @sec-kumeleme-getiri'de ise aynı kümelemeler
+   1,67×, 2,79× ve 4,23×'te temiz biçimde ayrıştı. İki sayı da doğru. ARI'ın neyi
+   saydığı üzerinden, bir bölümlemenin bu kadar karar-ilgili sinyal taşıyıp yine
+   de sıfır alabilmesini açıklayın. Sonra küçük bir işlenmiş örnek kurun — on
+   belge, iki etiket, iki küme — ARI'ın tam olarak 0 ve bir kümedeki lift'in 2×
+   olduğu bir örnek.
+
+2. **Hesaplamadığınız bir arka plan.** Bir meslektaşınız, derlemindeki iki
+   belgenin E5 altında 0,91 kosinüs benzerliği olduğunu raporluyor ve yakın kopya
+   olduklarını sonuçlandırıyor. @sec-benzerlik-ne-demek'teki sayıları kullanarak
+   çıkarımın nesinin yanlış olduğunu, bunu yapmadan önce hangi tek niceliği
+   hesaplaması gerektiğini ve o niceliğin hangi değerinin sonucunu makul kılacağını
+   söyleyin.
+
+3. **Sahip olmadığınız tokenizer testi.** @sec-noktali-i, tam tekrar temizliğinden
+   ve hem NFC hem NFKC normalleştirmesinden sağ çıkan bir kusur buldu.
+   @sec-karsilastirma bundan yalnızca Türkçe konuşan biri `tr_lower` yazmayı
+   bildiği için kurtuldu. (a) *Aynı* kusurlu hat üzerinde eğitilip test edilen bir
+   sınıflandırıcının neden hiç doğruluk kaybı göstermediğini açıklayın. (b) Bunu
+   birdenbire görünür kılacak dağıtım değişikliğini adlandırın. (c) Konuşmadığınız
+   bir dilde bu sınıf hataları yakalamak için bir CI paketine ekleyeceğiniz üç
+   satırlık özellik testini yazın — `assert tokenize(s.upper()) == tokenize(s)`
+   ifadesinin yanlış cevap olduğunu ve nedenini de belirterek.
+
+4. **Yoğunluk, dürüstçe.** HDBSCAN derlemin LSA'da %97'sine, E5'te %99,5'ine
+   gürültü dedi. Bir takım arkadaşınız önce UMAP ile 5 boyuta inmeyi öneriyor,
+   "çünkü o zaman küme buluyor". (a) UMAP'in girdiyle ilgili neyi değiştirdiğinin
+   kümelerin belirmesine yol açtığını açıklayın. (b) "UMAP orada olan yapıyı açığa
+   çıkardı" ile "UMAP olmayan yapıyı yarattı" arasında ayrım yapacak bir deney
+   tasarlayın. (c) Hangi sonucun UMAP hattını yine de sahaya çıkarmaya razı
+   edeceğinizi söyleyin.
+
+5. **Tutarlılık tuzağı, kendi verinizde.** Çalıştırdığınız herhangi bir konu
+   modelinden en yüksek tutarlılıklı konuyu alın ve o konuda en yüksek puanı alan
+   20 belgeyi okuyun. Konu gerçekse, bir meslektaşın yeni belgeleri o konuya ayıklamak
+   için kullanabileceği tek satırlık tarifi yazın. Değilse, modelin gerçekte neye
+   tutunduğunu belirleyin. Hangisinin olduğunu raporlayın — ve bu bölümde koşunun
+   tamamındaki en yüksek tutarlılıklı konunun ikinci durum olduğunu not edin.
+
+6. **İndekssiz $k$ seçimi.** 40.000 destek talebiniz ve her biri bir kategoriyi
+   sahiplenecek altı kişilik bir destek ekibiniz var. Hiçbir içsel doğrulama
+   indeksi kullanmadan bir $k$ değeri için sav kurun. Sizi bu değeri gözden
+   geçirmeye ne iterdi, söyleyin; ayrıca bu akıl yürütmenin bir dirsek grafiğinden
+   neden sadece daha kullanışlı değil, *daha sağlam temelli* olduğunu açıklayın.
+
+## Akılda kalması gerekenler {#sec-kumeleme-ozet}
+
+- **Kümeleme, derlemi okuyamadığınızda ve etiketiniz olmadığında yaptığınız
+  şeydir.** Sınıflandırmanın zayıf bir biçimi değil; farklı bir soruyu cevaplıyor
+  ve sınıflandırıcıları yargılayan metrikler onu kötü yargılıyor.
+- **Benzerlik, belgelerin değil geometrinin bir özelliğidir.** 0,98'lik bir
+  kosinüs, rastgele iki belgenin ne aldığını bilene kadar hiçbir şey ifade etmez.
+  Dört uzayımızda rastgele çift ortalaması 0,018 ile 0,855 arasında değişti, yani
+  aynı sayı bir uzayda "yakın kopya", bir başkasında "sıradan" demek. Arka planı
+  her zaman hesaplayın.
+- **Her şeyden önce tekrar temizliği yapın.** Ucuz, bölümdeki satır başına en
+  yüksek getirili iş ve elde ettiğiniz sayı veri toplama hattınızın bir tanısı.
+  $J \geq 0,8$'de 1,25 milyar çiftin tamamını karşılaştırmadan, 27 saniyede 151
+  belge çıkardık.
+- **k-means sizin adınıza dört varsayım yapıyor** — küresel kümeler, benzer
+  yayılım, aykırı değer yokluğu ve bilinen bir $k$ — ve metin derlemlerinde canı
+  yakan, herkesin endişelendiği varsayım değil, 2 ve 3 numaralı olanlar.
+- **Düz bir silhouette eğrisi bir bulgudur.** Bizimki 42 koşuda 0,1042'yi hiç
+  geçmedi; HDBSCAN da aynı derlemin `min_cluster_size`'a göre %53–100'üne bağımsız
+  olarak gürültü dedi, hiçbir ayarda üçten fazla küme döndürmedi ve belgelerin
+  çoğunu tuttuğu yerde onları derlemin yarısını tutan tek bir yığında tuttu.
+  Farklı varsayımlara sahip iki yöntemin sınır olmadığı konusunda anlaşması,
+  herhangi birinin tek başına söylemesinden daha güçlü bir kanıt.
+- **Dirsek yöntemini kullanmayın.** Her zaman bir bükülme vardır, konumu eksen
+  sınırlarınıza bağlıdır ve @schubert2023stop savı uzun uzun kuruyor.
+- **Kısa belgeler LDA'yı bozuyor.** 19 kelimelik yorumlarda NMF'ten 133× yavaştı
+  ve daha az tutarlıydı. Kısa metin üzerinde bir LDA hattı devraldıysanız, mevcut
+  olanı savunmadan önce yanında NMF çalıştırın.
+- **Önce kümele sonra betimle, modern varsayılan.** Kümeleriniz olduğunda c-TF-IDF
+  bedava; embedding'in bütün anlambilimini miras alıyor ve kümelemenin bütün
+  hatalarını da miras alıyor.
+- **Konu tutarlılığı çöple maksimize edilebilir.** Bölümün tamamındaki en yüksek
+  puanlı konumuz, +0,5075 ile, on tokenizer parçasıydı. Onu kaldırmak yöntemini
+  birincilikten sonunculuğa taşıdı. @chang2009reading bunu 2009'da göstermişti ve
+  o gün bugündür doğruluğunu koruyor.
+- **Gözetimsiz yöntemler verinizde gerçekte ne olduğunu bulur — koymadığınız
+  parçalar dahil.** k-means, Unicode hakkında kendisine hiçbir şey söylenmemişken
+  %6,0'lık bir arka plana karşı %94,7'si bir Unicode kusurundan etkilenmiş bir
+  küme topladı. @sec-karsilastirma o kusuru Türkçe konuşan biri bildiği için
+  biliyordu; kümeleme onu böyle biri olmadan buldu.
+- **`str.lower()` Türkçe farkındalığına sahip değil ve NFKC sizi kurtarmayacak.**
+  `"TAVSİYE".lower()` ifadesi `['tavsi', 'ye']` olarak token'lanıyor. Genel bir
+  gidiş-dönüş doğrulamak yerine önemsediğiniz durumları sabitleyin —
+  `assert tokenize("TAVSİYE") == tokenize("tavsiye")`.
+  `tokenize(s.upper()) == tokenize(s)` daha derli toplu görünüyor ve doğru kodda
+  bile başarısız oluyor, çünkü Python'ın `str.upper()` metodu da Türkçe
+  farkındalığına sahip değil: `i`'yi `İ` yerine `I`'ya gönderiyor, yani
+  küçültücünüz ne kadar iyi olursa olsun `iyi` geri `ıyı` olarak dönüyor.
+- **Bölümlemeyi değil, kararı ölçün.** ARI üç temsilimizi ayırt edemedi; triyaj
+  eğrisi onları temiz biçimde ve beklenen sırada sıraladı. Derlemin %13,3'ünü
+  okumak şikâyetlerinin %56,0'ını buldu — her dışsal indekste sıfır alan bir
+  kümelemeden, sabit bir bütçe üzerinde 4,2× getiri.
+- **"Kümeleme başarısız oldu" neredeyse her zaman erken bir yargıdır.**
+  Desteklemesi gereken kararı yazın, onu ölçün ve ancak ondan sonra karar verin.
