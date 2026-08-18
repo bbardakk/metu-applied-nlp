@@ -1,6 +1,1921 @@
-# Ön Eğitim Manzarası {#sec-on-egitim}
+# Ön Eğitim ve Model Manzarası {#sec-on-egitim}
+
+**Öğrenme hedefleri.** Bu bölümün sonunda şunları yapabileceksiniz:
+
+- rastgele ilklenmiş bir transformer'ı dağıtılabilir bir modele çeviren
+  aşamaları çizmek ve her aşamanın hangi veriyi, hangi amacı kullandığını
+  söylemek;
+- bir token'ı web taramasından eğitim batch'ine kadar izlemek, her filtreleme
+  adımının neyi attığını ve neye karşı koruduğunu adlandırmak;
+- açık bir veri kümesindeki en agresif deduplication'ın (tekilleştirme) veriyi
+  neden *kötüleştirdiğini* ve bunun genel olarak kalite filtreleri hakkında ne
+  söylediğini açıklamak;
+- herhangi bir ön eğitim koşusunun hesabını, gerçek süresini ve kira faturasını
+  iki sayıdan kestirmek — ve bu kestirimin tam olarak nerede geçerliliğini
+  yitirdiğini belirtmek;
+- model FLOP kullanımını bir donanım broşürü ile bir veri merkezi arasındaki
+  fark olarak okumak ve bu farkı doğru sebebe bağlamak;
+- bir tokenizer'ın bir dile neye mal olduğunu ölçmek ve bu bedeli bağlam
+  penceresi, gecikme ve para cinsinden fiyatlandırmak;
+- bir model sürümünü gerçekte neyi açtığına göre sınıflandırmak — ağırlıklar,
+  veri, kod, lisans — ve belirli bir görev ile bütçe için birini seçmek.
+
+## Hesap yapabilen ve hiçbir şey bilmeyen bir model
+
+@sec-transformerlar bölümünün sonunda elimizde doğru şekle sahip ama içi boş
+bir makine vardı. İçindeki her matris — $W^Q$, $W^K$, $W^V$, $W_1$, $W_2$ ve
+embedding tablosu — küçük rastgele sayılarla dolu. Mimari bitti. Model hiçbir
+şey bilmiyor. Yeni ilklenmiş, Llama şeklindeki bir ağdan *kedi sütü*'nü devam
+ettirmesini isteyin; size 128.000 olasılık arasından neredeyse tekdüze
+çekilmiş bir token verecektir, çünkü eğitilmemiş skorlar üzerindeki bir
+softmax tam olarak bunu yapar.
+
+Modelin bir gün bileceği her şey, birkaç milyon kez tekrarlanan tek bir
+işlemle geliyor:
+
+> ona bir metin parçası göster, sonraki token'ı tahmin etmesini iste, ne kadar
+> yanıldığını ölç ve her parametreyi doğru token'ı daha olası kılacak yönde
+> birazcık it.
+
+Mekanizmanın tamamı bu. İkincisi yok. Dilbilgisi, Fransa'nın başkenti, bir
+Python parantezinin nasıl kapatılacağı, kahvenin hazır olabildiği ve
+robotların talimat aldığı gerçeği — hepsi, yeterince metin üzerinde tek bir
+tahminde iyileşmenin yan etkisi.
+
+[Bu bölüm, o döngüyü endüstriyel ölçekte çalıştırdığınızda ne olduğuyla
+ilgili.]{.hl} Metnin nereden geldiği, kullanılabilir hâle gelmeden önce neyin
+atılması gerektiği, koşunun donanım, saat ve para cinsinden neye mal olduğu,
+Türkçe bir cümlenin İngilizce çevirisinden neden daha pahalıya geldiği ve her
+biri son teknoloji diye duyurulurken bir model sürümünü diğerinden nasıl ayırt
+edeceğiniz.
+
+### Üç aşama, ve yalnızca ilki pahalı
+
+Dağıtılabilir bir asistan tek bir eğitim koşusunun çıktısı değildir. Kısa bir
+pipeline'ın çıktısıdır ve [aşamalar yalnızca ne kadar veri tükettikleriyle
+değil, *ne işe yaradıklarıyla* birbirinden ayrılır]{.hl}.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Üç aşama ve her birinin çalıştığı ölçek</div>
+<svg viewBox="0 0 764 428" style="max-width:744px" role="img"
+     aria-label="Soldan sağa çizilmiş üç aşama. Birinci aşama, ön eğitim, trilyonlarca token ölçeğinde filtrelenmiş web'i sonraki token amacıyla kullanır ve metni devam ettiren bir base model üretir. İkinci aşama, denetimli fine-tuning, aynı sonraki token amacıyla özenle seçilmiş prompt ve cevap çiftlerini kullanır ve devam ettirmek yerine cevap veren bir model üretir. Üçüncü aşama, tercih ayarı, iki aday cevap arasındaki karşılaştırmaları kullanır ve üslubu, ret davranışını ve yardımseverliği ayarlar. Üç kutunun altında on binden yüz trilyon token'a uzanan logaritmik bir eksen, InstructGPT'nin denetimli prompt'larını beş milyon token civarında, GPT-3'ün ön eğitimini üç yüz milyar token'da ve Llama 3 405B'nin ön eğitimini 15,6 trilyon token'da işaretliyor; böylece ön eğitimin kendisinden sonra gelen her şeyden dört ila altı büyüklük mertebesi daha büyük olduğunu gösteriyor.">
+  <defs>
+    <marker id="pre-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="34" width="232" height="184" rx="10" class="box-accent"/>
+  <text x="30" y="58" class="t-xs t-b t-accent">1. AŞAMA</text>
+  <text x="30" y="80" class="t-sm t-b">Ön eğitim</text>
+  <line x1="30" y1="92" x2="230" y2="92" class="ln-thin"/>
+  <text x="30" y="112" class="t-xs t-muted">amaç</text>
+  <text x="30" y="128" class="t-xs">sonraki token'ı tahmin et</text>
+  <text x="30" y="150" class="t-xs t-muted">veri</text>
+  <text x="30" y="166" class="t-xs">filtrelenmiş web, kitaplar, kod</text>
+  <text x="30" y="188" class="t-xs t-muted">ne elde edersiniz</text>
+  <text x="30" y="204" class="t-xs t-b">base model: metni devam ettirir</text>
+
+  <line x1="246" y1="126" x2="264" y2="126" class="ln" marker-end="url(#pre-a)"/>
+
+  <rect x="266" y="34" width="232" height="184" rx="10" class="box-warm"/>
+  <text x="282" y="58" class="t-xs t-b t-warm">2. AŞAMA</text>
+  <text x="282" y="80" class="t-sm t-b">Denetimli fine-tuning</text>
+  <line x1="282" y1="92" x2="482" y2="92" class="ln-thin"/>
+  <text x="282" y="112" class="t-xs t-muted">amaç</text>
+  <text x="282" y="128" class="t-xs">aynısı, seçilmiş çiftler üzerinde</text>
+  <text x="282" y="150" class="t-xs t-muted">veri</text>
+  <text x="282" y="166" class="t-xs">yazılmış cevaplarıyla prompt'lar</text>
+  <text x="282" y="188" class="t-xs t-muted">ne elde edersiniz</text>
+  <text x="282" y="204" class="t-xs t-b">devam ettirmez, cevap verir</text>
+
+  <line x1="498" y1="126" x2="516" y2="126" class="ln" marker-end="url(#pre-a)"/>
+
+  <rect x="518" y="34" width="232" height="184" rx="10" class="box-rose"/>
+  <text x="534" y="58" class="t-xs t-b t-rose">3. AŞAMA</text>
+  <text x="534" y="80" class="t-sm t-b">Tercih ayarı</text>
+  <line x1="534" y1="92" x2="734" y2="92" class="ln-thin"/>
+  <text x="534" y="112" class="t-xs t-muted">amaç</text>
+  <text x="534" y="128" class="t-xs">A cevabını B cevabına tercih et</text>
+  <text x="534" y="150" class="t-xs t-muted">veri</text>
+  <text x="534" y="166" class="t-xs">insan ya da model karşılaştırması</text>
+  <text x="534" y="188" class="t-xs t-muted">ne elde edersiniz</text>
+  <text x="534" y="204" class="t-xs t-b">üslup, ret, yardımseverlik</text>
+
+  <text x="382" y="256" class="t-xs t-mid t-b t-muted">EĞİTİM TOKEN'I, LOG ÖLÇEK</text>
+  <line x1="60" y1="340" x2="730" y2="340" class="ln"/>
+  <line x1="60" y1="340" x2="60" y2="348" class="ln-thin"/>
+  <text x="60" y="364" class="t-xs t-mid t-muted t-mono">10⁴</text>
+  <line x1="194" y1="340" x2="194" y2="348" class="ln-thin"/>
+  <text x="194" y="364" class="t-xs t-mid t-muted t-mono">10⁶</text>
+  <line x1="328" y1="340" x2="328" y2="348" class="ln-thin"/>
+  <text x="328" y="364" class="t-xs t-mid t-muted t-mono">10⁸</text>
+  <line x1="462" y1="340" x2="462" y2="348" class="ln-thin"/>
+  <text x="462" y="364" class="t-xs t-mid t-muted t-mono">10¹⁰</text>
+  <line x1="596" y1="340" x2="596" y2="348" class="ln-thin"/>
+  <text x="596" y="364" class="t-xs t-mid t-muted t-mono">10¹²</text>
+  <line x1="730" y1="340" x2="730" y2="348" class="ln-thin"/>
+  <text x="730" y="364" class="t-xs t-mid t-muted t-mono">10¹⁴</text>
+
+  <circle cx="242" cy="340" r="6" class="chip"/>
+  <line x1="242" y1="334" x2="242" y2="300" class="ln-thin ln-dash"/>
+  <text x="242" y="292" class="t-xs t-mid t-b">≈ 5M</text>
+  <text x="242" y="280" class="t-xs t-mid t-muted">InstructGPT SFT prompt'ları</text>
+
+  <circle cx="561" cy="340" r="6" class="chip"/>
+  <line x1="561" y1="334" x2="561" y2="316" class="ln-thin ln-dash"/>
+  <text x="561" y="308" class="t-xs t-mid t-b">300B</text>
+  <text x="561" y="296" class="t-xs t-mid t-muted">GPT-3 ön eğitimi</text>
+
+  <circle cx="676" cy="340" r="6" class="chip"/>
+  <line x1="676" y1="334" x2="676" y2="300" class="ln-thin ln-dash"/>
+  <text x="676" y="292" class="t-xs t-mid t-b">15,6T</text>
+  <text x="676" y="280" class="t-xs t-mid t-muted">Llama 3 405B ön eğitimi</text>
+
+  <text x="382" y="400" class="t-xs t-mid t-muted">1. aşama, 2. ve 3. aşamanın toplamından dört ila altı büyüklük mertebesi daha büyük.</text>
+  <text x="382" y="416" class="t-xs t-mid t-muted">Modelin bildiği hemen her şeyi, ona kimse bir talimat göstermeden önce öğrendi.</text>
+</svg>
+```
+::: {.fig-cap}
+Her aşamada önemli olan iki şey var: *verinin ne olduğu* ve *ne kadar
+olduğu* — ve bunlar zıt yönleri gösteriyor. En çok veriye sahip aşama en az
+özenle derlenmiş olan, en özenle derlenmiş aşama ise neredeyse hiç verisi
+olmayan aşama.
+:::
+::::
+
+Bu uçuruma yayımlanmış sayılar koyalım. GPT-3, 300 milyar token üzerinde ön
+eğitildi [@brown2020language]. GPT-3 sınıfı bir base model'i konuşabileceğiniz
+bir şeye çeviren InstructGPT çalışması ise yaklaşık 13.000 denetimli prompt
+kullandı — eğitim bölmesinde 12.725 tane, her biri ortalama 408 token, yani
+kabaca beş milyon token'lık prompt metni — artı ödül modeli için 33.000 ve
+pekiştirmeli öğrenme aşaması için 31.000 prompt [@ouyang2022training].
+
+[Ön eğitim, denetimli fine-tuning'in gördüğünden kabaca 58.000 kat fazla metin
+gördü.]{.hl} Bu oran, bu pipeline hakkındaki tek başına en kullanışlı bilgi;
+çünkü aksi hâlde şaşırtıcı bulacağınız bir örüntüyü açıklıyor: bir fine-tune,
+bir modelin *nasıl* cevap verdiğini güvenilir biçimde değiştirir ve *ne
+bildiğini* neredeyse hiç değiştirmez. Bilgi 1. aşamada yüklendi. 2. ve 3.
+aşamalar bir kat boyadır — başkasının on milyonlarca dolar harcayarak inşa
+ettiği bir binaya usta eller tarafından sürülmüş, önemli bir kat boya.
+
+::: {.column-margin}
+*Ön eğitim* adı tarihsel bir kazadır. Aşamanın gerçekten hazırlık niteliği
+taşıdığı zamanlarda konmuştu: etiketsiz metin üzerinde ön eğitim yapar, sonra
+etiketli görevinizde asıl eğitimi verirdiniz. Oranlar tersine döndü, isim
+yetişemedi.
+:::
+
+Bu bölüm 1. aşamayla ilgili. @sec-egitim-sonrasi bölümü 2. ve 3. aşamaları
+ciddiye alıyor; LoRA, DPO ve "hizalama"nın gerçekte ne kazandırdığı dahil.
+
+### Sıra neden değiştirilemez
+
+2. aşamaya atlayamamanızın sebebini açıkça söylemekte fayda var, çünkü
+verisini gerçekten karşılayabileceğiniz aşama zaten 2. aşama.
+
+Talimat verisi bir dili öğretmek için fazlasıyla küçük. Beş milyon token
+kabaca kırk romana denk. Hiçbir şey kırk romandan İngilizce sözdizimini —
+Python semantiğini ve Anadolu coğrafyasını bir yana bırakın — öğrenemez;
+milyarlarca parametreli bir model bunları düpedüz ezberlerdi. Özenle yazılmış
+beş milyon token'ın *yapabildiği* şey bir **biçim** öğretmektir: bir sorunun
+ardından başka bir soru değil bir cevap geldiğini, liste istendiğinde liste
+üretildiğini, "bilmiyorum"un izin verilen bir çıktı olduğunu. Biçimi öğrenmek
+tam da şu yüzden ucuzdur: [base model](#gloss-base-model){#term-base-model .term-ref}
+zaten bütün malzemeye sahiptir ve yalnızca bir düzenlemeyi diğerine tercih
+etmek için bir sebebi yoktur.
+
+::: {#gloss-base-model .column-margin .term-gloss}
+**base model** (temel model) — ön eğitimin tek başına ürettiği şey: metni makul biçimde devam ettiren, ama bir soruyu cevaplamak yerine başka bir soru sormamak için özel bir sebebi olmayan bir model. [↩](#term-base-model){.term-back}
+:::
+
+Akılda tutmaya değer neden-sonuç ilişkisi şu:
+
+| aşama | ne sağlar | neye mal olur | tekrarlanabilir mi? |
+|:--|:--|:--|:--|
+| ön eğitim | bilgi, dilbilgisi, dünya modeli | aylar, binlerce GPU | pratikte asla |
+| fine-tuning | biçim, görev şekli, alan üslubu | saatler ya da günler, tek düğüm | sürekli |
+| tercih ayarı | üslup, ret, cevapların sıralaması | günler, artı etiketleme | her sürümde |
+
+Son sütun, hiç model eğitmeseniz bile bu bölümün neden önemli olduğunu
+söylüyor. [Ön eğitim kararları, devraldığınız ve geri alamadığınız
+kararlardır.]{.hl} Tokenizer Türkçeyi kötü bölüyorsa aşağı akıştaki her
+kullanıcı bunun bedelini sonsuza kadar öder. Veri kesim tarihi Aralık 2023
+ise, hiçbir fine-tune modele 2025'teki bir seçimi kimin kazandığını söylemez.
+Derlemde az Türkçe varsa hiçbir adaptör eksik yetkinliği yoktan var etmez.
+
+## Veri nereden geliyor {#sec-on-egitim-veri}
+
+"Büyük bir dil modeli ne üzerinde eğitiliyor?" sorusunun dürüst cevabı şu:
+web, artı laboratuvarın elde edebildiği başka her şey, eksi atılmak zorunda
+kalınan devasa bir miktar. İlginç olan kısım *eksi* kısmı.
+
+### Ham madde
+
+Neredeyse her açık ön eğitim derlemi [Common Crawl](#gloss-common-crawl){#term-common-crawl .term-ref}
+ile başlar; 2008'den beri web'i tarayıp sonuçları yayımlayan bir kâr amacı
+gütmeyen kuruluş. Bir iki ayda bir *anlık görüntü* yayımlıyor; FineWeb ekibi
+bunlardan 96'sıyla çalıştı [@penedo2024fineweb]. Her anlık görüntü birkaç yüz
+terabaytlık ham HTTP cevabından oluşuyor.
+
+::: {#gloss-common-crawl .column-margin .term-gloss}
+**Common Crawl** — 2008'den beri açık web'i tarayan ve her taramayı ücretsiz yayımlayan bir kâr amacı gütmeyen kuruluş. Neredeyse her açık ön eğitim derlemi buradan başlar. [↩](#term-common-crawl){.term-back}
+:::
+
+İki dosya biçimi önemli ve aralarında seçim yapmak ilk gerçek karar. WARC
+dosyaları ham HTML'i sunulduğu hâliyle tutar. WET dosyaları ise Common
+Crawl'ın kendi düz metin çıkarımını tutar; bu bedavadır ve muazzam miktarda
+hesap tasarrufu sağlar. FineWeb, WARC'ı kullanıp kendi çıkarımını
+`trafilatura` ile yaptı ve sebebini açıkça söylüyor: [WET dosyaları "fazla
+miktarda kalıp metin ve menü metni barındırıyordu"]{.hl} [@penedo2024fineweb].
+Gezinti çubukları, çerez uyarıları ve alt bilgi bağlantıları da metindir ve
+sonraki token amacı bunları tahmin etmeyi seve seve öğrenir.
+
+Bu, pipeline'ın tamamı boyunca tekrarlanan bir örüntünün ilk görünüşü:
+*modelin size verisinin kötü olduğunu söyleyecek bir yolu yoktur.* O, kendisine
+verilen loss'u küçültür. Ulaşılabilir loss düşüşünün onda biri çerez
+bildirimlerinde duruyorsa model çerez bildirimlerinde harika olur.
+
+### Huni
+
+Sağ kalan şey aşağıda; her aşamada FineWeb'in yayımladığı token sayılarıyla.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">96 tarama anlık görüntüsünden kullanılabilir bir derleme</div>
+<svg viewBox="0 0 764 400" style="max-width:744px" role="img"
+     aria-label="Daralan çubukların dikey bir yığını olarak çizilmiş bir huni. Ham HTML içeren doksan altı Common Crawl anlık görüntüsü trafilatura ile çıkarılıp URL kara listelerinden, bir fastText İngilizce filtresinden, tekrar filtrelerinden ve kalite sezgisel kurallarından geçiriliyor; geriye kabaca 36 trilyon token kalıyor. Her anlık görüntünün içinde uygulanan MinHash deduplication'ı 20 trilyon token bırakıyor. Kalan özel filtreler ve kişisel bilgi yeniden biçimlendirmesi, 15 trilyon token'lık yayımlanmış FineWeb veri kümesini bırakıyor. Her belgenin eğitici olup olmadığını soran ve tek başına çalıştırılması 6.000 H100-saate mal olan bir sınıflandırıcı ise FineWeb-Edu olarak 1,3 trilyon token bırakıyor. Yandaki bir dal, bunun yerine bütün anlık görüntüler arasında küresel deduplication yapılsaydı geriye yalnızca 4 trilyon token kalacağını — girenin 36 trilyonunun kabaca dokuzda biri — ve bu daha agresif yolun daha kötü modeller ürettiğini gösteriyor.">
+  <defs>
+    <marker id="fun-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head"/>
+    </marker>
+    <marker id="fun-r" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0.5 L7.5,4 L0,7.5 z" class="head-rose"/>
+    </marker>
+  </defs>
+
+  <rect x="150" y="22" width="330" height="40" rx="8" class="box"/>
+  <text x="315" y="40" class="t-sm t-mid t-b">96 Common Crawl anlık görüntüsü</text>
+  <text x="315" y="54" class="t-xs t-mid t-muted">ham HTML — her biri yüzlerce terabayt</text>
+
+  <line x1="315" y1="62" x2="315" y2="82" class="ln" marker-end="url(#fun-a)"/>
+  <text x="496" y="78" class="t-xs t-muted">bedava WET metni değil, WARC üzerinde trafilatura</text>
+
+  <rect x="168" y="86" width="294" height="40" rx="8" class="box-navy"/>
+  <text x="315" y="104" class="t-sm t-mid t-b">≈ 36T token</text>
+  <text x="315" y="118" class="t-xs t-mid t-muted">URL, dil, tekrar ve kalite filtrelerinden sonra</text>
+
+  <line x1="315" y1="126" x2="315" y2="146" class="ln" marker-end="url(#fun-a)"/>
+  <text x="478" y="142" class="t-xs t-muted">MinHash dedup, her anlık görüntünün içinde</text>
+
+  <rect x="192" y="150" width="246" height="40" rx="8" class="box-navy"/>
+  <text x="315" y="168" class="t-sm t-mid t-b">20T token</text>
+  <text x="315" y="182" class="t-xs t-mid t-muted">yakın kopyalar tek nüshaya indirildi</text>
+
+  <line x1="315" y1="190" x2="315" y2="210" class="ln" marker-end="url(#fun-a)"/>
+  <text x="454" y="206" class="t-xs t-muted">kalan özel filtreler, PII yeniden biçimlendirme</text>
+
+  <rect x="216" y="214" width="198" height="40" rx="8" class="box-accent"/>
+  <text x="315" y="232" class="t-sm t-mid t-b">15T token — FineWeb</text>
+  <text x="315" y="246" class="t-xs t-mid t-muted">yayımlanan veri kümesi</text>
+
+  <line x1="315" y1="254" x2="315" y2="274" class="ln" marker-end="url(#fun-a)"/>
+  <text x="430" y="270" class="t-xs t-muted">sınıflandırıcı: bu eğitici mi?  (6.000 H100-saat)</text>
+
+  <rect x="248" y="278" width="134" height="40" rx="8" class="box-accent"/>
+  <text x="315" y="296" class="t-sm t-mid t-b">1,3T — FineWeb-Edu</text>
+  <text x="315" y="310" class="t-xs t-mid t-muted">yüksek puanlı alt küme</text>
+
+  <path d="M168,106 L96,106 L96,166" class="ln-rose ln-dash" fill="none" marker-end="url(#fun-r)"/>
+  <rect x="16" y="172" width="160" height="58" rx="8" class="box-rose"/>
+  <text x="96" y="192" class="t-xs t-mid t-b t-rose">seçilmeyen yol</text>
+  <text x="96" y="208" class="t-xs t-mid t-b">4T token</text>
+  <text x="96" y="222" class="t-xs t-mid t-muted">küresel dedup, tüm görüntüler</text>
+  <text x="96" y="250" class="t-xs t-mid t-rose t-b">ve modeller daha kötü çıktı</text>
+
+  <text x="382" y="352" class="t-xs t-mid t-muted">Her ok, birinin bir eğitim koşusuyla gerekçelendirmek zorunda kaldığı bir karar.</text>
+  <text x="382" y="370" class="t-xs t-mid t-muted">Yayımlanan şey, çıkarımdan sağ çıkanın kabaca %40'ı — ve onu kabaca dokuzda bire</text>
+  <text x="382" y="386" class="t-xs t-mid t-muted">indirecek olan daha agresif yol, sonucu ölçülebilir biçimde kötüleştirdi.</text>
+</svg>
+```
+::: {.fig-cap}
+Token sayıları FineWeb'in kendi sayıları; GPT-2 tokenizer'ıyla ölçüldü
+[@penedo2024fineweb]. Yandaki dal, aşağıda tartışılan sonuç: daha fazla
+deduplication monoton biçimde daha iyi değil.
+:::
+::::
+
+### Her filtre gerçekte neye karşı koruyor
+
+Bir filtre listesi sıkıcıdır. Her birinin var olma sebebi değil.
+
+| filtre | neyi atar | önlediği başarısızlık |
+|:--|:--|:--|
+| URL kara listesi | yetişkin içerik listesindeki sayfalar | savunamayacağınız ve sonradan çıkaramayacağınız materyal üzerinde eğitim |
+| `trafilatura` çıkarımı | gezinti, reklam, alt bilgi | "Tüm çerezleri kabul et" konusunda akıcı bir model |
+| fastText dil kimliği, skor $\ge 0{,}65$ | kesin olarak İngilizce olmayan sayfalar | iddia ettiği dil, gerçek dili olmayan bir derlem |
+| tekrar filtreleri | tek satırı 400 kez tekrarlayan sayfalar | üretim anında yozlaşmış döngüler |
+| kalite sezgisel kuralları | cümle sonu noktalaması yok, saçma sembol oranları | hiçbir insanın okumadığı, anahtar kelime tıkıştırılmış spam |
+| MinHash deduplication | neredeyse birebir aynı belgeler | ezberleme ve tek bir metne iki kez harcanan hesap |
+| PII yeniden biçimlendirme | e-posta adresleri, telefon numaraları | prompt'la gerçek bir kişinin bilgilerini sızdırmaya ikna edilebilen bir model |
+
+Bu satırların ikisi bir tablo hücresinden fazlasını hak ediyor.
+
+**Deduplication yerini deneysel olarak hak ediyor.** Tekilleştirilmiş veri
+üzerinde eğitilen modeller eğitim kümelerini kayda değer ölçüde daha az
+ezberliyor ve aşağı akışta daha kötü de değiller [@lee2022deduplicating].
+Ezberleme varsayımsal bir şey değil: doğru prompt verildiğinde büyük bir
+model, kişisel bilgiler dahil, eğitim verisinden uzun pasajları kelimesi
+kelimesine dökebiliyor [@carlini2021extracting]. Kopyalar bunu mekanik bir
+sebeple kötüleştiriyor — yüz kez geçen bir pasaj, gradyanın modeli yeniden
+üretmesi için yüz kez ödüllendirdiği bir pasajdır.
+
+**Dil filtresi bir ölçüm değil, bir politikadır.** Bir İngilizce
+sınıflandırıcısında 0,65 eşiği yalnızca dili *tespit* etmez, derlemi
+*tanımlar*. Diller arası geçiş yapan metin, şapkasız yazılmış Türkçe, ağır
+lehçe özellikleri taşıyan İngilizce: hepsi daha düşük puan alır, hepsi elenir.
+Bir modelin sonradan dilin bir çeşidinde zayıf olduğu görüldüğünde bu genelde
+tam burada olmuştur — sessizce, daha kimse bir şey eğitmeden aylar önce.
+
+### Deduplication sürprizi
+
+Şimdi veri pipeline'ları hakkındaki düşüncenizi değiştirmesi gereken sonuç.
+
+[Deduplication](#gloss-deduplication){#term-deduplication .term-ref}'ın apaçık
+bir ayar düğmesi var: kopyaları ne kadar geniş bir alanda arıyorsunuz? Tek bir
+anlık görüntünün içinde mi, yoksa 96'sının tamamı arasında mı? Hepsinin
+arasında aramak daha kapsamlı, dolayısıyla daha iyi olması gerekir.
+
+::: {#gloss-deduplication .column-margin .term-gloss}
+**deduplication** (tekilleştirme) — zaten tutulanlarla birebir ya da neredeyse birebir aynı olan belgeleri atmak; böylece model aynı metne tekrar tekrar hesap harcamaz ve onu ezberlemez. [↩](#term-deduplication){.term-back}
+:::
+
+FineWeb tam olarak bunu denedi. İki strateji, aynı başlangıç noktasından
+ayrılan iki alternatif yol: temel filtrelenmiş metnin ~36 trilyon token'ı
+üzerinde çalıştırıldığında, anlık görüntü içi deduplication **20 trilyon**,
+küresel deduplication ise **4 trilyon** bırakıyor — beşte biri kadar ve girenin
+kabaca dokuzda biri. Ayrıca en sert vuruşu en eski anlık görüntülere indirdi;
+[onlardan "özgün temel filtrelenmiş verinin %90'ı kadarını" kaldırdı]{.hl},
+çünkü o görüntülerin karşısında tekilleştirilecek 95 sonraki tarama vardı
+[@penedo2024fineweb].
+
+Sonra kontrol ettiler; çoğu pipeline'ın atladığı kısım da bu. 2013-48 anlık
+görüntüsünü tek başına alıp iki model eğittiler: biri küresel deduplication'ın
+*tuttuğu* ~31 milyar token üzerinde, diğeri *attığı* ~460 milyardan çekilmiş
+171 milyar token üzerinde. Tutulan veri kaybetti.
+
+Belgeleri elle okuduktan sonra yaptıkları açıklama, ezberlenmeye değer olan:
+agresif küresel deduplication'dan sağ çıkan veri "başlangıçta atılan veriye
+kıyasla daha çok reklam, tutarsız anahtar kelime listeleri ve genel olarak
+kötü biçimlendirilmiş metin içeriyor" [@penedo2024fineweb].
+
+::: {.callout-important appearance="simple" icon="false"}
+**Bu neden oluyor ve neden sizin de başınıza gelecek.** Mekanizmayı doğru
+anlamakta fayda var, çünkü akla ilk gelen açıklama yanlış. Deduplication iyi
+yazıyı atmıyor — her şeyin bir nüshasını tutuyor. Önemli olan *hangi* nüshayı
+tuttuğu. FineWeb tekilleştirmeyi en yeni anlık görüntüden başlayıp geriye
+doğru, yinelemeli biçimde yaptı; yani sonraki bir taramada da görünen her
+belge eskilerinden silindi. İyi yazı ise tam olarak alıntılanan, yeniden
+yayımlanan ve zaman içinde ileriye taşınan şeydir; dolayısıyla yeni anlık
+görüntülerde hayatta kalır ve eskilerden kazınır. Spam ise her seferinde
+yeniden üretilir ve bir daha görünmez, o yüzden olduğu yerde kalır.
+
+İyi hiçbir şey silinmedi. Ama herhangi bir eski anlık görüntünün içinde çöpün
+*oranı* yükseldi ve makale bunu doğrudan söylüyor: [küresel deduplication "son
+tekilleştirilen taramadaki düşük kaliteli veriyi yukarı örnekliyor; bu da
+tutulan verinin atılan veriye kıyasla daha kötü performans göstermesine yol
+açıyor"]{.hl} [@penedo2024fineweb].
+
+Genel ders şu: bir vekil ölçüt — burada kopyalanma — gerçekte istediğiniz bir
+şeyin yerine geçiyordu ve belli bir şiddetin ötesinde vekil ölçüt tersine
+döndü. Bunu kimse üzerine düşünerek yakalayamazdı. Onlar iki model eğitip
+karşılaştırarak yakaladı.
+:::
+
+FineWeb'in tekilleştirmeyi her anlık görüntünün *içinde* yapıp orada
+durmasının sebebi bu. Bu aynı zamanda kitap boyunca tekrarlanan bir argümanın
+da habercisi: bir veri kararı apaçık doğru göründüğünde, onu küçük bir eğitim
+koşusuyla kontrol etmenin maliyeti neredeyse her zaman ölçekte yanılmanın
+maliyetinden düşüktür.
+
+### Miktar, ağırlık demek değildir
+
+Veriyi topladıktan sonra, modelin her türden ne kadarını gerçekten göreceğine
+karar vermeniz gerekir. Bunlar farklı sayılardır ve ikisini birbirine
+karıştırmak bir model raporunu yanlış okumanın klasik biçimidir.
+
+GPT-3'ün tablosu ayrımı alışılmadık ölçüde net gösteriyor [@brown2020language]:
+
+| veri kümesi | mevcut token | eğitim karışımındaki payı | 300B token içinde kaç kez görüldü |
+|:--|--:|--:|--:|
+| Common Crawl (filtrelenmiş) | 410B | %60 | 0,44 |
+| WebText2 | 19B | %22 | 2,9 |
+| Books1 | 12B | %8 | 1,9 |
+| Books2 | 55B | %8 | 0,43 |
+| Wikipedia | 3B | %3 | 3,4 |
+
+Son iki sütunu birlikte okuyun. Wikipedia, mevcut token'ların **%0,6**'sı ve
+eğitim karışımının **%3**'ü; yani model, filtrelenmiş web taramasının yarısından
+azını okurken Wikipedia'nın tamamını 3,4 kez baştan sona geçti. Yazarlar
+sebebini tek cümlede söylüyor: ağırlıklar kasten boyutla *orantılı değil* ve
+"daha yüksek kaliteli eğitim verisi karşılığında az miktarda aşırı uyumu"
+kabul ediyorlar [@brown2020language].
+
+Dört yıl sonra Llama 3, karışımını kaynağa göre değil *konuya* göre
+raporluyor; bu bile size alanın neyi önemsemeyi öğrendiğini söylüyor: kabaca
+[%50 genel bilgi, %25 matematik ve akıl yürütme token'ı, %17 kod ve %8 çok
+dilli]{.hl} [@grattafiori2024llama3]. Son rakama dikkat edin. Açıkça çok dilli
+diye pazarlanan bir modelde, İngilizce olmayan bütün dillerin paylaştığı yüzde
+sekiz. Bu sayıyı aklınızda tutun — Türkçenin bedelini fiyatlandırırken geri
+dönecek.
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Bölüm durumu: çevriliyor.** Bu bölümün Türkçesi hazırlanıyor. Tam ve güncel
-metin için [İngilizce sürüme](../../en/chapters/08-pretraining-landscape.html) bakabilirsiniz.
+**Kod oraya kod yazmak için konmadı.** Genel amaçlı bir modelin beslenmesinin
+yüzde on yedisinin kaynak kod olması, kodun *ne olduğunu* düşünene kadar tuhaf
+görünür: binlerce token önce yapılan bir hatanın devamı geçersiz kıldığı, uzun
+menzilli ve yapılı bir metin. İnternetteki en güvenilir biçimde kendi kendini
+denetleyen metin odur. Daha iyi akıl yürütmeden *nedensel olarak* sorumlu olup
+olmadığı hâlâ tartışılıyor; laboratuvarların oranı yükseltmeye devam etmesi
+ise size neye inandıklarını söylüyor.
 :::
+
+### Son kırk milyon token
+
+Llama 3'ün ön eğitimi kendi içinde üç aşamalı ve oranlar şaşırtıcı
+[@grattafiori2024llama3]:
+
+1. **İlk ön eğitim.** AdamW, tepe öğrenme oranı $8\times10^{-5}$, 8.000 adımda
+   ısıtılıyor, 1,2 milyon adım boyunca kosinüs programıyla $8\times10^{-7}$'ye
+   düşürülüyor. Batch boyu *büyüyor*: 4.096 dizi uzunluğunda 4M token, 252M
+   token sonra 8.192 uzunlukta 8M token'a ikiye katlanıyor, 2,87 trilyon token
+   sonra yeniden 16M'ye katlanıyor. Baştaki küçük batch'ler kararlılık,
+   sonraki büyük batch'ler verimlilik satın alıyor.
+2. **Uzun bağlam ön eğitimi.** Bağlam penceresi altı aşamada 8K'dan 128K'ya
+   çıkarılıyor; kabaca 800 milyar token kullanılıyor — koşunun yaklaşık %5'i
+   yalnızca daha uzun bir pencereyi kullanmayı öğrenmeye harcanıyor.
+3. **Tavlama.** **Son 40 milyon token** boyunca öğrenme oranı doğrusal olarak
+   sıfıra indiriliyor ve bu sırada veri karışımı çok yüksek kaliteli
+   kaynakları yukarı örneklemeye kayıyor. Yayımlanan ağırlıklar ise bu
+   aşamadaki checkpoint'lerin bir Polyak ortalaması.
+
+Kırk milyon token, 15,6 trilyonun $\%0{,}00026$'sı. Ve önemli: 8B modelde,
+yüksek kaliteli kod ve matematik üzerinde
+[annealing](#gloss-annealing){#term-annealing .term-ref} (tavlama) GSM8k'yı
+%24,0, MATH'i %6,4 iyileştirdi. 405B modelde aynı işlem ihmal edilebilir kaldı;
+yazarlar bunu, daha büyük modelin yeteneğe zaten sahip olması ve hatırlatmaya
+ihtiyaç duymaması olarak okuyor.
+
+::: {#gloss-annealing .column-margin .term-gloss}
+**annealing** (tavlama) — bir koşunun sonunda öğrenme oranını sıfıra indirmek; genelde veri karışımını eldeki en iyi malzemeye doğru kaydırarak. Yavaş soğutmanın bir yapıyı oturttuğu metalurjiden ödünç alınmış bir ad. [↩](#term-annealing){.term-back}
+:::
+
+[Bir token'ın programın neresinde durduğu, ne öğrettiğini değiştirir.]{.hl}
+400.000. adımda, büyük bir öğrenme oranı altında görülen bir token, bir milyon
+sonraki gradyanın kısmen üzerine yazacağı geniş bir yeteneğe katkı verir.
+Koşunun son %0,0003'ünde, öğrenme oranı sıfıra giderken görülen bir token ise
+bir daha asla kıpırdamayacak ağırlıklara iner. Aksi hâlde gizemli görünecek
+bir endüstri alışkanlığının arkasındaki mekanizma budur: en iyi veriyi sona
+saklayın.
+
+### Bir token'ı kaç kez yeniden kullanabilirsiniz?
+
+Er ya da geç her ciddi ön eğitim projesi istediği dilden tükenir. Bu Türkçe
+için şimdiden geçerli; İngilizce için de ham token sayılarının düşündürdüğünden
+daha erken geçerli olacak. Akla ilk gelen hamle, elinizdekinin üzerinden daha
+fazla [epoch](#gloss-epoch){#term-epoch .term-ref} geçmektir.
+
+::: {#gloss-epoch .column-margin .term-gloss}
+**epoch** (devir) — eğitim verisi üzerinden bir tam geçiş. Sınırdaki ön eğitim koşuları genelde bir epoch'un epeyce altında kalır; buradaki soru, üstüne çıkmak zorunda kaldığınızda ne olduğudur. [↩](#term-epoch){.term-back}
+:::
+
+Ölçülmüş cevap, halk inancının beklediğinden daha cömert
+[@muennighoff2023scaling]. [Tekrarlanmış verinin dört epoch'una kadar eğitim
+"benzersiz veriye kıyasla loss'ta ihmal edilebilir değişiklikler
+üretiyor"]{.hl}. Bunun ötesinde her ek epoch'un değeri sönüyor — ve nihayetinde
+*hesap* eklemenin değeri de sıfıra sönüyor, çünkü modelin zaten tükettiği veri
+üzerinden fazladan geçişler işe yaramaz.
+
+Tavsiyenin pratikteki hâli:
+
+| durumunuz | kanıtın desteklediği şey |
+|:--|:--|
+| hesaptan fazla benzersiz token var | benzersiz veriyi kullanın; asla tekrarlamayın |
+| veri kısıtlı, hesap fazlası ölçülü | yaklaşık 4 epoch'a kadar tekrarlayın, neredeyse bedava |
+| veri kısıtlı, hesap fazlası büyük | fazlayı parametreler *ve* epoch'lar arasında bölün, epoch'lara meylederek |
+| iki sınırın da çok ötesinde | durun; fazladan hesap hiçbir şey satın almıyor |
+
+İnsanları şaşırtan satır üçüncüsü, o yüzden doğrudan yazarlardan alalım: veri
+kısıtlı rejimde, yeni hesabı [hem daha fazla parametreye hem de epoch'a
+ayırmak "gerekiyor ve … epoch'lar biraz daha hızlı ölçeklenmeli"]{.hl}
+[@muennighoff2023scaling]. Şekilleri bunu daha da keskin ifade ediyor —
+veriler "Chinchilla ölçekleme yasalarının tekrarlanmış veri için de geçerli
+olduğunu varsaymanın öngöreceğinin aksine, daha küçük modelleri daha çok
+epoch boyunca eğitmeyi" işaret ediyor. Veriniz azken Chinchilla'nın oranına
+uzanırsanız size parametre almanızı söyler ve yanılır.
+
+Türkçe bir proje için bu gerçekten özgürleştirici. 30 milyar Türkçe token'lık
+bir derlem sizi 30 milyar token'lık eğitimle sınırlamaz; getiriler gözle
+görülür biçimde bükülmeden önce 120 milyara yakın bir yerdesiniz ve bu, hangi
+model boyutunun savunulabilir olduğunu değiştirir.
+
+## Tokenizer bir bütçe kararıdır {#sec-tokenizer-butcesi}
+
+Bir ön eğitim kararı ilk gradyan adımından önce verilir, bir daha asla
+gözden geçirilmez ve modelin bütün ömrü boyunca her kullanıcısını sessizce
+vergilendirir. O karar tokenizer'dır.
+
+@sec-metin-veri bölümü alt kelime tokenizasyonunu sınırsız bir sözlükten
+kaçınmanın bir yolu olarak tanıtmıştı. Bu çerçeve doğru ama eksik. Ön eğitim
+ölçeğinde tokenizer bir ön işleme kolaylığı değildir — [hesap bütçesinin
+diller arasında nasıl bölüştürüldüğüdür]{.hl} ve bu bölüşüm kalıcıdır.
+Fine-tuning ile bundan kurtulamazsınız, çünkü tokenizer'ı değiştirmek
+embedding tablosunu, o da aşağı akıştaki her ağırlığı değiştirir.
+
+Llama 3'ün tokenizer'ı, bu kararın açıkça verilmesinin iyi bir örneği.
+128.000 token'lık sözlüğü, OpenAI'ın `tiktoken`'ından alınan 100.000 token
+artı [İngilizce dışındaki dilleri desteklemek için özellikle eklenen 28.000
+token]{.hl} [@grattafiori2024llama3]. Rapor, bu 28K'nın diğer diller için
+sıkıştırmayı ve aşağı akış performansını "İngilizce tokenizasyonuna hiçbir
+etkisi olmadan" iyileştirdiğini belirtiyor. Bu, bir kez verilmiş, fiyat
+etiketli bir tasarım *tercihidir*.
+
+### Fertility ve apaçık metriğin neden yalan söylediği
+
+Standart ölçüt [fertility](#gloss-fertility){#term-fertility .term-ref}
+(doğurganlık): kelime başına token. Düşük olan iyidir.
+
+::: {#gloss-fertility .column-margin .term-gloss}
+**fertility** (doğurganlık) — bir tokenizer'ın girdideki her kelime için kaç token ürettiği. Tek bir dilde iki tokenizer'ı karşılaştırırken anlamlıdır; bir sonraki paragrafın gösterdiği gibi, iki dili karşılaştırırken yanıltıcıdır. [↩](#term-fertility){.term-back}
+:::
+
+Türkçe için fertility yanlış sayıdır ve bunu yanlış anlamak sizi tam tersi
+bir sonuca götürür. Türkçe eklemeli bir dildir: bir gövdenin üzerine ekler
+yığar, dolayısıyla tek bir Türkçe kelime İngilizcenin dört beş kelimeyle
+söylediği şeyi rutin olarak taşır. *Evlerinizden* tek kelimedir ve
+"from your houses" demektir. Kelime başına token'ı iki dil arasında
+karşılaştırmak, farklı büyüklükteki birimleri karşılaştırmaktır.
+
+Dürüst ölçüm **aynı içerik için token** sayısıdır: bir cümleyi ve onun
+profesyonel çevirisini alın, ikisini de tokenize edin ve bölün. Bir Türkçe
+kullanıcının gerçekte ödediği şey bu orandır — bağlam penceresinde,
+gecikmede ve her API faturasında.
+
+### Ölçüm
+
+İki metriği de elle seçilmiş bir paragraf yerine gerçek bir paralel derlem
+üzerinde çalıştırdık, çünkü tek bir pasaj tesadüf olabilir. Kaynak,
+OPUS-100'ün `en-tr` bölümü; oradan 3.000 cümle çifti indirildi ve 1.157
+kullanılabilir çifte filtrelendi: iki taraf da en az dört kelime ve karakter
+uzunluğu oranı 0,4 ile 2,5 arasında — bu, makineyle kurulmuş paralel
+derlemlerin her zaman içerdiği hizalama hatalarını eliyor. Geriye eşleşen
+içerikte 8.058 Türkçe kelimeye karşı 10.862 İngilizce kelime kalıyor — ve bu
+eşitsizliğe dikkat edin, çünkü ham sayımlarda görünen şey *eklemeliliğin ta
+kendisi*.
+
+Aşağıdaki her sayı, modelle birlikte gerçekten gelen tokenizer'ın
+çalıştırılmasından geliyor — `openai-community/gpt2`,
+`google-bert/bert-base-multilingual-cased`, `NousResearch/Meta-Llama-3-8B`,
+`Qwen/Qwen2.5-7B`, `dbmdz/bert-base-turkish-cased` ve
+`ytu-ce-cosmos/turkish-gpt2`.
+
+| tokenizer | sözlük | TR/kelime | EN/kelime | aynı içerik | ortanca |
+|:--|--:|--:|--:|--:|--:|
+| GPT-2 (2019) | 50.257 | 3,42 | 1,28 | **1,98×** | 1,92 |
+| BERT çok dilli (2018) | 119.547 | 2,38 | 1,43 | **1,23×** | 1,21 |
+| Llama 3 (2024) | 128.000 | 2,12 | 1,28 | **1,23×** | 1,22 |
+| Qwen 2.5 (2024) | 151.643 | 2,43 | 1,29 | **1,40×** | 1,39 |
+| BERTurk (Türkçe doğma) | 32.000 | 1,59 | 2,03 | **0,58×** | 0,58 |
+| Cosmos GPT-2 (Türkçe doğma) | 50.257 | 1,56 | 1,79 | **0,64×** | 0,64 |
+
+"Aynı içerik" sütunu derlemin tamamı üzerindeki toplu oran; "ortanca" ise ilk
+800 çiftteki cümle başına oranların ortancası — manşeti tek bir uzun aykırı
+değerin sürüklememesi için ayrıca hesaplandı. Altı tokenizer'ın beşinde ikisi
+0,02'lik bir fark içinde uyuşuyor; bu da toplu değerin bir yapaylık olmadığının
+sağlama testi. İstisna, 1,92'ye karşı 1,98 ile GPT-2. Toplu değer, cümle
+başına oranların uzunlukla ağırlıklandırılmış ortalaması; dolayısıyla
+ortancanın üstünde bir toplu değer, pahalı olanların uzun cümleler olduğunu
+söylüyor — GPT-2'nin Türkçe cezası düz bir ek ücret olmak yerine cümle
+uzunluğuyla birlikte büyüyor. Onun için tek bir sayı telaffuz etmeden önce
+bilmekte fayda var.
+
+```{ojs}
+//| echo: false
+viewof fertMetric = Inputs.radio(
+  [
+    "Aynı içerik için token (Türkçe ÷ İngilizce)",
+    "Kelime başına token (yanıltıcı görünüm)"
+  ],
+  { value: "Aynı içerik için token (Türkçe ÷ İngilizce)", label: "" }
+)
+```
+
+```{ojs}
+//| echo: false
+fertRows = [
+  { name: "GPT-2 (2019)",              vocab:  50257, tr: 3.42, en: 1.28, same: 1.98 },
+  { name: "Qwen 2.5 (2024)",           vocab: 151643, tr: 2.43, en: 1.29, same: 1.40 },
+  { name: "BERT çok dilli (2018)",     vocab: 119547, tr: 2.38, en: 1.43, same: 1.23 },
+  { name: "Llama 3 (2024)",            vocab: 128000, tr: 2.12, en: 1.28, same: 1.23 },
+  { name: "Cosmos GPT-2 (TR doğma)",   vocab:  50257, tr: 1.56, en: 1.79, same: 0.64 },
+  { name: "BERTurk (TR doğma)",        vocab:  32000, tr: 1.59, en: 2.03, same: 0.58 }
+]
+```
+
+```{ojs}
+//| echo: false
+fertOrder = fertRows.map(d => d.name)
+```
+
+```{ojs}
+//| echo: false
+fertPlot = {
+  const sameMode = fertMetric.startsWith("Aynı içerik");
+
+  if (sameMode) {
+    return Plot.plot({
+      width: 700,
+      height: 320,
+      marginLeft: 190,
+      marginRight: 40,
+      x: { label: "İngilizce token başına Türkçe token, aynı içerik →", domain: [0, 2.2], grid: true },
+      y: { domain: fertOrder, label: null },
+      marks: [
+        Plot.barX(fertRows, {
+          y: "name",
+          x: "same",
+          fill: d => d.same > 1 ? "#C1666B" : "#0E7C7B",
+          rx: 3,
+          title: d => `${d.name}: ${d.same.toFixed(2)}x`
+        }),
+        Plot.text(fertRows, {
+          y: "name",
+          x: "same",
+          text: d => d.same.toFixed(2) + "x",
+          dx: 16,
+          fontWeight: "bold"
+        }),
+        Plot.ruleX([1], { stroke: "#5B6272", strokeDasharray: "4 3" }),
+        Plot.ruleX([0])
+      ]
+    });
+  }
+
+  const long = fertRows.flatMap(d => [
+    { name: d.name, lang: "Türkçe", v: d.tr },
+    { name: d.name, lang: "İngilizce", v: d.en }
+  ]);
+
+  return Plot.plot({
+    width: 700,
+    height: 380,
+    marginLeft: 190,
+    marginRight: 40,
+    x: { label: "kelime başına token →", domain: [0, 3.7], grid: true },
+    fy: { domain: fertOrder, label: null },
+    y: { domain: ["Türkçe", "İngilizce"], axis: null },
+    color: {
+      domain: ["Türkçe", "İngilizce"],
+      range: ["#C1666B", "#1F4E79"],
+      legend: true
+    },
+    marks: [
+      Plot.barX(long, {
+        fy: "name",
+        y: "lang",
+        x: "v",
+        fill: "lang",
+        rx: 2,
+        title: d => `${d.name} — ${d.lang}: ${d.v.toFixed(2)} token/kelime`
+      }),
+      Plot.ruleX([0])
+    ]
+  });
+}
+```
+
+İki görünüm arasında geçiş yapın ve Türkçe doğma iki tokenizer'ı izleyin.
+Kelime başına token'da Türkçede açık ara kazanan gibi görünüyorlar ve neyi
+kaybettikleri belli olmuyor. Aynı içerik oranında ise takas ortaya çıkıyor:
+Türkçede 1,0'ın *altındalar*, çünkü bunun bedelini İngilizcede ödüyorlar —
+orada Llama 3'ün 1,28'ine karşı kelime başına 1,8 ilâ 2,0 token'a ihtiyaç
+duyuyorlar.
+
+### Tablonun söylediği üç şey
+
+**1. Uçurum muazzam ölçüde daraldı ve bu şans değil, mühendislikti.** GPT-2
+Türkçeden %98 ek ücret alıyordu — aynı içerik neredeyse tam olarak iki katı
+token'a mal oluyordu. Llama 3 %23 alıyor. 2019 ile 2024 arasında Türkçeye
+dair hiçbir şey değişmedi. Değişen şey, tokenizer eğitim verisinin ezici
+çoğunlukla İngilizce olmaktan çıkmasıydı.
+
+**2. Sözlük boyutu asıl kol değil.** İnsanları şaşırtan bulgu bu ve doğrudan
+tablodan çıkıyor. Qwen 2.5'in sözlüğü Llama 3'ünkinden *daha büyük* —
+128.000'e karşı 151.643 — ve Türkçede *daha kötü*: 1,23×'e karşı 1,40×. Başka
+dillere harcanmış daha büyük bir sözlük sizinkine hiçbir şey katmaz. [Önemli
+olan sözlükte kaç yuva olduğu değil, onu eğiten derlemin ne içerdiğidir.]{.hl}
+
+**3. 32K'lık Türkçe doğma bir sözlük, Türkçede 128K'lık çok dilli bir sözlüğü
+yeniyor.** BERTurk, Llama 3'ün sözlüğünün dörtte biriyle 0,58× alıyor. Buna
+karşılık İngilizce kelime başına 2,03 token'a ihtiyaç duyuyor; bu da kabaca
+GPT-2'nin Türkçe performansının tersi. Burada bedava öğle yemeği yok ve soyut
+anlamda "daha iyi tokenizer" diye bir şey de yok: bir sözlük sabit bir
+bütçedir ve Türkçe biçimbilimine verilen her yuva, İngilizceye, koda ya da
+Çinceye verilmemiş bir yuvadır.
+
+### Bir kelimenin gerçekte başına ne geldiğine bakın
+
+Oranlar mekanizmayı gizler. İşte uzun ama gayet sıradan bir Türkçe kelime —
+*bilgisayarlaştırabildiklerimizden* — üç farklı biçimde kesilmiş hâliyle.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir Türkçe kelime, üç farklı biçimde bölütlenmiş</div>
+<svg viewBox="0 0 764 288" style="max-width:744px" role="img"
+     aria-label="Toplam uzunlukları eşit üç yatay şerit hâlinde gösterilen bilgisayarlaştırabildiklerimizden kelimesi. Üstteki şerit bir dilbilimcinin ayırt edeceği sekiz biçimbirimi gösteriyor: bilgisayar, laş, tır, abil, dik, ler, imiz, den. Ortadaki şerit Llama 3'ün dokuz token'ını gösteriyor: bil, gis, ayar, laştır, ab, ild, ik, lerimiz, den; bunlar bilgisayar gövdesini ortasından kesiyor ve yeterlilik ekini üç parçaya bölüyor. Alttaki şerit Türkçe doğma Cosmos tokenizer'ının dört token'ını gösteriyor: bilgisayar, laştır, abildik, lerimizden; bunlar gövdeyi bütün bırakıyor. Daha az token daha ucuzdur, ama alttaki bölütleme de üsttekinden biçimbilimsel olarak daha sadık değildir.">
+  <text x="60" y="30" class="t-sm t-b">bilgisayarlaştırabildiklerimizden</text>
+  <text x="352" y="30" class="t-xs t-muted">— "bilgisayar hâline getirebildiklerimizden"</text>
+
+  <text x="60" y="60" class="t-xs t-b t-muted">BİÇİMBİRİMLER — dilin yaptığı şey (8)</text>
+  <rect x="60"  y="68" width="197" height="32" rx="5" class="box-navy"/>
+  <text x="158" y="88" class="t-xs t-mid t-mono">bilgisayar</text>
+  <rect x="260" y="68" width="57" height="32" rx="5" class="box-navy"/>
+  <text x="288" y="88" class="t-xs t-mid t-mono">laş</text>
+  <rect x="320" y="68" width="57" height="32" rx="5" class="box-navy"/>
+  <text x="348" y="88" class="t-xs t-mid t-mono">tır</text>
+  <rect x="380" y="68" width="77" height="32" rx="5" class="box-navy"/>
+  <text x="418" y="88" class="t-xs t-mid t-mono">abil</text>
+  <rect x="460" y="68" width="57" height="32" rx="5" class="box-navy"/>
+  <text x="488" y="88" class="t-xs t-mid t-mono">dik</text>
+  <rect x="520" y="68" width="57" height="32" rx="5" class="box-navy"/>
+  <text x="548" y="88" class="t-xs t-mid t-mono">ler</text>
+  <rect x="580" y="68" width="77" height="32" rx="5" class="box-navy"/>
+  <text x="618" y="88" class="t-xs t-mid t-mono">imiz</text>
+  <rect x="660" y="68" width="57" height="32" rx="5" class="box-navy"/>
+  <text x="688" y="88" class="t-xs t-mid t-mono">den</text>
+
+  <text x="60" y="130" class="t-xs t-b t-rose">LLAMA 3, 128K SÖZLÜK — 9 token</text>
+  <rect x="60"  y="138" width="57" height="32" rx="5" class="box-rose"/>
+  <text x="88"  y="158" class="t-xs t-mid t-mono">bil</text>
+  <rect x="120" y="138" width="57" height="32" rx="5" class="box-rose"/>
+  <text x="148" y="158" class="t-xs t-mid t-mono">gis</text>
+  <rect x="180" y="138" width="77" height="32" rx="5" class="box-rose"/>
+  <text x="218" y="158" class="t-xs t-mid t-mono">ayar</text>
+  <rect x="260" y="138" width="117" height="32" rx="5" class="box-rose"/>
+  <text x="318" y="158" class="t-xs t-mid t-mono">laştır</text>
+  <rect x="380" y="138" width="37" height="32" rx="5" class="box-rose"/>
+  <text x="398" y="158" class="t-xs t-mid t-mono">ab</text>
+  <rect x="420" y="138" width="57" height="32" rx="5" class="box-rose"/>
+  <text x="448" y="158" class="t-xs t-mid t-mono">ild</text>
+  <rect x="480" y="138" width="37" height="32" rx="5" class="box-rose"/>
+  <text x="498" y="158" class="t-xs t-mid t-mono">ik</text>
+  <rect x="520" y="138" width="137" height="32" rx="5" class="box-rose"/>
+  <text x="588" y="158" class="t-xs t-mid t-mono">lerimiz</text>
+  <rect x="660" y="138" width="57" height="32" rx="5" class="box-rose"/>
+  <text x="688" y="158" class="t-xs t-mid t-mono">den</text>
+
+  <text x="60" y="200" class="t-xs t-b t-accent">COSMOS, TÜRKÇE DOĞMA 50K SÖZLÜK — 4 token</text>
+  <rect x="60"  y="208" width="197" height="32" rx="5" class="box-accent"/>
+  <text x="158" y="228" class="t-xs t-mid t-mono">bilgisayar</text>
+  <rect x="260" y="208" width="117" height="32" rx="5" class="box-accent"/>
+  <text x="318" y="228" class="t-xs t-mid t-mono">laştır</text>
+  <rect x="380" y="208" width="137" height="32" rx="5" class="box-accent"/>
+  <text x="448" y="228" class="t-xs t-mid t-mono">abildik</text>
+  <rect x="520" y="208" width="197" height="32" rx="5" class="box-accent"/>
+  <text x="618" y="228" class="t-xs t-mid t-mono">lerimizden</text>
+
+  <text x="60" y="268" class="t-xs t-muted">Üç şerit de aynı 33 karakteri kaplıyor. Llama 3 "bilgisayar" gövdesini</text>
+  <text x="60" y="282" class="t-xs t-muted">üç parçaya bölüyor; Türkçe doğma tokenizer onu bütün bırakıyor.</text>
+</svg>
+```
+::: {.fig-cap}
+Bölütlemeler elle değil, her tokenizer çalıştırılarak üretildi. Llama 3'ün
+dokuz parçası, Türkçe doğma tokenizer'ın dört parçasının 2,25 katına mal
+oluyor — tek bir kelime için, her ileri geçişte, sonsuza kadar.
+:::
+::::
+
+Llama 3'ün nereden kestiğine bakın. Gündelik, sıradan bir isim olan
+*bilgisayar*'ı `bil | gis | ayar` diye üç parçaya bölüyor; bunların hiçbiri
+Türkçe bir biçimbirim değil ve biri (`ayar`) alakasız, gerçek bir kelime.
+Model, kavramı her geçişinde parçalarından yeniden kurmak zorunda.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**Daha az token, daha iyi dilbilim demek değildir ve bu fark önemlidir.**
+*Evlerinizden* kelimesinde Llama 3 `ev | ler | iniz | den` üretiyor — tam
+olarak dört biçimbirim, ders kitabı bölütlemesi. Türkçe doğma Cosmos
+tokenizer'ı ise `ev | lerinizden` üretiyor: iki token, daha ucuz ve
+biçimbilimsel olarak anlamsız, çünkü `lerinizden` hiçbir şeyin birimi değil.
+
+Yani iki metrik gerçekten çelişebiliyor. Sıkıştırma, bedelini ödediğiniz şey
+ve ölçmesi kolay. Biçimbilimsel hizalanma ise modelin daha önce görmediği bir
+ek bileşimine genellemesine yardım edebilecek şey ve ölçmesi zor. Daha ucuz
+bölütlemenin dilbilimsel olarak daha makul olduğunu varsaymayın — biraz önce
+yaptığımız gibi kontrol edin.
+:::
+
+### Ek ücret gerçekte neye mal oluyor
+
+Llama 3 için ölçülmüş derlem rakamını alalım: Türkçe, birebir aynı içerik için
+İngilizcenin **1,23×** token'ına mal oluyor. Bu tek sayı dört ayrı faturaya
+yayılıyor.
+
+| nereye düşüyor | 1,23×'te etkisi |
+|:--|:--|
+| bağlam penceresi | 128.000 token'lık bir pencere yaklaşık 104.000 İngilizce eşdeğeri token'lık Türkçe alır |
+| API maliyeti | bir milyon İngilizce eşdeğeri token, 1,23 milyonun fiyatına gelir |
+| gecikme | üretim token başına olduğu için Türkçe bir cevap yaklaşık %23 daha uzun sürer |
+| ön eğitim hesabı | sabit FLOP'ta, Türkçe bir derlem İngilizce olandan yaklaşık %19 daha az içerik satın alır |
+
+Son sayının yönüne dikkat edin, çünkü bir oranla yapılabilecek en kolay hata
+budur. Türkçe 1,23× *daha fazla* token'a mal oluyor, ama sabit bir token
+bütçesi içeriğin $1/1{,}23 = 0{,}813$'ünü satın alıyor — %23 değil, **%18,7
+daha az**. Bu ikisi aynı rakam değil ve tablonun yalnızca ilk iki satırı
+1,23 ile çarpılıyor; bağlam penceresi ve hesap satırları ona bölünüyor.
+128.000 token'ın 98.560 değil de yaklaşık 104.000 İngilizce eşdeğeri token
+alması bu yüzden.
+
+Bileşik etki yaratan satır hesap satırı. @sec-olcekleme-yasalari bölümünden
+biliyoruz ki hesap token sayısıyla ölçekleniyor; dolayısıyla Türkçeye
+harcanan sabit bir bütçe, aynı bütçenin İngilizceye harcanmasına kıyasla
+kabaca beşte bir daha az *malzeme* görüyor — tıpatıp aynı paraya daha az
+olgu, daha az cümle, daha az örüntü. Tokenizer vergisi yalnızca çıkarım
+anında alınmıyor. Ön eğitim sırasında, şu anda kullandığınız modele de
+kesilmişti.
+
+::: {.callout-tip appearance="simple" icon="false"}
+**Karar vermeden önce bunu kendi diliniz ve kendi metniniz için ölçün.**
+Yaklaşık on beş satır sürüyor. Kendi alan metninizden ve çevirisinden birkaç
+yüz cümle çifti alın, değerlendirdiğiniz her tokenizer'ı iki taraf üzerinde de
+çalıştırın ve bölün. Alan da en az dil kadar önemli: hukuk Türkçesi, klinik
+Türkçe ve Türkçe sosyal medya aynı şekilde tokenize olmuyor; bir derlem
+ortalaması sizi bu konuda uyarmaz.
+:::
+
+1,23×'in altında pragmatik cevap genelde "yine de çok dilli modeli kullan"
+oluyor — %23 gerçek bir maliyet ama bir kararı tersine çevirmiyor. GPT-2'nin
+1,98×'inde ise çeviriyor. Varsaymak yerine ölçmenizin sebebi tam olarak bu;
+Türkçe doğma bir modelin açık ara kazandığı durumlar dahil, kararın tamamı
+Türkçe NLP'ye ayrılmış ayrı bir konudur.
+
+## Bir koşu neye mal olur {#sec-on-egitim-hesap}
+
+Herhangi bir ön eğitim koşusunun hesabını — kaç
+[FLOP](#gloss-flop){#term-flop .term-ref} tükettiğini — iki sayıdan, parametre
+sayısı $N$ ve token sayısı $D$'den kestirebilir ve yarım yüzdenin altında
+isabetli olabilirsiniz. Bu, sistem işlerinde ciddiye alınacak kadar
+alışılmadık bir durum ve bir basın bültenini sağlamadan geçirmenizi sağlayan
+alet de bu.
+
+::: {#gloss-flop .column-margin .term-gloss}
+**FLOP** — bir kayan noktalı işlem: ondalık sayılar üzerinde tek bir çarpma ya da tek bir toplama. Eğitim hesabı FLOP cinsinden sayılır; yongalar ise saniyedeki işlem sayısı olan FLOP/s ile derecelendirilir. İkisini karıştırmak kolaydır ve aralarında koşuyu ne kadar çalıştırdığınız kadar fark vardır. [↩](#term-flop){.term-back}
+:::
+
+### 6 nereden geliyor
+
+$$
+C \;\approx\; 6\,N\,D \quad \text{FLOP}
+$$
+
+Buradaki 6 uydurulmuş bir katsayı değil. Üç tane 2'den oluşuyor ve her 2'nin
+ayrı bir sebebi var.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Parametre başına, token başına altı kayan noktalı işlem</div>
+<svg viewBox="0 0 764 320" style="max-width:744px" role="img"
+     aria-label="Sabit 6'yı açıklayan üç panel. İlk panel, ileri geçiş, parametre başına token başına iki işleme mal olur: bir çarpma ve bir toplama, çünkü her ağırlık bir çarp-topla işleminde tam bir kez kullanılır. İkinci panel, hatanın daha geriye yolculuk edebilmesi için katman girdisine göre gradyanları hesaplayan geri geçiş, iki işlem daha götürür. Üçüncü panel, optimizer'ın neyi değiştireceğini bilebilmesi için doğrudan ağırlıklara göre gradyanları hesaplayan geri geçiş, yine iki işlem götürür. Alttaki yığılmış çubuk, ileri geçişin toplam maliyetin üçte biri, geri geçişin ise üçte ikisi olduğunu gösteriyor; bu da geri geçişin ileri geçişin yaklaşık iki katına mal olduğu yolundaki standart kuraldır.">
+  <rect x="14" y="34" width="236" height="128" rx="10" class="box-accent"/>
+  <text x="132" y="58" class="t-xs t-mid t-b t-accent">İLERİ</text>
+  <text x="132" y="84" class="t-sm t-mid t-b">parametre başına 2</text>
+  <text x="132" y="106" class="t-xs t-mid t-muted">her ağırlık bir çarp-topla</text>
+  <text x="132" y="120" class="t-xs t-mid t-muted">işleminde bir kez kullanılır:</text>
+  <text x="132" y="140" class="t-xs t-mid t-mono">bir × ve bir +</text>
+
+  <rect x="264" y="34" width="236" height="128" rx="10" class="box-warm"/>
+  <text x="382" y="58" class="t-xs t-mid t-b t-warm">GERİ — GİRDİ</text>
+  <text x="382" y="84" class="t-sm t-mid t-b">parametre başına 2</text>
+  <text x="382" y="106" class="t-xs t-mid t-muted">hatanın önceki katmanlara</text>
+  <text x="382" y="120" class="t-xs t-mid t-muted">ulaşması gerekir:</text>
+  <text x="382" y="140" class="t-xs t-mid t-mono">∂L/∂x</text>
+
+  <rect x="514" y="34" width="236" height="128" rx="10" class="box-warm"/>
+  <text x="632" y="58" class="t-xs t-mid t-b t-warm">GERİ — AĞIRLIKLAR</text>
+  <text x="632" y="84" class="t-sm t-mid t-b">parametre başına 2</text>
+  <text x="632" y="106" class="t-xs t-mid t-muted">optimizer neyi değiştireceğini</text>
+  <text x="632" y="120" class="t-xs t-mid t-muted">bilmek zorunda:</text>
+  <text x="632" y="140" class="t-xs t-mid t-mono">∂L/∂W</text>
+
+  <text x="60" y="204" class="t-xs t-b t-muted">TOPLAMDAKİ PAY</text>
+  <rect x="60"  y="214" width="220" height="34" rx="5" class="box-accent"/>
+  <text x="170" y="236" class="t-xs t-mid t-b">ileri — 2ND</text>
+  <rect x="284" y="214" width="436" height="34" rx="5" class="box-warm"/>
+  <text x="502" y="236" class="t-xs t-mid t-b">geri — 4ND</text>
+
+  <text x="60" y="278" class="t-xs t-muted">"Geri geçiş ileri geçişin yaklaşık iki katına mal olur" ifadesinin bir ölçüm değil de</text>
+  <text x="60" y="294" class="t-xs t-muted">bir kestirme kural olmasının sebebi bu: bunu bir profiler bulmadı, zincir kuralı gerektiriyor.</text>
+</svg>
+```
+::: {.fig-cap}
+İleri geçiş için iki, geri geçiş için dört; parametre başına, token başına.
+$N$ parametre ve $D$ token ile çarpın, koşunun tamamı elinizde.
+:::
+::::
+
+İleri geçişteki iki, kolay olanı. Bir matris çarpımındaki her ağırlık token
+başına tam bir kez kullanılır: bir çarpma ve akümülatöre bir toplama. Ağırlık
+başına, token başına iki işlem.
+
+Geri geçişteki dört ise insanların ipin ucunu kaçırdığı yer; o yüzden iki işi
+ayrı ayrı adlandıralım. Bir katmandan geriye yayılım *iki* farklı gradyan
+üretmek zorunda. Bir yandan $\partial L/\partial x$'e ihtiyacı var — loss'un
+katmanın *girdisine* göre nasıl değiştiği — yoksa hata bir alttaki katmana
+yayılamaz. Bir yandan da $\partial L/\partial W$'ye ihtiyacı var — loss'un her
+bir *ağırlığa* göre nasıl değiştiği — yoksa optimizer'ın güncelleyecek bir şeyi
+olmaz. Bunların her biri aynı şekle sahip bir başka matris çarpımıdır,
+dolayısıyla her biri parametre başına token başına 2 işlem daha götürür. İki
+iş, her biri iki, toplam dört.
+
+### Laboratuvarların yayımladığıyla uyuşuyor mu?
+
+| koşu | $N$ | $D$ | $6ND$ | yayımlanan | fark |
+|:--|--:|--:|--:|--:|--:|
+| GPT-3 | 175B | 300B | $3{,}150\times10^{23}$ | $3{,}14\times10^{23}$ | +%0,32 |
+| Llama 3 405B | 405B | 15,6T | $3{,}791\times10^{25}$ | $3{,}80\times10^{25}$ | −%0,24 |
+
+Hesapta 120 katlık bir fark ve dört yıllık mimari değişime rağmen sapma yüzde
+yarımın altında. Buna yasanın doğrulanması demek cazip geliyor. Ama değil — ve
+bu ayrım, uyuşmanın kendisinden daha önemli.
+
+[Yayımlanan o rakamların kendisi de $6ND$.]{.hl} GPT-3'ün Ek D'si aritmetiği
+sütunlar hâlinde basıyor — "Fwd-pass flops per active param per token: 2",
+"Mult for bwd pass: 3", "Flops per param per token: 6" — ve varsayımını açıkça
+yazıyor: "attention işlemini yok sayıyoruz, çünkü analiz ettiğimiz modellerde
+tipik olarak toplam hesabın %10'undan azını kullanıyor"
+[@brown2020language]. Llama 3'ün $3{,}8\times10^{25}$'i de aynı şekilde bir
+*bütçe*: Meta'nın önceden sabitlediği ve sonra ona sığacak bir model boyutu
+seçtiği sayı [@grattafiori2024llama3].
+
+Yani tablo, bizim defter tutma biçimimizin onlarınkiyle örtüştüğünü gösteriyor;
+bunu doğrulamak değerli, ama hepsi bu. $6ND$'ye güvenmenin sebebi yukarıdaki
+şekildeki türetme, bu tablo değil. Tablonun size kazandırdığı şey pratik:
+laboratuvarlar bu şekilde saydığına göre, parametre ve token sayısı veren
+herhangi bir duyuruyu okuyup onların telaffuz edeceği sayıyı yeniden
+kurabilirsiniz — ve bir sonraki bölümün gösterdiği gibi, o sayının neyi dışarıda
+bıraktığını tam olarak bilirsiniz.
+
+### Nerede doğru olmaktan çıkıyor
+
+$6ND$, maliyeti parametre sayısıyla orantılı olan matris çarpımlarını sayar.
+Attention'ın skor matrisi bunlardan biri değil: o, ne $N$'de ne de $D$'de
+görünen *dizi uzunluğuna* bağlıdır.
+
+@sec-attention-maliyeti, attention'ın bir dizinin tamamı için ileri geçiş
+maliyetini katman başına $4n^2d$ olarak veriyor. Üç adım bunu token başına bir
+rakama çeviriyor: token başına $4nd$ elde etmek için $n$'e bölün; nedensel
+maskeleme yüzünden ortalama bir konum dizinin ancak yarısına baktığından yarıya
+indirin; sonra geri geçiş ileri geçişin iki katına mal olduğu için 3 ile çarpın.
+Geriye, $L$ katman, $n$ dizi uzunluğu ve $d$ genişlik için token başına yaklaşık
+$6\,L\,n\,d$ kalıyor.
+
+Bunu yok saymak ne kadar önemli? Tam olarak bağlamınız ne kadar uzunsa o kadar.
+
+| model ve bağlam | token başına $6N$ | token başına attention | attention'ın $6N$ içindeki payı | gerçek maliyet ÷ $6ND$ |
+|:--|--:|--:|--:|--:|
+| Llama 3 8B, 8K bağlamda | $4{,}82\times10^{10}$ | $6{,}44\times10^{9}$ | %13 | 1,13× |
+| Llama 3 8B, 128K bağlamda | $4{,}82\times10^{10}$ | $1{,}03\times10^{11}$ | %214 | 3,14× |
+| Llama 3 405B, 8K bağlamda | $2{,}43\times10^{12}$ | $1{,}02\times10^{11}$ | %4 | 1,04× |
+
+Son sütunu "gerçeğe ulaşmak için $6ND$'yi neyle çarpmanız gerektiği" diye okuyun.
+
+::: {.column-margin}
+Ters yöne iten daha küçük bir hata daha var. Girdi embedding'i bir matris
+çarpımı değil, bir *tablo bakışı*; yani neredeyse hiç FLOP harcamıyor — buna
+karşın parametreleri $N$'in içinde sayılıyor. Llama 3'ün bağlanmamış
+embedding'i $128{.}256 \times 4096 = 525$M parametre: 8B'nin $N$'inin
+**%6,5**'i, ama 70B'ninkinin yalnızca %1,5'i ve 405B'ninkinin %0,5'i. Yani
+$6ND$, attention'ı eksik sayarken aynı anda küçük modelleri biraz fazla
+sayıyor. 8B'nin 8K'daki hâlinde ikisi kısmen birbirini götürüyor.
+:::
+
+İkisi de pratik olan iki ders. Birincisi, [$6ND$ bir *ön eğitim*
+yasasıdır]{.hl}: ön eğitim kısa bağlamda koştuğu için isabetlidir ve geniş bir
+model attention terimini gömdüğü için en isabetli olduğu yer 405B'dir. İkincisi,
+128K bağlamda gerçek maliyet yasanın söylediğinin üç katından fazladır — uzun
+bağlam eğitiminin koşunun tamamı boyunca değil de token'ların küçük bir kısmı
+üzerinde kısa ve ayrı bir aşama olarak yapılmasının sebebi tam olarak budur.
+
+### Baştan sona tek bir koşu
+
+Llama 3.1 405B'yi alın ve parametrelerden faturaya kadar takip edin. Her girdi
+yayımlanmış durumda: makale $N$ ve $D$'yi, Meta'nın model kartı da GPU-saatlerini
+veriyor [@grattafiori2024llama3].
+
+| büyüklük | değer | nereden geliyor |
+|:--|--:|:--|
+| parametre | 405B | makale |
+| eğitim token'ı | 15,6T | makale |
+| hesap | $3{,}79\times10^{25}$ FLOP | $6ND$ |
+| H100-saat | 30,84M | Meta'nın model kartı |
+| 8.000 H100 üzerinde | 160,6 gün | 30,84M ÷ 8.000 ÷ 24 |
+| 16.000 H100 üzerinde | 80,3 gün | fiilen kullanılan filo |
+| 24.000 H100 üzerinde | 53,5 gün | |
+| \$2,00/GPU-saatten kiralanırsa | ≈ \$62M | piyasa fiyatı, çok oynak |
+| \$3,00/GPU-saatten kiralanırsa | ≈ \$93M | |
+
+Meta'nın kartı Llama 3.1 ailesinin tamamını **39,3M H100-saat** olarak veriyor:
+8B için 1,46M, 70B için 7,0M ve 405B için 30,84M. Tek başına 405B, ailenin
+hesabının %78'i.
+
+::: {.column-margin}
+Kimse 16.000 H100'ü saatlik kiralamaz; dolayısıyla dolar rakamları Meta'nın
+ödediği bir fatura değil, bir *fırsat maliyeti*. Yine de sizin için doğru sayı
+bunlar, çünkü bunlardan herhangi birini yeniden üretmenin yolu tam olarak
+kiralamaktan geçiyor.
+:::
+
+### Broşür ile veri merkezi
+
+Şimdi sıra, bir cluster (küme) çalıştırmış olanları bunun hakkında yalnızca
+okumuş olanlardan ayıran sayıda.
+
+Bir H100 SXM, yoğun BF16 için **989 TFLOP/s** olarak derecelendirilmiştir.
+(1.979 rakamını da göreceksiniz; o, 2:4 yapılandırılmış seyreklikle çalışan aynı
+yonga — ön eğitimin kullanmadığı, farklı bir işlem. PCIe kartı ise ondan da
+üçte bir oranında yavaş. Herhangi bir karşılaştırma yapmadan önce size hangi
+sayının verildiğini kontrol edin.) Bir koşunun ihtiyaç duyduğu FLOP'u,
+GPU'larının tahsis edildikleri saatler boyunca üretebilecekleri FLOP'a bölün;
+karşınıza [model FLOPs
+utilization](#gloss-model-flops-utilization){#term-model-flops-utilization .term-ref} çıkar: teorik tepe değerin gerçekten eğitime dönüşen
+kısmı.
+
+::: {#gloss-model-flops-utilization .column-margin .term-gloss}
+**model FLOPs utilization** (model FLOP kullanımı) — gerçek bir eğitim koşusunun, bir yonganın derecelendirilmiş tepe verimliliğinin ne kadarına ulaştığı; genelde *MFU* diye yazılır. %50'nin üstü nadirdir; aradaki farkı iletişim, bellek bant genişliği ve duruşlar doldurur. [↩](#term-model-flops-utilization){.term-back}
+:::
+
+Llama 3 makalesi anlık BF16 MFU'sunu 8.000 GPU'da **%43**, 16.000'de **%41** ve
+128K bağlam aşamasında **%38** olarak bildiriyor [@grattafiori2024llama3].
+Yayımlanan GPU-saatlerden çıkan tablo şu:
+
+| model | GPU-saat | $6ND$ | etkin MFU |
+|:--|--:|--:|--:|
+| Llama 3.1 8B | 1,46M | $7{,}23\times10^{23}$ | %13,9 |
+| Llama 3.1 70B | 7,00M | $6{,}35\times10^{24}$ | %25,5 |
+| Llama 3.1 405B | 30,84M | $3{,}79\times10^{25}$ | %34,5 |
+
+::: {.column-margin}
+8B ve 70B'nin token sayıları kartın düz metninden geliyor: "~15 trilyon
+token" — aynı koşular için teknik tablosu "15T+" diyor. Yalnızca 405B'nin
+15,6T'si kesin olarak belirtilmiş, o da sadece makalede. $D$'deki birkaç
+yüzdelik oynaklık resmi değiştirmiyor.
+:::
+
+405B satırını makalenin kendi %41'iyle karşılaştırın. Koşu %34,5 teslim etmiş.
+Eksik 6,5 puan nereye gitti? İki yere; bunları ayırmakta fayda var, çünkü biri
+veri merkezleriyle ilgili bir olgu, diğeri ise kendi aritmetiğimizle ilgili.
+
+**Büyük kısmı duruş.** Makale bunu, göz gezdirirken kolayca atlanan bir cümlede
+söylüyor. Ön eğitimin 54 günlük bir anlık görüntüsünde **466 iş kesintisi**
+yaşanmış — 47'si planlı, 419'u beklenmedik — ve koşu ">%90 etkin eğitim
+süresi"ni korumuş [@grattafiori2024llama3]. Yani:
+
+$$
+\%41 \times 0{,}90 = \%36{,}9
+$$
+
+Bu, 6,5 puanın **4,1**'ini açıklıyor. Kötü kernel'ler değil, zayıf bir framework
+değil, beceriksizlik değil. Donanım bozulur, bir düğüm devre dışı kalır, iş son
+checkpoint'ten yeniden başlar ve yapılmış işin bir kısmını tekrarlar. Haftalarca
+çalışan 16.000 GPU'da her üç saatte bir şeyin bozulması kriz değildir — hava
+durumudur.
+
+**Kalan 2,4 puan cluster'ın değil, bizim hatamız.** $6ND$'ye böldük ve $6ND$
+attention'ı dışarıda bırakıyor. Makalenin MFU'su koşunun fiilen ürettiği her
+FLOP'u sayıyor, attention matrisleri dahil; bizim payımız saymıyor. İki farklı
+ölçümü karşılaştırıp aradaki farka israf diyoruz. Attention'ı geri ekleyelim:
+yukarıda türettiğimiz token başına $6Lnd$ düzeltmesini ve makalenin kendi
+takvimini kullanarak — koşunun büyük kısmında 8K bağlam, ardından altı aşamada
+128K'ya tırmanan "yaklaşık 800B eğitim token'ı"
+[@grattafiori2024llama3]:
+
+| model | yalnızca $6ND$ | attention düzeltmeli | makalenin MFU'su $\times\,0{,}90$ |
+|:--|--:|--:|--:|
+| Llama 3.1 8B | %13,9 | %15,8–17,2 | yayımlanmadı |
+| Llama 3.1 70B | %25,5 | %27,4–29,0 | yayımlanmadı |
+| Llama 3.1 405B | %34,5 | **%36,0–37,1** | **%36,9** |
+
+Aralıklar uzun bağlam kuyruğunu kapsıyor: alt uç her şeyin 8K'da koştuğunu, üst
+uç tamamının 128K'da koştuğunu varsayıyor; gerçek ise ikisinin arasında bir
+yerde, çünkü bağlam aşamalar hâlinde büyüdü. Karşılaştırılacak yayımlanmış bir
+MFU'ya sahip tek model 405B — makalenin Tablo 4'ü "Llama 3 405B ön eğitiminin
+her aşamasını" kapsıyor ve daha küçük koşular hakkında hiçbir şey söylemiyor.
+[O tek model için düzeltilmiş rakam, aralığın hangi ucundan bakarsanız bakın
+makalenin sayısına oturuyor]{.hl}: öngörülen %36,9'un etrafında %36,0–37,1'lik
+bir aralık; bu tür bir yeniden kurgunun ulaşabileceği en yakın nokta budur.
+Elmayla armudu karşılaştırmayı bıraktığınız anda broşür, makale ve fatura
+birbiriyle uyuşuyor.
+
+::: {.column-margin}
+Aynı Tablo 4, %43'lük aşamada GPU başına **430 TFLOP/s** bildiriyor. $430/989 =
+\%43{,}5$ — bu da makalenin seyreklik sayısına göre değil, *yoğun* 989 tepe
+değerine göre konuştuğunu doğruluyor. Kontrol etmeye her zaman değer.
+:::
+
+İki ders; ikincisi sizi kurtaracak olan: kesintiler, hiçbir kernel ayarının
+ortadan kaldıramayacağı gerçek ve büyük bir vergidir ve **bir MFU rakamı,
+payına neyin girdiğini bilene kadar hiçbir şey ifade etmez.** Bir satıcı size
+kullanım oranı söylediğinde, sorun.
+
+::: {.callout-note appearance="simple" icon="false"}
+**8B neden hâlâ bu kadar kötü görünüyor.** Attention düzeltmesi 8B'yi ancak
+%15,8–17,2'ye çıkarıyor; bu hâlâ 405B'ninkinin yarısından az. Aynı olgu değil ve
+aynı şekilde açıklanmamalı. Küçük modellerle bir hızlandırıcıyı meşgul tutmak
+daha zordur: iletişim birimi başına daha az aritmetik, gecikmeyi arkasına
+gizleyecek daha az iş ve aynı cluster'ı paylaşan 405B kardeşine göre ayarlanmış
+bir paralellik düzeni. Ayrıca yayımlanan GPU-saatler *tahsis edilmiş* saatlerdir;
+değerlendirmeyi, checkpoint almayı ve makalenin anlık rakamının dışarıda
+bıraktığı boşta geçen süreyi de içerir — üstelik 8B koşusu için yayımlanmış bir
+MFU olmadığından yeniden kurguyu karşılaştıracak bir şey de yok. 8B satırını
+kernel kalitesinin ölçümü değil, israf için bir üst sınır olarak görün — genel
+örüntüyü ise güvenilir sayın: [büyük koşular GPU başına verimlidir, küçük
+koşular değildir]{.hl}.
+:::
+
+### Kendi koşunuzu tahmin edin
+
+Yukarıdaki her şey dört çarpmadan ibaret. Girdileri değiştirin ve hangisinin
+baskın çıktığını izleyin.
+
+```{ojs}
+//| echo: false
+viewof preN = Inputs.range([0.1, 500], { value: 8, step: 0.1, label: "Parametre (milyar)" })
+```
+
+```{ojs}
+//| echo: false
+viewof preD = Inputs.range([1, 20000], { value: 300, step: 1, label: "Eğitim token'ı (milyar)" })
+```
+
+```{ojs}
+//| echo: false
+viewof preMfu = Inputs.range([5, 60], { value: 35, step: 1, label: "Etkin MFU (%)" })
+```
+
+```{ojs}
+//| echo: false
+viewof preGpu = Inputs.select(
+  ["H100 BF16 yoğun — 989 TFLOP/s", "A100 BF16 — 312 TFLOP/s", "H200 BF16 yoğun — 989 TFLOP/s"],
+  { value: "H100 BF16 yoğun — 989 TFLOP/s", label: "Hızlandırıcı" }
+)
+```
+
+```{ojs}
+//| echo: false
+viewof preFleet = Inputs.range([8, 32000], { value: 512, step: 8, label: "Filodaki GPU sayısı" })
+```
+
+```{ojs}
+//| echo: false
+viewof prePrice = Inputs.range([0.5, 8], { value: 2.5, step: 0.1, label: "GPU-saat başına kiralama fiyatı (USD)" })
+```
+
+```{ojs}
+//| echo: false
+preCalc = {
+  const peak = preGpu.startsWith("A100") ? 312e12 : 989e12;
+  const N = preN * 1e9;
+  const D = preD * 1e9;
+  const flops = 6 * N * D;
+  const gpuSeconds = flops / (peak * (preMfu / 100));
+  const gpuHours = gpuSeconds / 3600;
+  const days = gpuHours / preFleet / 24;
+  const dollars = gpuHours * prePrice;
+  const perParam = D / N;
+  return { flops, gpuHours, days, dollars, perParam, peak };
+}
+```
+
+```{ojs}
+//| echo: false
+html`<table style="width:100%; border-collapse:collapse; font-size:0.95rem">
+  <tr><td style="padding:6px 10px">hesap</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${preCalc.flops.toExponential(2).replace(".", ",")} FLOP</td></tr>
+  <tr><td style="padding:6px 10px">GPU-saat</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        preCalc.gpuHours >= 1e6
+          ? (preCalc.gpuHours / 1e6).toFixed(2).replace(".", ",") + "M"
+          : Math.round(preCalc.gpuHours).toLocaleString("tr-TR")
+      }</td></tr>
+  <tr><td style="padding:6px 10px">${preFleet.toLocaleString("tr-TR")} GPU üzerinde duvar saati</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        preCalc.days < 1
+          ? (preCalc.days * 24).toFixed(1).replace(".", ",") + " saat"
+          : preCalc.days.toFixed(1).replace(".", ",") + " gün"
+      }</td></tr>
+  <tr><td style="padding:6px 10px">kiralama maliyeti</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${
+        preCalc.dollars >= 1e6
+          ? "$" + (preCalc.dollars / 1e6).toFixed(1).replace(".", ",") + "M"
+          : "$" + Math.round(preCalc.dollars).toLocaleString("tr-TR")
+      }</td></tr>
+  <tr><td style="padding:6px 10px">parametre başına token</td>
+      <td style="padding:6px 10px; text-align:right; font-weight:600">${preCalc.perParam.toFixed(1).replace(".", ",")}${
+        preCalc.perParam < 20 ? " — Chinchilla'nın altında" : ""
+      }</td></tr>
+</table>`
+```
+
+Girmeye değer üç ayar.
+
+**8B parametre, 15.000B token, %14 MFU** Llama 3.1 8B'yi yeniden üretiyor.
+Tablo, Meta'nın yayımladığı **1,46M**'ye karşılık **1,44M GPU-saat** gösteriyor
+— aradaki son %1,4, kaydırıcının tam sayı adımından (%13,9 tam üstüne otururdu)
+ve gerçek modelin 8,00B değil 8,03B parametreye sahip olmasından geliyor. Araca
+güvenebileceğiniz kadar yakın.
+
+**%35'te 405B ve 15.600B** amiral gemisini yeniden üretiyor: yayımlanan
+30,84M'ye karşılık 30,42M GPU-saat. MFU kaydırıcısını bir adım aşağı, iki bölüm
+önce hesapladığımız etkin değer olan **%34,5**'e çekin; 30,86M okuyor — yani
+yayımlanan sayının kendisi. Bütün numara bu: [bir koşunun gerçek MFU'sunu
+bildiğiniz anda, dört çarpma onun faturasını yeniden üretir]{.hl}.
+
+**%35'te 10B ve 200B** ciddi bir akademik koşu — parametre başına 20,0 token,
+tam olarak Chinchilla-optimal; saati \$2,50'den yaklaşık **9.600 GPU-saat** ve
+**\$24.000**. Şimdi filoyu 512'den, iyi fonlanmış bir üniversite laboratuvarının
+gerçekte sahip olduğuna daha yakın olan **64**'e düşürün ve duvar saatinin bir
+günün altından **6,3 güne** çıkışını izleyin. Sonra token sayısını, kabul
+edilebilir olmaktan çıkana kadar yükseltin. Asıl ders bu son adımda: [bağlayıcı
+kısıt neredeyse hiçbir zaman FLOP değildir, takvimdir]{.hl}.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**H200 seçeneği bilerek hiçbir şey yapmıyor.** Koda bakın: H100 ile aynı 989
+TFLOP/s'yi hesaplıyor, yani onu seçmek hiçbir şeyi değiştirmiyor. Bu bir hata
+değil. NVIDIA'nın kendi teknik belgelerine göre iki yonganın BF16 tensor
+çekirdeği verimliliği aynı; farklı olan bellek — H100'de **3,35 TB/s hızda 80
+GB**, H200'de ise **4,8 TB/s hızda 141 GB HBM3e**. Bir H200 size, o kadar sert
+bölmek zorunda kalmadan daha büyük batch'ler ve daha uzun bağlamlar kazandırır;
+bu da tepe FLOP/s artışı olarak değil, *ulaşılabilir MFU'nun iyileşmesi* olarak
+görünür. Yani bir H200'ü modellemek istiyorsanız hızlandırıcıya dokunmayın,
+onun yerine MFU kaydırıcısını yükseltin.
+
+[Genelde eksiğiniz olan şey aritmetik değil, bellek kapasitesi ve bellek bant
+genişliğidir]{.hl} — ve bu, bu hesap makinesinin yapısı gereği size
+öğretemeyeceği bir ders, çünkü $6ND$ belleğin var olduğunu bilmiyor. Bu
+bölümdeki bir formül size temiz bir cevap verdiğinde bunu aklınızda tutun.
+:::
+
+### Chinchilla'ya kim uydu peki?
+
+@sec-olcekleme-yasalari hesap-optimal oranı vermişti: parametre başına yaklaşık
+20 token [@hoffmann2022chinchilla]. Model yayımlayan hiç kimse buna uymuyor.
+
+| model | parametre başına token |
+|:--|--:|
+| GPT-3 175B | 1,7 |
+| Chinchilla 70B | 20,0 |
+| Llama 3.1 405B | 38,5 |
+| Llama 3.1 70B | 212,5 |
+| Llama 3.1 8B | 1.868,0 |
+
+GPT-3 çizginin bir büyüklük mertebesi *altında* duruyor; Chinchilla'nın
+yayımlanma sebebi zaten tam olarak bu bulguydu — model fena hâlde az
+eğitilmişti. Her Llama çizginin üstünde, küçük modeller ise saçma derecede
+üstünde: 8B, parametre başına neredeyse **1.900 token** gördü; bu, hesap-optimal
+eğitimin önereceğinin doksan üç katı.
+
+Bu bir hata değil, moda da değil. Farklı bir hedefi olan, farklı bir
+optimizasyon.
+
+### Bir kez eğit, sonsuza kadar sun
+
+Chinchilla, belirli bir loss'a *ulaşmanın* maliyetini asgariye indiriyor. Ama
+modeli sunacaksanız bu yanlış hedef, çünkü eğitim bir kez ödenir; çıkarım ise
+model emekliye ayrılana kadar her istekte yeniden ödenir.
+
+Aritmetik kısa. Bir token üretmek yaklaşık $2N$ FLOP'a mal olur — yalnızca ileri
+geçiş, geri geçiş yok. Yani Llama 3.1 8B için:
+
+$$
+\underbrace{7{,}23\times10^{23}}_{\text{eğitim}} \;\Big/\;
+\underbrace{1{,}61\times10^{10}}_{\text{üretilen token başına}} \;=\; 4{,}5\times10^{13}
+$$
+
+[Kırk beş trilyon üretilmiş token ve sunum faturası eğitim faturasına
+eşitlenir.]{.hl} Günde 100 milyar token üreten bir servis bu noktayı 450 günde
+geçer. Gerçek kullanımı olan her ürün bu noktayı aşar; ondan sonra ön eğitimde
+*yaptığınız* her ek token, *cebinizde kalan* çıkarım tasarrufuyla kendini amorti
+eder.
+
+**Üstelik 45 trilyon, elde edebileceğiniz en iyimser sayı.** FLOP'u FLOP'la
+karşılaştırıyor; bu da üretilen bir token ile eğitilen bir token'ın aynı
+maliyete üretildiğini sessizce varsayıyor. Öyle değil — üstelik ikisi de aynı
+yöne iten iki sebepten:
+
+- *Decode hesap değil, bellek sınırlıdır.* Her seferinde tek bir token üretmek,
+  tek bir küçük matris-vektör çarpımı yapabilmek için ağırlık matrisinin
+  tamamını bellekten okumak demektir. Eğitim ise aynı ağırlıkları bir kez okur
+  ve bir batch'teki binlerce token üzerine amorti eder. Ön eğitim %35–40 MFU'yu
+  sürdürürken decode tipik olarak yüzde birkaçta koşar — yonga hesap yapmıyor,
+  belleği bekliyordur.
+- *Prefill bu formülde bedava, hayatta değil.* Her *girdi* token'ı da $2N$'e mal
+  olur ve gerçek iş yüklerinin çoğu, geri aldığından çok daha fazla girdi
+  gönderir. Uzun bir sistem prompt'u, getirilmiş bir belge, bir sohbet geçmişi:
+  hepsi ödenir, hiçbiri yukarıda sayılmaz.
+
+Karşılaştırmayı FLOP yerine, fiilen kiraladığınız şey olan GPU-saat cinsinden,
+8B'nin yayımlanmış 1,46M H100-saatine karşı tekrarlayın:
+
+| decode verimliliği | başa baş noktası | günde 100B token'da |
+|:--|--:|--:|
+| %13,9 MFU | 45,0T token | 15 ay |
+| %10 MFU (büyük batch'ler, iyi ayarlanmış) | 32,4T token | 11 ay |
+| %5 MFU | 16,2T token | 5 ay |
+| %2 MFU (tipik etkileşimli sunum) | 6,5T token | **2 ay** |
+
+İlk satıra, sonra da yukarıdaki tabloda 8B'nin etkin MFU'suna bakın. İkisi de
+aynı %13,9 ve bu tesadüf değil: [FLOP'u FLOP'a bölmek, decode sunucunuzun
+Meta'nın eğitim cluster'ı kadar verimli olduğunu sessizce varsayar]{.hl}. Böyle
+yazınca varsayımın savunulamaz olduğu apaçık ortaya çıkıyor — decode'un bütün
+meselesi, eğitimin batch yapabildiği gibi batch yapamamasıdır.
+
+Yani 45 trilyon bir üst sınır; gerçek kesişim ise ciddi trafiğin bir ayı ile bir
+yılı arasında bir yerde. Bu da argümanı yalnızca keskinleştiriyor: aşırı eğitim,
+temiz formülün önerdiğinden daha yavaş değil, daha hızlı geri ödüyor.
+
+8B'lik bir modeli 15 trilyon token üzerinde eğitmenin bütün gerekçesi bu.
+Peşinen hesap-optimal bütçenin 93 katını harcarsınız ve karşılığında, aynı
+kalitedeki hesap-optimal alternatiften kalıcı olarak daha ucuza çalışan bir
+model alırsınız. Daha büyük, "doğru" model eğitilmesi daha ucuz, çalıştırılması
+ise sonsuza kadar daha pahalı olurdu.
+
+::: {.callout-tip appearance="simple" icon="false"}
+**Aynı mantık, kendin-yap mı satın-al mı sorusunu da çözer.** Günde
+beklediğiniz token sayısını hesaplayın, modelin $2N$'i ile çarpın ve o modelin
+üretilme maliyetiyle karşılaştırın. Başa baş noktasının üç büyüklük mertebesi
+altındaysanız, başka birinin çıkarım filosunda bir yuvarlama hatasısınız
+demektir; eğitmeniz değil, kiralamanız gerekir. Ekiplerin çoğu öyle yapıyor.
+:::
+
+## Model manzarası {#sec-model-manzarasi}
+
+Buraya kadarki her şey, dünyada 1. aşamayı sınır ölçeğinde yapan belki bir
+düzine kuruluş olmasının ve geri kalanımızın onların çıktıları arasından seçim
+yapmasının sebebini açıklıyor. Peki bu çıktıları birbirinden nasıl ayırt
+edersiniz?
+
+"Açık" kelimesine bakarak değil. [Bir yayım açık ya da kapalı değildir;
+birbirinden bağımsız dört karardan oluşur]{.hl} ve satıcılar bu kararları
+serbestçe harmanlar.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir yayımın açabileceği dört şey, ayrı ayrı kararlaştırılır</div>
+<svg viewBox="0 0 764 336" style="max-width:744px" role="img"
+     aria-label="Üç satırı yayım türünü, dört sütunu neyin açıklandığını gösteren bir ızgara. Sütunlar şunlar: ağırlıklar, eğitim verisi, eğitim kodu ve lisansın standart bir açık kaynak lisansı olup olmadığı. GPT-4, Claude ve Gemini gibi yalnızca API üzerinden sunulan yayımlar dördünden hiçbirini açıklamıyor. Llama 3.1, Qwen 2.5 ve Mistral gibi açık ağırlıklı yayımlar ağırlıkları yayımlıyor, ama eğitim verisini ya da eğitim kodunu yayımlamıyor; lisansları da değişiyor: Qwen 2.5 ve Mistral 7B Apache 2.0 ile geliyor, Llama 3.1 ise koşullar içeren özel şartlar kullanıyor. OLMo 2 ve Pythia gibi tamamen açık yayımlar, eğitim derlemi ve Apache 2.0 lisansı dahil dördünü birden yayımlıyor. Alt yazı, neredeyse her pratik kararın orta satırda verildiğini belirtiyor.">
+  <text x="268" y="44" class="t-xs t-mid t-b t-muted">AĞIRLIKLAR</text>
+  <text x="392" y="44" class="t-xs t-mid t-b t-muted">EĞİTİM VERİSİ</text>
+  <text x="516" y="44" class="t-xs t-mid t-b t-muted">EĞİTİM KODU</text>
+  <text x="648" y="44" class="t-xs t-mid t-b t-muted">STANDART LİSANS</text>
+
+  <rect x="16" y="58" width="236" height="66" rx="8" class="box"/>
+  <text x="32" y="82" class="t-sm t-b">Yalnızca API</text>
+  <text x="32" y="102" class="t-xs t-muted">GPT-4, Claude, Gemini</text>
+  <text x="32" y="116" class="t-xs t-muted">model değil, davranış kiralarsınız</text>
+  <rect x="220" y="72" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="268" y="96" class="t-sm t-mid t-b t-rose">✗</text>
+  <rect x="344" y="72" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="392" y="96" class="t-sm t-mid t-b t-rose">✗</text>
+  <rect x="468" y="72" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="516" y="96" class="t-sm t-mid t-b t-rose">✗</text>
+  <rect x="600" y="72" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="648" y="96" class="t-sm t-mid t-b t-rose">✗</text>
+
+  <rect x="16" y="134" width="236" height="66" rx="8" class="box-warm"/>
+  <text x="32" y="158" class="t-sm t-b">Açık ağırlıklar</text>
+  <text x="32" y="178" class="t-xs t-muted">Llama 3.1, Qwen 2.5, Mistral</text>
+  <text x="32" y="192" class="t-xs t-muted">çalıştırabilirsiniz; denetleyemezsiniz</text>
+  <rect x="220" y="148" width="96" height="38" rx="6" class="box-accent"/>
+  <text x="268" y="172" class="t-sm t-mid t-b t-accent">✓</text>
+  <rect x="344" y="148" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="392" y="172" class="t-sm t-mid t-b t-rose">✗</text>
+  <rect x="468" y="148" width="96" height="38" rx="6" class="box-rose"/>
+  <text x="516" y="172" class="t-sm t-mid t-b t-rose">✗</text>
+  <rect x="600" y="148" width="96" height="38" rx="6" class="box-warm"/>
+  <text x="648" y="167" class="t-xs t-mid t-b t-warm">değişir</text>
+  <text x="648" y="180" class="t-xs t-mid t-muted">Apache ya da özel</text>
+
+  <rect x="16" y="210" width="236" height="66" rx="8" class="box-accent"/>
+  <text x="32" y="234" class="t-sm t-b">Tamamen açık</text>
+  <text x="32" y="254" class="t-xs t-muted">OLMo 2, Pythia</text>
+  <text x="32" y="268" class="t-xs t-muted">yeniden üretip denetleyebilirsiniz</text>
+  <rect x="220" y="224" width="96" height="38" rx="6" class="box-accent"/>
+  <text x="268" y="248" class="t-sm t-mid t-b t-accent">✓</text>
+  <rect x="344" y="224" width="96" height="38" rx="6" class="box-accent"/>
+  <text x="392" y="248" class="t-sm t-mid t-b t-accent">✓</text>
+  <rect x="468" y="224" width="96" height="38" rx="6" class="box-accent"/>
+  <text x="516" y="248" class="t-sm t-mid t-b t-accent">✓</text>
+  <rect x="600" y="224" width="96" height="38" rx="6" class="box-accent"/>
+  <text x="648" y="248" class="t-xs t-mid t-b t-accent">Apache 2.0</text>
+
+  <text x="382" y="306" class="t-xs t-mid t-muted">Neredeyse her gerçek karar orta satırda verilir — ve adı "açık" olan bu satır,</text>
+  <text x="382" y="322" class="t-xs t-mid t-muted">aslında sunmadığı üç şeyi vaat eder.</text>
+</svg>
+```
+::: {.fig-cap}
+Sütunlar birbirinden bağımsız. Bir yayım ağırlıkları yayımlayıp veriyi
+saklayabilir; kimsenin yeniden üretemeyeceği bir modele izin verici bir lisans
+koyabilir. Tek başına "açık" kelimesi bunlardan hangisi olduğu hakkında hiçbir
+şey söylemez.
+:::
+::::
+
+### Her sütun size ne kazandırıyor
+
+**Ağırlıklar** size dağıtımı kazandırır. Elinizdeyse — bir şeyi
+[open-weights model](#gloss-open-weights-model){#term-open-weights-model .term-ref} yapan şey budur — modeli kendi donanımınızda,
+kendi ülkenizde, hiçbir istek ağınızdan çıkmadan çalıştırabilirsiniz; KVKK'ya
+tabi bir Türk kurumu için tartışmanın tamamı çoğu zaman budur. Ayrıca
+fine-tuning yapabilir, quantize edebilir ve aktivasyonları inceleyebilirsiniz.
+
+::: {#gloss-open-weights-model .column-margin .term-gloss}
+**open-weights model** (açık ağırlıklı model) — eğitilmiş parametrelerini indirip kendiniz çalıştırabildiğiniz model. Eğitim verisinin, eğitim kodunun ya da izin verici bir lisansın da onlarla birlikte gelip gelmediği hakkında hiçbir şey söylemez; bunlar birbirinden ayrı üç sorudur. [↩](#term-open-weights-model){.term-back}
+:::
+
+**Eğitim verisi** size denetimi kazandırır. O olmadan değerlendirme kümenizin
+eğitime sızıp sızmadığını kontrol edemez [@oren2024proving; @magar2022data],
+dilinizin temsil edilip edilmediğini söyleyemez, metnin nereden geldiğini soran
+bir hukukçuya cevap veremez [@longpre2024audit] ve üretimde karşınıza çıkan
+ezberlenmiş bir pasajı araştıramazsınız.
+
+**Eğitim kodu** size yeniden üretimi ve daha da işe yarar biçimde
+*değiştirmeyi* kazandırır — bir makaleden yola çıkmak yerine tarifi kendi
+derleminiz üzerinde koşturabilmeyi.
+
+**Lisans** ise yukarıdakilerin hepsini bir üründe yapma hakkını kazandırır.
+İnsanları en sık şaşırtan sütun bu, çünkü "open weights" ile "open source"
+rutin olarak eş anlamlı sanılıyor, oysa değiller.
+
+Ayrıca bir satırın *içinde* değişen sütun da bu; şemanın bir sembol seçmek
+yerine "değişir" demesinin sebebi budur. Orta satırda adı geçen üç modelin üçü
+de ağırlıkları yayımlıyor, veriyi ve kodu saklıyor — ama Qwen 2.5 ile Mistral
+7B, tamamen açık modellerin kullandığı lisansın aynısı olan düz **Apache 2.0**
+ile yayımlanıyor; Llama 3.1 ise **özel şartlar** taşıyor. [İki yayım üç sütunda
+birebir aynı olup dördüncüde tamamen ayrışabilir]{.hl}, dolayısıyla burada
+kestirme yol yok: modele tek tek bakmanız gerekir.
+
+::: {.callout-warning appearance="simple" icon="false"}
+**Lisansı, benchmark tablosundan önce okuyun.** Llama 3.1 Topluluk Lisansı
+neredeyse herkes için izin verici, ama bir açık kaynak lisansı değil. Doğrudan
+lisans metninden üç somut koşul:
+
+- ürününüzün yayım tarihinden önceki ayda **700 milyondan fazla aylık aktif
+  kullanıcısı** varsa Meta'dan ayrı bir lisans istemeniz gerekir; Meta bunu
+  "tamamen kendi takdirine bağlı olarak … verebilir";
+- **"Built with Llama"** ibaresini göstermeniz ve sözleşmenin bir kopyasını
+  birlikte dağıtmanız gerekir;
+- Llama çıktılarını kullanarak eğittiğiniz ya da iyileştirdiğiniz her modelin
+  adı **"Llama" ile başlamalıdır**.
+
+Bunların hiçbiri bir üniversite projesini ya da şirketlerin çoğunu durdurmaz.
+Ama hepsi, Apache 2.0 gibi OSI onaylı bir lisansın dayatmadığı koşullar; ayrımın
+bir adı olmasının sebebi tam olarak bu. OLMo ise buna karşılık kodu ve
+ağırlıkları Apache 2.0 ile, üstelik ön eğitim derlemi Dolma ile birlikte
+yayımlıyor [@groeneveld2024olmo; @soldaini2024dolma] — ve ardılları bu taahhüdü
+sürdürdü.
+:::
+
+Tamamen açık satır, bir üniversite için bir girişimden daha çok önem taşıyan bir
+sebeple var: [bilimin yürüdüğü tek satır o.]{.hl} "Türkçe veriyi %5 oranında
+eklemek İngilizceye yarar mı, zarar mı?" diye sormak istiyorsanız yalnızca
+ağırlıklara değil, veriye ve koda da ihtiyacınız var. The Pile [@gao2020pile],
+RefinedWeb [@penedo2023refinedweb], Dolma [@soldaini2024dolma] ve FineWeb
+[@penedo2024fineweb], bu soru hiç değilse sorulabilsin diye var.
+
+### Bir model kartını eleştirel okumak {#sec-model-kartlari}
+
+[model card](#gloss-model-card){#term-model-card .term-ref} (model kartı), bir modelin ne olduğunu, neyle eğitildiğini ve
+nerede kullanılmaması gerektiğini anlatan kısa ve yapılandırılmış bir belgedir
+[@mitchell2019model]; aynı fikrin veri kümelerine uygulanmış hâline datasheet
+(veri sayfası) denir [@gebru2021datasheets]. Artık standart hâle geldiler; bu da
+artık yalnızca belge değil, aynı zamanda pazarlama oldukları anlamına geliyor.
+Onları bir ilaç prospektüsü okur gibi okuyun: işe yarar bilgi somut olandır,
+ilginç bilgi ise dışarıda bırakılandır.
+
+::: {#gloss-model-card .column-margin .term-gloss}
+**model card** (model kartı) — bir laboratuvarın modelle birlikte yayımladığı, amaçlanan kullanımı, eğitim verisini, değerlendirme sonuçlarını ve sınırlılıkları belirten belge. Gönüllü, denetlenmemiş ve buna rağmen bir model hakkında okuyacağınız en yararlı sayfa. [↩](#term-model-card){.term-back}
+:::
+
+Çoğundan iyi olan Llama 3.1'in kartını baştan sona okuyun; teknik kendiliğinden
+ortaya çıkıyor.
+
+| kartta yazan | nasıl okunur |
+|:--|:--|
+| tabloda "15T+ token", düz metinde "~15 trilyon" | tek sayfada bir alt sınır ve bir yaklaşık değer. Gerçek olanı makalenin 15,6T'si |
+| "Aralık 2023 kesim tarihi" | kesin, kontrol edilebilir ve karttaki tek başına en yararlı satır |
+| desteklenen diller: İngilizce, Almanca, Fransızca, İtalyanca, Portekizce, Hintçe, İspanyolca, Tayca | **Türkçe listede yok** |
+| "desteklenen 8 dilden daha geniş bir dil koleksiyonuyla eğitildi" | yani liste bir *destek* sınırı, bir yetenek ölçümü değil |
+| konuma göre "11.390 ton CO2eq", piyasaya göre "0 ton" | tek koşu, iki muhasebe standardı, ikisi de doğru |
+| benchmark tabloları | model bunlar görünürken ayarlandı; üst sınır olarak görün |
+
+Üzerinde durulması gereken satır, dil satırı. Kart, "açıkça anılanların
+dışındaki dillerde" kullanımı **kapsam dışı** ilan ediyor — buna karşın iki
+bölüm önceki kendi ölçümümüz, Llama 3'ün tokenizer'ının Türkçeyi İngilizcenin
+1,23 katıyla işlediğini, yani test edilen bütün çok dilli tokenizer'lardan daha
+iyi olduğunu gösterdi. İki ifade de doğru. Kart size modelin ne yapabileceğini
+değil, Meta'nın arkasında duracağı şeyi söylüyor.
+
+[Ölçüm yapmanızın bütün sebebi bu boşluk.]{.hl} Bir kart, modelin *sizin*
+dilinizde *sizin* görevinizde iyi olup olmadığını size söyleyemez, çünkü satıcı
+bunu değerlendirmedi. Türkçe söz konusu olduğunda bunu sizin yerinize yapacak
+kimse yok.
+
+Hiçbir kartın cevaplamadığı, dolayısıyla kendinize sormanız gereken dört soru:
+
+1. **Değerlendirme kümem eğitim verisinin içinde miydi?** Bunu genelde
+   bilemezsiniz. Modelden eski olan her açık benchmark'ta bulaşma olduğunu
+   varsayın ve kendinize ait, ayrı tutulmuş bir küme saklayın
+   [@kapoor2023leakage; @oren2024proving].
+2. **Dilimden ne kadarı oradaydı?** Llama 3'ün %8'lik çok dilli dilimi onlarca
+   dil arasında paylaşılıyor. Az olduğunu varsayın.
+3. **Model, belgelenmiş kapsamının sınırında ne yapıyor?** Test edin. LLM
+   değerlendirmesi denen işin var oluş sebebi tam olarak budur.
+4. **Bu model kullanımdan kaldırıldığında ne olur?** Bir API için cevap
+   "prompt'larınız, kontrol etmediğiniz bir takvime göre çalışmayı bırakır"
+   olabilir. Açık ağırlıklar için cevap "hiçbir şey" ve bu, gerçek bir bedeli
+   olan gerçek bir özelliktir.
+
+### Pratikte birini seçmek
+
+Kararın dört girdisi var ve bunlar genelde yanlış sırada ele alınıyor. Önce
+yetenek demek yanlış sıradır, çünkü yetenek hem en az ihtimalle takılacağınız
+kısıt hem de fazladan satın almanın en pahalıya patladığı şeydir.
+
+Onun yerine şu sırayla sorun:
+
+1. **Verinin nerede bulunmasına izin var?** Kişisel veri ülkeden ya da binadan
+   çıkamıyorsa API satırı elenir ve hiçbir benchmark puanı onu geri getirmez.
+   Önce buna karar verin; bu, diğer her şeyden daha fazla seçenek eler.
+2. **Lisans neye izin veriyor?** Kullanıcı sayısı maddesini, adlandırma
+   maddesini ve atıf maddesini gerçek ürününüzle karşılaştırın. Bunu ikinci
+   sırada yapın; fikir değiştirmek hâlâ ucuzken.
+3. **Neyi sunmaya gücünüz yeter?** Yukarıdaki aritmetikten: üretilen token
+   başına $2N$ FLOP. Beklediğiniz trafikle çarpın. Bu, parametre sayınızı
+   genelde sizin yerinize seçer ve genelde sandığınızdan küçük bir şey seçer.
+4. **Ve ancak şimdi: yeterince iyi mi?** Elemeden geçenleri *kendi* verinizde
+   değerlendirin. Açık lider tablosu en iyi ihtimalle bir ön eleme aracıdır;
+   bulaşmayı da hesaba katınca zar zor o kadardır.
+
+::: {.callout-tip appearance="simple" icon="false"}
+**Olması gerekenden daha sık doğru çıkan varsayılan.** Kendi değerlendirme
+kümenizde kalite çıtanızı aşan en küçük open-weights modelle başlayın; sınırdaki
+bir API'yi ise isteklerin zor kuyruğu için başvurduğunuz üst basamak olarak
+görün. Daha ucuzdur, mahremdir, ayağınızın altından kayıp gitmez ve —
+yukarıdaki başa baş aritmetiğinden — trafiğiniz büyüdükçe her ay ekonomisi
+iyileşir. Modelin sunulması (serving) bunu enine boyuna açan ayrı bir konudur.
+:::
+
+## Lab: Türkçe bir ön eğitim koşusunu fiyatlandırın {#sec-on-egitim-lab}
+
+Bu labdaki her şey aritmetik ve tokenizer çağrılarından ibaret. Burada hiçbir
+şey GPU gerektirmiyor — ki mesele de bu, çünkü bu bölümün konusu olan karar,
+kimse bir GPU'ya dokunmadan çok önce veriliyor.
+
+1. **Kendi metninizde fertility ölçün.** Önemsediğiniz bir alandan 2.000–5.000
+   Türkçe cümle alın — destek talepleri, hukuk metni, haber, klinik not, kendi
+   teziniz. En az dört tokenizer ile tokenize edin: biri İngilizce öncelikli
+   (`openai-community/gpt2`), ikisi çok dilli
+   (`NousResearch/Meta-Llama-3-8B`, `Qwen/Qwen2.5-7B`) ve biri Türkçe doğma
+   (`dbmdz/bert-base-turkish-cased`). Bunlar @sec-tokenizer-butcesi bölümündeki
+   tablonun arkasındaki tanımlayıcıların tam olarak kendisi; dolayısıyla aynı
+   derlem üzerinde sizin sayılarınız bizimkileri yeniden üretmeli. Her biri için
+   kelime başına token'ı ve toplam token sayısını raporlayın. Kelime başına
+   token'ı **tek başına** diller arası bir iddia olarak raporlamayın; artık
+   sebebini biliyorsunuz.
+2. **Dürüst oranı bulun.** Bu cümlelerin 200'ünü İngilizceye çevirin ya da
+   mevcut bir paralel sürümünü bulun. Oranı eşleşmiş içerik üzerinde yeniden
+   hesaplayın. Kendi alanınızın sayısının, bu bölümde Llama 3 için verilen 1,23
+   kattan ne kadar uzak olduğunu belirtin ve fark için somut bir sebep gösterin.
+   Olağan şüpheli, alanın kendi sözlüğüdür: özel isimler, kod, sayılar ve
+   kısaltmalar iki dilde de neredeyse aynı şekilde tokenize olur ve oranı 1'e
+   doğru çeker.
+3. **Oranı paraya çevirin.** Gerçek bir API fiyat listesi seçin. Bir milyon
+   Türkçe belgenizin her tokenizer'ın oranı altında işlenmesinin ne tutacağını
+   hesaplayın. Sonra aynı rakamı İngilizce çeviriler için hesaplayın. Aradaki
+   fark, kendi ürününüz için, kendi para biriminizle ek ücrettir.
+4. **Bağlam tavanını bulun.** 128K token'lık bir bağlam penceresi için her
+   tokenizer altında kaç Türkçe *kelime*nin, kaç İngilizce kelimenin sığdığını
+   hesaplayın. İkisini de raporlayın. Bir belgenin retrieval sırasında tek bir
+   parçaya mı yoksa üçe mi sığacağına karar veren sayı budur.
+5. **$C = 6ND$ ile bir koşu bütçeleyin.** Türkçe öncelikli bir temel model
+   istediğinizi varsayın. $N$ ve $D$'yi kendiniz seçin ve ikisini de
+   gerekçelendirin: $N$'i sunmayı planladığınız şeyden, $D$'yi ihtiyaç
+   duyduğunuz kalitede gerçekten var olan Türkçe metinden. @sec-on-egitim-hesap
+   bölümündeki hesap makinesini kullanarak FLOP'u, GPU-saati, makul olarak
+   kiralayabileceğiniz bir filodaki duvar saatini ve dolar rakamını bulun. Sonra
+   varsaydığınız MFU'yu belirtin ve savunun — %40'ın üstünde bir sayı
+   yazdıysanız hangi makaleyle eşleştiğinizi söyleyin.
+6. **Gerçeğe karşı sağlama testi yapın.** Bütçenizi yayımlanmış üç Llama 3.1
+   koşusuyla karşılaştırın. Sayınız çok daha küçükse, işi yapan varsayımı bulun.
+   Bu neredeyse her zaman ya MFU'dur ya da token sayısı.
+7. **Şimdi duyarlılık analizi yapın.** Koşunun maliyetini 1,23 kat fazla token
+   ile yeniden hesaplayın — yani Türkçe ek ücretini yalnızca çıkarıma değil,
+   *eğitim* derlemine de uygulayın. Fazladan çıkan doları raporlayın. Sonra bu
+   sayının ortaya attığı soruyu cevaplayın: Türkçe bir tokenizer ve daha küçük
+   bir model eğitmek, çok dilli bir modelde ek ücreti sonsuza kadar ödemekten
+   hangi noktada daha ucuz hâle gelir?
+8. **Kendi başa baş noktanızı iki kez hesaplayın.** Üretilen token başına $2N$
+   FLOP'u kullanarak, sunum maliyetinin eğitimi aşması için servisinizin kaç
+   token üretmesi gerektiğini bulun. Bu, FLOP eşitliği cevabıdır ve artık bunun
+   bir üst sınır olduğunu biliyorsunuz. O yüzden aynı hesabı bir de GPU-saat
+   cinsinden yapın; decode'un, eğitim koşunuzun %35'ine karşılık %2–5 MFU
+   sürdürdüğünü varsayın. İkisini de öngördüğünüz trafikte aya çevirin. Dürüst
+   cevap bir yılın altındaysa, çıkarım-optimal ile hesap-optimalin neden farklı
+   hedefler olduğunu daha yeni keşfetmişsiniz demektir.
+
+**Teslim edilecek:** belirli bir Türkçe ürün için *eğit*, *fine-tune yap* ya da
+*API kullan* önerisinde bulunan, gerçekten göndereceğiniz cinsten bir sayfalık
+bir not; üç kanıtı fertility tablosu, hesap bütçesi ve başa baş ayı olsun.
+Yanlış çıkması hâlinde önerinizi tersine çevirecek varsayımı da belirtin.
+
+## Sezgi kontrolleri {#sec-on-egitim-sezgi}
+
+Açmadan önce cevaplayın. Her biri, sezgisel cevabın para kaybettiren bir yönde
+yanlış olduğu bir yer — devraldığınız ve geri alamadığınız ön eğitim
+kararlarının tekrarlayan teması da bu.
+
+::: {.callout-note collapse="true"}
+## 1. Türkçe kelime başına 1,59, İngilizce 1,28 token istiyor. Türkçe daha mı pahalı?
+
+O tokenizer'da değil — üstelik karşılaştırma bu hâliyle geçersiz.
+
+Kelime başına token, farklı boyuttaki birimleri karşılaştırıyor. Türkçe eklemeli
+bir dil: *evlerinizden* tek kelimedir, İngilizcede ise "from your houses" olur.
+[Dürüst ölçüm, *aynı içerik* için harcanan token sayısıdır]{.hl} — bir cümleyi
+ve onun profesyonel çevirisini tokenize edip bölün.
+
+Bunu 1.157 hizalanmış çift üzerinde yapın: BERTurk, İngilizcenin maliyetinin
+**0,58 katına** mal oluyor; Türkçenin *daha ucuz* olduğu tek tokenizer ailesi
+Türkçe doğma olanlar. GPT-2 **1,98 kat**, Llama 3 ile çok dilli BERT ise **1,23
+kat** tutuyor.
+
+Aynı derlem, eşleşmiş içerikte 10.862 İngilizce kelimeye karşılık 8.058 Türkçe
+kelime. Eklemeli yapı, daha hiçbir tokenizer'a dokunmadan ham sayımlarda
+görünüyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Modeliniz Türkçeyi kötü tokenize ediyor. Fine-tuning ile bundan kurtulabilir misiniz?
+
+Hayır — ve tokenizer'ın bir ön işleme bölümünde değil, bir ön eğitim bölümünde
+yer almasının sebebi tam olarak bu.
+
+Tokenizer'ı değiştirmek embedding tablosunu değiştirir; o da aşağı akıştaki her
+ağırlığı değiştirir. [Hesap bütçesinin diller arasında nasıl bölüşüleceğini
+tokenizer belirler ve bu bölüşüm kalıcıdır.]{.hl} 1,98 katlık bir tokenizer'ın
+kullanıcısı bu ek ücreti bağlam penceresinde, gecikmede ve her API faturasında,
+modelin bütün ömrü boyunca öder.
+
+Llama 3, bu kararın bilinçli olarak verilişini gösteriyor: `tiktoken`'dan
+100.000 token, artı **özellikle İngilizce dışındaki diller için eklenen 28.000
+token**; bunun, İngilizceye hiçbir maliyet yüklemeden o dillerdeki sıkıştırmayı
+iyileştirdiği bildiriliyor. Bu, fiyat etiketi olan, bir kez ve ilk gradyan
+adımından önce verilmiş bir tasarım kararı.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Bir satıcı %40 MFU söylüyor. İyi mi bu?
+
+Paydaya neyin girdiğini sormadan cevaplanamaz; sorunun bütün amacı da zaten o
+soruyu sordurmaktır.
+
+Aynı GPU'nun bir yoğun tepe değeri, bir de çok daha yüksek bir seyreklik tepe
+değeri vardır; ikincisine göre konuşmak her koşuyu iki kat verimli gösterir.
+Llama 3'ün Tablo 4'ü GPU başına 430 TFLOP/s bildiriyor; $430/989 = \%43{,}5$,
+yani yoğun değeri kullandıkları doğrulanıyor. Herkes böyle yapmıyor.
+
+İkinci tuzak paydır. Llama 3.1 405B'yi yalnızca $6ND$'den yeniden kurmak %34,5
+veriyor; attention terimi eklendiğinde **%36,0–37,1** çıkıyor ve makalenin kendi
+rakamı **%36,9**. [$6ND$ attention'ı dışarıda bırakır; bu bir bütçe tahmini için
+sorun değildir, ama bir kullanım oranı karşılaştırması için sorundur.]{.hl}
+
+Karşılaştırılabilir görünen ama olmayan iki sayı, verimlilik üzerine mühendislik
+sohbetlerinin raydan çıkmasının en yaygın yoludur.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. $C = 6ND$'deki 6 nereden geliyor?
+
+Her birinin ayrı bir sebebi olan üç tane 2; bunları bilmek, formülü ezberden
+okumak yerine uyarlayabilmenizi sağlar.
+
+**İleri** geçişte parametre başına iki FLOP, çünkü her ağırlık bir çarpmaya ve
+bir toplamaya katılır. **Girdiler üzerinden geri geçiş** için iki tane daha,
+çünkü hatanın önceki katmanlara ulaşmaya devam etmesi gerekir. **Ağırlıklar
+üzerinden geri geçiş** için de iki tane daha, çünkü optimizer neyi
+değiştireceğini bilmek zorundadır.
+
+Yani ileri geçiş $2ND$'dir ve faturanın yalnızca üçte biridir — bu da size
+hemen, çıkarımın token başına $6ND$ değil kabaca $2ND$'ye mal olduğunu söyler;
+bütçenize sunumun mu yoksa eğitimin mi hâkim olduğuna karar veren sayı da budur.
+Ayrıca $6ND$'nin neden bir *ön eğitim* yasası olduğunu ve dondurulmuş
+ağırlıklarla yapılan fine-tuning'e olduğu gibi taşınmadığını da anlatır.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Daha fazla hesabınız var. Daha büyük bir model mi eğitmelisiniz, daha fazla veri mi kullanmalısınız?
+
+Kabaca eşit ölçüde ikisi de — işin ilginç yanı, bunun iki yıl boyunca alanın
+hatası olması.
+
+Chinchilla'nın bulgusu, parametrelerin ve token'ların birlikte ölçeklenmesi
+gerektiği; daha önceki modeller boyutlarına göre fena hâlde az eğitilmişti. Ama
+modeli *sunacaksanız* hesap-optimal cevap, istediğiniz cevap değildir: [daha
+uzun eğitilmiş daha küçük bir modelin eğitimi daha pahalı, çalıştırılması ise
+sonsuza kadar daha ucuzdur]{.hl}; üretim modellerinin rutin olarak hesap-optimal
+noktanın epeyce ötesinde eğitilmesinin sebebi budur.
+
+Labdaki başa baş sorusu bunun pratik hâli: modeliniz birkaç aydan uzun süre
+hizmet verecekse, çıkarım-optimal ile hesap-optimal farklı hedeflerdir ve
+optimize etmeniz gereken, hesap-optimal olan değil, çıkarım-optimal olandır.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Daha fazla veri toplamak yerine aynı veriyle iki kez eğitim yapsanız olmaz mı?
+
+Ölçülebilir bir noktaya kadar olur, ondan sonra olmaz.
+
+Muennighoff ve arkadaşları, ilk birkaç epoch boyunca tekrarlanan verinin
+"benzersiz veriye kıyasla loss'ta ihmal edilebilir değişiklikler ürettiğini",
+sonrasında ise keskin biçimde bozulduğunu buldu. Kabaca dört epoch, tekrarlanan
+bir token'ın hâlâ taze bir token'a yakın değer taşıdığı bölge; ondan sonrası
+ezberlemek için hesap harcamaktır.
+
+Türkçe gibi bir dil için pratik okuma şu: [Türkçe bir ön eğitim koşusundaki
+kısıt GPU'lar değil, derlemdir]{.hl} ve tekrar size bir kaçış yolu değil, küçük
+bir çarpan kazandırır. @sec-on-egitim-veri bölümündeki veri filtreleme
+kararlarının bu kadar ilgi görmesinin sebebi de bu — daha fazla metin
+bulamıyorsanız, neyi tuttuğunuz çok daha önemli hâle gelir.
+:::
+
+## Mülakat soruları {#sec-on-egitim-mulakat}
+
+Ön eğitim soruları nadiren gerçekten bir koşu yapıp yapmayacağınızla ilgilidir.
+Devraldığınız bir sistem hakkında nicel akıl yürütüp yürütemediğinizle
+ilgilidir; asıl iş de zaten budur.
+
+::: {.column-margin}
+Mülakata giren neredeyse hiç kimse bir modeli ön eğitimden geçirmemiştir ve
+mülakatı yapan bunu bilir. Cevapları ayıran şey, *yap, fine-tune et ya da satın
+al* kararını veren aritmetiği yapabilmeniz — ve hangi ön eğitim kararlarına
+sonradan mahkûm kaldığınızı bilmenizdir.
+:::
+
+1. **2 trilyon token üzerinde 7B'lik bir model için hesabı tahmin edin.**
+   $C \approx 6ND = 6 \times 7\times10^9 \times 2\times10^{12} \approx
+   8{,}4\times10^{22}$ FLOP. Sonra bunu, bütçeyi tutan birinin anlayacağı bir
+   şeye çevirin: gerçekten beklediğiniz GPU başına verimliliğe — tepe değere
+   değil, yoğun tepenin kabaca %40'ına — ve ardından 3.600 saniyeye bölün;
+   karşınıza GPU-saat çıkar. $6ND$'nin attention'ı yok saydığını, bunun kısa
+   bağlamda yüzde birkaç, uzun bağlamda çok daha fazla olduğunu yüksek sesle
+   söyleyin ve şunu ekleyin: [bir ön eğitim programını gerçekten sarsan şey
+   neredeyse hiçbir zaman FLOP değildir, takvimdir]{.hl} — kesintiler, yeniden
+   başlatmalar ve checkpoint yüklemeleri.
+
+2. **Sonradan geri alamayacağınız tek ön eğitim kararı nedir?** Tokenizer.
+   Diğer her şey — talimat davranışı, güvenlik, alan bilgisi, hatta olgusal
+   içeriğin epey bir kısmı — eğitim sonrasıyla oynatılabilir
+   (@sec-egitim-sonrasi). Tokenizer oynatılamaz, çünkü onu değiştirmek embedding
+   tablosunu ve ondan sonraki her ağırlığı geçersiz kılar. Riski fertility
+   tablosuyla sayısallaştırın: GPT-2'nin tokenizer'ını kullanan bir Türkçe
+   kullanıcı, aynı içerik için İngilizce kullanan birinin **1,98 katı** token
+   öder; BERTurk'te ise **0,58 katı**. Aynı dil, aynı metin ve tamamen eğitim
+   başlamadan önce verilmiş bir karardan doğan 3,4 katlık bir yelpaze.
+
+3. **Türkçe bir ürün için ön eğitim mi yapacağınıza, fine-tuning mi yoksa API
+   mi kullanacağınıza nasıl karar verirsiniz?** Şu sırayla üç sayı. Fertility,
+   çünkü token başına maliyetinizi sonsuza kadar belirler ve tek başına Türkçe
+   doğma bir modeli gerekçelendirebilir. İşe yarayabilecek en küçük model için
+   $6ND$ bütçesi; bu neredeyse her zaman konuşmayı bitirecek kadar büyüktür. Ve
+   başa baş ayı: öngördüğünüz trafikte API harcamasının eğitim artı sunum
+   maliyetini aştığı nokta. Başa baş bir yılın altındaysa, çıkarım-optimal ile
+   hesap-optimalin farklı hedefler olduğunu keşfetmişsinizdir. Neredeyse her
+   ürün için cevap *fine-tune et ya da satın al*'dır — asıl beceri, *neden*
+   olduğunu aritmetikle gösterebilmektir.
+
+4. **Ön eğitim verisi gerçekte nereden geliyor ve neler atılıyor?** Common
+   Crawl'dan ya da FineWeb gibi temizlenmiş bir türevinden; dürüst manşet ise ne
+   kadarının atıldığı: filtreleme, deduplication ve kalite sınıflandırması ham
+   taramanın büyük çoğunluğunu siliyor. Adımları tek tek sayın — kalıp metin
+   temizliği, dil tespiti, taramalar arası deduplication, kalite
+   sınıflandırıcıları — ve FineWeb'in yazarlarının çarptığı sezgiye aykırı
+   bulguyu anlatın: *bütün* taramalar boyunca agresif deduplication işleri daha
+   kötü hâle getirdi, çünkü tercihen tekrarlanmamış olan düşük kaliteli metni
+   tuttu. [Deduplication tekdüze biçimde iyi bir şey değildir]{.hl}; bu da
+   raporu özetinden değil, kendisinden okuduğunuzu gösteren türden bir ayrıntı.
+
+5. **Bir model 128K bağlam penceresi olduğunu söylüyor. Neye şüpheyle
+   yaklaşmalısınız?** Kalitenin bu pencere boyunca aynı olduğuna ve bunu
+   karşılayabileceğinize. Kalite tarafında: eğitim nadiren baştan sona tam
+   uzunlukta yapılır — bağlam genelde sonlara doğru aşamalar hâlinde uzatılır —
+   yani son 100K token, ilk 8K'ya göre çok daha az eğitim görmüştür. Maliyet
+   tarafında @sec-attention-maliyeti bölümünün aritmetiğini alın: 7B'lik bir
+   modelin 100.000 token'daki KV cache'i, 14 GB'lık ağırlığa karşılık eşzamanlı
+   istek başına 52,4 GB. *Reklamı yapılan* pencere ile *sizin bütçenizde
+   kullanılabilir* pencere farklı sayılardır.
+
+6. **Küçük ön eğitim koşuları neden büyüklere göre bu kadar verimsiz
+   görünüyor?** Çünkü buradaki verimlilik büyük ölçüde bir hızlandırıcıyı meşgul
+   tutmakla ilgili ve küçük modeller ona daha az malzeme veriyor: iletişim birimi
+   başına daha az aritmetik, gecikmeyi arkasına gizleyecek daha az iş. Llama
+   3.1 için yeniden kurulan MFU 8B'de %15,8–17,2, 70B'de %27,4–29,0, 405B'de
+   %36,0–37,1. Sonra cevabı dürüst kılan çekinceyi ekleyin: yayımlanan
+   GPU-saatler değerlendirmeyi, checkpoint almayı ve boşta geçen süreyi de içeren
+   *tahsis edilmiş* saatlerdir ve karşılaştırılacak yayımlanmış bir MFU'ya sahip
+   tek model 405B'dir — dolayısıyla 8B rakamını kernel kalitesinin ölçümü değil,
+   israf için bir üst sınır olarak alın.
+
+## Daha derine inmek için
+
+Makalelerden herhangi birini okumadan önce yapmaya değer iki şey var.
+[FineWeb'in etkileşimli raporunu](https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1)
+açın ve ablasyon grafiklerini okuyun — bir laboratuvarın, yayımladığı sürümün
+yanı sıra başarısız denemeleri de yayımladığı ender durumlardan biri. Sonra
+[tokenizer oyun alanını](https://huggingface.co/spaces/Xenova/the-tokenizer-playground)
+açın ve bildiğiniz en uzun Türkçe kelimeyi yapıştırın;
+@sec-tokenizer-butcesi bölümünün tamamı yaklaşık on saniyede apaçık hâle gelir.
+
+Aşağıdaki makaleler, bu bölümdeki sayıların geldiği kaynaklar. Kabaca şu sırayla
+okuyun:
+
+| konu | kaynak |
+|:--|:--|
+| belgelenmiş, eksiksiz bir ön eğitim koşusu | @grattafiori2024llama3 |
+| veri pipeline'ının ne yaptığı, ablasyonlarla | @penedo2024fineweb; @penedo2023refinedweb |
+| açıkça yayımlanmış derlemler | @gao2020pile; @soldaini2024dolma |
+| baştan sona açık bir model — ağırlıklar, veri ve kod | @groeneveld2024olmo |
+| tekrarların neden zarar verdiği | @lee2022deduplicating; @carlini2021extracting |
+| kaç epoch koşabileceğiniz | @muennighoff2023scaling |
+| hesap-optimal sınır | @kaplan2020scaling; @hoffmann2022chinchilla |
+| alt kelime tokenizasyonu, kaynağından | @sennrich2016neural; @kudo2018sentencepiece |
+| tokenizer'ların diğer dillerin konuşucularına maliyeti | @petrov2023language |
+| verinin gerçekte nereden geldiği ve lisansları | @longpre2024audit; @dodge2021documenting |
+| kartlar ve veri sayfaları | @mitchell2019model; @gebru2021datasheets |
+| model çıktısı üzerinde eğitim | @shumailov2024curse |
+| ölçeğin zekâyı yendiği savı | @sutton2019bitter |
+
+## Alıştırmalar
+
+1. Bir açık model kartı ve bir kapalı model kartı alın. Her birinin, kendiniz
+   doğrulayabileceğiniz üç iddiasını ve doğrulayamayacağınız üç iddiasını
+   listeleyin. Sonra bu altı doğrulanamaz iddiadan hangisinin yanlış çıkması
+   hâlinde kararınızı en çok değiştireceğini belirtin.
+2. FineWeb ekibi küresel deduplication'ı sivri bir deneyle test etti. Tek bir
+   eski 2013-48 anlık görüntüsünün içinde, küresel dedup'ın **tuttuğu** ~31B
+   token ile **çıkardığı** ~460B token'ı (kendi başlarına yeniden tekilleştirip
+   171B'ye indirerek) aldılar, her biriyle bir model eğittiler ve *çıkarılan*
+   veriyle eğitilen modelin daha iyi olduğunu buldular. Mekanizmayı açıklayın —
+   deneyin iki derlemi değil, tek bir anlık görüntünün iki dilimini
+   karşılaştırdığına dikkat edin; onu temiz bir test yapan şey de bu. Sonra
+   hunideki başka bir yerde tam olarak aynı şekilde bozulabilecek bir filtre
+   adı verin ve bunu yakalamak için neyi ölçeceğinizi söyleyin.
+3. Llama 3'ün son annealing aşaması 40M token'ı kapsıyor: koşunun %0,00026'sı.
+   8B modelde GSM8k'yı **%24,0** iyileştirdi — makalenin verdiği rakam bir
+   göreli iyileşme, yüzde puan cinsinden bir kazanç değil ve bu fark, ne kadar
+   etkileneceğiniz açısından önemli — 405B'de ise neredeyse hiçbir şey
+   yapmadı. Her iki sonuçla da tutarlı bir açıklama verin. Açıklamanız bir şey
+   öngörmeli — ne öngördüğünü söyleyin.
+4. Bir satıcı hızlandırıcısı için 1.979 TFLOP/s reklamı yapıyor. Siz kendi
+   eğitim işinizde sürekli 310 TFLOP/s ölçüyorsunuz. Aradaki farkı, her biri
+   için bu bölümün rakamlarını kullanarak adı konmuş üç adımda açıklayın ve
+   eksiğin ne kadarını daha iyi mühendislikle makul biçimde geri
+   kazanabileceğinizi, ne kadarının yapısal olduğunu belirtin.
+5. 2T token üzerinde 3B'lik bir model için $6ND$'yi hesaplayın. Sonra %40 MFU'da
+   kaç H100-saat gerektiğini ve bunun 64 GPU'da ne kadar süreceğini hesaplayın.
+   Şimdi aynı hesabı %25 MFU ile tekrarlayın — kimsenin ayarlamadığı bir
+   cluster'daki ilk koşu için varsaymanız gereken değer bu. İki duvar saati
+   rakamını da raporlayın ve hangisinin bir proje planına yazılacağını söyleyin.
+6. Derlem ölçümümüz, Qwen 2.5'in (sözlük 151.643) Türkçeyi İngilizcenin 1,40
+   katıyla tokenize ettiğini, Llama 3'ün ise (sözlük 128.000) 1,23 katı
+   başardığını buldu. Daha büyük sözlüğün neden kaybettiğini açıklayın. Sonra
+   açıklamanızı doğrulayacak en küçük deneyi tasarlayın ve hangi sonucun onu
+   çürüteceğini söyleyin.
+7. `evlerinizden` için Llama 3 `ev|ler|iniz|den` üretiyor — tam olarak dört
+   biçimbirime karşılık gelen dört token — Cosmos GPT-2 ise `ev|lerinizden`
+   üretiyor: iki token, yarı maliyet ve dilbilimsel bir birim hiç olmayan bir
+   ikinci token. Her ikisinin de daha iyi bölütleme olduğunu savunun. Sonra
+   meseleyi çözmek için neyi ölçeceğinizi söyleyin ve görev konusunda somut
+   olun, çünkü cevap her görev için aynı değil.
+8. GPT-3 parametre başına 1,7 token kullandı; Llama 3.1'in 8B'si 1.868 kullandı.
+   İkisi de akılcı kararlardı. Her birinin arkasındaki muhakemeyi yeniden kurun,
+   sonra GPT-3'ün oranının Meta için doğru seçim olacağı trafik düzeyini bulun.
+9. Size 10.000 H100-saatlik sabit bir bütçe veriliyor — gerçekçi bir Türk
+   üniversitesi tahsisi. Bu bölümün aritmetiğini kullanarak,
+   Chinchilla-optimal bir token sayısıyla sıfırdan ön eğitimden geçirebileceğiniz
+   en büyük modeli bulun. Sonra aynı tahsisi, mevcut bir open-weights modelin
+   sürdürülen ön eğitimine harcamak için sayılarla savunma yapın. Gerçekte
+   hangisini yapacağınızı ve nedenini belirtin.
+10. Common Crawl'ın WET çıkarımı "fazla miktarda kalıp metin ve menü metni
+    barındırdığı" için FineWeb, WARC'tan trafilatura ile yeniden çıkarım yaptı.
+    Kalıp metin son derece tekrarlıdır. Deduplication'ın bunu neden öylece
+    temizlemediğini ve bunun bir veri pipeline'ındaki işlem sırası hakkında size
+    ne anlattığını açıklayın.
