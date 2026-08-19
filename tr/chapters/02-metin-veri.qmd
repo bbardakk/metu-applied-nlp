@@ -1640,8 +1640,12 @@ Aşağıdakilerin hiçbiri tarihî merak konusu değil ve her biri onu kuran
   numarasıdır [@weinberger2009feature].
 - **Yakın kopya tespiti.** Google'ın web tarama tekilleştirmesi
   [@manku2007detecting] sinir ağlarıyla değil, shingle'lar ve özetleme ile
-  çalışır; çünkü milyarlarca belge üzerinde işlemek zorundadır. Shingle'lar
-  kelime ya da karakter n-gram'larıdır — yani bu bölümün ön yarısı.
+  çalışır; çünkü milyarlarca belge üzerinde işlemek zorundadır. Bir
+  **shingle**, belge boyunca kaydırılan sabit uzunlukta bir kelime (ya da
+  karakter) penceresidir; pencereler birbirinin üstüne bindiği için ada
+  "kiremit" denmiş. *Pompa dün gece arızalandı* cümlesinin üçlü kelime
+  shingle'ları `pompa dün gece` ve `dün gece arızalandı` olur. Yani
+  shingle'lar n-gram'ların ta kendisidir — bu bölümün ön yarısı.
 
 Pratik kural: etiketiniz azsa, belgeleriniz uzunsa, sözlüğünüz teknik ve
 birebir eşleşme önemliyse ya da bu öğleden sonraya bir baseline
@@ -1671,8 +1675,10 @@ kullanılan dört kategorili derlemde `min_df=5`, sözlüğü 32.318'den 6.281'e
 indiriyor — sütunların %81'i gidiyor.
 
 Ama bunu bedava sanmayın. Silinen o sütunlar token geçişlerinin %11,6'sını
-taşıyor; yani bu saf bir hapax ayıklaması değil ve takasın değip değmediği
-bir kural değil, ölçülecek bir sorudur. 4. alıştırma bunu ölçmenizi istiyor.
+taşıyor; yani attığınız şey yalnızca metinde bir kez geçen kelimeler
+(*hapax legomena*) değil — okurun gerçekten karşılaştığı kelimeleri de
+atıyorsunuz. Takasın değip değmediği bir kural değil, ölçülecek bir sorudur.
+4. alıştırma bunu ölçmenizi istiyor.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1737,8 +1743,10 @@ bu hata sınıfı, herhangi bir model seçiminden daha çok zarar verir. Üsteli
 görünmezdir: hiçbir yerde hata alınmaz, doğruluk sadece olması gerekenden
 sessizce düşük durur.
 
-Bunu önleyen alışkanlık: herhangi bir vektörleştiriciyi eğittikten sonra
-`get_feature_names_out()` çıktısını yazdırın ve okuyun. Gerçekten okuyun.
+Bunu önleyen alışkanlık: herhangi bir `vectorizer`'ı (vektörleştirici —
+metni sayı matrisine çeviren `CountVectorizer`, `TfidfVectorizer` gibi
+nesneler) eğittikten sonra `get_feature_names_out()` çıktısını yazdırın ve
+okuyun. Gerçekten okuyun.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1803,15 +1811,22 @@ terimin df'i benzer olan, birbirine çok yakın belgelerden oluşan bir
 derlem; her terimin zaten bir kez geçtiği, dolayısıyla TF'in hiçbir şey
 katmadığı çok kısa metinler; olabilirliği sayımlar üzerinde tanımlı olan ve
 olasılıksal yorumunu TF-IDF'in bozduğu çok terimli naive Bayes gibi
-üretici modeller. Ayrıca aşağı akıştaki istatistiksel bir test için
-yorumlanabilir, toplanabilir sayımlara ihtiyacınız olduğunda.
+üretici modeller. Bir de sayıları bir modele değil, doğrudan bir
+istatistiksel teste vereceğiniz durum: ki-kare ya da log-olabilirlik oranı
+gibi testler girdinin *sayım* olmasını bekler, çünkü sayımlar toplanabilir —
+"bu terim iki kategoride toplam 47 kez geçiyor" cümlesi anlamlıdır. TF-IDF
+ağırlıkları ise ölçeklenmiş kesirli değerlerdir; toplamları hiçbir şeye
+karşılık gelmez ve testin varsayımını çiğner.
 
 **S: İkili n-gram eklediniz ve doğruluk düştü. Ne oldu?**
 
 Varyans. Değişken uzayı kabaca bir büyüklük mertebesi büyürken veri sabit
 kaldı; dolayısıyla ikili n-gram'ların çoğu bir ya da iki kez görülüyor ve
 gürültü katıyor. Bu bölümdeki deney tam olarak bunu gösteriyor: 32.318 →
-249.522 değişken, 0,831 → 0,819 doğruluk. Çareler: `min_df`'i yükseltmek,
+249.522 değişken, 0,831 → 0,819 doğruluk. Çareler: `min_df`'i yükseltmek
+(`min_df`, bir terimin kendine bir sütun kazanabilmesi için en az kaç
+*farklı belgede* geçmesi gerektiğini söyleyen eşiktir; yükseltmek, yalnızca
+bir iki belgede görünen ikilileri daha sözlüğe girmeden eler),
 düzenlileştirmeyi güçlendirmek ya da noktasal karşılıklı bilgi eşiğini
 geçen ikililerle sınırlamak.
 
@@ -1863,37 +1878,109 @@ geçme sinyalidir
 **S: Belge-terim matrisiniz 10⁶ × 10⁵. Bunu nasıl saklar ve nasıl
 çalışırsınız?**
 
-Sıkıştırılmış seyrek satır (CSR) biçiminde. Yoğunluğu da söyleyin: metin
-matrisleri %0,1–1 arasında sıfırdan farklıdır, yani kazanç iki ile üç
-büyüklük mertebesindedir. Sonra seyrekliği *bozan* işlemlerden — ortalama
-merkezleme, ham matris üzerinde PCA — ve onu korumak için tasarlanmış
-olanlardan söz edin; özellikle kesilmiş SVD'den, ki bu gizli anlam
-analizidir ve embedding'lere giden tarihsel köprüdür
-(@sec-gommeler).
+Önce sayının ne demek olduğunu söyleyin: bir milyon belge, yüz bin kelimelik
+bir sözlük, yani $10^{11}$ hücre. Her hücre için 8 baytlık bir ondalık sayı
+tutarsanız bu **800 GB** eder — soru bir bilmece değil, sıkıştırmadan
+gerçekten hiçbir makineye sığmıyor.
+
+Sonra kurtarıcıyı söyleyin: bu hücrelerin neredeyse hepsi sıfır. Tek bir
+belgede yüz bin kelimenin belki birkaç yüzü geçer; metin matrislerinde
+sıfırdan farklı hücre oranı tipik olarak %0,1 ile %1 arasındadır. Sıfırları
+saklamanın hiçbir anlamı yok.
+
+**Sıkıştırılmış seyrek satır (compressed sparse row, CSR)** biçimi tam olarak
+bunu yapar: matrisi bir tablo olarak değil üç listeyle tutar — sıfırdan
+farklı değerler, her değerin hangi sütuna ait olduğu ve her satırın bu
+listede nereden başladığı. Böylece maliyet hücre sayısıyla değil, *sıfırdan
+farklı hücre* sayısıyla ölçeklenir. %0,1 yoğunlukta bu $10^8$ değer demek;
+değer başına 12 bayttan yaklaşık **1,2 GB** — yani 800 GB'ın yerine 1,2 GB,
+kabaca **665×** kazanç. %1 yoğunlukta bile 12 GB'da kalırsınız.
+
+Cevabı asıl ayıran kısım şurası: seyreklik bir depolama numarası değil,
+hangi işlemleri yapabileceğinizi belirleyen bir kısıttır.
+
+- **Seyrekliği yok eden işlemler.** Sütunlardan ortalama çıkarmak (ortalama
+  merkezleme) her sıfırı sıfırdan farklı yapar ve sizi bir anda 800 GB'a geri
+  götürür. Ham matris üzerinde PCA da bunu yapar, çünkü içinde sessizce
+  ortalama merkezleme vardır.
+- **Seyrekliği koruyan işlemler.** Satır bazında L2 normalleştirme, kosinüs
+  benzerliği ve matris–vektör çarpımları yalnızca sıfırdan farklı hücrelere
+  dokunur; hiçbiri biçimi bozmaz.
+- **Boyut indirmek istiyorsanız kesilmiş (truncated) SVD.** PCA'nın aksine
+  merkezleme adımını atlar, dolayısıyla doğrudan seyrek matris üzerinde
+  çalışır. Bunun adı gizli anlam analizidir ve embedding'lere giden tarihsel
+  köprüdür (@sec-gommeler).
 
 ### Bir şey sahiden yayına almış olup olmadığınızı sınayanlar
 
 **S: Çevrimdışı iyi, üretimde kötü çalışan bir metin sınıflandırıcı
 eğittiniz. Hata ayıklama sürecinizi anlatın.**
 
-Beklenen yapı, maliyet sırasına dizilmiş bir kontrol listesidir: (1)
-eğitim/servis kayması — *birebir aynı* ön işleme hattı her iki yerde de mi
-çalışıyor, vektörleştirici artefaktı ve IDF vektörü dâhil? (2) Sözlük
-kayması — yeni ürün adları, yeni hata kodları, hepsi hiçbir şeye eşleniyor.
-(3) Etiket dağılımında kayma. (4) Çevrimdışı değerlendirmede sızıntı;
-örneğin vektörleştiriciyi eğitim/test ayrımından önce eğitmek. (5) Ve
-ancak bundan sonra model. Vektörleştiricinin, ağırlıklarla birlikte
-sürümlenip dağıtılması gereken *eğitilmiş bir artefakt* olduğunu söylemek,
-uygulayıcıyı öğrenciden en çok ayıran tek cevaptır.
+Beklenen yapı, maliyet sırasına dizilmiş bir kontrol listesidir.
+
+1. **Eğitim/servis kayması** (*training/serving skew*). Buradaki "servis",
+   modelin eğitimi bittikten sonra gerçek isteklere cevap verdiği aşama —
+   yani test/üretim tarafı. Sorulacak soru: *birebir aynı* ön işleme hattı
+   her iki yerde de mi çalışıyor? Buna `TfidfVectorizer` nesnesinin kendisi
+   de dâhil. `fit` edildikten sonra o nesne artık yalnızca kod değildir;
+   içinde eğitim verisinden öğrenilmiş iki şey taşır — hangi kelimenin hangi
+   sütuna düştüğünü tutan sözlük ve terim başına hesaplanmış IDF vektörü.
+   Üretimde bu nesnenin *aynısı* yüklenmiyor, yeniden eğitiliyorsa, aynı
+   cümle iki tarafta iki farklı vektöre dönüşür ve model suçsuzdur.
+2. **Sözlük kayması.** Yeni ürün adları, yeni hata kodları — sözlükte
+   olmadıkları için hepsi hiçbir sütuna düşmüyor, yani model onları hiç
+   görmüyor.
+3. **Etiket dağılımında kayma.**
+4. **Çevrimdışı değerlendirmede sızıntı**; örneğin `vectorizer`'ı
+   eğitim/test ayrımından *önce* eğitmek.
+5. Ve ancak bundan sonra model.
+
+Eğitilmiş `vectorizer`'ın, tıpkı model ağırlıkları gibi kaydedilmesi,
+sürümlenmesi ve üretime onlarla birlikte gönderilmesi gereken bir *çıktı*
+olduğunu söylemek, uygulayıcıyı öğrenciden en çok ayıran tek cevaptır.
 
 **S: 100 milyonluk bir derlemde yakın kopya belgeleri tespit eden bir sistem
 tasarlayın.**
 
-10¹⁶ ikili benzerliği hesaplamamak gerektiğini bilip bilmediğinizi
-sınıyorlar. Beklenen cevap shingling + MinHash + yerellik duyarlı özetleme
-(LSH); bu, neredeyse doğrusal zamanda yaklaşık benzerlik verir. Bu bölümün
-malzemesi o hattın ön yarısıdır: shingle'lar, yukarıda tartışılan
-tokenization kararlarından çıkan karakter ya da kelime n-gram'larıdır.
+Sınadıkları şey tek bir refleks: her belge çiftine tek tek bakmaya
+kalkmamak. 100 milyon belgenin $\binom{10^8}{2} \approx 5 \times 10^{15}$
+çifti vardır; saniyede bir milyar karşılaştırma yapabilseniz bile bu 58 gün
+sürer. Yani cevap "hızlandırırız" değil, "çiftleri hiç saymayız" olmalı.
+Beklenen hat dört adımdır ve her adım bir öncekinin bıraktığı sorunu çözer.
+
+1. **Shingling — belgeyi karşılaştırılabilir bir kümeye çevirin.** Her
+   belgeyi, üzerinde kaydırılan sabit uzunlukta kelime pencerelerinin
+   (tipik olarak 5–9 kelimelik shingle'ların) kümesine dönüştürün. Neden
+   bag-of-words değil de shingle: kopya tespitinde *sıra* önemlidir. Aynı
+   kelimeleri farklı sırayla kullanan iki belge kopya değildir, ama
+   bag-of-words'te aynı vektöre düşerler.
+2. **Jaccard benzerliği — "yakın kopya"yı tanımlayın.** İki shingle kümesi
+   $A$ ve $B$ için $|A \cap B| / |A \cup B|$. Doğru ölçü budur; sorun onu
+   *hesaplamak*, çünkü kümeler büyük ve çift sayısı da $5 \times 10^{15}$.
+3. **MinHash — kümeleri kısaltın.** Her shingle kümesini sabit uzunlukta
+   kısa bir imzaya sıkıştırır; diyelim 128 sayı. MinHash'i özel kılan
+   özellik şudur: iki imzanın belirli bir konumda aynı çıkma olasılığı, tam
+   olarak özgün kümelerin Jaccard benzerliğine eşittir. Yani koca kümeleri
+   kesiştirmek yerine 128 sayı karşılaştırarak benzerliği kestirebilirsiniz.
+   Belge başına depolama birkaç yüz bayta iner — ama çift sayısı hâlâ
+   $5 \times 10^{15}$.
+4. **LSH (yerellik duyarlı özetleme) — çift patlamasını çözün.** 128
+   sayılık imzayı $b$ banda bölün, her bant $r$ satır içersin ($b \times r =
+   128$). Her bandı ayrı ayrı özetleyip bir kovaya atın. İki belge, ancak
+   *en az bir bantta aynı kovaya düşerse* aday sayılır. Benzer belgeler bunu
+   neredeyse kesin yapar, benzemeyenler neredeyse hiç yapmaz — böylece
+   sorun karesel olmaktan çıkıp neredeyse doğrusal hâle gelir. $b$ ve $r$
+   seçimi eşiği belirler: $b=16$, $r=8$ ile eşik $\approx 0{,}71$'dir;
+   Jaccard 0,8 olan bir çift %94,7 olasılıkla aday olur, Jaccard 0,3 olan
+   bir çift ise yalnızca %0,1 olasılıkla.
+5. **Doğrulama.** Yalnızca aday çiftler üzerinde gerçek Jaccard'ı hesaplayın
+   — bunlar milyarlarca değil, yönetilebilir sayıdadır.
+
+Bu bölümün malzemesi hattın *ilk* adımıdır ve önemi göründüğünden büyüktür:
+shingle'lar yukarıda tartışılan tokenization kararlarından çıkar. Büyük/küçük
+harfi birleştirdiniz mi, noktalamayı attınız mı, kelime yerine karakter
+penceresi mi kullandınız — bunların her biri neyin "kopya" sayılacağını
+doğrudan değiştirir.
 
 **S: Kurum içi teknik dokümantasyon için bir arama motoru kurun. Nereden
 başlarsınız?**
@@ -2016,7 +2103,7 @@ bakıyor.
    `tiktoken` ile iki farklı tokenizer'da token sayın. Maliyet oranını
    hesaplayın, sonra bu oranın ayda 100.000 istekte yıllık API faturanıza
    ne yaptığını kestirin.
-2. **Vektörleştiriciyi kırın.** Kendi alanınızdan on belge üzerinde bir
+2. **`vectorizer`'ı kırın.** Kendi alanınızdan on belge üzerinde bir
    `CountVectorizer` eğitin ve `get_feature_names_out()` çıktısını
    yazdırın. En az iki yanlış token bulun — bozulmuş bir tanımlayıcı,
    birleşmiş bir çift, kaybolmuş bir birim. `token_pattern` ile düzeltin ve

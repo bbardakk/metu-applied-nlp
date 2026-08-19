@@ -1575,8 +1575,12 @@ by the company that built it:
   a vocabulary.
 - **Near-duplicate detection.** Google's web-crawl deduplication
   [@manku2007detecting] runs on shingles and hashing, not neural networks,
-  because it has to work over billions of documents. Shingles are word or
-  character n-grams — the front half of this chapter.
+  because it has to work over billions of documents. A **shingle** is a
+  fixed-length window of words (or characters) slid across the document; the
+  windows overlap like roof tiles, which is where the name comes from. The
+  three-word shingles of *the pump failed last night* are `the pump failed`
+  and `pump failed last` and `failed last night`. So shingles are exactly
+  n-grams — the front half of this chapter.
 
 The practical rule: reach for TF-IDF when your labels are few, your
 documents are long, your vocabulary is technical and exact-match matters, or
@@ -1605,9 +1609,10 @@ four-category corpus from the classification experiment above, `min_df=5`
 takes the vocabulary from 32,318 down to 6,281 — 81% of the columns gone.
 
 Do not mistake that for a free lunch. Those deleted columns still carry
-11.6% of the token occurrences, so this is not purely hapax pruning, and
-whether the trade is worth it is an empirical question rather than a rule.
-Exercise 4 asks you to measure it.
+11.6% of the token occurrences, so what you are throwing away is not only
+the words that appear exactly once (*hapax legomena*) — you are throwing
+away words a reader actually meets. Whether the trade is worth it is an
+empirical question rather than a rule. Exercise 4 asks you to measure it.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1735,15 +1740,22 @@ When document frequency is not informative about importance. Examples: a
 corpus of near-identical documents where every term has similar df; very
 short texts where each term appears once anyway so TF adds nothing;
 generative models like multinomial naive Bayes, whose likelihood is defined
-over counts and whose probabilistic interpretation TF-IDF breaks. Also when
-you need interpretable, additive counts for a downstream statistical test.
+over counts and whose probabilistic interpretation TF-IDF breaks. And when
+the numbers feed a statistical test directly rather than a model: tests like
+chi-square or the log-likelihood ratio expect *counts*, because counts add
+up — "this term occurs 47 times across the two categories" is a meaningful
+sentence. TF-IDF weights are scaled fractional values whose sums correspond
+to nothing, and they violate the test's assumption.
 
 **Q: You add bigrams and accuracy drops. What happened?**
 
 Variance. The feature space grew by roughly an order of magnitude while the
 data stayed fixed, so most bigrams are seen once or twice and contribute
 noise. The experiment in this chapter shows exactly this: 32,318 → 249,522
-features, 0.831 → 0.819 accuracy. Fixes: raise `min_df`, strengthen
+features, 0.831 → 0.819 accuracy. Fixes: raise `min_df` (the threshold for
+how many *separate documents* a term must appear in before it earns a
+column of its own; raising it removes the bigrams seen in only one or two
+documents before they ever enter the vocabulary), strengthen
 regularization, or restrict to bigrams that pass a pointwise-mutual-
 information threshold.
 
@@ -1791,35 +1803,106 @@ representations (@sec-embeddings).
 **Q: Your document-term matrix is 10⁶ × 10⁵. How do you store and work with
 it?**
 
-Compressed sparse row. Quote the density: text matrices run around 0.1–1%
-non-zero, so the saving is two to three orders of magnitude. Then mention
-the operations that *break* sparsity — mean-centering, PCA on the raw matrix
-— and the ones designed to preserve it, notably truncated SVD, which is
-latent semantic analysis and the historical bridge to @sec-embeddings.
+Start by saying what the number means: a million documents against a
+hundred-thousand-word vocabulary is $10^{11}$ cells. At 8 bytes per cell
+that is **800 GB** — the question is not a riddle, the matrix genuinely does
+not fit anywhere without compression.
+
+Then say what rescues it: almost all of those cells are zero. A single
+document uses maybe a few hundred of the hundred thousand words, and text
+matrices typically run 0.1–1% non-zero. There is no point storing the zeros.
+
+**Compressed sparse row (CSR)** does exactly that: it holds the matrix not
+as a grid but as three lists — the non-zero values, the column each value
+belongs to, and where each row starts in that list. Cost then scales with
+the number of *non-zeros* rather than the number of cells. At 0.1% density
+that is $10^8$ values, roughly **1.2 GB** at 12 bytes each — 1.2 GB in place
+of 800 GB, about a **665×** saving. Even at 1% density you stay at 12 GB.
+
+What separates a good answer is the next part: sparsity is not a storage
+trick, it is a constraint on which operations you are allowed to perform.
+
+- **Operations that destroy sparsity.** Subtracting the column mean
+  (mean-centering) makes every zero non-zero and puts you straight back at
+  800 GB. PCA on the raw matrix does the same, because it mean-centers
+  silently.
+- **Operations that preserve it.** Row-wise L2 normalization, cosine
+  similarity and matrix–vector products touch only the non-zeros and leave
+  the format intact.
+- **Truncated SVD if you want fewer dimensions.** Unlike PCA it skips the
+  centering step, so it runs directly on the sparse matrix. That is latent
+  semantic analysis, and the historical bridge to @sec-embeddings.
 
 ### Testing whether you have shipped something
 
 **Q: You trained a text classifier that performs well offline and badly in
 production. Walk me through your debugging.**
 
-The expected structure is a checklist, in cost order: (1) train/serve skew —
-is the *identical* preprocessing pipeline running in both places, including
-the vectorizer artifact and its IDF vector? (2) Vocabulary drift — new
-product names, new error codes, all mapping to nothing. (3) Distribution
-shift in the label mix. (4) A leak in the offline evaluation, such as
-fitting the vectorizer before the train/test split. (5) Only then, the
-model. Mentioning that the vectorizer is a *fitted artifact* that must be
-versioned and shipped alongside the weights is the single answer that most
+The expected structure is a checklist, in cost order.
+
+1. **Train/serve skew.** "Serving" is the stage after training, where the
+   model answers real requests. The question to ask: is the *identical*
+   preprocessing pipeline running in both places? That includes the
+   `TfidfVectorizer` object itself. Once fitted, it is no longer just code —
+   it carries two things learned from the training data: the vocabulary that
+   maps each word to a column, and the per-term IDF vector. If production
+   refits it instead of loading the same one, the same sentence becomes two
+   different vectors and the model is innocent.
+2. **Vocabulary drift.** New product names, new error codes — absent from
+   the vocabulary, they map to no column at all, so the model never sees
+   them.
+3. **Distribution shift in the label mix.**
+4. **A leak in the offline evaluation**, such as fitting the vectorizer
+   *before* the train/test split.
+5. Only then, the model.
+
+Saying that the fitted vectorizer is an output that must be saved, versioned
+and shipped alongside the model weights is the single answer that most
 distinguishes practitioners from students.
 
 **Q: Design a system to detect near-duplicate documents in a corpus of 100
 million.**
 
-They are testing whether you know not to compute 10¹⁶ pairwise similarities.
-The expected answer is shingling plus MinHash plus locality-sensitive
-hashing, giving approximate similarity in near-linear time. This chapter's
-material is the front half of that pipeline: shingles are character or word
-n-grams from exactly the tokenization decisions discussed above.
+They are testing one reflex: do not try to look at every pair. A hundred
+million documents have $\binom{10^8}{2} \approx 5 \times 10^{15}$ pairs; at
+a billion comparisons a second that is 58 days. So the answer cannot be
+"make it faster" — it has to be "never enumerate the pairs". The expected
+pipeline has four steps, each fixing the problem the previous one leaves
+behind.
+
+1. **Shingling — turn each document into a comparable set.** Represent every
+   document as the set of fixed-length word windows (shingles, typically
+   5–9 words) slid across it. Why shingles rather than bag-of-words:
+   duplicate detection cares about *order*. Two documents using the same
+   words in a different order are not duplicates, yet bag-of-words gives
+   them the same vector.
+2. **Jaccard similarity — define what "near-duplicate" means.** For two
+   shingle sets $A$ and $B$, it is $|A \cap B| / |A \cup B|$. That is the
+   right measure; the problem is *computing* it, because the sets are large
+   and there are still $5 \times 10^{15}$ pairs.
+3. **MinHash — shrink the sets.** It compresses each shingle set into a
+   short fixed-length signature, say 128 numbers. The property that makes it
+   work: the probability that two signatures agree at a given position is
+   exactly the Jaccard similarity of the original sets. So you can estimate
+   similarity by comparing 128 numbers instead of intersecting large sets,
+   and storage drops to a few hundred bytes per document. The pair count is
+   still $5 \times 10^{15}$.
+4. **LSH (locality-sensitive hashing) — kill the pair explosion.** Split the
+   128-number signature into $b$ bands of $r$ rows each ($b \times r = 128$),
+   hash each band separately into a bucket, and call two documents
+   *candidates* only if they land in the same bucket in at least one band.
+   Similar documents almost always do; dissimilar ones almost never do. That
+   turns a quadratic problem into a near-linear one. Choosing $b$ and $r$
+   sets the threshold: with $b=16$, $r=8$ it sits near $0.71$, so a pair at
+   Jaccard 0.8 becomes a candidate 94.7% of the time and a pair at Jaccard
+   0.3 only 0.1% of the time.
+5. **Verify.** Compute the exact Jaccard on the candidate pairs only — a
+   manageable number, not billions.
+
+This chapter's material is the *first* step, and it matters more than it
+looks: shingles come out of the tokenization decisions discussed above. Did
+you case-fold, did you strip punctuation, did you use character windows
+instead of word windows — each of those changes what counts as a duplicate.
 
 **Q: Build a search engine for internal technical documentation. Where do
 you start?**
