@@ -10,10 +10,11 @@ explorers are interactive.
 **Learning objectives.** After this chapter you can:
 
 - explain the distributional hypothesis and turn it into a matrix, then into coordinates;
-- derive PPMI and truncated SVD, and say what each one fixes;
+- reweight co-occurrence counts with PPMI: the score for how much more often two words land together than chance predicts;
+- compress the result with truncated SVD — the method that keeps a table's strongest patterns and drops the rest — and say what each step fixes;
 - write skip-gram with negative sampling from scratch and explain it as a logistic regression;
 - choose between word2vec, GloVe, fastText and doc2vec for a stated problem, and defend it;
-- diagnose the geometry — anisotropy, frequency effects, cosine's confusion of relatedness with similarity;
+- diagnose three defects of the space: vectors bunching into a narrow cone (anisotropy), a vector recording frequency as much as meaning, and cosine failing to separate "mentioned together" from "means the same thing";
 - state precisely what a static embedding cannot do, which is exactly what @sec-transformers exists to fix.
 
 ## The problem, in one sentence
@@ -170,9 +171,21 @@ $$
 \mathrm{PMI}(w, c) = \log \frac{P(w, c)}{P(w)\,P(c)}
 $$
 
-If $w$ and $c$ are independent, the ratio is 1 and the PMI is 0. If they
-attract, it is positive. If they repel, it is negative — and negative PMI is
-notoriously unreliable, because establishing that two words co-occur *less*
+Read the fraction like this: the denominator ($P(w)\,P(c)$) is how often we
+would *expect* the two words to land next to each other if they were placed
+completely independently; the numerator ($P(w, c)$) is how often they
+actually do. So PMI is nothing but the log of **observed ÷ expected**. Three
+cases:
+
+- **Ratio 1** — the words co-occur exactly as often as chance predicts, so
+  there is no relationship at all. $\log 1 = 0$, and PMI is zero.
+- **Ratio above 1** — they co-occur more often than expected; they *attract*.
+  The log is positive.
+- **Ratio below 1** — they co-occur less often than expected; they *avoid*
+  each other. The log is negative.
+
+The negative side is notoriously unreliable, because establishing that two
+words co-occur *less*
 than chance takes far more data than establishing that they co-occur more.
 So we clip at zero and call it [positive PMI]{.hl}.
 
@@ -185,11 +198,30 @@ total, $c_{\ast c}$ the column total, and $N$ the grand total of the matrix.
 That fraction is doing something very simple, and it is worth seeing it with
 actual numbers.
 
-**Work one cell by hand.** Take `apple`–`sweet` in the table above. The pair
-occurs once. `apple` occurs in 7 co-occurrence slots altogether, `sweet` in
-6, and the whole matrix contains $N = 144$ slots. If the two words were
-sprinkled independently, the number of times we would *expect* them to land
-next to each other is
+**Work one cell by hand.** We will run the formula on `apple`–`sweet`, but
+first pin down where the four numbers come from, because all four are read
+off the same matrix $C$:
+
+- $c_{wc} = 1$ — how many times `apple` and `sweet` actually landed in each
+  other's window. That is a single cell, visible in the table above.
+- $c_{w\ast} = 7$ — the **sum of the `apple` row**, meaning "how many times
+  was `apple` counted next to anything at all". `apple` occurs three times in
+  the corpus, with 2, 3 and 2 neighbours respectively: $2 + 3 + 2 = 7$.
+- $c_{\ast c} = 6$ — the same sum for `sweet`, down its **column**.
+- $N = 144$ — the sum of every cell in the matrix: all the (word, neighbour)
+  pairs counted in the corpus. You can check it by hand. Each token
+  contributes one pair per neighbour in its window — 4 for a token in the
+  middle of a sentence, 2 or 3 at the edges — so a five-token sentence yields
+  14 pairs. The corpus has nine five-token sentences and one six-token
+  sentence (18 pairs): $9 \times 14 + 18 = 144$.
+
+Note that $N$ is not the 51 tokens in the corpus; it is the number of
+*pairs*. Because the denominator of PMI is a product of probabilities, the
+thing to divide by is how many pairs were counted, not how many tokens exist.
+
+Now the actual question: if the two words were sprinkled through the text
+completely independently, how many times would we *expect* them to land next
+to each other?
 
 $$
 \frac{c_{\text{apple},\ast} \times c_{\ast,\text{sweet}}}{N}
@@ -199,14 +231,26 @@ $$
 We observed 1, which is $1 / 0.29 = 3.43$ times more than expected. PMI is
 the log of that ratio: $\log 3.43 = 1.23$ — the value in the table.
 
-Now do the same for `king`–`the`, which occurs **four** times, four times as
-often as `apple`–`sweet`. But `the` is everywhere: $c_{\ast,\text{the}} = 22$,
-and `king` has 9 slots, so we expect $9 \times 22 / 144 = 1.38$ co-occurrences
-by chance alone. Observing 4 is only $4 / 1.38 = 2.91$ times expected, and
-$\log 2.91 = 1.07$.
+Now do the same for `king`–`the`, which occurs **four** times — exactly four
+times as often as `apple`–`sweet`. But `the` is everywhere: its column sums
+to 22, and the `king` row sums to 9. By chance alone we already expect
+$9 \times 22 / 144 = 1.38$ co-occurrences, so this pair had every reason to
+meet.
 
-So `apple`–`sweet` (seen once) scores **higher** than `king`–`the` (seen four
-times). That reversal is the entire point of the formula.
+Put the two calculations side by side:
+
+| | observed | expected | ratio | PMI |
+|---|--:|--:|--:|--:|
+| `apple`–`sweet` | 1 | $7 \times 6 / 144 = 0.29$ | 3.43 | **1.23** |
+| `king`–`the` | 4 | $9 \times 22 / 144 = 1.38$ | 2.91 | **1.07** |
+
+: The raw count loses, the ratio wins {tbl-colwidths="[24,17,29,15,15]"}
+
+The pair seen once scores **higher** than the pair seen four times. The
+reason is right there: most of the four meetings between `king` and `the` are
+explained by how popular `the` is, whereas the single meeting between `apple`
+and `sweet` is not explained by anything. That reversal is the entire point
+of the formula.
 
 ::: {.column-margin}
 Think of a crowded party. Someone who talks to everyone tells you nothing
@@ -287,8 +331,8 @@ keep those and discard the rest. [↩](#term-singular-value-decomposition-svd){.
 
 Truncated [singular value decomposition](#gloss-singular-value-decomposition-svd){#term-singular-value-decomposition-svd .term-ref} fixes this by refusing to model
 everything. Keep only the $d$ directions with the largest singular values
-and you throw away the one-off co-occurrences — including the
-`apple`–`man` accident — while keeping the structure that recurs.
+and you force the model to spend its budget on the structure that recurs,
+leaving one-off coincidences only whatever room is left over.
 
 $$
 \mathrm{PPMI} \approx U_d \Sigma_d V_d^\top, \qquad
@@ -344,18 +388,31 @@ for. Five directions out of nineteen carry roughly two-thirds of it — the
 remaining fourteen are splitting the last third between them, which is
 another way of saying none of them is describing much.
 
-`apple`'s nearest neighbour is now `banana` at 1.00 instead of `man` at
-0.79. Nothing was added — the same counts, compressed — but forcing the
-representation through five dimensions made the model prefer the pattern
-that repeats over the coincidence that does not.
+The easiest way to see what happened is to put three cosines side by side,
+before and after factorization:
 
-The `apple`–`banana` cosine is the number to watch: **0.40 before
-factorization, 1.00 after.** The two words never once occur in the same
-sentence in this corpus, so no amount of counting could ever link them
-directly. What links them is that they keep the same company — both follow
-`eats`, both precede `is sweet fruit` — and it takes the compression step to
-notice that. This is transitivity, and it is the thing sparse count vectors
-cannot do.
+| word pair | PPMI rows, 19-D | SVD, 5-D | what happened |
+|---|--:|--:|---|
+| `apple` – `banana` | 0.40 | **1.00** | never share a sentence in this corpus; the compression is what links them |
+| `king` – `queen` | 0.55 | **0.90** | already right, and got stronger |
+| `apple` – `man` | 0.79 | **0.85** | the one-sentence accident — *not* deleted, but no longer first |
+
+: The same counts, compressed into five dimensions {tbl-colwidths="[24,20,16,40]"}
+
+Look at the third row, because this step is often described wrongly. SVD does
+**not** delete the `apple`–`man` accident; that cosine *rises*, from 0.79 to
+0.85. What changes is the ranking. Before, `apple`'s nearest neighbour was
+`man`, with `banana` in fourth place; now `banana` is first and `man` third.
+The compression does not break the wrong link — it strengthens the right link
+enough to overtake it. That is what preferring signal over noise actually
+looks like in practice: the ordering improves, not the absolute values.
+
+The number to watch is the first row. `apple` and `banana` never once occur
+in the same sentence in this corpus, so no amount of counting could ever link
+them directly. What links them is that they keep the same company — both
+follow `eats`, both precede `is sweet fruit` — and it takes the compression
+step to notice that. This is transitivity, and it is the thing sparse count
+vectors cannot do.
 
 This is latent semantic analysis [@deerwester1990indexing], and it came before
 word2vec by more than twenty years.
@@ -442,6 +499,28 @@ In 2013 Mikolov and colleagues published [word2vec](#gloss-word2vec){#term-word2
 matrix entirely [@mikolov2013efficient; @mikolov2013distributed]. Rather than
 counting co-occurrences and factorizing, train a classifier to *predict*
 context — and then throw the classifier away and keep its weights.
+
+Architecturally, that classifier is a **shallow neural network**: an input
+layer, a single hidden layer, an output layer. It is called shallow because
+there is only one hidden layer and — unlike a deep network — it carries no
+activation function. The three layers do this:
+
+1. The **input layer** is a word's one-hot vector: as long as the vocabulary,
+   a single 1, zeros everywhere else.
+2. The **hidden layer** multiplies that vector by a matrix $\mathbf{W}$.
+   Multiplying a one-hot by a matrix does nothing except pull out the row
+   belonging to that word — so the hidden layer is really a lookup table. The
+   row it pulls out *is* the word's embedding. No sums, no activation, which
+   is why it is often called a *projection layer* instead.
+3. The **output layer** is a second matrix, $\mathbf{W}'$. It scores the
+   hidden vector against candidate words from the vocabulary.
+
+The critical point: [the product is not the network you train, it is the
+weights of the network's first layer.]{.hl} When training ends, $\mathbf{W}'$
+is thrown away and $\mathbf{W}$ is what you keep — one row per word, 300
+numbers per row. The model was a pretext; the weights were the point. You
+will see why that matters in @sec-transformers: the embedding table at the
+bottom of a transformer is literally the same object.
 
 There are two ways to set up that prediction, and they are mirror images.
 [CBOW]{.hl} averages the surrounding words and predicts the centre.
@@ -861,9 +940,18 @@ is roughly 65,000 times cheaper.
 :::
 ::::
 
-There is no hidden layer, no non-linearity beyond the sigmoid, and the
-"embedding" is just the coefficient vector attached to each word. If you
-have ever fitted a logistic regression, you have fitted 99% of word2vec. The
+Notice how the two descriptions meet here. The network does have a hidden
+layer — the row pulled out of $\mathbf{W}$ is exactly that — but it carries
+no activation function, and the only non-linearity in the model is the
+sigmoid at the very end. A single linear layer with no activation, followed
+by a sigmoid and a log loss, is by definition a logistic regression. So
+"shallow neural network" and "logistic regression" are not competing
+explanations here; they are two names for the same object. The first is what
+you reach for to describe the architecture, the second to compute the
+gradient.
+
+If you have ever fitted a logistic regression, you have fitted 99% of
+word2vec. The
 only unusual part is that *both* the predictors and the coefficients are
 learned, which is what makes it a factorization rather than a regression.
 
@@ -923,6 +1011,51 @@ the left. Since the dot product of two unit-length vectors <i>is</i> their
 cosine, "similar words have similar vectors" is not an emergent property —
 it is literally the loss function.</p>`
 ```
+:::
+
+### Which vectors get updated in one step?
+
+This is the question to settle before writing the code, and the answer on its
+own explains why word2vec is fast.
+
+For a single training pair, with $K = 5$ negatives, **seven rows** change
+across the two matrices:
+
+- **one** row of $\mathbf{W}$: the centre word's vector $\mathbf{v}_w$.
+- **one** row of $\mathbf{W}'$: the true context word's vector
+  $\mathbf{u}_c$.
+- **$K$** rows of $\mathbf{W}'$: the vectors of the sampled fake words.
+
+Everything else — the rows of every other word in the vocabulary, in both
+matrices — **does not move**. Not "moves a little": the gradients are
+*exactly zero*. The reason is simple. Those rows never entered any dot
+product in this step, so they never appear in the loss, and the derivative
+with respect to a parameter that does not appear in the loss is zero.
+
+For scale, take the model we train from scratch below: a vocabulary of
+18,677, 100
+dimensions, two matrices — 37,354 rows and 3,735,400 parameters. One training
+pair touches **7 rows**, which is **0.019%** of them. That is why billions of
+updates finish in hours on one machine.
+
+You can see it directly in the update lines of the code below: `targets` in
+`np.add.at(Wo, targets.ravel(), ...)` holds only $K+1$ indices per pair, so
+only that many rows of `Wo` are added into. The rest are untouched.
+
+**With a full softmax it would be completely different**, and the difference
+is precisely why negative sampling exists. The softmax denominator sums over
+*every* word in the vocabulary, so every word's output vector enters the loss
+and every one of them receives a non-zero gradient. Rows touched per pair
+jumps from 7 to 18,678 — half of all rows — which is **2,668 times** the
+arithmetic, for *every* pair.
+
+::: {.column-margin}
+The practical consequence: the gradient of an embedding matrix is **sparse**.
+PyTorch's `nn.Embedding(..., sparse=True)` and the matching `SparseAdam`
+optimizer come straight out of this fact. A second consequence: a word learns
+only as much as it occurs in the corpus or gets drawn as a negative. That is
+another way to read why the 0.75 exponent matters — it buys tail words a
+place in the update queue.
 :::
 
 ### Two details that matter more than the architecture
@@ -2563,8 +2696,12 @@ networks.**
 Say it is a logistic regression that classifies word pairs as real or
 fabricated, where the linear predictor is the dot product of two learned
 vectors and the vectors are the thing you keep. Write $\sigma(v \cdot u)$,
-point out that `score - labels` is the residual, and note that there is no
-hidden layer at all. Then deliver the key point: @levy2014neural proved the
+point out that `score - labels` is the residual, and add that the single
+hidden layer carries no activation function — which is what leaves the
+network's mathematics identical to a logistic regression. If they push back
+with "but isn't this a neural network?", the answer is ready: yes, a shallow
+one, and the two are names for the same thing. Then deliver the key point:
+@levy2014neural proved the
 optimum is a factorization of the shifted PPMI matrix, so the "neural" method
 and the "count" method are the same method.
 

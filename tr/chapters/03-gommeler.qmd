@@ -11,10 +11,11 @@ analoji ve alt kelime gezginleri etkileşimlidir.
 **Öğrenme hedefleri.** Bu bölümün sonunda:
 
 - dağılımsal hipotezi (distributional hypothesis) açıklayabilir, onu önce bir matrise, sonra koordinatlara dönüştürebilirsiniz;
-- PPMI'yı ve kesik SVD'yi türetebilir, her birinin neyi düzelttiğini söyleyebilirsiniz;
+- eş-oluşum sayımlarını PPMI ile yeniden ağırlıklandırabilirsiniz: iki kelimenin rastlantıdan ne kadar daha sık yan yana düştüğünü ölçen puan;
+- sonucu kesik (truncated) SVD ile sıkıştırabilir — bir tablonun en güçlü örüntülerini tutup gerisini atan yöntem — ve her iki adımın neyi düzelttiğini söyleyebilirsiniz;
 - negatif örneklemeli skip-gram'ı sıfırdan yazabilir ve onu bir lojistik regresyon olarak açıklayabilirsiniz;
 - verilen bir problem için word2vec, GloVe, fastText ve doc2vec arasında seçim yapıp seçiminizi savunabilirsiniz;
-- geometriyi teşhis edebilirsiniz — anizotropi, frekans etkileri, kosinüsün ilişkililik ile benzerliği birbirine karıştırması;
+- uzayın üç kusurunu teşhis edebilirsiniz: vektörlerin dar bir koniye toplanması (anizotropi), vektörün anlam kadar sıklığı da kaydetmesi ve kosinüsün "birlikte anılan" ile "aynı anlama gelen"i ayıramaması;
 - statik bir embedding'in tam olarak neyi yapamadığını söyleyebilirsiniz — @sec-transformerlar zaten tam da bunu düzeltmek için var.
 
 ## Problem, tek cümlede
@@ -181,9 +182,20 @@ $$
 \mathrm{PMI}(w, c) = \log \frac{P(w, c)}{P(w)\,P(c)}
 $$
 
-$w$ ile $c$ bağımsızsa oran 1, PMI de 0 olur. Birbirlerini çekiyorlarsa
-pozitif olur. İtiyorlarsa negatif olur — ve negatif PMI'nın güvenilmezliği
-meşhurdur, çünkü iki kelimenin rastlantıdan *daha az* bir arada geçtiğini
+Kesri okumanın yolu şu: payda ($P(w)\,P(c)$), iki kelime birbirinden
+tamamen bağımsız olsaydı yan yana düşmelerini *bekleyeceğimiz* sıklık; pay
+($P(w, c)$) ise fiilen düştükleri sıklık. Yani PMI, **gözlenen ÷ beklenen**
+oranının logaritmasından ibaret. Üç durum var:
+
+- **Oran 1** — kelimeler tam da rastlantının öngördüğü kadar bir arada
+  geçiyor, yani aralarında hiçbir ilişki yok. $\log 1 = 0$, PMI sıfır.
+- **Oran 1'den büyük** — beklenenden daha sık bir aradalar, birbirlerini
+  *çekiyorlar*. Logaritma pozitif.
+- **Oran 1'den küçük** — beklenenden daha seyrek bir aradalar, birbirlerinden
+  *kaçınıyorlar*. Logaritma negatif.
+
+Negatif tarafın güvenilmezliği meşhurdur, çünkü iki kelimenin rastlantıdan
+*daha az* bir arada geçtiğini
 kanıtlamak, daha çok geçtiğini kanıtlamaktan kat kat fazla veri ister. Bu
 yüzden sıfırdan kırpıyoruz ve buna [pozitif PMI]{.hl} diyoruz.
 
@@ -195,11 +207,31 @@ Burada $c_{wc}$ çiftin fiilen kaç kez geçtiği, $c_{w\ast}$ satır toplamı,
 $c_{\ast c}$ sütun toplamı ve $N$ matrisin genel toplamıdır. Bu kesir çok
 basit bir şey yapıyor ve bunu gerçek sayılarla görmeye değer.
 
-**Bir hücreyi elle hesaplayın.** Yukarıdaki tabloda `apple`–`sweet` çiftini
-alın. Çift bir kez geçiyor. `apple` toplamda 7 eş-oluşum yuvasında, `sweet`
-6 yuvada geçiyor ve matrisin tamamı $N = 144$ yuva içeriyor. İki kelime
-birbirinden bağımsız biçimde serpiştirilmiş olsaydı, yan yana düşmelerini
-*bekleyeceğimiz* sayı şu olurdu:
+**Bir hücreyi elle hesaplayın.** Formülü `apple`–`sweet` çifti üzerinde
+çalıştıracağız; ama önce dört sayının nereden geldiğini yerine oturtalım,
+çünkü dördü de aynı $C$ matrisinden okunuyor:
+
+- $c_{wc} = 1$ — `apple` ile `sweet`'in fiilen kaç kez birbirinin
+  penceresine düştüğü. Bu tek bir hücre, yukarıdaki tabloda görebilirsiniz.
+- $c_{w\ast} = 7$ — `apple` **satırının toplamı**, yani "`apple` toplamda kaç
+  kez bir şeyin yanında sayıldı". `apple` derlemde üç kez geçiyor ve bu üç
+  geçişte sırasıyla 2, 3 ve 2 komşusu var: $2 + 3 + 2 = 7$.
+- $c_{\ast c} = 6$ — aynı hesabın `sweet` için yapılmış hâli, yani `sweet`
+  **sütununun toplamı**.
+- $N = 144$ — matristeki bütün hücrelerin toplamı: derlemde sayılan
+  (kelime, komşu) çiftlerinin tamamı. Bunu elle doğrulayabilirsiniz. Her
+  token, penceresine kaç komşu düşüyorsa o kadar çift üretir — cümlenin
+  ortasındaki bir token 4, kenarlardakiler 2 ya da 3 — dolayısıyla beş
+  token'lık bir cümle 14 çift verir. Derlemde dokuz tane beş token'lık cümle
+  ve bir tane altı token'lık (18 çift veren) cümle var:
+  $9 \times 14 + 18 = 144$.
+
+Dikkat: $N$, derlemdeki 51 token'ın sayısı değil; *çiftlerin* sayısı. PMI'nın
+paydası bir olasılık çarpımı olduğu için, bölünmesi gereken şey token sayısı
+değil, sayılan çift sayısıdır.
+
+Şimdi asıl soru: bu iki kelime metne birbirinden tamamen bağımsız biçimde
+serpiştirilmiş olsaydı, yan yana düşmelerini kaç kez *beklerdik*?
 
 $$
 \frac{c_{\text{apple},\ast} \times c_{\ast,\text{sweet}}}{N}
@@ -209,14 +241,25 @@ $$
 Biz 1 gözlemledik; bu da beklenenden $1 / 0{,}29 = 3{,}43$ kat fazla. PMI de
 bu oranın logaritmasıdır: $\log 3{,}43 = 1{,}23$ — tablodaki değer.
 
-Şimdi aynısını `king`–`the` için yapın; bu çift **dört** kez, yani
-`apple`–`sweet`'in dört katı sıklıkta geçiyor. Ama `the` her yerde:
-$c_{\ast,\text{the}} = 22$ ve `king`'in 9 yuvası var; dolayısıyla salt
-rastlantıyla $9 \times 22 / 144 = 1{,}38$ eş-oluşum bekliyoruz. 4 gözlemlemek
-beklenenin yalnızca $4 / 1{,}38 = 2{,}91$ katı ve $\log 2{,}91 = 1{,}07$.
+Şimdi aynısını `king`–`the` için yapın. Bu çift **dört** kez geçiyor, yani
+`apple`–`sweet`'in tam dört katı. Ama `the` her yerde: sütun toplamı 22 ve
+`king`'in satır toplamı 9. Salt rastlantıyla bile
+$9 \times 22 / 144 = 1{,}38$ eş-oluşum bekliyoruz — yani bu çiftin
+buluşması için zaten bir sebep var.
 
-Yani `apple`–`sweet` (bir kez görüldü), `king`–`the`'den (dört kez görüldü)
-**daha yüksek** puan alıyor. Formülün bütün amacı bu tersine çevirme.
+İki hesabı yan yana koyun:
+
+| | gözlenen | beklenen | oran | PMI |
+|---|--:|--:|--:|--:|
+| `apple`–`sweet` | 1 | $7 \times 6 / 144 = 0{,}29$ | 3,43 | **1,23** |
+| `king`–`the` | 4 | $9 \times 22 / 144 = 1{,}38$ | 2,91 | **1,07** |
+
+: Ham sayım kaybeder, oran kazanır {tbl-colwidths="[24,17,29,15,15]"}
+
+Bir kez görülen çift, dört kez görülen çiftten **daha yüksek** puan alıyor.
+Sebep ortada: `king` ile `the`'nin dört kez buluşmasının çoğu `the`'nin
+popülerliğiyle açıklanıyor, `apple` ile `sweet`'in tek buluşması ise
+açıklanamıyor. Formülün bütün amacı bu tersine çevirme.
 
 ::: {.column-margin}
 Kalabalık bir davet düşünün. Herkesle konuşan birini onur konuğunun yanında
@@ -301,9 +344,9 @@ böylece onları tutup gerisini atabilirsiniz.
 
 Kesik [singular value decomposition](#gloss-singular-value-decomposition-svd){#term-singular-value-decomposition-svd .term-ref}
 bunu, her şeyi modellemeyi reddederek düzeltir. Yalnızca en büyük tekil
-değerlere sahip $d$ yönü tutarsanız, tek seferlik eş-oluşumları — bu arada
-`apple`–`man` kazasını da — atmış, buna karşılık tekrarlayan yapıyı korumuş
-olursunuz.
+değerlere sahip $d$ yönü tutarsanız, modeli bütçesini tekrar eden yapıya
+harcamaya ve tek seferlik rastlantılara ancak artakalan yeri ayırmaya
+zorlamış olursunuz.
 
 $$
 \mathrm{PPMI} \approx U_d \Sigma_d V_d^\top, \qquad
@@ -359,18 +402,32 @@ yönden beşi bunun kabaca üçte ikisini taşıyor — kalan on dört yön son 
 biri aralarında paylaşıyor ki bu da hiçbirinin pek bir şey anlatmadığının
 başka bir ifadesi.
 
-`apple`'ın en yakın komşusu artık 0,79'daki `man` değil, 1,00'daki `banana`.
-Hiçbir şey eklenmedi — aynı sayımlar, sıkıştırılmış hâlde — ama temsili beş
-boyuttan geçmeye zorlamak, modelin tekrar eden örüntüyü tekrar etmeyen
-rastlantıya tercih etmesini sağladı.
+Ne olup bittiğini görmenin en kolay yolu, üç kosinüsü çarpanlara ayırmadan
+önce ve sonra yan yana koymak:
 
-İzlenmesi gereken sayı `apple`–`banana` kosinüsü: **çarpanlara ayırmadan
-önce 0,40, sonra 1,00.** Bu iki kelime bu derlemde bir kez bile aynı cümlede
-geçmiyor; dolayısıyla ne kadar sayarsanız sayın onları doğrudan
-bağlayamazdınız. Onları bağlayan şey aynı kelimelerle arkadaşlık etmeleri —
-ikisi de `eats`'ten sonra geliyor, ikisi de `is sweet fruit`'ten önce — ve
-bunu fark etmek için sıkıştırma adımı gerekiyor. Buna geçişlilik denir ve
-seyrek sayım vektörlerinin yapamadığı şey tam olarak budur.
+| kelime çifti | 19 boyutlu PPMI satırları | 5 boyutlu SVD | ne oldu |
+|---|--:|--:|---|
+| `apple` – `banana` | 0,40 | **1,00** | derlemde hiç aynı cümlede geçmiyorlar; bağı kuran şey sıkıştırmanın kendisi |
+| `king` – `queen` | 0,55 | **0,90** | zaten doğruydu, güçlendi |
+| `apple` – `man` | 0,79 | **0,85** | tek cümleden doğan kaza — *silinmedi*, ama artık birinci sırada değil |
+
+: Aynı sayımlar, beş boyuta sıkıştırılmış {tbl-colwidths="[24,20,16,40]"}
+
+Üçüncü satıra dikkat edin, çünkü bu adım sık sık yanlış anlatılır. SVD,
+`apple`–`man` kazasını **silmiyor**; o kosinüs 0,79'dan 0,85'e *çıkıyor*.
+Değişen şey sıralama. Önce `apple`'ın en yakın komşusu `man` idi, `banana`
+ise dördüncü sıradaydı; şimdi `banana` birinci, `man` üçüncü. Yani sıkıştırma
+yanlış bağı koparmıyor — doğru bağı, onun önüne geçecek kadar güçlendiriyor.
+Sinyali gürültüye tercih etmek pratikte böyle görünür: mutlak değerler değil,
+sıralama düzelir.
+
+Asıl izlenmesi gereken sayı da birinci satır. `apple` ile `banana` bu
+derlemde bir kez bile aynı cümlede geçmiyor; dolayısıyla ne kadar sayarsanız
+sayın onları doğrudan bağlayamazdınız. Onları bağlayan şey aynı kelimelerle
+arkadaşlık etmeleri — ikisi de `eats`'ten sonra geliyor, ikisi de
+`is sweet fruit`'ten önce — ve bunu fark etmek için sıkıştırma adımı
+gerekiyor. Buna geçişlilik denir ve seyrek sayım vektörlerinin yapamadığı şey
+tam olarak budur.
 
 Buna latent semantic analysis (örtük anlamsal çözümleme) denir
 [@deerwester1990indexing] ve word2vec'ten yirmi yıldan fazla önce geldi.
@@ -458,6 +515,29 @@ saklanır, modelin kendisi çöpe atılır. [↩](#term-word2vec){.term-back}
 [@mikolov2013efficient; @mikolov2013distributed]. Eş-oluşumları sayıp
 çarpanlara ayırmak yerine, bağlamı *tahmin eden* bir sınıflandırıcı eğitin —
 sonra sınıflandırıcıyı atın, ağırlıklarını saklayın.
+
+O sınıflandırıcı, mimarisiyle söylersek **sığ bir yapay sinir ağıdır**
+(shallow neural network): bir girdi katmanı, tek bir gizli katman, bir çıktı
+katmanı. "Sığ" diyoruz çünkü gizli katman tektir ve — derin ağların aksine —
+üzerinde hiçbir aktivasyon fonksiyonu yoktur. Üç katman şu işi yapar:
+
+1. **Girdi katmanı** bir kelimenin one-hot vektörüdür: sözlük boyunda,
+   tek bir 1, gerisi sıfır.
+2. **Gizli katman** bu vektörü $\mathbf{W}$ matrisiyle çarpar. Bir one-hot'ı
+   matrisle çarpmak, matristen o kelimeye karşılık gelen satırı çekip
+   almaktan başka hiçbir şey yapmaz — yani gizli katman aslında bir arama
+   tablosudur. Çektiği o satır, kelimenin embedding'idir. Toplama-çarpma
+   yapılmaz, aktivasyon uygulanmaz; bu yüzden buna çoğu zaman *izdüşüm
+   katmanı* (projection layer) denir.
+3. **Çıktı katmanı** ikinci bir matristir, $\mathbf{W}'$. Gizli vektörü
+   sözlükteki aday kelimelere karşı puanlar.
+
+Kritik nokta şu: [ürün, eğittiğiniz ağ değil, ağın birinci katmanının
+ağırlıklarıdır.]{.hl} Eğitim bitince $\mathbf{W}'$ çöpe gider; elinizde
+$\mathbf{W}$ kalır — satır başına bir kelime, satırda 300 sayı. Model bir
+bahaneydi, ağırlıklar üründü. Bunun neden bu kadar önemli olduğunu
+@sec-transformerlar'da göreceksiniz: bir transformer'ın en altındaki
+embedding tablosu, harfiyen aynı nesnedir.
 
 Bu tahmini kurmanın iki yolu var ve ikisi birbirinin aynadaki yansıması.
 [CBOW]{.hl} çevredeki kelimelerin ortalamasını alıp merkezi tahmin eder.
@@ -877,9 +957,16 @@ regresyondur ve kabaca 65.000 kat daha ucuzdur.
 :::
 ::::
 
-Gizli katman yok, sigmoidin ötesinde doğrusal olmayan bir şey yok ve
-"embedding" dediğimiz şey, her kelimeye iliştirilmiş katsayı vektöründen
-ibaret. Hayatınızda bir kez lojistik regresyon uydurduysanız, word2vec'in
+Burada iki anlatımın nasıl birleştiğine dikkat edin. Ağın gizli katmanı
+*var* — $\mathbf{W}$'dan çekilen satır tam olarak odur — ama üzerinde
+aktivasyon fonksiyonu yok; modeldeki tek doğrusal olmayan öğe, en sondaki
+sigmoid. Aktivasyonsuz tek bir doğrusal katman, ardından sigmoid ve log
+kaybı: bu, tanım gereği bir lojistik regresyondur. Yani "sığ sinir ağı" ile
+"lojistik regresyon" burada rakip iki açıklama değil, aynı nesnenin iki
+adıdır. Mimariyi tarif etmek isterseniz birincisi, gradyanı hesaplamak
+isterseniz ikincisi işinizi görür.
+
+Hayatınızda bir kez lojistik regresyon uydurduysanız, word2vec'in
 %99'unu uydurmuşsunuz demektir. Alışılmadık olan tek kısım, öngörücülerin
 *ve* katsayıların ikisinin birden öğrenilmesi; bunu bir regresyon değil, bir
 çarpanlara ayırma yapan şey de bu.
@@ -940,6 +1027,54 @@ Birim uzunluktaki iki vektörün iç çarpımı <i>zaten</i> kosinüsleri olduğ
 göre, "benzer kelimelerin benzer vektörleri olur" ortaya çıkan bir özellik
 değil — harfiyen loss fonksiyonunun kendisi.</p>`
 ```
+:::
+
+### Bir adımda hangi vektörler güncellenir?
+
+Kodu yazmadan önce netleşmesi gereken soru bu — ve cevabı, word2vec'in neden
+bu kadar hızlı olduğunu tek başına açıklıyor.
+
+Tek bir eğitim çiftinde, $K = 5$ negatifle, iki matristen **toplam yedi
+satır** değişir:
+
+- $\mathbf{W}$'dan **bir** satır: merkez kelimenin vektörü $\mathbf{v}_w$.
+- $\mathbf{W}'$'den **bir** satır: gerçek bağlam kelimesinin vektörü
+  $\mathbf{u}_c$.
+- $\mathbf{W}'$'den **$K$** satır: örneklenen sahte kelimelerin vektörleri.
+
+Geri kalan her şey — sözlükteki diğer bütün kelimelerin her iki matristeki
+satırları — **kıpırdamaz**. Bu "çok az değişir" demek değil: gradyanları
+*tam olarak sıfırdır*. Sebebi de basit. O satırlar bu adımın iç çarpımlarına
+hiç girmedi, dolayısıyla kaybın formülünde hiç görünmüyorlar; formülde
+görünmeyen bir parametreye göre türev de sıfırdır.
+
+Ölçeğini görmek için aşağıda sıfırdan eğiteceğimiz modeli alın: 18.677
+kelimelik sözlük, 100 boyut, iki matris — yani 37.354 satır ve 3.735.400
+parametre. Bir eğitim çifti bunların **7 satırına**, yani satırların
+**%0,019'una** dokunuyor.
+Milyarlarca güncellemenin tek bir makinede saatler içinde bitmesinin sebebi
+bu.
+
+Birazdan göreceğiniz kodda bu doğrudan görünür:
+`np.add.at(Wo, targets.ravel(), ...)` çağrısındaki `targets`, çift başına
+yalnızca $K+1$ indeks taşır — dolayısıyla `Wo`'nun yalnızca o kadar satırına
+ekleme yapılır. Gerisine dokunulmaz.
+
+**Tam softmax kullansaydınız durum tamamen farklı olurdu** ve fark, negatif
+örneklemenin var oluş sebebinin ta kendisi. Softmax'ın paydası sözlükteki
+*bütün* kelimeler üzerinden toplanır; dolayısıyla her kelimenin çıktı vektörü
+kaybın formülüne girer ve her biri sıfırdan farklı bir gradyan alır. Çift
+başına dokunulan satır sayısı 7'den 18.678'e, yani bütün satırların yarısına
+fırlar — aynı iş için **2.668 kat** daha fazla hesap, üstelik *her* çiftte.
+
+::: {.column-margin}
+Buradan çıkan pratik sonuç: bir embedding matrisinin gradyanı **seyrektir**.
+PyTorch'taki `nn.Embedding(..., sparse=True)` seçeneği ve ona eşlik eden
+`SparseAdam` optimizasyonu doğrudan bu olgudan doğar. Aynı olgunun ikinci
+sonucu da şu: bir kelime, ancak derlemde geçtiği ya da negatif olarak
+çekildiği kadar öğrenir. 0,75 üssünün neden önemli olduğunu bir kez de
+buradan okuyabilirsiniz — o üs, kuyruktaki kelimelere "güncellenme sırası"
+satın alıyor.
 :::
 
 ### Mimariden daha çok önem taşıyan iki ayrıntı
@@ -1281,7 +1416,7 @@ vardıklarına göre seçim tamamen mühendislikle ilgili:
 |---|---|---|
 | Bellek | $V \times V$ matris tutar — 400.000 kelime 160 milyar hücre eder | Derlemi akıtarak işler; bellek, derlem boyutundan bağımsız $V \times d$ |
 | Derlem boyutu | Her sayımın kıymetli olduğu küçük derlemlerde rahat | Gradyan gürültüsü ortalamaya oturana kadar çok metin ister |
-| Belirlenimlilik | [Aynı girdi, aynı çıktı, her seferinde]{.pro} | [Rastgele ilklendirme ve örnekleme; iki koşu farklı çıkar]{.con} |
+| Deterministiklik | [Aynı girdi, aynı çıktı, her seferinde]{.pro} | [Rastgele ilklendirme ve örnekleme; iki koşu farklı çıkar]{.con} |
 | Yeni veri | [Baştan say, baştan çarpanlarına ayır]{.con} | [Bıraktığınız yerden eğitmeye devam edin]{.pro} |
 | İncelenebilirlik | [Her ara adım, okuyabileceğiniz bir tablo]{.pro} | [Bitene kadar bakılacak anlamlı bir şey yok]{.con} |
 | Ayar yükü | Pencere boyu, PPMI varyantı, $d$ | Pencere, $d$, $K$, altörnekleme $t$, öğrenme oranı, epoch sayısı |
@@ -2595,8 +2730,11 @@ kontrol edebilesiniz diye o sistem kaynak gösterildi.
 Bunun, kelime çiftlerini gerçek ya da uydurma diye sınıflandıran bir lojistik
 regresyon olduğunu söyleyin; doğrusal öngörücü, öğrenilen iki vektörün iç
 çarpımıdır ve sakladığınız şey de o vektörlerdir. $\sigma(v \cdot u)$ yazın,
-`score - labels` ifadesinin artık (residual) olduğunu belirtin ve hiçbir gizli
-katman bulunmadığını söyleyin. Sonra kilit noktayı verin: @levy2014neural,
+`score - labels` ifadesinin artık (residual) olduğunu belirtin ve tek gizli
+katmanın hiçbir aktivasyon fonksiyonu taşımadığını — dolayısıyla ağın
+matematiğinin bir lojistik regresyondan ibaret kaldığını — ekleyin. Soruyu
+soran "ama bu bir sinir ağı değil mi?" derse cevabınız hazır: evet, sığ bir
+sinir ağı; ikisi aynı şeyin iki adı. Sonra kilit noktayı verin: @levy2014neural,
 optimumun kaydırılmış PPMI matrisinin bir çarpanlara ayrılması olduğunu
 kanıtladı; yani "yapay sinir ağı" yöntemi ile "sayma" yöntemi aynı yöntemdir.
 
