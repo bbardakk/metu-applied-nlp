@@ -1,57 +1,1332 @@
 # Sequence Labeling and Information Extraction {#sec-sequence-labeling}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Every number on this page was measured on
+WikiANN Turkish (PAN-X.tr) [@pan2017cross; @rahimi2019massively] — 20,000
+training, 10,000 validation and 10,000 test sentences, used exactly as the
+dataset ships, so that anyone can reproduce them in one `load_dataset` call.
+@sec-sequence-labeling-audit reports what auditing that corpus turned up,
+including a leakage problem that changes how the rest of the chapter reads its
+own scores. Software: `scikit-learn` 1.9.0, `sklearn-crfsuite` 0.5.0,
+`transformers` 5.15.1, PyTorch 2.13.0, `datasets` 5.0.1 on Python 3.14.5;
+encoder fine-tuning on an Apple M-series GPU; the local LLM through `ollama`
+0.24.0.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- frame NER, POS, and chunking as token classification with a decoding step;
-- choose a tagging scheme and decode spans correctly, including the awkward cases;
-- extract structured records with an LLM under a schema and measure whether it worked;
-- build a domain extractor from a couple of hundred labelled examples.
+- frame NER, POS tagging and chunking as one architecture — a label per token
+  — plus a decoding step, and say why the decoding step is where the bugs
+  live;
+- choose a tagging scheme, decode spans from token predictions, and handle
+  the sequences a tagger should never emit but does;
+- explain why token accuracy flatters a sequence labeller, and report the
+  metric that does not;
+- align labels onto subword tokens without silently sliding them off the
+  words they belong to;
+- extract structured records with an LLM under a schema, align the result
+  back onto the text, and measure whether it worked;
+- audit a labelled corpus before trusting a score computed on it;
+- say what a couple of hundred labelled sentences actually buys, from
+  measurement rather than from hope.
 
-## POS, chunking, and NER as token classification
+## One architecture, three tasks {#sec-sequence-labeling-setup}
 
-<!-- TODO(draft): one architecture, three tasks; subword-to-word alignment
-    as the practical trap. -->
+@sec-classification asked one question per document: *which class is this?*
+This chapter asks one question per *token*, and the questions are no longer
+independent — the answer for token 4 constrains the answer for token 5.
 
-## BIO/BIOES schemes and span decoding
+That single change of granularity covers most of what the field calls
+information extraction:
 
-<!-- TODO(draft): why the scheme matters; illegal transitions; converting
-    token predictions back into character offsets. -->
+| task | the question at each token | typical labels |
+|:--|:--|:--|
+| POS tagging | what part of speech is this word? | `NOUN`, `VERB`, `ADJ`, … |
+| Chunking | is this word inside a noun phrase? | `B-NP`, `I-NP`, `O` |
+| [NER](#gloss-named-entity-recognition-ner){#term-named-entity-recognition-ner .term-ref} | is this word part of a name, and what kind? | `B-PER`, `I-ORG`, `O`, … |
 
-## CRF layers and structured prediction
+: Three tasks, one shape {tbl-colwidths="[20,44,36]"}
 
-<!-- TODO(draft): modelling label dependencies; Viterbi decoding; whether
-    a CRF still pays for itself on top of a transformer. -->
+::: {#gloss-named-entity-recognition-ner .column-margin .term-gloss}
+**named entity recognition (NER)** — finding the mentions of people,
+organisations and places in text and saying which is which. The archetypal
+sequence-labelling task, and the one this chapter measures.
+[↩](#term-named-entity-recognition-ner){.term-back}
+:::
 
-## Nested, overlapping, and discontinuous entities
+The architecture is identical in all three: run the sentence through
+something that produces one vector per token, put a classifier on top, read
+off one label per token. That part is
+[token classification](#gloss-token-classification){#term-token-classification .term-ref},
+and it is genuinely the easy half.
 
-<!-- TODO(draft): where BIO breaks; span-based and table-filling
-    alternatives. -->
+::: {#gloss-token-classification .column-margin .term-gloss}
+**token classification** — one label per token instead of one label per
+document. The architecture NER, POS tagging and chunking all share; what
+differs between them is the label set, not the model.
+[↩](#term-token-classification){.term-back}
+:::
 
-## Relation extraction and event extraction
+The hard half is that [what you actually want is not labels, it is
+spans]{.hl} — *"Türkiye Büyük Millet Meclisi is an organisation"*, not seven
+separate token verdicts. Turning one into the other is a decoding problem,
+and this chapter spends more time on decoding and measurement than on models,
+because that is where the real defects are.
 
-<!-- TODO(draft): pairwise classification, joint models, and the
-    annotation cost that dominates. -->
+### The corpus
 
-## Structured IE with LLMs: schema-guided extraction
+```python
+from datasets import load_dataset
 
-<!-- TODO(draft): extraction as constrained generation; forward-reference
-    @sec-decoding for the schema-validity machinery. -->
+ds = load_dataset("unimelb-nlp/wikiann", "tr")
+```
 
-## Entity linking, normalization, and record matching
+```text
+train        20,000 sentences   149,786 tokens   median length 6, mean 7.5
+             26,482 entities    PER 8,833   ORG 7,970   LOC 9,679
+validation   10,000 sentences    75,930 tokens
+             13,517 entities    PER 4,374   ORG 4,129   LOC 5,014
+test         10,000 sentences    75,731 tokens
+             13,587 entities    PER 4,519   ORG 4,154   LOC 4,914
+```
 
-<!-- TODO(draft): surface form to canonical id; the Turkish morphology
-    problem when the mention is inflected. -->
+Three entity types, `PER`, `ORG` and `LOC`, and a striking absence: **every
+sentence in this corpus contains at least one entity.** Real text does not
+work that way — most sentences in a news feed or a ticket queue mention
+nobody. Keep that in mind when you read the scores; it makes the task easier
+than the one you will actually have.
 
-## Lab: domain NER with 200 labeled examples
+### The floor, before anything else
 
-<!-- TODO(draft): annotate, train, evaluate span-level F1, then compare
-    against a schema-guided LLM extractor on the same data. -->
+@sec-classification insisted on computing the floor first, and the habit pays
+here more dramatically than anywhere else in the book. A model that emits `O`
+for every token — no features, no parameters, no training:
 
-## Exercises
+```text
+everything-is-O      token accuracy 61.36%      span-level F1 0.00
+```
 
-1. Take a BIO-tagged sentence and hand-decode the spans, including one illegal transition. What should a decoder do with it?
-2. Compare span-level and token-level F1 on the same predictions. Explain why they differ and which you would report.
+[Sixty-one percent accurate, and it has never found a single
+entity.]{.hl} The gap between those two numbers is not a curiosity; it is the
+reason @sec-sequence-labeling-metrics exists. Any paper, model card or
+colleague reporting "94% accuracy" on a tagging task is reporting a number
+whose floor is 61.
+
+## What is actually in the corpus {#sec-sequence-labeling-audit}
+
+@sec-data-annotation argued that you audit a labelled corpus before you
+trust a number computed on it. WikiANN was built automatically, by
+projecting Wikipedia's internal links through cross-lingual links
+[@pan2017cross], which makes it enormous, free, available in 282 languages —
+and unreviewed by anyone. So here is the audit.
+
+**These are mostly not sentences.**
+
+```text
+ends with . ! ?       6,896   34.5%
+does not             13,104   65.5%
+3 tokens or fewer       172    0.9%
+```
+
+Two thirds are fragments clipped out of Wikipedia markup. That is a fact about
+the *domain*, and it will not transfer to prose.
+
+**Some mentions are not mentions.**
+
+```text
+pure punctuation or digits    160   0.60%
+containing wiki markup         63   0.24%
+
+  ORG: '1966–67'
+  ORG: '2012'
+  ORG: '2013'
+  ORG: '2000'
+```
+
+Bare years typed as organisations. A small fraction, but it puts a ceiling on
+what any model can score, because some of the test set is simply wrong.
+
+**The same string gets labelled two ways.**
+
+```text
+distinct surface forms                16,591
+forms carrying more than one label       116   (0.7%)
+mentions affected                      1,397   (5.3%)
+
+  'Türkiye'      {LOC: 82, ORG: 4}
+  'Almanya'      {LOC: 80, ORG:  2}
+  'Fransa'       {LOC: 69, ORG:  5}
+  'İtalya'       {LOC: 55, ORG:  1}
+```
+
+Some of this is real ambiguity — *Türkiye* beat *İtalya* is the football
+federation, not the landmass — and some is annotation noise. Either way,
+5.3% of mentions live in a class the model is being asked to guess.
+
+### The part that changes how you read every score
+
+::: {.callout-warning appearance="simple"}
+**13.06% of the test set is in the training set.**
+
+```text
+test sentences identical to a train sentence   1,306 / 10,000   13.06%
+  of those, carrying an identical gold tagging  1,305
+  carrying a different gold tagging                 1
+
+validation sentences also in train             1,265   12.65%
+test sentences also in validation                846    8.46%
+duplicate sentences inside train itself        1,565
+duplicate sentences inside test itself           540
+```
+:::
+
+Not similar sentences. *Byte-identical token sequences*, 1,305 of them
+carrying byte-identical gold labels. A model that does nothing but memorise
+its training data gets those 1,306 sentences right for free.
+
+This is the kind of thing @elangovan2021memorization warned about, and it is
+worth being precise about who it flatters. Later in this chapter two systems
+are scored separately on the leaked and the clean halves of the test set:
+
+| system | leaked 1,306 | clean 8,694 | gap |
+|:--|--:|--:|--:|
+| Gazetteer (pure memorisation) | 77.54 | 51.04 | [+26.50]{.con} |
+| CRF with hand features | **99.81** | 83.56 | [+16.25]{.con} |
+| Fine-tuned BERTurk | 98.69 | 91.04 | [+7.65]{.pro} |
+
+: Span-level F1, split by whether the test sentence was in training
+{tbl-colwidths="[40,20,20,20]"}
+
+The CRF scores **99.81** on the leaked half. It is not a better model there;
+it is a lookup table that has seen the answer.
+
+Read that gap column downwards, because it is the most useful thing in this
+section. The three systems are ordered by how much they memorise — a
+dictionary, a feature-based linear model, a pre-trained encoder — and the
+leakage bonus falls monotonically with them: **+26.50, +16.25, +7.65**.
+[The size of a system's leakage gap is a measurement of how much of its score
+is recall of the training set.]{.hl} A benchmark with 13% leakage does not
+just inflate scores, it inflates them *unevenly*, in favour of exactly the
+models that will disappoint you in production.
+
+Every headline number in this chapter is computed on the full test set,
+because that is what the literature reports and comparisons have to be
+like-for-like. But the clean-half column is the one to believe.
+
+::: {.column-margin}
+The honest fix is to deduplicate against training before scoring, and to say
+so. The cheaper habit, and the one worth carrying out of this chapter: when a
+result looks too good, hash your test inputs and check how many of them your
+model has already seen. It takes four lines and it has saved more projects
+than any modelling trick in this book.
+:::
+
+## Tagging schemes and span decoding {#sec-sequence-labeling-bio}
+
+A tagger emits one label per token. You want spans. The bridge is a *tagging
+scheme*, and the standard one is
+[BIO](#gloss-bio-tagging){#term-bio-tagging .term-ref}: `B-X` opens a span of
+type X, `I-X` continues it, `O` is everything else.
+
+::: {#gloss-bio-tagging .column-margin .term-gloss}
+**BIO tagging** — `B-` marks a span's first token, `I-` a continuation, `O`
+everything outside. The trick that lets a per-token classifier express
+multi-token spans, including two of the same type back to back.
+[↩](#term-bio-tagging){.term-back}
+:::
+
+```text
+Mustafa    Kemal    1919    yılında    Samsun'a    çıktı    .
+B-PER      I-PER    O       O          B-LOC       O        O
+```
+
+The `B`/`I` distinction is not decoration. Without it, two adjacent entities
+of the same type would merge into one: `Ali` `Veli` as `PER PER` is one span
+or two, and you cannot tell. With BIO, `B-PER B-PER` is unambiguously two.
+
+BIOES adds `E-` for the last token of a span and `S-` for a single-token
+span. It gives the model more specific classes to learn and the decoder more
+redundancy to check, at the cost of nearly doubling the label set.
+@ratinov2009design compared them carefully and found BIOES ahead on their
+setup — which is worth knowing mostly so you can say *it depends on the
+corpus* with a citation behind it, rather than repeating whichever one your
+first tutorial used.
+
+### The sequences that should not exist
+
+BIO has grammar. `I-PER` may follow `B-PER` or `I-PER`. It may not follow
+`O`, and it may not follow `B-LOC`. A tagger that scores each token
+independently does not know that.
+
+Here is how often the gold data and three systems break the rule, across the
+10,000 test sentences:
+
+```text
+                              I- after O    I- after a different type
+gold test set                          0                            0
+gazetteer (longest match)              0                            0
+CRF                                    0                            0
+fine-tuned BERTurk                    49                           90
+```
+
+[The CRF cannot emit an illegal transition; the fine-tuned transformer — the
+best model in this chapter, at 91.92 span F1 — emits 139 of them.]{.hl} That
+inversion surprises people, and the reason is structural rather than a matter
+of quality.
+
+A softmax tagger picks the highest-scoring label at each position
+*independently*. Nothing in the arithmetic couples position 4 to position 5,
+so `O` followed by `I-ORG` is available whenever the scores happen to favour
+it. A [CRF](#gloss-viterbi-decoding){#term-viterbi-decoding .term-ref}
+[@lafferty2001crf] scores whole *sequences*: it learns a transition weight
+for every label pair, drives the weight for `O → I-ORG` deeply negative
+because that pair never appears in training, and then
+[Viterbi decoding](#gloss-viterbi-decoding){.term-ref} [@viterbi1967error]
+returns the best-scoring path rather than the best label at each step. An
+illegal path is not filtered out afterwards — it never wins.
+
+::: {#gloss-viterbi-decoding .column-margin .term-gloss}
+**Viterbi decoding** — a dynamic program that finds the single
+highest-scoring label sequence, instead of taking the best label at each
+position separately. What makes a CRF structurally incapable of emitting a
+transition it has learned to forbid.
+[↩](#term-viterbi-decoding){.term-back}
+:::
+
+::: {.column-margin}
+This is exactly why the classic neural NER architecture was BiLSTM-**CRF**
+[@lample2016neural] rather than BiLSTM alone: the encoder supplies the
+features, the CRF layer supplies the grammar. The question of whether that
+layer still earns its cost on top of a transformer is
+@sec-sequence-labeling-encoder's.
+:::
+
+### What a decoder does with a broken sequence
+
+So your model emits `O I-ORG I-ORG`. What is that? There is no right answer,
+only conventions, and they disagree:
+
+| decoder | `O I-ORG I-ORG` becomes | rationale |
+|:--|:--|:--|
+| lenient (`seqeval`, `conlleval`) | one `ORG` span over tokens 2–3 | a stray `I-` opens a span; recover what you can |
+| strict | nothing | the sequence is invalid; refuse to guess |
+| repair-then-decode | rewrite to `O B-ORG I-ORG`, then decode | fix the grammar first, score after |
+
+: Three readings of the same predictions {tbl-colwidths="[26,32,42]"}
+
+The point is not which to pick. The point is that [your reported F1 depends
+on a decoder you probably did not choose deliberately]{.hl}, and the
+difference is invisible unless you look for it. On the CRF's predictions the
+choice happens to cost nothing, because there is nothing to disagree about:
+
+```text
+same CRF predictions, two decoders
+  lenient (a stray I- opens a span)    F1 85.45
+  strict  (a stray I- is dropped)      F1 85.45
+```
+
+On the transformer's 139 malformed transitions it would not be a tie. When
+you compare your numbers against a paper's, the decoder is one of the things
+that has to match.
+
+## The subword alignment trap {#sec-sequence-labeling-alignment}
+
+Your labels are per *word*. A transformer's inputs are per *subword*. Every
+sequence-labelling pipeline therefore contains an alignment step, and it is
+the single most common place to introduce a silent bug — silent because the
+model still trains, the loss still falls, and the score is merely worse than
+it should be.
+
+Turkish makes the problem vivid. Here is BERTurk's tokenizer on entity words
+from this corpus:
+
+```text
+Türkiye'nin      -> ['Türkiye', "'", 'nin']
+Takımı'nı        -> ['Takımı', "'", 'nı']
+Mississippi'de   -> ['Miss', '##iss', '##ip', '##pi', "'", 'de']
+Baudelaire'in    -> ['Ba', '##ude', '##la', '##ire', "'", 'in']
+Erdemir          -> ['Erdem', '##ir']
+İstanbul         -> ['İstanbul']
+```
+
+One word, six subwords. And the fragmentation is not evenly spread — it
+concentrates on exactly the words you are trying to label:
+
+```text
+BERTurk (dbmdz/bert-base-turkish-cased)
+  entity words   1.98 subwords/word   53.8% split into more than one piece
+  other words    1.45 subwords/word   30.9% split
+  -> entity words are 1.36x more fragmented
+
+mBERT (bert-base-multilingual-cased)
+  entity words   1.90 subwords/word   47.3% split
+  other words    2.00 subwords/word   45.5% split
+```
+
+Names are rarer than common words, so the tokenizer has less reason to keep
+them whole — the mechanism @sec-text-as-data described, arriving here as a
+concrete cost. (The mBERT row is its own lesson: it fragments *everything* in
+Turkish at 2.00 subwords per word, which is @sec-pretraining's argument for
+language-specific tokenizers, measured on a downstream task.)
+
+### The alignment itself
+
+The convention is to label the **first** subword of each word and mask the
+rest with `-100`, the index PyTorch's cross-entropy ignores:
+
+```python
+enc = tok(batch["tokens"], is_split_into_words=True, truncation=True)
+
+labels = []
+for i, tags in enumerate(batch["ner_tags"]):
+    word_ids = enc.word_ids(batch_index=i)
+    prev, row = None, []
+    for wid in word_ids:
+        if wid is None:            # [CLS], [SEP], padding
+            row.append(-100)
+        elif wid != prev:          # first subword of a word: label it
+            row.append(tags[wid])
+        else:                      # continuation: ignore in the loss
+            row.append(-100)
+        prev = wid
+    labels.append(row)
+```
+
+Three ways this goes wrong, all of which still run:
+
+1. **Forgetting `word_ids()` and zipping labels to subwords positionally.**
+   The moment any word splits, every subsequent label is attached to the
+   wrong token. With 53.8% of entity words splitting, the labels are
+   scrambled almost immediately. Training proceeds; F1 lands somewhere near
+   noise.
+2. **Propagating the word's label to every subword.** Defensible, and
+   sometimes done — but if you propagate `B-PER` rather than converting
+   continuations to `I-PER`, you have taught the model that a person's name
+   starts four times.
+3. **Forgetting that `[CLS]` and `[SEP]` exist.** An off-by-one that shifts
+   every label by one position.
+
+[If a sequence-labelling model scores far below expectation, check the
+alignment before you touch the model.]{.hl} Print one tokenized sentence
+beside its aligned labels and read it. It takes a minute and it is the
+highest-yield minute in this chapter.
+
+## Baselines before transformers {#sec-sequence-labeling-baselines}
+
+@sec-classification's discipline: build the cheap thing first, and make the
+expensive thing beat it.
+
+### A gazetteer
+
+Memorise every entity string in the training data, then tag test sentences by
+longest match. No learning, no features, no generalisation whatsoever.
+
+```text
+gazetteer (16,591 memorised phrases, longest match)
+  token accuracy 75.73%
+  span   P 59.73   R 51.41   F1 55.26      (0.1s to tag 10,000 sentences)
+```
+
+Fifty-five F1 from a Python dictionary. That is the number a model has to
+justify itself against, and it is higher than most people guess — because
+names repeat. In this corpus [52.2% of test mentions appear verbatim in the
+training data]{.hl}, which is simultaneously the gazetteer's ceiling on
+recall and a restatement of the leakage problem from
+@sec-sequence-labeling-audit.
+
+::: {#gloss-gazetteer .column-margin .term-gloss}
+**gazetteer** — a memorised list of known entity strings, matched against
+text directly. Fast, exact, completely unable to recognise a name it has
+never seen. [↩](#term-gazetteer){.term-back}
+:::
+
+A [gazetteer](#gloss-gazetteer){#term-gazetteer .term-ref} is also the right
+answer more often than its reputation suggests. If your entities are a
+closed set — the parts in your catalogue, the drugs in a formulary, the 81
+provinces of Turkey — then the list *is* the ground truth and a model can
+only approximate it.
+
+### A CRF
+
+Hand-built features, a linear-chain CRF, twenty thousand sentences:
+
+```python
+def features(tokens, i):
+    w = tokens[i]
+    f = {
+        "bias": 1.0,
+        "w.lower": w.lower(),
+        "w[-3:]": w[-3:], "w[-2:]": w[-2:],        # Turkish suffixes
+        "w.isupper": w.isupper(), "w.istitle": w.istitle(),
+        "w.isdigit": w.isdigit(),
+        "w.hasapos": ("'" in w or "’" in w),        # Türkiye'nin
+        "w.shape": shape(w),                        # Xxxxx, 9999
+        "w.len": min(len(w), 12),
+    }
+    for off in (-2, -1, 1, 2):                      # a window of context
+        j = i + off
+        if 0 <= j < len(tokens):
+            v = tokens[j]
+            f[f"{off:+d}:w.lower"] = v.lower()
+            f[f"{off:+d}:w.istitle"] = v.istitle()
+            f[f"{off:+d}:w[-3:]"] = v[-3:]
+        else:
+            f[f"{off:+d}:BOS_EOS"] = True
+    return f
+```
+
+```text
+CRF (sklearn-crfsuite, lbfgs, c1=0.1, c2=0.1, 200 iterations)
+  fit 18.5s        predict 0.2s for 10,000 sentences
+
+  token accuracy 94.41%      token-level micro-F1 88.73
+  span   P 86.27   R 84.64   F1 85.45      macro-F1 85.34
+
+     PER   P 88.64   R 88.56   F1 88.60    (n=4,519)
+     LOC   P 84.09   R 86.06   F1 85.06    (n=4,914)
+     ORG   P 86.34   R 78.70   F1 82.34    (n=4,154)
+```
+
+**85.45 span F1 in eighteen seconds on a CPU.** No GPU, no pre-training, no
+downloads. This is the number the rest of the chapter has to beat, and it is
+a genuinely hard target.
+
+Two things in that table are worth reading rather than skimming. `ORG` recall
+is 78.70, seven points below `PER` — organisations are long, compositional
+and open-ended (*Slovenya Millî Basketbol Takımı*), so a five-token window
+sees only part of one. And the `w.hasapos` feature is doing real work: in
+Turkish an apostrophe is a reliable signal that the preceding characters are
+a proper noun, which is a piece of orthographic luck other languages do not
+get.
+
+## Fine-tuning an encoder {#sec-sequence-labeling-encoder}
+
+Same task, same test set, `AutoModelForTokenClassification` on top of
+BERTurk, first-subword alignment as above, three epochs, learning rate 3e-5.
+The interesting question is not "does it win" but "at what label budget does
+it start winning", so the run is a curve rather than a point.
+
+```text
+budget    token acc   span P   span R   span F1   macro   illegal   train s
+   200        63.43     9.02     1.90      3.14    2.95      1561       5.6
+   500        85.04    51.25    58.11     54.47   54.05      3739      12.6
+ 1,000        92.59    74.99    80.44     77.62   77.26       915      24.6
+ 2,000        94.68    82.74    85.78     84.23   84.04       538      48.9
+ 5,000        95.96    87.44    89.24     88.33   88.16       304     121.3
+20,000        97.20    91.49    92.35     91.92   91.82       139     476.6
+
+CRF, all 20,000 sentences   94.41    86.27    84.64     85.45   85.34    0    18.5
+```
+
+At the full budget the encoder reaches **91.92 span F1** against the CRF's
+85.45 — six and a half points, for 477 seconds of GPU training instead of 18
+seconds of CPU, and 10.3 seconds of inference over the test set instead of
+0.2.
+
+Read the top row again. [At 200 labelled sentences, a fine-tuned transformer
+scores 3.14 span F1 — while a dictionary of memorised strings scores
+55.26.]{.hl}
+
+That is not a bug, and it is the most useful thing in this chapter. At 200
+sentences the model has seen roughly 265 entities spread over six label
+classes; the classification head is randomly initialised; three epochs is
+600 gradient steps. Token accuracy is 63.43% — barely above the
+everything-is-`O` floor of 61.36% — which tells you precisely what it
+learned: it learned to say `O`. It picks up almost no entities at all
+(recall 1.90), and the few it does are mostly wrong.
+
+The crossover against the CRF sits between **2,000 and 5,000** labelled
+sentences: at 2,000 the encoder is still a point behind (84.23 against
+85.45), and by 5,000 it is nearly three ahead. So [somewhere around two and a
+half thousand labelled sentences of BERTurk buy what twenty thousand
+sentences of hand-engineered CRF buy]{.hl} — call it a fivefold to eightfold
+reduction in annotation, which is the honest case for pre-training on this
+task, and smaller than the folklore suggests. Below that crossover the
+classical pipeline is not a fallback; it is the better model.
+
+The `illegal` column is worth a second look, because it says something the F1
+column does not. Well-formedness is *learned* here, not guaranteed: illegal
+BIO transitions peak at 3,739 once the model starts emitting entity tags at
+all, then fall steadily as it picks up the grammar from data — and never
+reach zero. Even at 20,000 sentences and 91.92 F1, the tagger emits 139
+sequences that BIO forbids. The CRF emits none at any budget, because for it
+those sequences are not improbable but unreachable.
+
+::: {.column-margin}
+Notice which way the errors run. The CRF is precision-leaning (86.27 P
+against 84.64 R); every encoder row from 500 up is recall-leaning. Feature
+templates fire when they match and stay silent otherwise, while a fine-tuned
+encoder will guess. Which failure you prefer is a product decision, and
+@sec-classification-costs is the machinery for making it.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Label budget against span-level F1 — and what the CRF costs to beat</div>
+```
+
+```{ojs}
+//| echo: false
+budgetData = [
+  {n: 200,    f1: 3.14,  macro: 2.95,  acc: 63.43, illegal: 1561, secs: 5.6},
+  {n: 500,    f1: 54.47, macro: 54.05, acc: 85.04, illegal: 3739, secs: 12.6},
+  {n: 1000,   f1: 77.62, macro: 77.26, acc: 92.59, illegal: 915,  secs: 24.6},
+  {n: 2000,   f1: 84.23, macro: 84.04, acc: 94.68, illegal: 538,  secs: 48.9},
+  {n: 5000,   f1: 88.33, macro: 88.16, acc: 95.96, illegal: 304,  secs: 121.3},
+  {n: 20000,  f1: 91.92, macro: 91.82, acc: 97.20, illegal: 139,  secs: 476.6}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof budgetMetric = Inputs.radio(
+  new Map([["span-level F1", "f1"], ["token accuracy", "acc"],
+           ["illegal BIO transitions", "illegal"]]),
+  {value: "f1", label: "Show"})
+```
+
+```{ojs}
+//| echo: false
+budgetRef = ({f1: 85.45, acc: 94.41, illegal: 0})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 400, marginLeft: 60, marginBottom: 46,
+  x: {type: "log", label: "labelled training sentences", grid: true,
+      domain: [150, 26000], ticks: [200, 500, 1000, 2000, 5000, 20000],
+      tickFormat: d => d.toLocaleString()},
+  y: {label: budgetMetric === "illegal" ? "illegal BIO transitions"
+        : budgetMetric === "acc" ? "token accuracy (%)" : "span-level F1",
+      grid: true,
+      domain: budgetMetric === "illegal" ? [0, 4000]
+        : budgetMetric === "acc" ? [55, 100] : [0, 100]},
+  marks: [
+    Plot.ruleY([budgetRef[budgetMetric]], {stroke: "#C1666B", strokeDasharray: "4,3"}),
+    Plot.text([{x: 20000, y: budgetRef[budgetMetric]}], {
+      x: "x", y: "y", dy: -9, textAnchor: "end", fill: "#C1666B", fontSize: 11,
+      text: () => `CRF on all 20,000: ${budgetRef[budgetMetric]}`}),
+    Plot.line(budgetData, {x: "n", y: budgetMetric, stroke: "#0E7C7B", strokeWidth: 2}),
+    Plot.dot(budgetData, {x: "n", y: budgetMetric, fill: "#0E7C7B", r: 5}),
+    Plot.text(budgetData, {x: "n", y: budgetMetric, dy: -14, fontSize: 11,
+      text: d => d[budgetMetric].toLocaleString()})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.85rem; color:#5B6272; margin-top:0.5rem;">
+Both axes matter. On <b>span-level F1</b> the encoder does not pass the CRF
+until somewhere between 2,000 and 5,000 sentences. On <b>token accuracy</b>
+it looks competitive almost immediately — which is the metric lying, exactly
+as the section on metrics below describes. And <b>illegal
+transitions</b> peak once the model starts predicting entities at all, then
+fall without ever reaching the zero a CRF gets for free.</p>`
+```
+:::
+
+## Token accuracy is the wrong metric {#sec-sequence-labeling-metrics}
+
+Three numbers, all computed on the same CRF predictions over the same 10,000
+test sentences:
+
+```text
+token accuracy                94.41
+token-level micro-F1          88.73      (entity tags only, O excluded)
+span-level F1                 85.45      (exact match on type, start and end)
+```
+
+They differ because they ask different questions, and only the last one asks
+the question you care about.
+
+**Token accuracy** counts every token, including the 61% that are `O`.
+Predicting `O` everywhere already scores 61.36, so the informative range of
+this metric is the fifteen points between 61 and the low 90s — and it gets
+worse, not better, on realistic corpora where most sentences contain no
+entity at all. It is the metric that makes a model look finished when it is
+not.
+
+**Token-level F1 over entity tags** drops the `O` class, which fixes the
+floor. But it still gives partial credit: get three tokens of a four-token
+organisation right and you score three quarters of a hit. No downstream
+system can use three quarters of an organisation name.
+
+**[Span-level F1](#gloss-span-level-f1){#term-span-level-f1 .term-ref}**
+requires the type, the start and the end to all be right. It is the only one
+of the three that corresponds to "did we extract the record correctly", which
+is why it is what NER papers report and what `seqeval` computes by default.
+
+::: {.column-margin}
+The scorer used throughout this chapter is written out rather than imported,
+so that the decoding it assumes is visible. It was checked against `seqeval`
+on deliberately corrupted predictions and agrees to four decimal places —
+P 46.2332, R 75.2042, F1 57.2629 from both. If you write your own, run that
+comparison; the disagreements are always in the malformed sequences.
+:::
+
+::: {#gloss-span-level-f1 .column-margin .term-gloss}
+**span-level F1** — a prediction counts as correct only if its type, its
+first token and its last token all match a gold span. Partial overlaps score
+zero, which is the point: half an entity is not half useful.
+[↩](#term-span-level-f1){.term-back}
+:::
+
+The gap between token-level 88.73 and span-level 85.45 is entirely made of
+boundary errors — spans where the type was right and an edge was wrong.
+Turkish makes those common, for a reason worth naming: the boundary of a
+Turkish entity is frequently *inside* an orthographic word, because the
+suffix that marks the case is attached to the name.
+
+::: {.callout-note collapse="true"}
+## When partial credit is the right call
+
+Exact match is the convention, not a law. If your downstream consumer is a
+human reviewing highlighted text, a span that is off by one token is nearly
+as useful as a perfect one, and reporting only exact match will make you
+reject models your users would have preferred.
+
+The alternatives are the MUC-style partial-credit schemes and the entity-type
+/ partial / exact breakdown that `nervaluate` implements. Use them when they
+match your consumer, and *say which you used* — a paper reporting 90 under
+partial credit is not beating a paper reporting 88 under exact match.
+:::
+
+### Where the errors are
+
+```text
+        precision   recall      F1     support
+  PER       88.64    88.56   88.60       4,519
+  LOC       84.09    86.06   85.06       4,914
+  ORG       86.34    78.70   82.34       4,154
+```
+
+`ORG` recall is the outlier at 78.70, and this is stable across every system
+in this chapter. Organisation names are long — mean gold span **2.68 tokens
+for `ORG` against 2.26 for `PER` and 1.61 for `LOC`** — compositional, and
+frequently built out of ordinary words
+(*Türk Silahlı Kuvvetleri*, *Eurovision Şarkı Yarışması*). A model with a
+five-token window structurally cannot see all of one, and a model that can
+still has to decide where it stops.
+
+Report macro-F1 alongside micro when your types are this uneven. Here they
+are close (85.34 macro against 85.45 micro) only because the three types
+happen to be similarly sized; in a schema with one rare type and one common
+one they diverge sharply, exactly as @sec-classification showed for document
+labels.
+
+## Schema-guided extraction with an LLM {#sec-sequence-labeling-llm}
+
+The 2026 alternative to training a tagger is to describe the schema and ask.
+No labelled data, no training run, an afternoon of prompt iteration. It works
+well enough to be a real option and it fails in ways a tagger never does, so
+it needs measuring rather than believing.
+
+The setup is deliberately favourable: the annotation guidelines go in the
+prompt, the output is constrained to a JSON schema, temperature is 0.
+
+```python
+SCHEMA = {
+  "type": "object",
+  "properties": {
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"},
+          "type": {"type": "string", "enum": ["PER", "ORG", "LOC"]},
+        },
+        "required": ["text", "type"],
+      },
+    }
+  },
+  "required": ["entities"],
+}
+```
+
+### The trap that costs a day
+
+Before any results, a bug worth more than the results. The same schema, the
+same model, the same server — two endpoints:
+
+```text
+POST /api/generate   with format=<schema>
+  -> {"answer": 1}
+
+POST /api/chat       with format=<schema>
+  -> "The capital of France is **Paris**.\n\nLocated in the north-central
+      part of the country along the Seine River, Paris is..."
+```
+
+The schema said the reply must be an object with an integer `answer`. On
+`/api/generate` the constraint was enforced. On `/api/chat`, with `ollama`
+0.24.0, [the `format` field was silently ignored]{.hl} and the model returned
+prose. No error, no warning, no field in the response saying the constraint
+was dropped.
+
+Run that inside an extraction pipeline with a `try/except json.JSONDecodeError`
+around the parse, and you get an extractor that returns zero entities for every
+document and a metrics table full of zeros you will spend an afternoon
+blaming on your prompt.
+
+::: {.column-margin}
+Note also *what* the constrained call returned: `{"answer": 1}`. Paris is not
+an integer, so grammar-constrained decoding produced something schema-valid
+and semantically worthless. [A schema guarantees shape, never
+truth.]{.hl} @sec-decoding is where the machinery behind this lives — how
+grammars constrain sampling, and what they cost.
+:::
+
+The general rule this stands for: **verify that your structured-output
+constraint is actually being applied, by sending one request whose schema the
+model would otherwise violate.** A schema you believe is enforced and is not
+is worse than no schema, because it removes the malformed output that would
+have told you.
+
+### Getting the answer back onto the text
+
+A tagger returns positions. An LLM returns *strings*. Nothing in
+`{"text": "Samsun", "type": "LOC"}` says which tokens that was, and span-level
+F1 is defined over token offsets — so every LLM answer has to be aligned back
+onto the sentence before it can be scored at all.
+
+This step is usually skipped in write-ups and it is where the interesting
+failures are:
+
+```python
+def align_span(tokens, text):
+    want = text.split()
+    for i in range(len(tokens) - len(want) + 1):      # 1. exact token run
+        if tokens[i:i + len(want)] == want:
+            return i, i + len(want)
+    ...                                               # 2. ignore whitespace
+    ...                                               # 3. allow a dropped suffix
+    return None                                       # not in the sentence
+```
+
+Three things can come back:
+
+- **A mention that is there** — align it, score it.
+- **A mention with the Turkish suffix stripped.** The model returns `Samsun`;
+  the token is `Samsun'a`. The guidelines asked for an exact copy and it
+  helpfully normalised. Fallback 3 exists for this and it is doing real work.
+- **A mention that is not in the sentence at all.** A paraphrase, an
+  expansion, an inference. There is no honest way to score it, and counting
+  it as a hit would be scoring the model on a claim about text it invented.
+
+[Anything that will not align is a hallucination with a JSON schema around
+it.]{.hl} The count of unalignable mentions is a metric in its own right, and
+it is one a tagger cannot produce: a tagger can only ever label tokens that
+exist.
+
+<!-- MEASURED-PENDING: results table, timing and cost comparison land here
+     once the 1,000-sentence run completes. -->
+
+## Where BIO stops working {#sec-sequence-labeling-nested}
+
+BIO assigns one label per token. That single sentence contains the format's
+whole set of limitations, and real schemas hit all of them.
+
+**Nested entities.** *Türkiye Cumhuriyeti Merkez Bankası* is an `ORG`, and
+*Türkiye* inside it is a `LOC`. One token, two correct labels, and BIO has
+room for one. Practically everyone drops the inner one and never mentions it;
+biomedical and legal schemas, where nesting is the norm rather than the
+exception, cannot.
+
+**Overlapping entities.** Two spans that share tokens without one containing
+the other — common in relation-heavy schemas and in clinical text.
+
+**Discontinuous entities.** *sol ve sağ ventrikül* mentions two structures,
+each of which is a span with a hole in it. Ordinary in clinical notes,
+inexpressible in BIO.
+
+The alternatives all give up the one-label-per-token constraint:
+
+| approach | idea | cost |
+|:--|:--|:--|
+| Span enumeration | score every candidate span up to length *k*, classify each | $O(n^2)$ candidates; a strong, simple baseline |
+| Biaffine / dependency-style | score every (start, end) pair with a biaffine layer [@yu2020named] | handles nesting natively; the standard strong result |
+| MRC framing | ask "where are the organisations?" as a question per type [@li2020unified] | one forward pass per type; brings the type description into the model |
+| Table filling / generative | emit the records directly as text | no span algebra at all — and back to the alignment problem above |
+
+: Beyond one-label-per-token {tbl-colwidths="[26,42,32]"}
+
+[If your schema has nesting and your pipeline uses BIO, you have already
+decided to lose those entities.]{.hl} The decision is usually accidental,
+inherited from a tutorial. Make it deliberately.
+
+## Relations and events {#sec-sequence-labeling-relations}
+
+Extracting *Ali* and *Acme* is half a record. The other half is that Ali
+*works at* Acme.
+
+The standard framing is pairwise classification: take every pair of mentions
+in a sentence, and classify the relation between them, including a `no
+relation` class that dominates the label distribution. It works, and it costs
+$O(n^2)$ forward passes per sentence — the same quadratic that
+@sec-sequence-labeling-nested has, for the same reason.
+
+The two things worth knowing before starting:
+
+1. **`no relation` is the overwhelming majority class**, so everything
+   @sec-classification-imbalance said applies here with more force. Report
+   micro-F1 *excluding* `no relation`, and expect the raw accuracy to be
+   uninformative.
+2. **Annotation cost dominates everything else.** Entity annotation is
+   roughly linear in tokens; relation annotation is quadratic in entities,
+   and the guidelines are far harder to make reproducible — two annotators
+   who agree on `PER` and `ORG` routinely disagree on whether a sentence
+   asserts employment. TACRED [@zhang2017position] is the reference dataset
+   and the reference cautionary tale about how much of the reported difficulty
+   is annotation noise.
+
+Event extraction adds a trigger word and a set of typed arguments, which is
+the same machinery with more roles and worse agreement. For most applied work
+in 2026 the honest advice is to try schema-guided generation first
+(@sec-sequence-labeling-llm), measure it, and only build the pairwise
+classifier if you can afford the annotation to beat it.
+
+## Linking and normalization {#sec-sequence-labeling-linking}
+
+Finding *Türkiye'nin* is recognition. Knowing that it refers to the same
+thing as *Türkiye'de*, *Türkiye'deki* and *Türkiye* is
+[entity linking](#gloss-entity-linking){#term-entity-linking .term-ref}, and
+in an agglutinative language it starts one step earlier than the textbooks
+assume.
+
+::: {#gloss-entity-linking .column-margin .term-gloss}
+**entity linking** — mapping a mention to a canonical identifier, so that
+different surface forms of the same thing collapse to one record. Separate
+from recognising that the mention is an entity at all.
+[↩](#term-entity-linking){.term-back}
+:::
+
+Measured on this corpus's training half:
+
+```text
+entity mentions                             26,482
+  carrying an apostrophe suffix              4,099   15.5%
+
+distinct surface forms                      16,591
+distinct after stripping the suffix         14,876   10.3% collapse
+
+most common suffixes on mentions
+  -da   587    -nın  352    -de   328    -ın   233
+  -in   227    -a    201    -nin  195    -ya   182
+```
+
+[One mention in six carries a case suffix welded onto the name.]{.hl} And the
+surface forms multiply per entity:
+
+```text
+base forms appearing in more than one surface form   1,122
+
+  ABD       -> ABD, ABD'de, ABD'deki, ABD'li, ABD'nin, ...        13 forms
+  Fransa    -> Fransa, Fransa'da, Fransa'daki, Fransa'dan, ...    12 forms
+  Türkiye   -> Türkiye, Türkiye'de, Türkiye'deki, ...             12 forms
+```
+
+Count mentions of `ABD` by exact string and you get thirteen entities with
+one occurrence each instead of one entity with thirteen. Every aggregate you
+build on top — a frequency ranking, a co-occurrence graph, an alert on
+"mentions of X this week" — is wrong in a way that looks plausible.
+
+The Turkish-specific first step is cheap and worth doing before anything
+clever: **split on the apostrophe and keep the stem.** It is not a general
+solution — plenty of inflected mentions carry no apostrophe, and the
+apostrophe convention is not universally followed — but it collapses 10.3% of
+surface forms for one line of code.
+
+Beyond that, the pipeline is the standard one: generate candidate entries
+from a knowledge base by string similarity, then rank the candidates with
+context. Classical systems did this with a graph over co-occurring mentions
+[@hoffart2011robust]; the modern version encodes mention-in-context and
+entry-description into the same vector space and retrieves
+[@wu2020scalable] — which is @sec-embeddings' machinery, pointed at a
+different problem. @sec-retrieval builds that retrieval step properly.
+
+::: {.column-margin}
+The evaluation trap here mirrors @sec-sequence-labeling-audit's. Linking
+accuracy measured on mentions whose surface form appears in your knowledge
+base is not linking accuracy; it is dictionary coverage. Report the two
+separately, and report how often the correct entry was not a candidate at
+all — that number is a ceiling nothing downstream can raise.
+:::
+
+## Intuition checks {#sec-sequence-labeling-intuition}
+
+Answer these before reading the answers.
+
+::: {.callout-note collapse="true"}
+## 1. Your tagger reports 96% token accuracy. Is it good?
+
+You cannot tell, and the number is designed to stop you asking. On this
+corpus a model that outputs `O` for every token scores **61.36%**, so 96%
+represents 35 points of headroom, not 96 points of competence. On a realistic
+corpus where most sentences contain no entity at all, the floor is higher
+still — 97% or more is routine — and a model can beat it while finding
+nothing.
+
+Ask for span-level F1. If the answer is "we don't have that number", the
+model has not been evaluated.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Token-level F1 is 88.73 and span-level F1 is 85.45. Where did three points go?
+
+Boundaries. Token-level F1 gives partial credit: three correct tokens out of
+a four-token organisation score three quarters. Span-level requires the type,
+the first token and the last token all to match, so that same prediction
+scores zero.
+
+The gap is therefore a direct measurement of how often the model gets the
+type right and an edge wrong. Report span-level, because no downstream
+consumer can use three quarters of a company name — but keep an eye on the
+gap, because a widening one tells you your errors are boundary errors, which
+have different fixes than type errors.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your transformer emits `O I-ORG I-ORG`. Whose bug is it?
+
+Nobody's — it is the expected behaviour of a softmax tagger, which picks the
+best label at each position independently with nothing coupling position 4 to
+position 5. The best fine-tuned BERTurk in this chapter emits 139 such
+transitions across 10,000 sentences, and a half-trained one emits 3,739.
+
+What *is* your decision is what happens next. `seqeval` will silently recover
+an `ORG` span; a strict decoder will drop it; a repair pass will rewrite the
+first `I-` to `B-`. All three are defensible and they give different F1. The
+bug is not the illegal transition, it is not knowing which of the three your
+evaluation is doing.
+
+Worth knowing how the count moves: it peaks at 3,739 when the model is
+half-trained, falls to 139 at the full budget, and never reaches zero.
+Well-formedness is something a softmax tagger learns approximately from
+data — a CRF gets it by construction.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. You have 200 labelled sentences. Fine-tune BERTurk or write a gazetteer?
+
+Measured, on this corpus: fine-tuning 200 sentences gives **3.14 span F1**. A
+dictionary of memorised strings gives **55.26**.
+
+At that budget the encoder has seen a few hundred entities across six label
+classes with a randomly initialised head, and what it learns is to say `O` —
+its token accuracy of 63.43% is barely above the 61.36% floor. The crossover
+against a CRF trained on the full 20,000 sentences arrives somewhere between
+1,000 and 2,000 labelled sentences.
+
+So: gazetteer first, then a CRF, and fine-tune when you have four figures of
+labelled sentences. The general lesson is that "just fine-tune a transformer"
+is advice with a budget attached, and the budget is rarely stated.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your NER F1 jumped six points when you switched corpora. Did the model improve?
+
+Check for leakage before you celebrate. In WikiANN Turkish, **13.06% of test
+sentences appear verbatim in the training set**, 1,305 of them with identical
+gold labels. A memorising model gets those free.
+
+The diagnostic takes four lines: hash your test inputs, intersect with your
+training inputs, and score the leaked and clean halves separately. In this
+chapter the CRF scored 99.81 on the leaked half against 83.56 on the clean
+half. If your gap looks like that, you measured your dataset, not your model.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your LLM extractor returns a company that is not in the document. What is the F1 contribution?
+
+Zero, and the deeper answer is that it cannot be scored at all. Span metrics
+are defined over token offsets; a string that does not appear in the text has
+no offsets, so there is nothing to compare against a gold span.
+
+Count these separately and report the count. It is a failure mode a tagger
+structurally cannot have — a tagger can only label tokens that exist — and it
+is the main thing you give up in exchange for not needing training data. If
+the number is not in your evaluation, your evaluation is not comparing the two
+approaches fairly.
+:::
+
+## Interview questions {#sec-sequence-labeling-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** Pages claiming to
+list "the NER questions Google asks" are search-engine content with nothing
+behind the claim. What follows are questions that recur in the two credible
+open sources this book uses throughout — Chip Huyen's
+[*Introduction to Machine Learning Interviews*](https://huyenchip.com/ml-interviews-book/)
+[@huyen2021interviews] and the
+[Machine Learning Interviews](https://github.com/alirezadir/Machine-Learning-Interviews)
+repository — plus the ones this chapter's own measurements make answerable.
+:::
+
+### Testing whether you understand the task
+
+**Q: Why is NER not just token classification?**
+
+Because the output is spans and the model produces labels, so there is a
+decoding step between them — and the decoding step is where the ambiguity
+lives. Say what BIO buys (adjacent same-type entities become separable), what
+it cannot express (nesting, overlap, discontinuity), and what a decoder does
+with a malformed sequence. A candidate who says "it's just classification per
+token" has not shipped one.
+
+**Q: What is the CRF layer for, and do you still need it on top of BERT?**
+
+The CRF models dependencies *between labels* — it learns a transition score
+for every label pair and decodes with Viterbi, so it returns the best whole
+sequence rather than the best label at each position. That makes an illegal
+transition like `O → I-ORG` structurally unreachable rather than merely
+unlikely.
+
+On top of a strong pre-trained encoder the gain is small, because the encoder
+already sees the whole sentence and the transitions are mostly learnable from
+context. The honest answer is that it buys well-formedness cheaply, that the
+measured F1 difference is usually under a point, and that a constrained
+decoder gets you most of the same guarantee without the extra layer.
+
+**Q: How would you evaluate an NER system?**
+
+Span-level micro and macro F1, exact match, reported per type. Then say what
+you would check *before* believing it: the everything-is-`O` floor, the
+overlap between test and training inputs, and which decoding convention the
+score assumes. Anyone who answers "F1" and stops has evaluated nothing.
+
+### Testing whether you have shipped one
+
+**Q: Your NER model does well offline and badly in production. Walk through it.**
+
+Ordered by cost, and the first three are not the model:
+
+1. **Tokenization mismatch.** Offline you evaluated on pre-tokenized gold
+   tokens; production tokenizes raw text with a different splitter, so the
+   spans do not line up. This is the most common cause and the easiest to
+   miss.
+2. **Alignment.** Labels are per word, model inputs are per subword. Print
+   one production sentence beside its aligned labels and read it.
+3. **Domain.** Wikipedia fragments are not support tickets. 65.5% of the
+   sentences this chapter trained on do not even end in punctuation.
+4. **Leakage in the offline number.** See above; it inflates the memorising
+   parts of your model most.
+5. Only then, the model.
+
+**Q: You need to extract 30 fields from contracts and have no labelled data.**
+
+Start with schema-guided generation, because the alternative is months of
+annotation before you learn whether the task is feasible. Then say how you
+would know it works: hand-label a couple of hundred documents as an
+evaluation set (evaluation data is far cheaper than training data), align
+every returned string back onto the source, and count the ones that will not
+align. Move to a trained extractor for the fields that are high-volume and
+stable; keep generation for the long tail.
+
+The answer to listen for is the evaluation set. Candidates who describe the
+prompt and stop have not run one of these in production.
+
+**Q: How do you handle an entity type that appears twice in your training data?**
+
+You do not train it. Write a gazetteer or a rule, ship that, and collect
+examples until there is something to train on. The measurement in this
+chapter — 3.14 F1 at 200 sentences — is the general shape of the answer:
+below a certain budget, learned models are worse than lists, and knowing
+where that line is for your task is the actual skill.
+
+## The 2026 toolbox {#sec-sequence-labeling-tools}
+
+Everything above ran on one laptop with the versions below.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `datasets` | 5.0.1 | loading WikiANN in one call, and the audit in @sec-sequence-labeling-audit |
+| `sklearn-crfsuite` | 0.5.0 | the linear-chain CRF and its Viterbi decoding |
+| `transformers` | 5.15.1 | BERTurk, `AutoModelForTokenClassification`, and `word_ids()` for the alignment |
+| `torch` | 2.13.0 | the MPS backend the fine-tuning ran on |
+| `seqeval` | 1.2.2 | the reference span-level scorer, used to cross-check the explicit implementation above |
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for @sec-sequence-labeling-llm |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `spaCy` | 3.8.16 | the pragmatic default for production NER pipelines: fast, has Turkish support, and ships tokenizer, tagger and entity ruler as one deployable object |
+| `spacy-llm` | 0.7.4 | the schema-guided path of @sec-sequence-labeling-llm inside a spaCy pipeline, so you can mix a prompt-driven component with a trained one |
+| `GLiNER` | 0.2.28 | zero-shot NER from type *names* rather than a prompt — usually far better than an LLM at this task and orders of magnitude cheaper |
+| `nervaluate` | 1.2.1 | the MUC-style partial-credit breakdown when exact match is the wrong contract for your consumer |
+| `Label Studio` / `doccano` | 1.23.0 / 1.8.4 | span annotation interfaces; the bottleneck in every project in this chapter is labelled data, not modelling |
+| `pytorch-crf` | 0.7.2 | a CRF layer to put on top of a transformer, when you want the well-formedness guarantee inside the model |
+| `outlines` / `jsonformer` | 1.3.3 / 0.12.0 | grammar-constrained decoding you control, rather than trusting a server flag that may be silently ignored (@sec-decoding) |
+| `zeyrek` | 0.1.3 | Turkish morphological analysis, for the normalization step of @sec-sequence-labeling-linking when the apostrophe heuristic is not enough |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[20,14,66]"}
+
+::: {.column-margin}
+`GLiNER` deserves the second look its position in that table does not give
+it. It is a small encoder trained to match type *descriptions* against spans,
+so you get zero-shot extraction over an arbitrary label set at roughly
+tagger latency rather than LLM latency. For a new schema with no labelled
+data it is usually the strongest thing you can run before annotating
+anything.
+:::
+
+## Lab: extraction on a budget you actually have {#sec-sequence-labeling-lab}
+
+The premise of this lab is the measurement in @sec-sequence-labeling-encoder:
+at small label budgets the learned model loses to the list. The lab is
+therefore not "fine-tune a transformer" — it is "find out what your budget
+buys, before spending it".
+
+Pick a domain where you can produce labelled sentences yourself: support
+tickets, job ads, match reports, a bibliography. Choose three to five entity
+types that a second person could label the same way.
+
+### Step 1 — write the guidelines before labelling anything
+
+One page. For each type: a definition, three positive examples, and three
+near-misses that are *not* that type. @sec-data-annotation's argument in one
+sentence: if the rule is not written down, the labels are not reproducible,
+and the model is learning your Tuesday afternoon.
+
+### Step 2 — label 300 sentences, and set aside 150 of them as test
+
+Not 30. The evaluation set is the part you cannot skip, and it is worth more
+than the training half at this budget — you can improve a model without more
+training data, but you cannot measure one without evaluation data.
+
+Label the test half *last*, and do not look at it again until step 6.
+
+### Step 3 — compute the floor and the gazetteer
+
+Everything-`O`, then longest-match over the strings in your training half.
+Two numbers, half an hour, and they are the two numbers every later result
+has to beat. Expect the gazetteer to be embarrassingly competitive.
+
+### Step 4 — train a CRF, and check whether the features are doing anything
+
+Use the feature template from @sec-sequence-labeling-baselines. Then ablate:
+drop the suffix features, drop the context window, drop the shape feature,
+and record the F1 each time. The point is not the final score; it is knowing
+which part of your model is load-bearing.
+
+### Step 5 — fine-tune an encoder at three budgets
+
+50, 100 and 150 sentences from your training half. Plot span F1 against
+budget. You are reproducing @sec-sequence-labeling-encoder's curve on your
+own data, and the thing to look for is where — or whether — it crosses the
+CRF.
+
+### Step 6 — the schema-guided extractor, honestly
+
+Put your guidelines in the prompt, constrain the output to a schema, and
+verify the constraint is really applied by sending one request whose schema
+the model would otherwise violate. Align every returned string back onto the
+source. Report three numbers: span F1, the fraction of returned mentions that
+would not align, and seconds per document.
+
+### Step 7 — open the test set once
+
+Score all five systems on the 150 held-out sentences. One table, one reading.
+
+### What to hand in
+
+The table, plus a paragraph naming which system you would ship and what it
+would cost per thousand documents. If the gazetteer wins, say so — that is a
+result, and on 150 labelled sentences it is a likely one.
+
+## Exercises {#sec-sequence-labeling-exercises}
+
+1. **Hand-decode a broken sequence.** Take the tags
+   `O B-PER I-PER I-LOC O I-ORG B-ORG` over a seven-token sentence. Write out
+   the spans a lenient decoder produces, then a strict one. Which tokens do
+   the two disagree about, and how many spans does each return?
+
+2. **Token versus span F1.** Take one system's predictions and compute both.
+   Explain the gap in terms of boundary errors, and construct a prediction
+   that scores well on the first and zero on the second.
+
+3. **Break the alignment on purpose.** Take the alignment code from
+   @sec-sequence-labeling-alignment and remove the `word_ids()` call, zipping
+   labels to subwords positionally instead. Train on 2,000 sentences both
+   ways and report both scores. Then find the shortest sentence in your data
+   where the two labelings differ, and print it.
+
+4. **Measure the leakage yourself.** Hash the token sequences of any NER
+   corpus you use — CoNLL-2003 [@tjongkimsang2003conll], your own, or
+   WikiANN in another language — and report the test/train intersection. Then
+   score a memorising baseline separately on the leaked and clean halves.
+
+5. **The suffix ablation.** Remove `w[-3:]`, `w[-2:]` and `w.hasapos` from
+   the CRF features and re-fit. How much of the 85.45 was Turkish
+   orthography? Predict the answer before you run it.
+
+6. **Normalize the mentions.** Take the extracted mentions from any system,
+   collapse them on the apostrophe, and count how many distinct entities you
+   have before and after. Then find a mention the heuristic gets *wrong* —
+   they exist, and describing one is the exercise.
+
+7. **Nesting, on paper.** Write five sentences from your own domain that
+   contain a nested entity. Encode them in BIO, then in a span-enumeration
+   format, and state precisely what BIO lost.
+
+## What to remember {#sec-sequence-labeling-summary}
+
+- **Compute the floor.** Everything-is-`O` scores **61.36% token accuracy**
+  and **0.00 span F1** on this corpus, and higher on a realistic one where
+  most sentences contain no entity. Every token-accuracy number in sequence
+  labelling should be read as a distance from that floor, and the distance is
+  usually smaller than the headline suggests.
+
+- **Report span-level F1.** Token accuracy 94.41, token-level F1 88.73,
+  span-level F1 85.45 — the same predictions, three answers. Only the last
+  one asks whether the record came out right.
+
+- **Audit the corpus before you trust the score.** WikiANN Turkish has
+  **13.06% of its test set verbatim in training**, and the leakage bonus
+  falls monotonically with how much a system memorises: **+26.50** for a
+  gazetteer, **+16.25** for the CRF (99.81 leaked against 83.56 clean),
+  **+7.65** for the fine-tuned encoder. That gap is a measurement of how much
+  of a score is recall of the training set. Hash your test inputs — it is
+  four lines.
+
+- **The classical baseline is not a formality.** A gazetteer scores **55.26**
+  from a Python dictionary; a CRF with hand features scores **85.45** in
+  **18.5 seconds on a CPU**. Fine-tuned BERTurk needs 2,000 to 5,000 labelled
+  sentences to match the CRF trained on 20,000, and reaches **91.92** on the
+  full budget — a real saving, and a real threshold below which the
+  transformer is simply the worse model.
+
+- **200 labelled sentences buys 3.14 span F1.** Not 60, not 40. At that
+  budget a fine-tuned encoder learns to say `O`, and a memorised list beats it
+  by fifty points. "Just fine-tune a transformer" is advice with a budget
+  attached; ask what the budget is.
+
+- **Decoding is a decision you are making whether or not you know it.** A
+  softmax tagger at full budget emitted **139 illegal BIO transitions**
+  across 10,000 sentences — and 3,739 when half-trained; the CRF emitted zero
+  at every budget, because Viterbi scores whole sequences and the forbidden
+  transition never wins. What your evaluation does with those 139 changes your
+  reported F1, and the convention is not stated in most papers.
+
+- **Alignment is where the silent bugs live.** Entity words fragment into
+  **1.98 subwords each in BERTurk against 1.45 for ordinary words** — names
+  are rare, so tokenizers break them. Get `word_ids()` wrong and the model
+  still trains, the loss still falls, and the labels are attached to the
+  wrong tokens.
+
+- **A schema guarantees shape, never truth.** `ollama` 0.24.0 silently
+  ignored a JSON schema on `/api/chat` while enforcing it on `/api/generate`,
+  and the enforced call happily returned `{"answer": 1}` for the capital of
+  France. Send one request the model would otherwise fail, and check.
+
+- **An LLM returns strings; a metric wants offsets.** Every extracted mention
+  has to be aligned back onto the source, and the ones that will not align
+  are hallucinations with a schema around them. Count them and report the
+  count — it is the failure mode a tagger cannot have, and the price of not
+  needing training data.
