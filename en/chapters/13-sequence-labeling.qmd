@@ -696,15 +696,17 @@ partial credit is not beating a paper reporting 88 under exact match.
 ### Where the errors are
 
 ```text
-        precision   recall      F1     support
-  PER       88.64    88.56   88.60       4,519
-  LOC       84.09    86.06   85.06       4,914
-  ORG       86.34    78.70   82.34       4,154
+                CRF                       BERTurk @ 20,000
+        precision  recall      F1     precision  recall      F1   support
+  PER       88.64   88.56   88.60         94.19   94.73   94.46     4,519
+  LOC       84.09   86.06   85.06         91.16   93.22   92.18     4,914
+  ORG       86.34   78.70   82.34         88.93   88.73   88.83     4,154
 ```
 
-`ORG` recall is the outlier at 78.70, and this is stable across every system
-in this chapter. Organisation names are long — mean gold span **2.68 tokens
-for `ORG` against 2.26 for `PER` and 1.61 for `LOC`** — compositional, and
+`ORG` is last in both columns, and its recall is the outlier — 78.70 for the
+CRF, and still the lowest of the three at 88.73 for the encoder six points
+further up. Organisation names are long — mean gold span **2.68 tokens for
+`ORG` against 2.26 for `PER` and 1.61 for `LOC`** — compositional, and
 frequently built out of ordinary words
 (*Türk Silahlı Kuvvetleri*, *Eurovision Şarkı Yarışması*). A model with a
 five-token window structurally cannot see all of one, and a model that can
@@ -816,13 +818,117 @@ Three things can come back:
   expansion, an inference. There is no honest way to score it, and counting
   it as a hit would be scoring the model on a claim about text it invented.
 
-[Anything that will not align is a hallucination with a JSON schema around
-it.]{.hl} The count of unalignable mentions is a metric in its own right, and
-it is one a tagger cannot produce: a tagger can only ever label tokens that
-exist.
+It is tempting to call every unalignable mention a hallucination and move on.
+That turns out to be mostly wrong, and finding out why is worth the section.
 
-<!-- MEASURED-PENDING: results table, timing and cost comparison land here
-     once the 1,000-sentence run completes. -->
+Across 1,000 sentences the model returned **1,419 typed mentions**, of which
+31 would not align. Sorting those 31 by cause:
+
+```text
+aligned directly                              1,388   97.82%
+recovered by normalising apostrophes              7    0.49%   ' vs ’
+recovered by stripping wiki markup               20    1.41%   ''Gorran ''
+genuinely not in the sentence                     4    0.28%
+```
+
+[Twenty-seven of the thirty-one failures were the aligner's fault, not the
+model's.]{.hl} Twenty came from the corpus's own Wikipedia markup, seven from
+the model normalising a curly apostrophe to a straight one. Had this been
+reported without looking, the headline would have been "the model hallucinated
+31 entities" — a claim about the model that is really a claim about
+preprocessing.
+
+And the second half of the lesson, which is less comfortable: fixing the
+aligner **barely moves the score**, from 60.57 to 60.29 F1. Recall rises
+(60.82 to 61.11) and precision falls (60.33 to 59.50), because the recovered
+mentions were mostly wrong anyway. So check the alignment — and do not expect
+it to be the explanation for a disappointing number.
+
+The four genuinely unalignable mentions are all suffix-boundary confusions
+rather than invention: the model returned `Çin Halk Cumhuriyeti` where the
+text has `Çin Halk Cumhuriyetini` with the accusative fused on and no
+apostrophe to split at, and `Niksar'ın` where the text has `Niksar'da` — the
+right name, the wrong case.
+
+### The results
+
+Same 1,000 test sentences for every system, 1,373 gold entities, scored the
+same way:
+
+| system | labels used | token acc | span P | span R | span F1 |
+|:--|--:|--:|--:|--:|--:|
+| Gazetteer | 20,000 sentences | 76.12 | 60.28 | 50.40 | 54.90 |
+| **LLM, zero-shot** | **none** | 82.87 | 60.33 | 60.82 | **60.57** |
+| CRF | 20,000 sentences | 94.42 | 84.94 | 83.39 | 84.16 |
+| BERTurk fine-tuned | 20,000 sentences | 96.98 | 91.11 | 91.77 | **91.44** |
+
+: `qwen3.5:9b` against the taggers, on the identical slice
+{tbl-colwidths="[26,20,14,13,13,14]"}
+
+Two readings, and both matter.
+
+**With no training data at all, the LLM beats the gazetteer by six points.**
+That is a real capability and it did not exist in 2019. If you have a schema
+and no labels, this is a working extractor by tomorrow.
+
+**It also loses to an eighteen-second CRF by 24 points, and to the fine-tuned
+encoder by 31.** Zero-shot extraction is where you *start*, not where you
+stop, and the gap is far larger than the marketing around structured output
+suggests.
+
+The per-type breakdown says where it goes wrong:
+
+```text
+             LLM              BERTurk @ 20,000
+        P      R     F1        P      R     F1
+  PER 64.63  82.00  72.29    92.97  95.32  94.13
+  LOC 59.01  59.24  59.13    92.12  93.93  93.02
+  ORG 54.67  40.10  46.26    90.46  87.97  89.20
+```
+
+`ORG` recall of **40.10** is the headline failure: the model misses three
+organisations in five. This is the same weakness every system in this chapter
+has, amplified — but it also has a cause the taggers do not share. The model
+is not failing to *find* the strings; it is disagreeing about whether
+*Değişim Hareketi* is an organisation, and about where its name stops. A
+tagger learns that boundary convention from 20,000 examples of it. A prompt
+has to state it, and one page of guidelines cannot encode what annotators
+converged on over a corpus.
+
+`PER` shows the mirror image: recall 82.00 against precision 64.63. The model
+finds people eagerly and over-commits, tagging descriptions and titles that
+the guidelines exclude.
+
+### What it costs
+
+```text
+                              LLM (qwen3.5:9b)     BERTurk fine-tuned
+per sentence                        1.26 s              0.00103 s
+1,000 sentences                    1,265 s                    1.0 s
+generated tokens per sentence          26.4                    n/a
+malformed JSON responses                  0
+```
+
+[The LLM is roughly 1,200 times slower per sentence]{.hl} — and that is a
+9B model quantised to 4 bits, running locally, with thinking disabled and a
+schema that keeps the output to 26 tokens. A hosted frontier model would be
+more accurate and no faster.
+
+For a thousand documents that difference is nothing. For the ten million
+documents an extraction pipeline usually has to get through, 1.26 seconds
+each is 146 days of wall clock. The decision rule from
+@sec-classification-crossover applies unchanged: prompt at low volume,
+distil into a tagger when the volume arrives.
+
+::: {.column-margin}
+The right middle option is missing from that table on purpose, because it
+deserves naming rather than a row: **use the LLM to label, then train the
+tagger on its output.** At 60.57 F1 the model is a poor extractor and a
+serviceable annotator — it gives you thousands of noisy labels overnight,
+which @sec-sequence-labeling-encoder's curve says is exactly the regime where
+a fine-tuned encoder starts to work. @sec-data-annotation is the chapter on
+doing that without fooling yourself.
+:::
 
 ## Where BIO stops working {#sec-sequence-labeling-nested}
 
@@ -1045,11 +1151,16 @@ Zero, and the deeper answer is that it cannot be scored at all. Span metrics
 are defined over token offsets; a string that does not appear in the text has
 no offsets, so there is nothing to compare against a gold span.
 
-Count these separately and report the count. It is a failure mode a tagger
-structurally cannot have — a tagger can only label tokens that exist — and it
-is the main thing you give up in exchange for not needing training data. If
-the number is not in your evaluation, your evaluation is not comparing the two
-approaches fairly.
+But before you write "hallucination" in the report, check whose bug it is.
+Measured here: of 1,419 returned mentions, 31 would not align — and 27 of
+those were the *aligner's* fault, 20 from wiki markup in the corpus and 7
+from a curly apostrophe normalised to a straight one. Only 4 in 1,419
+(0.28%) were genuinely not in the text, and even those were case-suffix
+confusions rather than invention.
+
+So: count them, report the count, and split it by cause. It is a failure mode
+a tagger structurally cannot have — a tagger can only label tokens that
+exist — but most of what looks like it is preprocessing.
 :::
 
 ## Interview questions {#sec-sequence-labeling-interview}
@@ -1325,8 +1436,16 @@ result, and on 150 labelled sentences it is a likely one.
   and the enforced call happily returned `{"answer": 1}` for the capital of
   France. Send one request the model would otherwise fail, and check.
 
-- **An LLM returns strings; a metric wants offsets.** Every extracted mention
-  has to be aligned back onto the source, and the ones that will not align
-  are hallucinations with a schema around them. Count them and report the
-  count — it is the failure mode a tagger cannot have, and the price of not
-  needing training data.
+- **Zero-shot extraction is where you start, not where you stop.** On the
+  same 1,000 sentences: LLM **60.57** span F1 with no labels at all,
+  gazetteer 54.90, CRF **84.16**, fine-tuned encoder **91.44** — and the LLM
+  is about **1,200× slower per sentence**. It beats the dictionary and loses
+  to eighteen seconds of CRF by 24 points. Its worst class is `ORG` recall at
+  40.10, because a prompt cannot encode the boundary convention that 20,000
+  annotated examples teach.
+
+- **An LLM returns strings; a metric wants offsets.** Every mention has to be
+  aligned back onto the source, and that step is where you can quietly
+  misattribute your own bugs: 27 of 31 alignment failures here were the
+  aligner's, not the model's. Fixing it moved F1 by 0.28 — so check it, and
+  do not expect it to explain a bad number.
