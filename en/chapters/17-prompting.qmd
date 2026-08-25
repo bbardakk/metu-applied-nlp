@@ -1,44 +1,680 @@
 # Prompting and In-Context Learning {#sec-prompting}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.** Port core content from the CME 295-based
-workshop material (prompting section); rewrite examples for the
-non-CS audience.
+**Chapter status: drafted.** The measurements here were run on the same
+Turkish product-review corpus as @sec-bake-off and @sec-classification —
+233,508 de-duplicated reviews — but on a **balanced** sample rather than the
+natural 93.7%-positive distribution, so that accuracy is readable against a
+50% floor and the effect being measured is the prompt rather than the class
+prior. Software: `ollama` 0.24.0 serving `qwen3.5:9b`, Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- explain in-context learning and why examples in the prompt work at all;
-- apply the core prompt patterns: role, structure, few-shot, chain-of-thought;
-- design prompts as *specifications*, with output contracts (JSON/schemas);
-- run a small prompt A/B test instead of arguing from anecdotes.
+- explain what in-context learning is and why putting examples in a prompt
+  changes behaviour without changing a single weight;
+- apply the pattern library — role, structure, demonstrations, decomposition —
+  and say what each one is actually for;
+- write a prompt as a *specification* with an output contract, rather than as
+  a request;
+- measure how much of your score is the prompt rather than the model, and
+  build the evaluation that makes prompt changes reviewable.
 
-## Why does prompting work?
+## Why prompting works at all {#sec-prompting-why}
 
-<!-- TODO(draft): ICL as implicit task inference; connect back to
-     @sec-pretraining (instruction tuning made models promptable). -->
+A pretrained model predicts the next token. Nothing in that objective says it
+should follow an instruction, and the first large models mostly did not —
+you had to trick them, by writing a prefix whose natural continuation happened
+to be the answer you wanted. @reynolds2021prompt is the historical document
+for that era, and reading it now is a good reminder of how much of "prompt
+engineering" was working around a missing capability.
 
-The uncomfortable truth of applied LLM work: [the prompt is part of the
-model]{.hl}. Treat it like code — versioned, tested, reviewed — not like a
-chat message.
+Two things changed. **Scale** made models able to infer a task from examples
+in the context [@brown2020language], and **instruction tuning**
+(@sec-post-training) trained them to treat an instruction as an instruction
+rather than as text to continue. The second is why modern prompting feels like
+asking rather than tricking.
 
-## A pattern library
+::: {#gloss-in-context-learning .column-margin .term-gloss}
+**in-context learning** (bağlam içi öğrenme) — the model doing better at a
+task because examples of it are sitting in the prompt. No weight is updated
+and nothing survives the call, which is why *learning* is a slightly
+misleading word for it.
+[↩](#term-in-context-learning){.term-back}
+:::
 
-<!-- TODO(draft): role/persona, structured output, few-shot selection,
-     chain-of-thought & when it helps, decomposition. One worked example
-     end-to-end: extracting structured data from an industrial report. -->
+[In-context learning](#gloss-in-context-learning){#term-in-context-learning .term-ref}
+is the first of those: you put input-output pairs in the prompt, and the model
+does better on the next input, **with no weight updated and nothing retained
+after the call**. It is not learning in the sense @sec-post-training uses the
+word. A better description is *task inference*: the examples narrow down which
+of the many tasks the model already knows how to do you are asking for.
 
-## Prompts as specifications
+That framing predicts something odd, and the prediction holds.
+@min2022rethinking replaced the labels in the demonstrations with **random**
+ones and found performance mostly survived. What the examples were mainly
+conveying was the *shape* of the task — the label space, the format, the
+distribution of inputs — not the input-to-label mapping. That is worth
+knowing before you spend a week curating perfect examples.
 
-<!-- TODO(draft): output schemas, function-style contracts, guardrails at
-     the prompt layer vs system layer; failure taxonomy. -->
+::: {.column-margin}
+It also predicts the failure mode. If demonstrations mostly convey format,
+then a model that already knows the format gains little from them — which is
+exactly what @sec-classification measured, where eight examples were worth
++7.17 macro-F1 on one model and +0.51 ($p = 0.62$) on a stronger one. The
+technique did not stop working; the models stopped needing it.
+:::
 
-## Measuring prompt quality
+### The claim this chapter is built on
 
-<!-- TODO(draft): small eval sets; pairwise comparisons; foreshadow
-     @sec-llm-eval. -->
+[The prompt is part of the model.]{.hl} Not a message to it — a component of
+the system, sitting in the same position a feature-extraction function sits in
+@sec-bake-off's pipeline. It has a version, it has a contract, it has
+regressions, and changing it changes your output distribution as surely as
+swapping the checkpoint would.
 
-## Exercises
+The rest of the chapter is what follows from taking that seriously, and
+@sec-prompting-brittle is the measurement that makes it hard to avoid.
 
-1. Take a task you do weekly. Write a v1 prompt, collect five failure
-   cases, revise, and report what changed — like a mini ablation study.
+## A pattern library {#sec-prompting-patterns}
+
+Five patterns cover most of what works. They are not magic words; each one is
+doing an identifiable job.
+
+**Role.** *You are an experienced customer-feedback analyst.* The job is to
+select a region of the model's distribution — vocabulary, register, what
+counts as a relevant detail. It is weakest when it asks for expertise the
+model does not have (a role prefix does not make a model a doctor) and
+strongest when it disambiguates *style*, which is a real and frequent need.
+
+**Structure.** Sections, delimiters, an explicit place for the input. The job
+is to make the boundary between your instruction and the user's data
+unambiguous — for the model, and for the injection-safety reasons
+@sec-agent-security covers. `<review>...</review>` is not decoration; it is
+the difference between data and instruction.
+
+**Demonstrations.** Input-output pairs. The job, per @min2022rethinking, is
+mainly to fix the *format and label space*. Use them when the output shape is
+unusual or hard to describe, and expect less from them when the task is one
+the model has obviously seen.
+
+**Decomposition.** Ask for one thing at a time, or ask for intermediate
+results before the answer. The job is to move work out of a single forward
+pass and into tokens — which is @sec-reasoning's subject, and where the
+measurement of when it helps lives. This chapter's contribution is the
+practical corollary: **a prompt that asks for four things at once will do at
+least one of them badly**, and splitting it is usually cheaper than fixing it.
+
+**Output contract.** State the exact shape of the answer, and make it the
+easiest thing for the model to produce. This is the pattern with the most
+leverage and it gets its own section.
+
+::: {.callout-note collapse="true"}
+## What about "think step by step"?
+
+It belongs to @sec-reasoning, which measures it properly, and the short answer
+is that the phrase is a relic. @kojima2022large found it worked on models that
+had not been trained to reason; models that *have* been trained to reason
+produce the trace whether or not you ask, and adding the phrase to a reasoning
+model mostly wastes tokens.
+
+The durable part is not the phrase but the mechanism: more tokens before the
+answer means more computation available to produce it. Ask for intermediate
+results when the task needs them, and skip the incantation.
+:::
+
+## Prompts as specifications {#sec-prompting-spec}
+
+The most useful shift in this chapter is grammatical: stop writing prompts as
+*requests* and start writing them as *specifications*.
+
+A request says what you want. A specification says what a valid output is —
+which means it can be checked, and a prompt whose output can be checked is a
+prompt you can test.
+
+```text
+request         "Summarise the customer's complaint."
+
+specification   "Return one JSON object with keys `issue` (string, max 15
+                 words), `severity` (one of: low, medium, high) and
+                 `product` (string, copied exactly from the review, or null
+                 if no product is named). Return nothing else."
+```
+
+The second version gives you three things the first does not: a parser that
+either succeeds or fails loudly, a set of values you can validate, and a
+`null` that distinguishes *absent* from *unknown* — which is the distinction
+@sec-sequence-labeling found LLM extractors quietly destroying.
+
+Three rules that follow:
+
+1. **Name the failure output.** If the model cannot comply, what should it
+   return? A prompt without an escape hatch gets a fabricated answer instead
+   of an admission, because you left the model no legal way to say no.
+2. **Put the constraint where it binds.** An instruction 800 tokens above the
+   input competes with the input for attention. Constraints that must hold go
+   close to the end.
+3. **Make the contract machine-checkable, then check it.** A schema you do not
+   validate is a comment. @sec-decoding is where the enforcement machinery
+   lives — grammars, JSON Schema, and the measurement of what constraining
+   costs.
+
+::: {.column-margin}
+And a warning from @sec-summarization, which is worth repeating in the chapter
+where the schema gets written rather than the one where it gets enforced: a
+schema guarantees *shape*, never *truth*. A grammar-constrained call happily
+returned `{"answer": 1}` for the capital of France. Validating the contract
+tells you the output is well-formed and nothing else.
+:::
+
+## How much of your score is the prompt? {#sec-prompting-brittle}
+
+Everything above is craft. This section is the measurement that makes the
+craft matter, and it is the one to run on your own task before you trust any
+number you have.
+
+Twelve prompts were written for the same task — decide whether a Turkish
+product review is positive or negative. **A competent reader would call them
+the same instruction.** They differ in formatting, in the surface form of the
+labels, in where the review sits relative to the instruction, in delimiters,
+and in politeness. None changes the task, the criteria, or the meaning of
+either label.
+
+All twelve ran on the same 150 balanced reviews, same model, temperature 0,
+fixed seed. Every response parsed; nothing was dropped.
+
+```text
+variant                        acc      95% CI (Wilson)
+label positive/negative     90.00%   [ 84.2,  93.8]
+label A/B                   88.67%   [ 82.6,  92.8]
+bulleted                    87.33%   [ 81.1,  91.7]
+numbered                    87.33%   [ 81.1,  91.7]
+label 1/0                   86.67%   [ 80.3,  91.2]
+triple quotes               82.00%   [ 75.1,  87.3]
+baseline                    79.33%   [ 72.2,  85.0]
+label olumlu/olumsuz        78.00%   [ 70.7,  83.9]
+xml delimiters              77.33%   [ 70.0,  83.3]
+polite                      76.67%   [ 69.3,  82.7]
+role prefix                 76.00%   [ 68.6,  82.1]
+review first                75.33%   [ 67.9,  81.5]
+
+spread 75.33% – 90.00% = 14.67 points     mean 82.06   sd 5.57
+```
+
+[Fourteen and a half points of accuracy, between two prompts that say the same
+thing.]{.hl}
+
+### Is that real, or is it 150 documents of noise?
+
+The confidence intervals overlap, so the obvious next question is whether any
+of this survives contact with statistics. It does, because the comparison is
+**paired** — the same documents through both prompts — and a paired test is far
+more powerful than comparing two independent proportions.
+
+```text
+best  'label positive/negative'  90.00%
+worst 'review first'             75.33%
+
+  documents where they disagree            42
+    best right, worst wrong                32
+    worst right, best wrong                10
+  McNemar exact test                    p = 0.0009
+```
+
+The difference is not noise. And the stronger statistic is the one that does
+not involve accuracy at all:
+
+```text
+all 12 variants give the same answer on   104/150 = 69.3% of reviews
+the prompt decides the answer on           46/150 = 30.7%
+
+two variants disagree on: median 12.0% of reviews, max 28.7%
+```
+
+**On three reviews in ten, the answer is determined by the prompt's
+formatting rather than by the review.** The model has an opinion on 69.3% of
+this corpus; on the rest, what you get depends on whether you wrote a bulleted
+list or a paragraph.
+
+### What that means for everything else you measure
+
+Put this next to @sec-classification's result on the same model family. There,
+writing the instruction in English rather than Turkish — the single most
+repeated piece of prompting folklore — was worth **+0.54 macro-F1, $p =
+0.54$**, indistinguishable from nothing. Here, changing the *bullet
+formatting* is worth eight points.
+
+[The variable everyone argues about turned out to be noise, and the variable
+nobody mentions turned out to be the largest effect in the experiment.]{.hl}
+
+Three consequences, and the third is the one that changes how you work:
+
+1. **A single-prompt model comparison is unreliable.** If prompt variance on
+   one model is 14.67 points, then "model A beat model B by 5 points" measured
+   with one prompt each is a statement about the prompts. Compare models over a
+   *set* of prompts and report the distribution, or accept that you have not
+   compared the models.
+2. **Your reported accuracy needs an error bar you have not been computing.**
+   The sampling interval on 150 documents is about ±6 points. The *prompt*
+   interval, on the same data, is 14.67. The second is larger and almost never
+   reported.
+3. **Prompt changes need regression tests, not review.** No reviewer reading
+   "moved the review above the instruction" would predict −4 points, because
+   the change is semantically empty. Only a measurement catches it, which is
+   what makes this a testing problem rather than a writing problem.
+
+::: {.column-margin}
+@sclar2024quantifying is the systematic version of this experiment across
+tasks and models, and it finds the same thing at scale: spurious formatting
+features move scores by amounts comparable to real model differences.
+@lu2022fantastically found the same for the *order* of demonstrations. The
+literature has been clear about this for years; the practice has not caught
+up, because the prompt still feels like a message rather than a component.
+:::
+
+### The patterns that lost
+
+Two results in that table are worth naming because they contradict widely
+taught advice.
+
+**The role prefix came 11th of 12** (76.00%, against 79.33% for the same
+prompt without it). *You are an experienced customer-feedback analyst* is the
+most reproduced prompting pattern in circulation, and on this task it cost
+three points.
+
+**Politeness cost 2.66 points.** *Lütfen… Teşekkürler* is harmless-looking and
+it is not free.
+
+Neither result generalises — that is the point. They are two more variables
+that a competent reader would call irrelevant and the model does not. The
+lesson is not "never use a role prefix"; it is that [you cannot tell which
+prompt is better by reading them]{.hl}, and the belief that you can is what
+this whole section is arguing against.
+
+## Making prompt work reviewable {#sec-prompting-eval}
+
+If the prompt is a component and its effect is 14.67 points, it needs the
+machinery any other component gets. Four pieces, in the order they pay off.
+
+### 1. Pin down reproducibility first
+
+Before measuring anything, find out whether your setup returns the same answer
+twice. Thirty reviews, ten repeats each:
+
+```text
+setting                          identical output   documents that varied
+temperature 0, fixed seed              100.0%              0 / 30
+temperature 0, no seed                 100.0%              0 / 30
+temperature 0.7, fixed seed            100.0%              0 / 30
+temperature 0.7, no seed                 3.3%             29 / 30
+```
+
+Good news and a trap. **Temperature 0 was deterministic here with or without a
+seed, and a fixed seed made even temperature 0.7 deterministic.** But without
+either, 29 of 30 documents gave a different answer across ten runs — so an
+evaluation run at default settings is measuring the sampler as much as the
+prompt.
+
+::: {.callout-warning appearance="simple"}
+That table is a single local server answering one request at a time. **Hosted
+APIs are frequently not deterministic even at temperature 0**, because
+requests are batched and batch composition changes the order of floating-point
+reductions. Do not assume; run the ten-repeat check against the endpoint you
+will actually ship on, and if it is not deterministic, your eval needs repeats
+and an interval rather than a single number.
+:::
+
+### 2. Build a small evaluation set, and freeze it
+
+Fifty to two hundred items, labelled by you, covering the failure modes you
+have already seen. It does not need to be large — it needs to be *fixed*, so
+that two prompt versions are comparable.
+
+The discipline from @sec-classification applies unchanged: hold it out, look at
+it as rarely as possible, and never tune a prompt against the same items you
+report on. A prompt tuned on its evaluation set is exactly as overfitted as a
+model tuned on its test set, and far easier to do by accident because iterating
+on a prompt feels like writing rather than fitting.
+
+### 3. Compare paired, not independently
+
+This is the statistical point @sec-prompting-brittle turned on. Two prompts run
+on the *same* items are a paired comparison, so use the pairing: count the
+documents where they disagree, and test that count.
+
+```text
+prompt A right, B wrong     32
+prompt B right, A wrong     10
+                            --
+McNemar exact            p = 0.0009
+```
+
+Comparing two accuracy figures with overlapping confidence intervals would
+have called that inconclusive. The paired test calls it decisively, from the
+same 150 documents, because it throws away the 108 items both prompts agree
+on — which carry no information about the difference.
+
+### 4. Version the template, not the string
+
+Store the template with slots, in the repository, with a version. Log which
+version produced each output. When something regresses, the question *which
+prompt was this* has to have an answer, and "the one in the notebook" is not
+one.
+
+```python
+PROMPTS = {
+    "sentiment/v3": "...",     # bulleted, labels positive/negative
+    "sentiment/v4": "...",     # + explicit null case
+}
+```
+
+Two habits that fall out of it: the assembled prompt is a *build artefact* and
+should not be edited by hand, and a prompt change ships with its evaluation
+delta the way a code change ships with tests.
+
+## Intuition checks {#sec-prompting-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Model A beat model B by 5 points on your eval. Which is better?
+
+You do not know, because you have not separated the model from the prompt.
+Measured on one model, one task and twelve semantically identical prompts, the
+spread was **14.67 points** — three times the gap you are trying to interpret.
+
+Run both models over a *set* of prompts and compare the distributions. If that
+is too expensive, at least run each model on two or three prompts and report
+the range. A single-prompt comparison is a statement about the prompts.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your reviewer says "moving the input above the instruction is a no-op." Are they right?
+
+Semantically yes, empirically no: it cost **4.00 points** here (79.33% → 75.33%).
+
+That is the whole argument for treating prompts as testable components. No
+reviewer can predict that by reading, because there is nothing to read — the
+change is meaning-preserving. The only thing that catches it is running the
+evaluation, which makes prompt changes a testing problem rather than a writing
+problem.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Does "You are an expert…" help?
+
+On this task it came 11th of 12, at 76.00% against 79.33% for the same prompt
+without it.
+
+Do not over-read that either — it is one task and one model, and the point is
+not that role prefixes are bad. The point is that the most-reproduced pattern
+in prompting lost to its own baseline here, and nobody would have guessed the
+sign. Measure it on your task; it takes one extra run.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your few-shot examples have wrong labels. How bad is that?
+
+Less bad than you would think, which tells you something about what
+demonstrations are for. @min2022rethinking randomised the labels in the
+demonstrations and most of the benefit survived, because what the examples
+mainly convey is the *format and the label space* rather than the mapping.
+
+Practical readings: do not spend a week hand-curating examples before checking
+whether examples help at all; and if your task's difficulty is in the mapping
+rather than the format, expect demonstrations to underdeliver.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Is temperature 0 reproducible?
+
+Locally, here, yes — 100% identical across ten repeats, with or without a
+seed. On a hosted API, often not, because batching changes floating-point
+reduction order and your request shares a batch with strangers.
+
+Run the check rather than assuming: same prompt, same input, ten times,
+against the endpoint you will ship on. If it varies, every number in your
+evaluation needs repeats and an interval.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. When should a prompt stop being a prompt?
+
+When you are maintaining a specification rather than writing a request. The
+signals: the prompt has a version history, its output is parsed by code, a
+change to it can break a downstream consumer, and you cannot safely edit it
+without running something.
+
+At that point it is a component of your system and belongs under the same
+discipline as the rest of your code — repository, version, contract,
+regression test. @sec-decoding is where the output contract gets *enforced*
+rather than requested.
+:::
+
+## Interview questions {#sec-prompting-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** These recur in the two
+credible open sources this book uses, plus the ones this chapter's own
+measurements make answerable.
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: What actually happens when you put examples in a prompt?**
+
+Nothing is learned in the training sense — no weight changes and nothing
+survives the call. The examples narrow which task the model performs, which is
+why it is better described as task inference than as learning. Then deliver
+the result that shows you have read past the tutorial: @min2022rethinking
+randomised the demonstration labels and most of the benefit survived, so what
+examples largely convey is the format and label space rather than the mapping.
+
+**Q: Why did prompting stop feeling like a trick?**
+
+Because instruction tuning happened. A base model continues text, so early
+prompting meant constructing a prefix whose natural continuation was the
+answer. Instruction tuning (@sec-post-training) trained models to treat an
+instruction as an instruction. Candidates who cannot separate "the model got
+bigger" from "the model got trained to follow instructions" have not thought
+about where the capability came from.
+
+### Testing whether you have shipped one
+
+**Q: Two prompts, which is better?**
+
+Run both on the same frozen evaluation set and use a **paired** test — count
+the items where they disagree and test that count, not the two accuracies.
+Measured here, two prompts with overlapping confidence intervals were
+separated at $p = 0.0009$ by McNemar, because the pairing discards the items
+both got right.
+
+If the answer is "I read them and the second is clearer", the candidate has
+not measured a prompt.
+
+**Q: How much of your reported accuracy is the prompt?**
+
+The honest answer is that most teams do not know, and the measurement is a
+morning's work: write several semantically identical prompts and run all of
+them. Here twelve of them spanned **14.67 points**, and all twelve agreed on
+only **69.3%** of items — so on three items in ten the formatting decided the
+output. That number is an error bar that almost nobody reports and that is
+usually larger than the sampling interval.
+
+**Q: How do you stop prompt changes from breaking production?**
+
+Treat the prompt as a versioned component: template in the repository, version
+logged with every output, a frozen evaluation set, and a delta reported with
+every change. Then say why review is not enough — a semantically empty edit
+cost 4 points here and no reviewer would have predicted it.
+
+**Q: Your evaluation results changed and nothing was deployed. What happened?**
+
+Check reproducibility before anything else. Same prompt, same input, ten
+repeats. Locally, temperature 0 was fully deterministic here; without a seed
+at temperature 0.7, 29 of 30 items varied. And hosted endpoints are often
+non-deterministic even at temperature 0, because batching changes
+floating-point reduction order — so the answer may be that nothing happened
+and your eval never had an interval on it.
+
+## The 2026 toolbox {#sec-prompting-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for every measurement in this chapter |
+| Python stdlib | 3.14.5 | the experiment is a `for` loop over prompts and a paired test; it needed no framework |
+
+: The stack these numbers came from {tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `promptfoo` | 0.122.0 (npm) | prompt A/B testing and regression suites as a config file — the tooling version of @sec-prompting-eval, and the fastest way to stop doing this in notebooks |
+| `dspy` | 3.3.1 | stops you writing prompt strings at all: declare the signature, let it compile the prompt against a metric. The right answer once you accept that hand-tuning a brittle artefact is a poor use of a week |
+| `instructor` / `pydantic` | 1.15.4 / 2.13.4 | the output contract of @sec-prompting-spec as a Python type, validated on arrival |
+| `guidance` | 0.3.1 | constrains generation to a template or grammar — @sec-decoding's machinery, applied at the prompt layer |
+| `jinja2` | 3.1.6 | prompt templates with slots, versioned as files. Unglamorous, and it solves the "which prompt produced this" problem outright |
+| `langsmith` | 0.11.1 | tracing and dataset management when the pipeline outgrows a spreadsheet |
+| `pytest` | 9.1.1 | the point being that a prompt regression suite is just tests, and needs no LLM-specific framework to start |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[22,16,62]"}
+
+::: {.column-margin}
+`dspy` deserves the second look its position does not give it. Its premise is
+exactly this chapter's finding: if prompt wording moves the score by amounts
+you cannot predict, then hand-writing prompts is optimisation by guesswork,
+and a compiler with a metric will beat you. The cost is that your prompts stop
+being readable artefacts, which is a real trade rather than a free win.
+:::
+
+## Lab: turn a prompt into a component {#sec-prompting-lab}
+
+Take a task you actually do — one where you have been iterating on a prompt by
+feel. The lab converts it into something with a version and an error bar.
+
+### Step 1 — freeze fifty items
+
+Label them yourself. Include the failures you already know about; that is what
+makes the set useful rather than decorative. Write them to a file and stop
+editing it.
+
+### Step 2 — measure reproducibility before anything else
+
+Same prompt, same input, ten repeats, against the endpoint you will ship on.
+If the answers vary, every number below needs repeats and an interval, and you
+need to know that now rather than after a confusing week.
+
+### Step 3 — write six prompts that mean the same thing
+
+Not six *better* prompts — six that a colleague would call identical. Vary
+formatting, label surface form, delimiters, the position of the input, a role
+prefix. Run all six.
+
+The spread you get is your prompt's error bar. Write it down; it is the number
+that tells you how seriously to take every comparison you have made so far.
+
+### Step 4 — pick the winner with a paired test
+
+Best against worst, McNemar on the disagreements. Report the number of items
+where they differ, not just the two accuracies.
+
+### Step 5 — rewrite the winner as a specification
+
+Output contract, explicit failure value, constraints near the end. Re-run.
+Report whether the score moved and whether the *parse* failures went to zero,
+which is usually the larger win.
+
+### Step 6 — put it under version control and break it on purpose
+
+Template with slots in a file, version string logged with each output. Then
+make a semantically empty edit — reorder two sentences — and run the
+evaluation. If the number moves, you have just demonstrated to yourself why
+this is a testing problem.
+
+### What to hand in
+
+The six-prompt spread, the paired test for your winner, the before-and-after
+for the specification rewrite, and one paragraph on what your prompt's error
+bar means for the model comparison you most recently believed.
+
+## Exercises {#sec-prompting-exercises}
+
+1. **Your own brittleness number.** Six semantically identical prompts, one
+   task, one model. Report the spread and the fraction of items where all six
+   agree. Compare the spread against the difference between the two models you
+   are choosing between.
+
+2. **Paired versus unpaired.** Take two prompts whose confidence intervals
+   overlap. Compute an unpaired comparison and a McNemar test on the same
+   data. Report both, and say which you would put in a report and why.
+
+3. **Randomise the demonstration labels.** Reproduce @min2022rethinking on your
+   task: few-shot with correct labels, with shuffled labels, and zero-shot.
+   How much of the benefit survives randomisation? What does the answer tell
+   you about what your examples are doing?
+
+4. **The role prefix, on your task.** Run the same prompt with and without
+   *You are an expert…*. Predict the sign before you run it. Report both.
+
+5. **Reproducibility on your endpoint.** Ten repeats at temperature 0 against a
+   hosted API and against a local model. If they differ, explain the mechanism
+   to a colleague in two sentences.
+
+6. **Request to specification.** Take a prompt written as a request, rewrite it
+   as a contract with an explicit failure value, and count parse failures
+   before and after. Then find an input where the failure value is the correct
+   answer and check that the model actually returns it.
+
+7. **The regression you cannot see.** Make a meaning-preserving edit to a
+   production prompt — reorder sentences, change bullets to prose. Run your
+   evaluation. If nothing moved, try three more edits before concluding your
+   task is robust.
+
+## What to remember {#sec-prompting-summary}
+
+- **In-context learning is task inference, not learning.** No weight changes
+  and nothing survives the call. @min2022rethinking randomised the labels in
+  the demonstrations and most of the benefit remained, which says examples
+  mainly convey format and label space rather than the mapping.
+
+- **The prompt is part of the model.** Twelve prompts that a competent reader
+  would call the same instruction spanned **14.67 accuracy points** on one
+  model and one task — 75.33% to 90.00%. That is not a writing difference; it
+  is a component with an effect size.
+
+- **On 30.7% of items, the prompt decided the answer.** All twelve variants
+  agreed on only 69.3% of the reviews; two variants disagreed on a median of
+  12% and as much as 28.7%. Your model has an opinion on most items and the
+  formatting decides the rest.
+
+- **The spread is real, and paired testing is how you show it.** Best against
+  worst: overlapping confidence intervals, 42 disagreements, McNemar
+  **$p = 0.0009$**. Comparing two accuracies would have called it
+  inconclusive; the pairing throws away the 108 items that carry no
+  information and finds the signal.
+
+- **Which means a single-prompt model comparison is unreliable.** If prompt
+  variance is 14.67 points, "model A beat model B by 5" measured with one
+  prompt each is a statement about prompts. Compare over a set of prompts and
+  report the distribution.
+
+- **The folklore variable was noise and the ignored one was the effect.**
+  @sec-classification measured English-versus-Turkish instructions at
+  **+0.54, $p = 0.54$** on this model family. Bullet formatting, here, was
+  worth eight points. The role prefix — the most reproduced pattern in
+  circulation — came 11th of 12 and cost 3.33 points against its own baseline.
+
+- **You cannot tell which prompt is better by reading them.** That is the whole
+  case for treating prompt changes as a testing problem: a semantically empty
+  edit cost 4.00 points, and no reviewer would have predicted the sign.
+
+- **Check reproducibility before you measure anything.** Locally, temperature 0
+  was fully deterministic with or without a seed, and a fixed seed made even
+  temperature 0.7 deterministic — but with neither, 29 of 30 items varied
+  across ten runs. Hosted APIs are frequently non-deterministic even at
+  temperature 0, because batching changes floating-point reduction order. Run
+  the ten-repeat check on the endpoint you will ship on.
+
+- **Write prompts as specifications.** Name the output contract, name the
+  failure value, and put constraints where they bind. Then validate the
+  contract — a schema you do not check is a comment, and @sec-summarization
+  already showed that a schema guarantees shape and never truth.
