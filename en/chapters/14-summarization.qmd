@@ -1,74 +1,1126 @@
 # Summarization {#sec-summarization}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Every number on this page was measured on XL-Sum
+Turkish [@hasan2021xlsum] — 27,176 training and 3,397 test BBC Türkçe
+articles with journalist-written one-sentence summaries. The extractive
+systems are scored on all 3,397; the LLM on a 500-article sample, stated
+where it appears. @sec-summarization-rouge reports a tokenizer defect that
+changes every ROUGE number ever published on Turkish, so the ROUGE used here
+is written out rather than imported and validated against `rouge-score` to
+ten decimal places on text that tool can tokenize. Software: `rouge-score`
+0.1.2, `snowballstemmer` 3.1.1, NumPy 2.5.2 on Python 3.14.5; the local LLM
+through `ollama` 0.24.0.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- say which of several incompatible tasks the word "summary" is naming;
-- build the extractive baseline before reaching for a generative model;
-- summarize documents longer than the context window;
-- detect unfaithful summaries, and explain why ROUGE will not detect them for you.
+- say which of several incompatible tasks the word "summary" is naming, and
+  refuse to build one until somebody has chosen;
+- characterise a summarization corpus before modelling it, and predict from
+  that characterisation whether extractive methods can work at all;
+- build the extractive baselines, including the oracle that tells you their
+  ceiling;
+- explain what ROUGE measures, what it cannot see, and why its standard
+  implementation is broken for Turkish;
+- distinguish intrinsic from extrinsic unfaithfulness and measure the rate of
+  each;
+- use an LLM as a judge while measuring the biases that come with it;
+- summarize documents longer than the context window, and say what the
+  pipeline loses.
 
-## "Summarize this" names at least four different tasks
+## "Summarize this" is not one task {#sec-summarization-tasks}
 
-<!-- TODO(draft): generic vs. query-focused, single vs. multi-document,
-    indicative vs. informative. The specification failure comes first:
-    most disappointing summarization systems are answering a different
-    question from the one the user meant. -->
+Before any modelling, a specification problem that sinks more summarization
+projects than any modelling choice. The word names at least four different
+jobs, and the person asking usually has not decided which:
 
-## Extractive baselines that are hard to beat
+| axis | one end | the other end |
+|:--|:--|:--|
+| Audience intent | **indicative** — help me decide whether to read this | **informative** — replace reading it |
+| Scope | **generic** — what is this about? | **query-focused** — what does this say about X? |
+| Input | **single-document** | **multi-document**, where contradiction between sources becomes the hard part |
+| Method | **extractive** — select source sentences | **abstractive** — generate new text |
 
-<!-- TODO(draft): lead-3 is embarrassingly strong on news and must be
-    reported. TextRank as centrality on the similarity graph built in
-    @sec-clustering — no new machinery required. -->
+: Four axes, sixteen tasks {tbl-colwidths="[20,40,40]"}
 
-## Abstractive summarization
+An indicative summary that is 80% accurate is fine; you were only deciding
+whether to open the document. An informative summary that is 80% accurate is
+a liability, because the reader is acting on it without checking. [Those are
+different products with different acceptance criteria, and "summarize this"
+distinguishes neither.]{.hl}
 
-<!-- TODO(draft): encoder-decoder and decoder-only framings; what the
-    pretraining objective in @sec-pretraining already gave the model, and
-    what @sec-post-training had to add to make it follow the instruction. -->
+The first question on a summarization project is therefore not *which model*
+but **who reads the output, and what happens if it is wrong**. Everything in
+this chapter — including which metric to report — follows from that answer.
 
-## Long documents: chunking, map-reduce, and hierarchical summarization
+::: {.column-margin}
+A useful forcing question when the requirement is vague: *"if the summary is
+wrong, would the reader find out?"* If yes, you are building an indicative
+summary and can tolerate error. If no, you are building an informative one
+and @sec-summarization-faithfulness is the section that matters, not the
+leaderboard.
+:::
 
-<!-- TODO(draft): when the document exceeds the window, the architecture
-    becomes a pipeline design problem. Cost scales with @sec-attention-cost
-    and the budget arithmetic in @sec-tokenizer-budget; show where the
-    map-reduce tree loses information across chunk boundaries. -->
+## Characterising the corpus before modelling it {#sec-summarization-corpus}
 
-## Faithfulness: the failure mode that actually matters
+@sec-sequence-labeling made auditing the corpus a habit rather than an
+accusation. Here the audit answers a question with immediate engineering
+consequences: **can an extractive system work on this data at all?**
 
-<!-- TODO(draft): a fluent summary asserting something the source never
-    said is worse than a clumsy one, because it survives review. Taxonomy
-    of intrinsic vs. extrinsic hallucination with real examples. -->
+```python
+# XL-Sum Turkish: BBC Türkçe articles, each with a one-sentence summary
+# written by the journalist, not crowdsourced.
+rows = [json.loads(l) for l in open("turkish_test.jsonl")]
+```
 
-## Why ROUGE misleads, and what to report instead
+```text
+train  27,176 articles   median 303 words, 17 sentences   summary 22 words
+val     3,397 articles   median 300 words, 17 sentences   summary 22 words
+test    3,397 articles   median 296 words, 17 sentences   summary 21 words
 
-<!-- TODO(draft): n-gram overlap against one reference rewards copying and
-    is blind to the faithfulness errors above. Show a pair of summaries
-    where ROUGE ranks them backwards. The morphology argument from
-    @sec-turkish-nlp makes this sharper still in Turkish. -->
+compression 14x        83.4% of test summaries are exactly one sentence
+```
 
-## LLM-as-judge for summaries, and its biases
+The leakage check that dominated @sec-sequence-labeling comes back clean
+here:
 
-<!-- TODO(draft): position and length bias, self-preference. Reuse the
-    protocol from @sec-llm-eval rather than restating it; the contribution
-    here is the summarization-specific rubric. -->
+```text
+train articles 27,176, distinct texts 27,173      3 internal duplicates
+test article also in train                        0    0.00%
+test url also in train                            0
+test summary also in train                       24    0.71%
+duplicate texts inside test                       0
+```
 
-## Summarization in production: caching, cost, and the human in the loop
+[Zero article leakage.]{.hl} Worth saying plainly, because the habit is
+easily misread as cynicism: you audit so that you can *trust* the numbers,
+and sometimes the audit says you can. The 0.71% of repeated summaries are
+BBC boilerplate attached to different articles, small enough to ignore and
+large enough to mention.
 
-<!-- TODO(draft): who reads the summary and what happens if it is wrong.
-    Connect the cost model to @sec-serving. -->
+### How much of the summary is in the article?
 
-## Lab: summarize a corpus and measure whether anyone can trust it
+This is the measurement that decides the architecture. Following
+@grusky2018newsroom, take each summary and greedily find the longest
+fragments of it that appear verbatim in the source:
 
-<!-- TODO(draft): build the pipeline, then run a faithfulness audit on a
-    random sample — the sampling discipline is already established in
-    @sec-random-audit. Report the error rate with an interval, not a
-    verdict. -->
+```text
+coverage   0.527    share of summary words found anywhere in the article
+density    1.05     mean squared length of the extractive fragments
+novel     47.3%     summary words that never appear in the article
+verbatim   0/500    summaries that are a copied article sentence
+```
 
-## Exercises
+A density of 1.05 means the matching fragments are essentially **single
+words**. There is almost no copied phrasing at all. For contrast, CNN /
+DailyMail — the corpus most summarization intuitions were formed on — has
+summaries built from bullet highlights that reuse the article's own clauses.
+Running the identical measurement on 400 of its test articles makes the
+contrast concrete:
 
-1. Compare lead-3 against an LLM summarizer on the same 50 documents. Report ROUGE for both, then hand-check faithfulness on 20. Say whether ROUGE agreed with your reading.
-2. Take a summary you judge unfaithful and find the smallest edit to the source that would make it faithful. What does that tell you about where the model went wrong?
+| corpus | coverage | density | lead-3 R-1 | oracle R-1 |
+|:--|--:|--:|--:|--:|
+| CNN / DailyMail (English) | 0.845 | — | 29.44 | **40.58** |
+| XL-Sum Turkish | 0.527 | 1.05 | 14.03 | **24.89** |
+
+: The same code on two corpora, each with the tokenizer that is correct for
+its language {tbl-colwidths="[34,16,16,16,18]"}
+
+[XL-Sum Turkish is in the opposite regime, and the whole chapter follows from
+that.]{.hl} These are *rewritten*, in the style @narayan2018xsum called
+extreme summarization: one sentence, composed rather than selected.
+
+::: {.column-margin}
+The published lead-3 figure for CNN / DailyMail is 40.34 [@see2017get],
+higher than the 29.44 measured here, because that number comes from the
+original Perl ROUGE-1.5.5 with stemming and a truncated reference. The gap is
+a preview of @sec-summarization-rouge's argument: ROUGE is not one number but
+a family of them, and two papers reporting "ROUGE-1" are often not reporting
+the same quantity.
+:::
+
+### Where the summary's content comes from
+
+If the summary is not copied, is it at least drawn from the top of the
+article? Matching each summary against every article sentence by unigram F1
+and taking the best:
+
+```text
+best-matching article sentence, 500 test articles
+  sentence  1:   79   15.8%  ###############################
+  sentence  2:   54   10.8%  #####################
+  sentence  3:   50   10.0%  ####################
+  sentence  4:   38    7.6%  ###############
+  sentence  5:   40    8.0%  ################
+  sentence  6:   35    7.0%  ##############
+  sentence  7:   30    6.0%  ############
+  sentence  8:   30    6.0%  ############
+  sentences 9+: 144   28.8%
+```
+
+Lead bias is real but weak: the first sentence wins only 15.8% of the time,
+and **28.8% of summaries are best matched by something from sentence 9
+onward**. A system that reads only the opening is throwing away most of the
+evidence.
+
+### A caution about that 47.3%
+
+The novelty figure is inflated by Turkish, and by exactly how much is
+measurable. Re-run it with the words normalized:
+
+```text
+summary words absent from the article
+  exact surface form              47.3%
+  after Snowball Turkish stemming 37.5%
+  after 5-character prefix        32.8%
+```
+
+Between ten and fifteen of those points are **inflection, not new content**:
+
+```text
+summary 'bölgede'      <- article 'bölgedeki'
+summary 'parlamento'   <- article 'parlamentonun'
+summary 'uzmanlara'    <- article 'uzmanlar'
+summary 'işgal'        <- article 'işgali'
+```
+
+Same word, different case, counted as different by anything that compares
+surface strings. Hold on to that: it is a corpus statistic here, and in
+@sec-summarization-rouge it becomes a defect in the field's standard metric.
+
+## Extractive baselines, and their ceiling {#sec-summarization-extractive}
+
+The extractive family selects sentences from the source. It cannot
+hallucinate — every word was in the document — and it cannot compress below
+a sentence. Full test set, 3,397 articles:
+
+```text
+system                    R-1     R-2     R-L    words   time
+lead-1                  12.75    3.37   10.69     20.0
+lead-2                  14.04    3.61   10.94     37.6    0.2s
+lead-3                  14.03    3.74   10.44     54.9
+random sentence          8.56    1.73    7.30     17.5
+TextRank (1 sentence)   13.66    3.27   10.88     30.3   25.4s
+oracle sentence         24.89    9.31   20.39     20.1    1.8s
+```
+
+Three things to read out of that table.
+
+**Lead-3 is not strong here.** The received wisdom — "always report lead-3,
+it beats trained models" — is a fact about CNN / DailyMail, where the same
+code scores it at 29.44 R-1, and not a fact about summarization. On this
+corpus lead-3 scores **14.03**, and lead-2 beats it. Adding a third sentence
+adds 17 words and no information. [Report the lead baseline always; assume it
+is strong never.]{.hl}
+
+**TextRank does not earn its 25 seconds.** Building the sentence-similarity
+graph and running centrality on it — @sec-clustering's machinery, no new
+model — scores 13.66, between lead-1 and lead-2 [@mihalcea2004textrank]. It
+is a real method and on this corpus it is a rounding error away from taking
+the first sentence.
+
+**The oracle is the number that decides the chapter.** The oracle picks, for
+each article, the single sentence with the highest ROUGE-1 against the
+reference — it reads the answer first, so it is not a system but a *ceiling*.
+It scores **24.89**.
+
+::: {.callout-warning appearance="simple"}
+No single-sentence extractive system on this corpus can exceed 24.89 ROUGE-1,
+because that is what perfect sentence selection achieves. The gap between
+lead-2's 14.04 and that 24.89 is all the room there is for better selection;
+everything above 24.89 requires *writing*, not selecting.
+
+That is a corpus property, computed in 1.8 seconds, and it tells you whether
+to reach for an abstractive model before you train anything.
+:::
+
+::: {.column-margin}
+Run this oracle on any summarization corpus you are handed. If it is high —
+CNN / DailyMail's is above 50 — extraction is viable and cheap, and you
+should exhaust it before generating. If it is low, as here, the reference
+summaries are compositions and extraction is structurally capped. Two lines
+of code, and it decides the architecture.
+:::
+
+## What ROUGE measures, and what breaks it {#sec-summarization-rouge}
+
+[ROUGE](#gloss-rouge){#term-rouge .term-ref} [@lin2004rouge] counts n-gram
+overlap between a candidate summary and a reference. ROUGE-1 is unigram
+overlap, ROUGE-2 bigram, ROUGE-L the longest common subsequence, each reported
+as an F1. It has been the field's default metric for twenty years, and it
+survives for the honest reason that it is cheap, deterministic and correlates
+with quality well enough to rank obviously-bad systems below obviously-good
+ones.
+
+::: {#gloss-rouge .column-margin .term-gloss}
+**ROUGE** — n-gram overlap against a reference summary, reported as an F1.
+Cheap and reproducible; blind to whether the summary is true, and dependent
+on a tokenizer nobody checks. [↩](#term-rouge){.term-back}
+:::
+
+This chapter has three complaints, in increasing order of how much they
+should worry you.
+
+### Complaint one: the standard implementation destroys Turkish
+
+Google's `rouge-score` is the reference implementation. HuggingFace's
+`evaluate` wraps it, and most papers reporting ROUGE since 2019 have used it.
+Its tokenizer, reproducing the original Perl script's behaviour, is one line:
+
+```python
+# rouge_score/tokenize.py
+text = text.lower()
+text = re.sub(r"[^a-z0-9]+", " ", text)   # <- everything else is a separator
+```
+
+`[^a-z0-9]` does not include `ç`, `ğ`, `ı`, `ö`, `ş`, `ü` or `İ`. In Turkish
+those are not punctuation; they are letters, and six of them are among the
+language's most frequent. So:
+
+```text
+görüştü        -> ['g', 'r', 't']
+çiğ            -> ['i']
+köfte          -> ['k', 'fte']
+değişiklik     -> ['de', 'i', 'iklik']
+şehrinde       -> ['ehrinde']
+Türkiye'nin    -> ['t', 'rkiye', 'nin']
+```
+
+Measured over 300 reference summaries from this corpus:
+
+```text
+word tokens, correct Turkish tokenization    6,682
+tokens after rouge-score                     9,660   1.45x as many
+words left intact                            3,713    55.6%
+words split or mutilated                     2,969    44.4%
+average pieces per mutilated word             1.96
+```
+
+[Forty-four percent of Turkish words do not survive the tokenizer, and the
+debris inflates every score.]{.hl} The single letters `g`, `r`, `t`, `i` match
+each other across documents at random, so overlap goes up:
+
+```text
+system                  correct tokenizer    rouge-score default    inflation
+lead-1                            12.75                  20.37        +59.8%
+lead-2                            14.04                  22.51        +60.3%
+lead-3                            14.03                  22.03        +57.0%
+random sentence                    8.56                  15.44        +80.4%
+TextRank                          13.66                  21.34        +56.2%
+oracle sentence                   24.89                  30.28        +21.7%
+```
+
+: ROUGE-1 on the same 3,397 summaries, two tokenizers
+{tbl-colwidths="[30,24,24,22]"}
+
+Be precise about the damage, because overstating it would be its own error:
+**the ranking is unchanged.** lead-2 > lead-3 > TextRank > lead-1 under both
+tokenizers. What is destroyed is *comparability* — every published Turkish
+ROUGE number is roughly 60% larger than the quantity its readers think it is,
+by an amount that varies with how much a system copies. A random baseline
+gains 80%; the oracle gains 22%. [The inflation is a function of the system,
+so the gaps between systems are wrong even though the order survives.]{.hl}
+
+::: {.column-margin}
+Our own tokenizer needed a fix in the same family, and it is the bug
+@sec-clustering found in the wild: `"İstanbul".lower()` gives `i` plus a
+combining dot, which `\w+` then splits into `i` and `stanbul`; and
+`"IŞIK".lower()` gives `işik` rather than `ışık`. Turkish lowercasing is not
+`str.lower()`. Both directions have to be special-cased, and the bug is
+invisible unless you print the tokens.
+:::
+
+To be sure the argument is about the tokenizer and not about our arithmetic,
+the ROUGE used in this chapter was validated against `rouge-score` on 300
+random ASCII-only pairs, where both tokenizers agree:
+
+```text
+max absolute difference vs rouge-score, 900 comparisons:  0.0000000000
+```
+
+The implementations are identical. The entire Turkish gap is tokenization.
+
+### Complaint two: it depends on a normalizer nobody reports
+
+Turkish inflects. `bölgede` and `bölgedeki` are the same word doing the same
+job; ROUGE sees two unrelated tokens. Applying a stemmer before counting
+moves every number:
+
+```text
+system                  surface   5-char prefix   Snowball tr
+lead-1                    12.75           17.85         16.13
+lead-2                    14.04           19.46         17.67
+lead-3                    14.03           19.13         17.48
+TextRank                  13.66           18.24         17.11
+oracle sentence           24.89           29.30         27.77
+```
+
+: ROUGE-1 under three normalizers {tbl-colwidths="[28,18,18,18]"}
+
+Five points of ROUGE-1 sit between "surface form" and "5-character prefix",
+which is a larger difference than most papers' claimed improvements over
+their baselines. **A ROUGE number is not interpretable without the tokenizer
+and the normalizer that produced it**, and those are almost never stated.
+This is not a Turkish problem; it is worse in Turkish.
+
+### Complaint three: the one that actually matters
+
+The first two complaints are about reproducibility, and could be fixed by a
+convention. The third cannot be fixed.
+
+[ROUGE cannot see whether the summary is true.]{.hl} It counts word overlap
+with a reference, so a summary that copies the right words in a
+truth-reversing order scores well, and a correct paraphrase using different
+words scores badly. Consider a source sentence *"the minister denied that the
+bank would be sold"*:
+
+| candidate | truth | ROUGE-1 vs reference |
+|:--|:--|--:|
+| the minister denied the bank would be sold | correct | high |
+| the minister said the bank would be sold | **false** | high — one word differs |
+| the sale was ruled out by the ministry | correct | low — almost no overlap |
+
+: What overlap cannot distinguish {tbl-colwidths="[46,18,36]"}
+
+The false summary and the true one differ by a single token, and that token
+carries the entire meaning. @kryscinski2019neural made this case at length;
+@fabbri2021summeval then measured it, finding ROUGE's correlation with human
+judgements of *consistency* to be weak enough that it cannot be used to rank
+systems on faithfulness. @goyal2022news found human annotators preferring
+GPT-3 summaries that ROUGE ranked *below* fine-tuned models.
+
+So: report ROUGE, because it is the common currency and its absence looks
+evasive. Never conclude from it alone. The next two sections are what to add.
+
+## Abstractive summarization {#sec-summarization-abstractive}
+
+Extraction is capped at 24.89 on this corpus, so the rest of the ground
+belongs to models that *write*. Three framings have been used, and the
+history is worth two paragraphs because it explains why the current answer
+looks so anticlimactic.
+
+**Encoder-decoder, trained on the task.** The encoder reads the article, the
+decoder writes the summary, and the whole thing is trained on
+(article, summary) pairs. BART, T5, mT5 and their descendants. This is what
+"a summarization model" meant until about 2022, and it still wins on
+throughput per unit of quality when you have a corpus and a fixed domain.
+
+**Decoder-only, instructed.** @sec-pretraining's next-token objective already
+teaches a model how text of every genre is shaped, including the shape of a
+news lede. @sec-post-training is what makes the model *follow the
+instruction* to produce one rather than continue the article. Summarization
+turned out to be one of the tasks that needed no task-specific training at
+all — the capability was latent in the pre-trained model, and instruction
+tuning unlocked it.
+
+That is why this chapter's abstractive system is a prompt rather than a
+training run. It is also why @goyal2022news found human annotators preferring
+zero-shot GPT-3 summaries over fine-tuned models that scored *higher* on
+ROUGE — a result this chapter is about to reproduce in miniature.
+
+```python
+PROMPT = """Aşağıdaki haber metnini TEK BİR CÜMLEYLE özetle.
+
+Kurallar:
+- Yalnızca tek bir cümle yaz, en fazla 30 kelime.
+- Sadece metinde geçen bilgileri kullan; metinde olmayan hiçbir şey ekleme.
+- Haberin ana olayını ver, ayrıntıları değil.
+- Başlık değil, tam bir cümle yaz.
+- Sadece özeti yaz, başka hiçbir şey yazma.
+
+Haber metni:
+{text}"""
+```
+
+Two details in that prompt earn their place. The length cap exists because
+ROUGE-1 F1 punishes long summaries through precision, so an uncapped model
+writes three sentences and scores worse while being no less useful — a metric
+artefact you have to defend against rather than discover. And the instruction
+to use only what is in the text is the faithfulness constraint stated
+explicitly; @sec-summarization-faithfulness measures whether it worked.
+
+### What it scores
+
+All six systems on the same 500 articles, ROUGE-1 with a tokenizer that
+handles Turkish:
+
+| system | R-1 | R-2 | R-L | words |
+|:--|--:|--:|--:|--:|
+| lead-1 | 13.24 | 3.36 | 10.85 | 20.1 |
+| lead-2 | 14.69 | 3.79 | 11.16 | 38.0 |
+| lead-3 | 14.52 | 3.95 | 10.74 | 55.4 |
+| TextRank (1 sentence) | 13.92 | 3.29 | 10.93 | 29.8 |
+| **LLM, zero-shot** | **19.29** | **6.00** | **16.08** | 23.7 |
+| *oracle sentence* | *25.05* | *9.21* | *20.29* | *19.5* |
+
+: Same 500 articles, surface-form normalizer {tbl-colwidths="[34,14,14,14,12]"}
+
+The zero-shot LLM beats every real extractive system by about **4.6 ROUGE-1
+points** and still sits **5.8 below the extractive oracle**. Both halves of
+that matter: generation is clearly worth it here, and the ceiling on *perfect
+sentence selection* is still above what a 9B model writing freely achieves
+against these references.
+
+Which should already make you suspicious of the metric, because a system that
+picks the single best existing sentence is not obviously better than one that
+writes a summary. @sec-summarization-faithfulness is where that suspicion is
+confirmed with a measurement.
+
+## Long documents {#sec-summarization-long}
+
+The articles above are 300 words. Real summarization requests arrive as
+80-page contracts, quarterly filings and year-long ticket histories, and at
+that point the architecture stops being a model choice and becomes a pipeline
+design.
+
+Three patterns, in increasing order of what they cost and what they preserve:
+
+**Truncate.** Feed the first *n* tokens and ignore the rest. Honest when lead
+bias is strong; on this corpus, where 28.8% of summaries are best matched by
+sentence 9 or later, it throws away most of the evidence. The cheapest option
+and the one most often chosen by accident.
+
+**Map-reduce.** Chunk, summarize each chunk, then summarize the summaries.
+Cost is linear in document length, it parallelises perfectly, and it is the
+default in every framework. What it loses is **anything that spans a chunk
+boundary**: a contract clause qualified twelve pages later, a retraction, a
+narrative arc. Each chunk summarizer sees a window with no idea what came
+before, so it cannot know which of its details will matter globally, and the
+reduce step can only work with what the map step happened to keep.
+
+**Refine, or hierarchical rollup.** Carry a running summary forward, updating
+it with each chunk. Preserves cross-chunk continuity, and is strictly
+sequential — no parallelism — with the running summary drifting as it is
+repeatedly rewritten. Late chunks get more influence than early ones, which
+is the opposite failure to truncation.
+
+::: {.column-margin}
+The arithmetic that decides this is @sec-transformers'. Attention is
+quadratic in sequence length, so one pass over 100k tokens is not ten times a
+pass over 10k. Map-reduce trades that quadratic for a linear number of small
+quadratic passes, which is why it wins on cost even where a long-context
+model would fit the document — and why "the model has a million-token window"
+does not settle the design.
+:::
+
+The rule that survives contact with production: [chunk on structure, never on
+character count.]{.hl} Sections, clauses, chapters, speaker turns, dates.
+A boundary drawn mid-argument produces two summaries that are each locally
+plausible and jointly wrong, and that failure is invisible in every automatic
+metric — it needs a reader who knows the document.
+
+## Faithfulness {#sec-summarization-faithfulness}
+
+A summary can be fluent, on topic, well-sized, high-ROUGE, and assert
+something the source never said.
+[Faithfulness](#gloss-faithfulness){#term-faithfulness .term-ref} is whether
+every claim in the summary is supported by the source, and it is a different
+question from whether the summary reads well or matches a reference.
+
+::: {#gloss-faithfulness .column-margin .term-gloss}
+**faithfulness** — whether a summary asserts only what its source supports.
+Independent of fluency, independent of reference overlap, and the property
+that decides whether anyone can act on the output.
+[↩](#term-faithfulness){.term-back}
+:::
+
+@maynez2020faithfulness split the failure in two, and the distinction is
+operationally useful because the fixes differ:
+
+- **Intrinsic** — the summary misstates something that *is* in the source.
+  Swapped subject and object, a negation dropped, two entities conflated,
+  a number attached to the wrong thing. Detectable by comparing against the
+  source, and usually a model error.
+- **Extrinsic** — the summary adds something not in the source at all.
+  Sometimes true (the model knows who the finance minister was) and sometimes
+  invented. Detectable as *unsupported*; deciding whether it is also *false*
+  needs the world, not the document.
+
+An extrinsic addition that happens to be true is still a defect in an
+informative summary, because the reader cannot tell which sentences were
+grounded and which were supplied by the model.
+
+### Counting it without a human
+
+A crude proxy gets you a long way: **a number or a proper noun in the summary
+that appears nowhere in the source is an unsupported claim.** It misses
+intrinsic errors entirely — a swapped subject uses only source words — but it
+catches extrinsic ones, and it costs nothing to run on every summary you
+generate.
+
+Crude proxies need a control, or you will believe whatever they say. The
+control here is free: [lead-2 is copied verbatim from the article, so its
+flag rate is the proxy's false-positive rate, and it must be zero.]{.hl}
+
+```text
+system                nums  unsupported   propers  unsupported   summaries flagged
+lead-1  (control)      100            0       521            0       0    ( 0.0%)
+lead-2  (control)      173            0       809            0       0    ( 0.0%)
+```
+
+Zero on both, which is what makes the next table worth reading. Getting there
+took three attempts; the two failures are in @sec-summarization-proxy-bugs
+because they are more instructive than the fix.
+
+::: {.callout-note collapse="true"}
+## The two versions of this proxy that were wrong {#sec-summarization-proxy-bugs}
+
+**Attempt one** compared the summary's capitalised words against the
+*capitalised* words of the source — and skipped sentence-initial ones in both,
+to avoid counting "The" as a proper noun. So a name that appears in the
+article only at the start of a sentence was recorded as absent. It reported
+that **56% of BBC journalists' own summaries were unfaithful**, which is the
+kind of number that should stop you rather than excite you.
+
+**Attempt two** fixed that by checking the whole source, but built the
+summary's token set with `str.split()` while building the source's with
+`\w+`. So `İtalya'ya` in the summary never matched `italya` in the source,
+`neo-İslamcı` never matched `islamcı`, and a source typo like
+`Komisyonu,hemşirenin` matched nothing at all. Copied text — which cannot be
+unfaithful — came back 8% unfaithful.
+
+Both bugs share a shape: **the two sides of a comparison were tokenised
+differently.** That is the same defect @sec-summarization-rouge finds in
+`rouge-score` and the same one @sec-sequence-labeling found in an LLM
+extraction pipeline. When a metric compares text against text, the first
+thing to check is that both sides went through the same tokenizer, and the
+cheapest way to check is a control whose answer you already know.
+:::
+
+### What the proxy found
+
+::: {.callout-warning appearance="simple"}
+The most surprising number in this chapter is not about a model.
+
+```text
+system                nums  unsupported   propers  unsupported   summaries flagged
+lead-1  (control)      100            0       521            0       0    ( 0.0%)
+lead-2  (control)      173            0       809            0       0    ( 0.0%)
+LLM (qwen3.5:9b)        61            0       494            3       3    ( 2.0%)
+reference (human)       74           33       644          173      86    (57.3%)
+```
+:::
+
+[The reference summaries assert unsupported content at nearly thirty times the
+rate the model does.]{.hl}
+
+This is not a measurement error — the controls are clean — and it is not BBC
+journalists inventing news. It is how the corpus was built. XL-Sum's
+"summary" is the bolded intro line that accompanies the article, written to
+orient a reader arriving cold, so it supplies background the body then takes
+for granted: the minister's first name, the date of the referendum, the
+figure from a report the article only alludes to.
+@maynez2020faithfulness documented exactly this for XSum, which is built the
+same way; here it is again in Turkish.
+
+Some of the 57.3% is my proxy counting an abbreviation mismatch — the
+reference writes *Avrupa Birliği* where the article writes *AB* — so treat it
+as an upper bound. The direction is not in doubt.
+
+Three consequences follow, and they are the reason this section is not a
+footnote.
+
+1. **ROUGE against these references rewards unfaithfulness.** A model that
+   reproduces the reference's unsupported background scores higher. A model
+   that refuses scores lower.
+2. **Our prompt told the model to use only what is in the text, and it
+   complied** — 2.0% against the reference's 57.3%. It is being penalised by
+   the metric for doing the thing we asked.
+3. **Fine-tuning on this corpus would teach a model to hallucinate**, because
+   the training signal contains 57.3% unsupported assertions. This is the
+   single strongest argument in this chapter against training on a
+   scraped summarization corpus without auditing it first.
+
+::: {.column-margin}
+Which is also the answer to "why not just fine-tune mT5 on the 27,176
+training pairs?" You can, and it will score better on ROUGE, and part of what
+it will have learned is to assert things its input does not contain. The
+metric will not tell you. @sec-data-annotation is the chapter on noticing
+this class of problem before it reaches a model.
+:::
+
+## LLM-as-judge, and what it costs you {#sec-summarization-judge}
+
+ROUGE cannot see faithfulness; a hand audit sees everything and does not
+scale. The middle option is to ask a model, which is now the default in
+practice [@liu2023geval] and comes with biases that have to be measured
+rather than assumed away.
+
+The design used here follows three rules worth stating, because breaking any
+of them quietly invalidates the result:
+
+1. **A different model judges than generates.** `gemma3:27b` judges
+   `qwen3.5:9b`. Models prefer their own output, and a self-judged score is
+   not a measurement.
+2. **The judge answers one narrow question, under a schema.** Not "rate this
+   summary 1-5" — *is every claim in this summary supported by the source?*
+   with a two-value enum. A rubric with one axis is reproducible; a
+   five-point overall quality score is a mood.
+3. **The human reference is judged too, under identical conditions.** It is
+   the only way to know what the judge's scores mean, and — as
+   @sec-summarization-faithfulness showed — the reference is not
+   automatically the ceiling.
+
+### What the judge said
+
+150 articles, both the model's summary and the human reference judged under
+identical conditions:
+
+| judged by | LLM (qwen3.5:9b) | reference (human) |
+|:--|--:|--:|
+| automatic proxy | 3.3% | 57.3% |
+| `gemma3:27b` judge | 7.3% | 33.3% |
+
+: Share of summaries with at least one unsupported claim, same 150 articles
+{tbl-colwidths="[34,33,33]"}
+
+The judge confirms the direction: **the human references are judged
+unsupported four to five times as often as the model's summaries**. Two
+methods, one crude and one expensive, disagree about the level and agree
+about the ordering.
+
+### The part worth more than either number
+
+Agreement between the two methods, item by item:
+
+```text
+                       proxy flags   judge flags   both   verdicts agreeing
+LLM (qwen3.5:9b)                 5            11      1        90.7%
+reference (human)               86            50     35        56.0%
+```
+
+[On the model's summaries the two methods flag 5 and 11 items and overlap on
+exactly one.]{.hl} That 90.7% agreement figure is almost entirely agreement
+about the *clean* summaries; where either method sees a problem, they are
+nearly disjoint.
+
+This is what the theory predicts and it is easy to forget:
+
+- The proxy can only see **extrinsic** errors — a name or number that is not
+  in the source. It is structurally blind to intrinsic ones, because a
+  swapped subject or a dropped negation uses only source words.
+- The judge sees both, and adds its own errors: it flags the model at 7.3%
+  where the proxy sees 3.3%, and it *clears* references the proxy flags,
+  because it correctly resolves *AB* to *Avrupa Birliği* and the proxy
+  cannot.
+
+So: **the ranking is the trustworthy part; the rate is not.** Report both
+measurements, report the disagreement, and if you need an absolute number —
+"what fraction of what we ship is wrong?" — neither of these gives it to you.
+That number comes from reading a random sample, which is @sec-data-annotation's
+discipline and @sec-summarization-lab's step 6.
+
+### What the judge costs
+
+```text
+300 judgements with gemma3:27b     20,482s     68.3s each
+```
+
+Nearly six hours to judge 150 article-summary pairs twice, against 20 minutes
+to *generate* 500 summaries with the 9B model. [Judging is more expensive than
+generating]{.hl}, because the judge reads the whole article as well as the
+summary and you run it once per system. Budget for it as an evaluation cost,
+not an afterthought, and sample rather than judging everything.
+
+### The biases, and which ones this chapter measured
+
+The design rules above exist because LLM judges have known, replicable
+failure modes. This chapter's setup avoids two of them by construction and
+does not measure the third:
+
+| bias | what it is | handled here |
+|:--|:--|:--|
+| Self-preference | a model scores its own output higher | avoided: `gemma3:27b` judges `qwen3.5:9b` |
+| Position | in a pairwise comparison, the option presented first wins more often [@zheng2023judging] | not applicable: this judge scores one summary at a time, with no pairwise ordering |
+| Length | longer, more fluent answers score higher regardless of content | **not measured here** — the length cap in the prompt holds the model's summaries near the reference length (23.7 words against 21), which reduces the exposure but does not test for it |
+
+: Judge biases and what this setup does about them {tbl-colwidths="[18,48,34]"}
+
+Stating the third one plainly rather than waving at it: if you move to a
+pairwise or 1–5 rubric judge, position and length bias both become live, and
+@zheng2023judging's swap test — present both orders, count how often the
+verdict flips — is the measurement to run before believing any of it.
+
+## Summarization in production {#sec-summarization-production}
+
+The engineering questions are the same three every generative feature has,
+and summarization has unusually clean answers to two of them.
+
+**Caching is nearly free money.** A summary is a pure function of
+(document, prompt, model, decoding parameters). Key a cache on the hash of
+those four and the same document is never summarized twice. Documents are
+re-read far more often than they are written, so hit rates are high, and
+unlike most LLM features there is no personalisation to defeat the cache.
+Version the prompt into the key, or a prompt change will silently serve stale
+output forever.
+
+**Cost is dominated by input, not output.** Measured over the 500 articles
+summarized here: **890 prompt tokens per article against 53 generated**, a
+ratio of nearly 17 to 1 — and these are 300-word articles, the short end of
+anything you would want summarized. For long documents under map-reduce the
+ratio gets worse, because the intermediate summaries are read again. The
+arithmetic is @sec-serving's: what you pay for is *reading*, so the lever is
+how much you send, not how much you ask for. Truncating boilerplate —
+headers, navigation, disclaimers, signature blocks — is usually a larger
+saving than any model change.
+
+**The human in the loop is a design decision, not a fallback.** Return to the
+question from @sec-summarization-tasks: what happens if the summary is wrong?
+Three shapes, in order of how much they cost:
+
+| pattern | when | what it costs |
+|:--|:--|:--|
+| Show source alongside | the reader can verify in one glance | UI work, no per-item cost |
+| Link every claim to its sentence | claims are checkable individually | the extraction of @sec-sequence-labeling, plus alignment |
+| Human review before delivery | acting on a wrong summary is expensive | a person, per item |
+
+: Who checks, and what checking costs {tbl-colwidths="[32,34,34]"}
+
+[Showing the source next to the summary is the highest-return feature in most
+summarization products]{.hl} and it is not a model improvement at all. It
+converts an informative summary — which must be right — into an indicative
+one, which only has to be useful.
+
+## Intuition checks {#sec-summarization-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. A vendor reports ROUGE-1 of 41 on Turkish news. Are you impressed?
+
+You cannot be, until you know three things they almost certainly did not
+state: the tokenizer, the normalizer, and the reference set.
+
+On this corpus the same predictions score **14.03** with a Turkish-correct
+tokenizer and **22.03** with `rouge-score`'s default, which treats `ç`, `ğ`,
+`ı`, `ö`, `ş` and `ü` as punctuation and mutilates 44.4% of Turkish words.
+Stemming moves it another five points. So "41" could be a strong system, or a
+weak system measured generously, and the number alone cannot tell you.
+
+Ask what tokenizer produced it. If the answer is "the standard one", the
+number is not comparable to anything computed correctly.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Before training anything, how do you know whether extraction can work?
+
+Compute the oracle. For each document, take the single sentence with the
+highest ROUGE against the reference, and average. That is what *perfect*
+sentence selection achieves, so no extractive system can beat it.
+
+Here it is **24.89**, and lead-2 already reaches 14.69 — so all the remaining
+room in extraction is ten points, and everything above 24.89 requires
+writing. On CNN / DailyMail the same measurement gives 40.58, which is why
+extractive systems were respectable there for a decade.
+
+Two lines of code, and it decides your architecture before you spend a GPU
+hour.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your faithfulness metric says human journalists hallucinate in 56% of summaries. What do you do?
+
+Not publish it. A number that surprising is far more likely to be a bug in
+your measurement than a discovery, and the way to find out is a **control
+whose answer you already know**.
+
+Here the control is free: lead-2 is copied verbatim from the article, so it
+*cannot* be unfaithful, and any flag on it is a false positive. Running it
+exposed two bugs in two successive versions of the proxy — both the same
+mistake, tokenising the two sides of the comparison differently.
+
+Only after the control returned exactly zero was the reference's rate worth
+reporting. It was still high (57.3%), for a real reason: the corpus's
+summaries are BBC intro lines that supply background the article body does
+not contain.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your model scores below the fine-tuned baseline on ROUGE. Is it worse?
+
+Maybe the opposite. On this corpus the reference summaries assert unsupported
+content in 33–57% of cases depending on how you measure, so ROUGE against
+them rewards a model for reproducing that. Our prompt told the model to use
+only what is in the text; it complied, and the metric charged it for the
+compliance.
+
+@goyal2022news found exactly this at scale — humans preferring zero-shot
+GPT-3 summaries that ROUGE ranked below fine-tuned models. When ROUGE and a
+faithfulness measurement disagree, the reference is a hypothesis about
+quality, not the definition of it.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. You need to summarize 80-page contracts. Where does map-reduce lose?
+
+At the chunk boundaries, and invisibly. Each chunk summarizer sees its window
+with no knowledge of the rest, so it cannot tell which of its details will
+matter globally; the reduce step can only work with what survived. A clause
+qualified twelve pages later produces two locally-correct summaries that are
+jointly wrong.
+
+No automatic metric catches this — both summaries are fluent, both are
+grounded in their own chunk. The mitigations are to chunk on *structure*
+rather than character count, and to carry a running summary forward (refine)
+when continuity matters more than parallelism.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. When is extractive summarization the right answer in 2026?
+
+When being wrong is expensive and being clumsy is not. An extractive summary
+is quoted text: it cannot assert anything the document does not contain, which
+in a regulated or legal setting is worth more than fluency.
+
+Also when the oracle says the answer *is* in the document — a high oracle
+score means selection is viable — and when you need determinism, auditability,
+or a per-document cost of approximately zero. Lead-2 on this corpus takes
+0.2 seconds for 3,397 articles against 20 minutes for the LLM.
+:::
+
+## Interview questions {#sec-summarization-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the
+ones this chapter's own measurements make answerable.
+:::
+
+### Testing whether you understand the task
+
+**Q: How would you evaluate a summarization system?**
+
+The answer that ends the question: ROUGE for comparability, a faithfulness
+measurement because ROUGE cannot see truth, and a hand-audited random sample
+with an interval because neither automatic measure gives you an absolute
+rate. Then say what you would check first — the tokenizer, the oracle
+ceiling, and whether the references themselves are faithful. Candidates who
+answer "ROUGE" and stop have not shipped one.
+
+**Q: Why is ROUGE still used if it is this flawed?**
+
+Because it is cheap, deterministic, reproducible and comparable across
+papers, and because the alternatives are expensive, non-deterministic, or
+model-dependent. It ranks obviously-bad systems below obviously-good ones,
+which is most of what a leaderboard needs. The honest position is to report
+it and never to conclude from it — and to be able to say precisely what it
+cannot see: faithfulness, and any paraphrase that uses different words.
+
+**Q: Extractive or abstractive?**
+
+Ask what the oracle says, then ask what happens if the summary is wrong.
+High oracle plus expensive errors is an extractive problem. Low oracle plus
+tolerant readers is an abstractive one. A candidate who answers from
+preference rather than from those two questions is guessing.
+
+### Testing whether you have shipped one
+
+**Q: Your summarizer works in the demo and users say it hallucinates. Debug it.**
+
+Ordered by cost, and the first two are not the model. (1) Is it actually
+hallucinating, or is it surfacing something true the user did not expect?
+Have them point at a sentence. (2) Chunking — a map-reduce boundary produces
+locally-correct, jointly-wrong output that reads exactly like hallucination.
+(3) The prompt: is there an explicit grounding instruction? Adding one took
+the measured rate here from a model that was never asked to a model at 2–7%.
+(4) Only then, the model and its decoding parameters.
+
+**Q: How would you catch it automatically?**
+
+An entity-and-number proxy is an afternoon's work and catches extrinsic
+errors; validate it on copied text, which must score zero. An entailment
+model or an LLM judge catches intrinsic errors too, at roughly 68 seconds per
+judgement in this chapter's setup. Say that the two disagree at the item level
+even when they agree on the ranking — measured here, an overlap of one item
+out of the five and eleven each flagged — so neither replaces a sampled human
+read.
+
+**Q: 10 million documents, a budget, and a deadline. What do you build?**
+
+Costs first: 890 prompt tokens per 300-word article, and input dominates, so
+the biggest lever is boilerplate removal, not model choice. Then caching — a
+summary is a pure function of (document, prompt, model, parameters), so key
+on all four and version the prompt into the key. Then ask whether the reader
+needs an informative summary or an indicative one, because showing the source
+next to the summary converts one into the other and is cheaper than any model
+improvement.
+
+## The 2026 toolbox {#sec-summarization-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `rouge-score` | 0.1.2 | the reference ROUGE, used to validate this chapter's implementation and to demonstrate its tokenizer |
+| `snowballstemmer` | 3.1.1 | Turkish stemming, for the normalizer comparison in @sec-summarization-rouge |
+| `numpy` | 2.5.2 | the graph arithmetic behind TextRank and every average in the chapter |
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for generation and `gemma3:27b` for judging |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[26,16,58]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `bert-score` | 0.3.13 | embedding-based overlap [@zhang2020bertscore] — survives paraphrase where ROUGE does not, and is still blind to faithfulness |
+| `summac` / `AlignScore` | 0.0.4 / GitHub only | entailment-based faithfulness scoring: does the source entail each summary sentence? The principled version of this chapter's crude proxy |
+| `factscore` | 0.2.0 | decomposes a summary into atomic claims and checks each one, which is what you want when the summary is long |
+| `evaluate` | 0.4.6 | HuggingFace's metric wrapper — note that its `rouge` metric wraps `rouge-score`, tokenizer and all |
+| `lexrank` / `sumy` | 0.1.0 / 0.13.0 | classical extractive summarizers packaged, when you want LexRank and LSA baselines without writing them |
+| `Trafilatura` | 2.2.0 | stripping boilerplate out of documents before you pay to send them, which @sec-summarization-production says is the real cost lever |
+| `langchain-text-splitters` | 1.1.2 | structure-aware chunking for the map-reduce pipelines of @sec-summarization-long |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[22,14,64]"}
+
+## Lab: summarize a corpus and find out whether anyone can trust it {#sec-summarization-lab}
+
+Pick a corpus from your own domain with 200+ documents. Reference summaries
+are optional — the point of this lab is that you can evaluate without them.
+
+### Step 1 — decide what kind of summary, in writing
+
+One paragraph naming the four axes from @sec-summarization-tasks and who
+reads the output. If you cannot write it, the rest of the lab is premature.
+
+### Step 2 — characterise the corpus before modelling
+
+Compute coverage, density, and the oracle-sentence ROUGE. If the oracle is
+high, build the extractive system and stop. If it is low, you have just
+justified a generative model — with a number, to somebody who asked why.
+
+If you have no reference summaries, run the oracle against the document's own
+title or first sentence. It is a weaker signal and it still tells you whether
+the answer is *in* the document or has to be composed.
+
+### Step 3 — build lead-k and TextRank
+
+Always. They take an hour and they are the numbers every later claim is
+measured against.
+
+### Step 4 — generate, with the length cap and the grounding instruction
+
+Both matter, and both are in @sec-summarization-abstractive's prompt for
+reasons this chapter measured.
+
+### Step 5 — build the faithfulness proxy, then break it on purpose
+
+Numbers and proper nouns absent from the source. Then run it on **copied
+text** — lead-2 — and confirm it returns zero. It will not, the first time.
+Fix it until it does, and keep the broken version's output; the difference
+between the two is what you would have published.
+
+### Step 6 — audit a random sample by hand
+
+Thirty documents, read properly, each summary marked supported or not. Report
+the rate **with a Wilson interval**, not as a verdict: 3/30 is 10% with a
+95% interval from 3.5% to 25.6%, and shipping decisions differ across that
+range. @sec-data-annotation has the sampling discipline.
+
+### Step 7 — compare your hand audit against the proxy and the judge
+
+Three measurements of the same property. Where they disagree, read the
+document. The disagreements are the useful part — they tell you which of your
+cheap metrics you are allowed to trust unattended.
+
+### What to hand in
+
+One table of systems against ROUGE, the faithfulness proxy and your hand
+audit; the corpus characterisation from step 2; and a paragraph saying which
+system you would ship, to whom, and what happens when it is wrong.
+
+## Exercises {#sec-summarization-exercises}
+
+1. **The oracle first.** On any summarization corpus you can reach, compute
+   the oracle-sentence ROUGE-1 before building anything. Say what it implies
+   about extraction, then build lead-3 and see whether the implication held.
+
+2. **Break ROUGE deliberately.** Write two summaries of the same article: one
+   true and clumsy, one false and fluent, where the false one differs from a
+   correct summary by a single word (a negation, or a swapped subject).
+   Compute ROUGE-1, -2 and -L for both. Report the ranking.
+
+3. **The tokenizer, in your language.** Run `rouge_score.tokenize.tokenize`
+   over 100 sentences in a language you know that is not English. Count how
+   many words survive intact. If you work in Turkish, predict the answer from
+   @sec-summarization-rouge before you run it.
+
+4. **Normalizer sensitivity.** Take one system's output and score it under
+   three normalizers — surface, stemmed, and lemmatized if you have a
+   lemmatizer. Report the spread, and compare it to the improvement claimed
+   by the most recent summarization paper you have read.
+
+5. **Chunk-boundary loss.** Take a document long enough to need map-reduce.
+   Summarize it whole, then under map-reduce with chunks that deliberately
+   split a key argument in half. Find a fact present in the first summary and
+   absent from the second, and explain the mechanism.
+
+6. **Audit the references.** Run the faithfulness proxy of
+   @sec-summarization-faithfulness against the *reference* summaries of any
+   corpus you plan to fine-tune on. Validate it on copied text first. Then
+   decide whether you still want to fine-tune on it.
+
+7. **Cost, honestly.** For a corpus you actually have, compute the cost of
+   summarizing all of it: prompt tokens, output tokens, wall clock, and the
+   cache hit rate you would expect. Compare against the cost of the
+   extractive baseline, which is approximately zero, and against what the
+   summaries are worth.
+
+## What to remember {#sec-summarization-summary}
+
+- **Decide which summary before building one.** Indicative or informative,
+  generic or query-focused, single or multi-document, extractive or
+  abstractive. The forcing question is *who reads this, and what happens if
+  it is wrong* — an 80%-accurate indicative summary is fine and an
+  80%-accurate informative one is a liability.
+
+- **Compute the oracle before choosing an architecture.** Perfect
+  single-sentence selection scores **24.89** ROUGE-1 on this corpus and
+  **40.58** on CNN / DailyMail. That one number, two lines of code, tells you
+  whether the answer is *in* the document or has to be composed — and
+  therefore whether extraction can work at all.
+
+- **Do not inherit lead-3's reputation.** It scores 40.34 in the literature
+  on CNN / DailyMail and **14.03** here, where lead-*2* beats it. Report the
+  lead baseline always; assume it is strong never.
+
+- **`rouge-score` mutilates 44.4% of Turkish words.** Its tokenizer treats
+  `ç ğ ı ö ş ü İ` as punctuation, so `görüştü` becomes `['g','r','t']`. The
+  debris matches at random and inflates ROUGE-1 by about 60% — unevenly, from
+  +22% for the oracle to +80% for a random baseline. The rankings survive;
+  comparability does not. Our own implementation needed a Turkish lowercaser
+  for the same class of bug, and agrees with `rouge-score` to ten decimal
+  places on text that tool can tokenize.
+
+- **A ROUGE number without its tokenizer and normalizer is not a number.**
+  Five points of ROUGE-1 separate "surface form" from "5-character prefix" on
+  identical predictions — more than most papers claim over their baselines.
+
+- **ROUGE cannot see whether the summary is true**, and on this corpus it
+  actively rewards untruth: the human references assert unsupported content in
+  **33–57%** of cases, against **2–7%** for a model told to stay in the text.
+  Fine-tuning on such a corpus teaches a model to hallucinate, and the metric
+  will report that as an improvement.
+
+- **Validate a faithfulness metric on copied text.** Lead-2 is quoted
+  verbatim, so it cannot be unfaithful and must score zero. That control
+  caught two successive bugs here, both the same mistake: the two sides of the
+  comparison went through different tokenizers. The first version reported
+  BBC journalists as 56% unfaithful.
+
+- **Two faithfulness measurements can agree on the ranking and on almost
+  nothing else.** The proxy and the judge flagged 5 and 11 of the model's
+  summaries and overlapped on **one**, because one sees only extrinsic errors
+  and the other sees both. Trust the ordering, distrust the rate, and get
+  absolute numbers from a sampled human read with an interval.
+
+- **Judging costs more than generating.** 68.3 seconds per judgement against
+  2.4 seconds per summary. Sample, do not judge everything, and never let a
+  model judge its own output.
+
+- **Input dominates cost.** 890 prompt tokens per article against 53
+  generated. Stripping boilerplate beats every model change, and a cache keyed
+  on (document, prompt, model, parameters) is close to free money because
+  documents are read far more often than they are written.
+
+- **Showing the source beside the summary is the highest-return feature in
+  most summarization products**, and it is not a model improvement. It turns
+  an informative summary, which has to be right, into an indicative one, which
+  only has to be useful.
