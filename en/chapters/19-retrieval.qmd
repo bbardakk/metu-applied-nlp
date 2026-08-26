@@ -1,59 +1,630 @@
 # Retrieval: Search Before Generation {#sec-retrieval}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** The measurements extend @sec-turkish-nlp's
+retrieval experiment — the same 7,165 Turkish documents, the same query
+construction, the same seed — so the sparse numbers here and there are
+directly comparable. Two query conditions and two dense models are used
+deliberately; @sec-retrieval-conditions says why running only one of each
+would have measured the wrong thing. Software: `sentence-transformers` 6.0.0,
+`snowballstemmer` 3.1.1, NumPy 2.5.2 on Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- build a BM25 baseline and know why it is still hard to beat;
-- train and evaluate a dense retriever, including hard-negative mining;
-- tune the recall/latency dial on an ANN index deliberately;
-- report retrieval quality with recall@k and nDCG instead of eyeballing results.
+- build a BM25 baseline and say precisely which queries it wins;
+- explain what a dense retriever adds, and construct a query type where it
+  beats lexical search by seventy points and one where it loses by sixty;
+- decide whether to fuse two retrievers, using a rule rather than a habit;
+- tune the recall/latency dial on an approximate index deliberately;
+- report retrieval quality with recall@k and nDCG, and know which of them
+  bounds what your downstream system can possibly do.
 
-## Lexical retrieval: BM25 and why it still wins
+## Two families, and the question that decides between them {#sec-retrieval-families}
 
-<!-- TODO(draft): term frequency saturation and length normalisation; the
-    exact-match cases dense retrieval fails. This is @sec-bake-off's
-    argument again, one level up. -->
+Retrieval has two families and they fail in opposite directions.
 
-## Dense retrieval: bi-encoders, training, hard negatives
+**Lexical retrieval** matches words. BM25 — the standard scoring function
+[@robertson2009probabilistic] — is @sec-text-as-data's TF-IDF with two
+corrections that matter: term frequency **saturates**, so the tenth occurrence
+of a word adds far less than the second, and document length is normalised, so
+a long document does not win by containing more of everything. It is fast,
+exact, interpretable, needs no training, and it cannot match a word it has
+never seen.
 
-<!-- TODO(draft): contrastive training; in-batch vs. mined hard negatives;
-    why hard negatives are the whole game. -->
+**Dense retrieval** matches meaning. A
+[bi-encoder](#gloss-bi-encoder){#term-bi-encoder .term-ref}
+[@karpukhin2020dense] embeds queries and documents separately into the same
+space, so documents can be encoded once and searched by vector similarity. It
+handles paraphrase, synonymy and — as this chapter will show — different
+languages. It needs a trained model, it cannot guarantee an exact match on a
+part number, and its failures are hard to explain.
 
-## Approximate nearest neighbor: HNSW, IVF-PQ, and the recall/latency dial
+::: {#gloss-bi-encoder .column-margin .term-gloss}
+**bi-encoder** — query and document encoded independently, so every document
+can be embedded ahead of time and search is a vector lookup. The independence
+is what makes it scale, and what limits its accuracy relative to a
+cross-encoder. [↩](#term-bi-encoder){.term-back}
+:::
 
-<!-- TODO(draft): graph and quantisation indexes; the parameter that
-    trades recall for speed, measured. -->
+The received framing is that dense is the modern one and lexical is the
+baseline you report out of politeness. The measurements below say something
+less convenient.
 
-## Hybrid retrieval and fusion (RRF)
+## The experiment, and why it has two conditions {#sec-retrieval-conditions}
 
-<!-- TODO(draft): reciprocal rank fusion in five lines; why the hybrid
-    beats both parents. -->
+@sec-turkish-nlp measured the sparse side on 7,165 Turkish documents: with
+queries whose terms are inflected differently from the document — the case
+where a user types the dictionary form — surface-form BM25 reaches 28.0%
+recall@1 and stemming takes it to 95.3%.
 
-## Reranking: cross-encoders and late interaction
+The obvious next step is to add a dense retriever to that setup and see. **The
+obvious next step is also a trap**, and it is worth spending a paragraph on
+because the same trap is available in any retrieval evaluation you build.
 
-<!-- TODO(draft): the retrieve-then-rerank pattern; cost of a
-    cross-encoder over top-50; ColBERT-style late interaction as the
-    middle path. -->
+Those queries are *three disconnected content words*. That is the natural
+input for a lexical matcher and it is out of distribution for a bi-encoder
+trained to embed sentences. Running only that condition and reporting "dense
+retrieval is weak in Turkish" would have been measuring the query format and
+blaming the model.
 
-## Retrieval evaluation: recall@k, nDCG, MRR
+So the experiment runs **two query conditions** against the same documents:
 
-<!-- TODO(draft): what each metric rewards; why recall@k is the one that
-    bounds a RAG system's ceiling. -->
+| condition | the query is | who this favours |
+|:--|:--|:--|
+| **A. keyword, inflected** | three content words, in a different inflection than the document uses | lexical matching, if it can handle morphology |
+| **B. cross-lingual** | the document's professional English translation | dense only — there is no shared vocabulary at all |
 
-## Vector database or not: an honest decision guide
+: Two conditions, chosen so neither family gets a home fixture
+{tbl-colwidths="[24,44,32]"}
 
-<!-- TODO(draft): postgres+pgvector vs. a dedicated store vs. a library;
-    the scale at which the answer changes. -->
+And **two dense models**, for the same reason:
+`paraphrase-multilingual-MiniLM` is a *similarity* model, trained to score how
+alike two sentences are, and `multilingual-e5-base` [@wang2024e5] is a
+*retrieval* model, trained on query-document pairs with hard negatives.
+Reaching for the first because it is the famous one is a common mistake, and
+running only it would have understated dense retrieval.
 
-## Lab: build and tune a hybrid retriever on Turkish documents
+## What the measurements say {#sec-retrieval-results}
 
-<!-- TODO(draft): BM25, dense, and hybrid on the same Turkish corpus;
-    report recall@10 and latency for each. -->
+800 queries per condition, 7,165 documents, single relevant document per
+query.
 
-## Exercises
+### Condition A — keyword queries, inflected
 
-1. Build BM25 and a dense retriever on the same corpus. Find three queries where each beats the other and explain the pattern.
-2. Sweep your ANN index's search parameter. Plot recall@10 against p95 latency and pick an operating point with a stated SLO.
+```text
+system                                        R@1    R@10   MRR@10  nDCG@10
+BM25 surface form                           27.5%   54.1%     34.9     39.4
+BM25 stemmed                                96.0%   99.8%     97.7     98.2
+dense: paraphrase-MiniLM (similarity model) 10.6%   28.2%     15.6     18.6
+dense: multilingual-e5-base (retrieval)     35.9%   63.7%     44.5     49.1
+hybrid RRF, surface + e5                    37.6%   71.6%     47.6     53.3
+hybrid RRF, stemmed + e5                    63.2%   96.5%     73.7     79.2
+```
+
+[Stemmed BM25 wins by sixty points.]{.hl} A hundred lines of suffix-stripping
+rules beat a trained multilingual retriever 96.0% to 35.9% — and beat the
+similarity model, the one most people reach for first, 96.0% to 10.6%.
+
+The surface-form and stemmed rows reproduce @sec-turkish-nlp's 28.0% and 95.3%
+on a slightly different query sample, which is the continuity check that lets
+the rest of the table be read against it.
+
+### Condition B — cross-lingual queries
+
+```text
+system                                        R@1    R@10   MRR@10  nDCG@10
+BM25 surface form                           23.2%   43.5%     28.9     32.3
+BM25 stemmed                                23.8%   41.9%     29.1     32.1
+dense: paraphrase-MiniLM (similarity model) 93.8%   98.1%     95.4     96.0
+dense: multilingual-e5-base (retrieval)     96.2%   99.9%     97.8     98.3
+hybrid RRF, surface + e5                    49.4%   99.6%     71.6     78.7
+hybrid RRF, stemmed + e5                    48.1%   99.6%     70.9     78.2
+```
+
+[Dense wins by seventy-two points.]{.hl} The English query and the Turkish
+document share almost no vocabulary, so BM25 is reduced to matching proper
+nouns and numbers — which is exactly why it still scores 23.8% rather than
+zero, and worth noticing, because those are precisely the cases dense
+retrieval is worst at.
+
+::: {.column-margin}
+Stemming is worth **68 points** in condition A and **0.6 points** in condition
+B. That is not a contradiction; it is the same fact seen twice. Stemming fixes
+vocabulary mismatch *within* a language, and in condition B the mismatch is
+total, so there is nothing for it to fix.
+:::
+
+### The finding that contradicts the received wisdom
+
+Read the two hybrid rows in each table against their best parent:
+
+```text
+condition A     stemmed BM25 alone         96.0%  R@1
+                hybrid stemmed + e5        63.2%  R@1      -32.8
+
+condition B     dense e5 alone             96.2%  R@1
+                hybrid surface + e5        49.4%  R@1      -46.8
+```
+
+**Reciprocal rank fusion made things worse in both conditions**, and badly.
+That is the opposite of the standard claim that hybrid retrieval beats both
+parents [@cormack2009reciprocal], and the reason is visible in the mechanism.
+
+[RRF assumes the systems it is fusing are comparably good.]{.hl} It scores
+each document by $\sum 1/(k + \text{rank})$ across the lists, which treats a
+rank-1 hit from a useless system exactly like a rank-1 hit from an excellent
+one. When one parent is at 96% and the other at 36%, the weak parent's
+confident garbage arrives with full weight and displaces the strong parent's
+correct answer.
+
+The damage has a shape worth seeing, because it tells you when you can get
+away with it:
+
+```text
+condition B     dense alone       R@1 96.2%    R@10  99.9%
+                hybrid            R@1 49.4%    R@10  99.6%
+```
+
+**Recall@10 barely moved; recall@1 halved.** Fusion did not *lose* the
+document — it pushed it down the list. So if your consumer reads the top ten,
+the fusion cost you almost nothing; if it reads the top one, fusion cost you
+half your accuracy.
+
+### So when should you fuse?
+
+The rule the measurement supports, which is narrower than the folklore:
+
+- **Fuse when the parents are comparable and fail differently.** That is the
+  case @cormack2009reciprocal studied, and where fusion earns its reputation.
+- **Do not fuse when one parent dominates.** Check first, on your own queries.
+  It costs one evaluation run and the alternative is shipping a 47-point
+  regression that every blog post told you was an improvement.
+- **If your query mix contains both kinds** — and most real systems do, with
+  users typing part numbers *and* asking questions — the answer is usually to
+  *route* rather than to fuse: classify the query, send it to the retriever
+  that handles it, and keep fusion for the genuinely ambiguous middle.
+
+::: {.column-margin}
+Weighted fusion is the obvious repair, and it is not free: the weight is a
+fitted parameter, so it needs held-out queries and it will drift as your query
+mix changes. Routing has the same requirement more honestly, because a router
+is a model you can evaluate rather than a constant you tuned once.
+:::
+
+### And the choice of dense model matters exactly where the task is hard
+
+```text
+                              condition A   condition B
+paraphrase-MiniLM (similarity)      10.6%         93.8%
+multilingual-e5-base (retrieval)    35.9%         96.2%
+                                   ------        ------
+                                   +25.3          +2.4
+```
+
+On the easy condition the two are within two points, so a casual benchmark
+would conclude the model choice does not matter. On the hard condition the
+retrieval-trained model is **three and a half times better**. [The gap between
+a good and a mediocre component only appears on the inputs that are hard for
+it]{.hl}, which is an argument for building the difficult condition into your
+evaluation rather than reporting the average of an easy one.
+
+## Training a dense retriever {#sec-retrieval-training}
+
+The models above were used off the shelf. When they are not good enough on
+your domain, the training recipe is short to state and has one part that
+matters far more than the rest.
+
+A bi-encoder is trained **contrastively**: pull the embedding of a query
+toward its relevant document and push it away from irrelevant ones. The loss
+is usually InfoNCE over a batch, and the whole difficulty is in the word
+*irrelevant*.
+
+**In-batch negatives** are free: for a batch of query-document pairs, every
+other document in the batch is a negative. They cost nothing and they are
+mostly *easy* — a random document about football is not a plausible answer to
+a query about invoices, so the model learns to separate topics and stops
+there.
+
+**Hard negatives** are documents that look right and are not. Mine them by
+retrieving with your current model and taking the top-ranked wrong answers.
+[This is the whole game.]{.hl} A retriever trained only on random negatives
+learns topical similarity; a retriever trained on hard negatives learns the
+distinction your users actually need, which is between two documents that are
+both about invoices and only one of which answers the question.
+
+Two failure modes to plan for:
+
+1. **False negatives.** Your "hard negative" may be an unlabelled relevant
+   document, and training says it is wrong. On a corpus with sparse relevance
+   labels this is common enough to hurt; the usual mitigation is to skip the
+   very top of the retrieved list and mine from a little further down.
+2. **Staleness.** Negatives mined with the initial model stop being hard once
+   the model improves. Re-mine periodically, which is what makes this an
+   iterative procedure rather than a preprocessing step.
+
+If you have no labelled pairs at all, generate them: ask an LLM to write a
+question that each document answers, and train on those. The synthetic query
+is noisy on the input side and the document is genuine on the output side —
+the same asymmetry that makes back-translation work in
+@sec-machine-translation.
+
+## Reranking {#sec-retrieval-reranking}
+
+A [cross-encoder](#gloss-cross-encoder){#term-cross-encoder .term-ref}
+[@nogueira2019passage] reads the query and the document **together**, in one
+forward pass with attention across both. That is strictly more informative
+than comparing two independently-computed vectors, and it is why a
+cross-encoder is more accurate than any bi-encoder.
+
+::: {#gloss-cross-encoder .column-margin .term-gloss}
+**cross-encoder** — query and document concatenated and read in a single
+forward pass, so attention runs across both. More accurate than a bi-encoder
+and impossible to precompute, which is why it reranks a shortlist instead of
+searching a corpus. [↩](#term-cross-encoder){.term-back}
+:::
+
+It is also unusable as a retriever. Because the score depends on the pair,
+nothing can be precomputed: scoring a query against a million documents means
+a million forward passes. Hence the standard two-stage pattern:
+
+```text
+retrieve  top 50–100     cheap, recall-oriented   (BM25 / dense / both)
+rerank    those 50–100   expensive, precision-oriented (cross-encoder)
+return    top 5–10
+```
+
+Three consequences worth internalising:
+
+- **The first stage sets a ceiling the second cannot raise.** A reranker can
+  only reorder what it is given. If recall@50 is 80%, no reranker gets you
+  past 80% — which is why @sec-retrieval-metrics argues recall@k is the metric
+  to watch on stage one.
+- **The cost is linear in the shortlist**, so the shortlist size is your
+  quality/latency dial, and it is a better dial than the ANN parameter because
+  its effect is monotone and easy to reason about.
+- **Late interaction is the middle path.** ColBERT [@khattab2020colbert] keeps
+  a vector per token and scores by summed maximum similarity, which recovers
+  much of the cross-encoder's accuracy while remaining precomputable. It costs
+  an order of magnitude more storage, which is the trade.
+
+## Approximate nearest neighbour, and the dial nobody sets on purpose {#sec-retrieval-ann}
+
+Exhaustive search over a few thousand vectors is a matrix multiply and takes
+no time at all — the dense numbers above were computed that way. At millions
+of vectors it stops being free, and you move to an approximate index.
+
+Two families:
+
+**HNSW** [@malkov2018hnsw] builds a navigable graph and walks it greedily from
+a coarse layer down to a fine one. Fast and accurate, memory-hungry — the
+graph plus the full vectors sit in RAM.
+
+**IVF-PQ** [@johnson2019billion] partitions the space into cells, searches
+only the nearest few, and stores *compressed* vectors via product
+quantisation. Far smaller, and the compression is lossy in a way that costs
+accuracy.
+
+Both expose a knob — `efSearch` for HNSW, `nprobe` for IVF — that trades
+recall against latency. [The number to fix in your head is that the default is
+somebody else's operating point]{.hl}, chosen for a benchmark that is not your
+corpus.
+
+The discipline is the same one @sec-classification applied to a decision
+threshold: sweep it, plot recall against p95 latency, state your latency SLO,
+and pick the point that meets it. And measure recall against **exhaustive
+search on your own data**, not against the library's published curve — the
+loss depends on how your vectors are distributed, which is a property of your
+corpus and your embedding model.
+
+::: {.column-margin}
+There is a trap in evaluating an ANN index against the *labels* rather than
+against exhaustive search. If your recall@10 drops when you switch on the
+index, you want to know whether the index lost documents or whether the
+embedding was wrong to begin with. Exhaustive search is the control that
+separates the two, and it is cheap to run once on a sample.
+:::
+
+## Measuring retrieval {#sec-retrieval-metrics}
+
+Four metrics, and they answer different questions.
+
+| metric | asks | use it when |
+|:--|:--|:--|
+| **[recall@k](#gloss-recall-k){#term-recall-k .term-ref}** | is the right document in the top *k* at all? | the consumer reads all *k* — which includes every RAG system |
+| **MRR** | how high is the *first* right answer? | the user reads one result and stops |
+| **nDCG@k** | are the relevant documents near the top, weighted by how relevant? | graded relevance, several relevant documents |
+| **precision@k** | what share of the *k* is relevant? | the cost of a wrong result is per-result |
+
+: Four metrics, four questions {tbl-colwidths="[16,42,42]"}
+
+::: {#gloss-recall-k .column-margin .term-gloss}
+**recall@k** — did the right document appear anywhere in the top *k*. The
+number that bounds everything downstream: a generator cannot ground an answer
+in a document the retriever never returned.
+[↩](#term-recall-k){.term-back}
+:::
+
+[If you report one number for the retrieval stage of a RAG system, report
+recall@k for the *k* you actually pass to the model.]{.hl} It is a hard
+ceiling: @sec-rag's generator can only work with what arrives, so a retrieval
+recall@10 of 80% means 20% of answers are ungroundable before generation
+begins — and no amount of prompting fixes them.
+
+The corollary is that **the two stages want different metrics**. Stage one is
+judged on recall, because its job is not to miss. Stage two — a reranker, or
+the generator itself — is judged on precision and ordering, because its job is
+to choose. Optimising the first stage for precision@1 is a common and
+expensive mistake.
+
+Two practical notes on measurement itself:
+
+- **You need relevance judgements, and building them is the real work.** With
+  no labels, the cheapest honest start is what this chapter did: take
+  documents you have, construct queries whose answer you know, and accept that
+  synthetic queries are a proxy. BEIR [@thakur2021beir] is the reference
+  benchmark suite if you want to compare against published numbers rather than
+  measure your own corpus.
+- **Report the query mix.** @sec-retrieval-results is one long argument that a
+  retrieval number without its query distribution is not interpretable — the
+  same two systems swap places by sixty points between two conditions on the
+  same corpus.
+
+## Vector database, or not {#sec-retrieval-storage}
+
+The honest decision guide, by scale:
+
+| documents | what to use | why |
+|:--|:--|:--|
+| under ~100k | NumPy array plus exhaustive search | a matrix multiply; the dense numbers in this chapter were computed this way, and it is exact |
+| ~100k–10M | `pgvector` in the Postgres you already run, or FAISS in-process | you get transactions, backups, joins and access control for free, and no new service to operate |
+| 10M+, or multi-tenant | a dedicated vector store | when sharding, replication and filtered search stop being your problem to solve |
+
+: Where to put the vectors {tbl-colwidths="[18,38,44]"}
+
+[The default answer for most projects is the boring one]{.hl}: keep the
+vectors next to the data they belong to. The operational cost of a second
+datastore — consistency between it and your source of truth, its own backup
+story, its own access-control model — is usually larger than the query
+latency you were trying to save, and it arrives on a different team's
+schedule.
+
+The question that actually forces a dedicated store is rarely raw scale. It is
+**filtered search at scale**: "the top 10 documents this user is allowed to
+see, from the last 90 days, in Turkish." Doing that well requires the filter
+and the vector search to cooperate, and that is a genuine engineering
+capability rather than a matter of size.
+
+## Intuition checks {#sec-retrieval-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Should you replace BM25 with a dense retriever?
+
+Only after checking which queries you actually get. Measured on one corpus,
+the same two systems swapped places by sixty points between two query
+conditions: stemmed BM25 **96.0%** against dense **35.9%** on keyword queries,
+and dense **96.2%** against BM25 **23.8%** cross-lingually.
+
+Neither family dominates. Lexical wins exact-match and rare-token queries;
+dense wins paraphrase, synonymy and anything crossing a language boundary.
+Sample a hundred real queries and classify them before choosing.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Everyone says hybrid retrieval beats both parents. Does it?
+
+Not when the parents are unequal. Measured here, reciprocal rank fusion **cost
+32.8 points** in one condition and **46.8** in the other, against the better
+parent each time.
+
+RRF weights a rank-1 hit from a weak system exactly like a rank-1 hit from a
+strong one, so the weak parent's confident wrong answers displace the strong
+parent's right ones. Fusion is a variance-reduction trick for *comparable*
+systems. Check that yours are comparable before fusing, which costs one
+evaluation run.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your recall@10 barely changed but users complain. What happened?
+
+Look at recall@1. In this chapter's condition B, fusion took recall@10 from
+99.9% to 99.6% — nothing — while recall@1 went from **96.2% to 49.4%**. The
+document was still retrieved; it was pushed down the list.
+
+Which metric matters depends on the consumer. A RAG pipeline passing ten
+chunks to a model cares about recall@10. A user reading the first result cares
+about recall@1. Reporting only the one that looks good is the easiest
+self-deception in retrieval.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Which embedding model should you use?
+
+Not the famous one, and the difference only shows on hard inputs. A
+*similarity* model and a *retrieval* model were within 2.4 points on the easy
+condition here — and **25.3 points apart** on the hard one, 10.6% against
+35.9%.
+
+Similarity models are trained to score how alike two sentences are; retrieval
+models are trained on query-document pairs with hard negatives. They are
+different tasks. And the practical consequence for evaluation: if your test
+set is easy, every model looks the same and you will pick by download count.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Why is recall@k the number that bounds a RAG system?
+
+Because a generator cannot ground an answer in a document it never received.
+If recall@10 is 80% and you pass ten chunks, then 20% of questions are
+unanswerable before the model is invoked, and prompt engineering cannot reach
+them.
+
+This is why the two stages want different metrics. Stage one is judged on not
+missing; stage two — the reranker, or the generator — is judged on choosing
+well from what arrived. Tuning stage one for precision@1 throws away the
+recall the second stage needed.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Do you need a vector database?
+
+Under about 100k documents, no — exhaustive search over a NumPy array is a
+matrix multiply and it is exact. Up to a few million, `pgvector` in the
+Postgres you already run gives you transactions, backups, joins and access
+control for free.
+
+The thing that genuinely forces a dedicated store is rarely scale; it is
+**filtered search** — the top ten documents this user may see, from the last
+90 days, in this language — which needs the filter and the vector search to
+cooperate. Weigh that against operating a second datastore with its own
+consistency and backup story.
+:::
+
+## The 2026 toolbox {#sec-retrieval-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `sentence-transformers` | 6.0.0 | both dense models, and the encoding in @sec-retrieval-results |
+| `snowballstemmer` | 3.1.1 | the Turkish stemmer that is worth 68 points in condition A |
+| `numpy` | 2.5.2 | BM25, exhaustive dense search, and RRF — the whole retrieval stack in this chapter is a few hundred lines |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `faiss-cpu` | 1.15.0 | HNSW and IVF-PQ indexes [@johnson2019billion]; the reference implementation, and where to sweep the recall/latency dial of @sec-retrieval-ann |
+| `pgvector` | 0.5.0 | vectors in the database you already run — the default answer for most projects |
+| `qdrant-client` / `chromadb` | 1.19.0 / 1.5.9 | dedicated stores, when filtered search at scale becomes the requirement |
+| `rank-bm25` | 0.2.2 | BM25 without writing it yourself, for a quick baseline |
+| `ir-measures` | 0.4.3 | the standard IR metrics computed the standard way, so your nDCG matches everyone else's definition of nDCG |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## Lab: build and tune a hybrid retriever {#sec-retrieval-lab}
+
+### Step 1 — collect a hundred real queries
+
+From logs if you have them, from users if you do not. This is the step that
+decides everything else, because @sec-retrieval-results is one long
+demonstration that the query distribution determines which retriever wins.
+
+Classify them: exact-match (part numbers, names, codes), natural-language
+questions, and anything crossing a language boundary.
+
+### Step 2 — label relevance, then build BM25
+
+For each query, the document that answers it. Fifty labelled queries is
+enough to distinguish systems that differ by ten points. Then build BM25 — and
+if your language is morphologically rich, build it twice, with and without
+stemming, because @sec-turkish-nlp says that one step can be worth sixty
+points.
+
+### Step 3 — add dense retrieval, with a retrieval model
+
+Not a similarity model. Encode, search exhaustively — under 100k documents you
+do not need an index yet — and report recall@1 and recall@10 next to BM25.
+
+### Step 4 — check whether fusing helps *before* shipping it
+
+Run RRF and compare against **the better parent**, not against the weaker one.
+If the parents differ by more than about twenty points, expect fusion to hurt
+and verify. This is a fifteen-minute check that this chapter's measurements
+suggest is skipped routinely.
+
+### Step 5 — route instead, if your query mix is mixed
+
+Classify the query and send it to the retriever that handles it. Measure the
+router's accuracy separately from the retrievers', because a router error and
+a retrieval error look identical in the final number and have different fixes.
+
+### Step 6 — add a reranker and find where the shortlist saturates
+
+Cross-encoder over the top 10, 25, 50, 100. Plot final accuracy against
+latency. The shortlist size is a cleaner dial than any ANN parameter and its
+effect is monotone.
+
+### What to hand in
+
+One table of recall@1, recall@10 and nDCG@10 for every system on your own
+queries, broken down **by query type**; the fusion check from step 4 with its
+verdict; and a sentence naming the ceiling your first stage imposes on
+everything downstream.
+
+## Exercises {#sec-retrieval-exercises}
+
+1. **Find the swap.** Build BM25 and a dense retriever on one corpus. Find
+   three queries where each beats the other by a wide margin, and state the
+   pattern in one sentence.
+
+2. **Reproduce the fusion result.** Take two retrievers that differ by at
+   least twenty points on your data and fuse them with RRF. Report recall@1
+   and recall@10 for both parents and the fusion. Explain the shape of the
+   damage.
+
+3. **Weight the fusion.** Repeat exercise 2 with a weighted combination
+   instead of plain RRF, tuning the weight on held-out queries. How much of
+   the loss do you recover, and what did the tuning cost you in
+   generalisation?
+
+4. **Similarity model against retrieval model.** Run both on an easy query set
+   and a hard one. Report the gap in each. Then say which set you would have
+   used if you had only built one.
+
+5. **The ANN dial.** Sweep `efSearch` or `nprobe`, and plot recall against p95
+   latency — measuring recall against *exhaustive search*, not against your
+   labels, so you separate index loss from embedding error.
+
+6. **Recall as a ceiling.** Measure recall@k on your retriever for k = 1, 5,
+   10, 25. For each, state the maximum accuracy a downstream generator could
+   achieve. Compare against what your RAG system actually achieves, and say
+   where the remaining gap lives.
+
+7. **Query-type census.** Sample 100 production queries and classify them.
+   Predict, from this chapter's tables, which retriever should win your mix.
+   Then measure and see whether you were right.
+
+## What to remember {#sec-retrieval-summary}
+
+- **Neither retrieval family dominates, and the query type decides.** Same
+  corpus, two query conditions: stemmed BM25 **96.0%** against dense **35.9%**
+  on keyword queries; dense **96.2%** against BM25 **23.8%** cross-lingually.
+  A retrieval number without its query distribution is not interpretable.
+
+- **Hybrid fusion is not free, and it is not always positive.** RRF cost
+  **32.8** and **46.8** recall@1 points against the better parent in the two
+  conditions. It weights a rank-1 hit from a weak system like a rank-1 hit
+  from a strong one, so unequal parents produce a worse child.
+
+- **The damage lands on recall@1, not recall@10.** In condition B, fusion took
+  R@10 from 99.9% to 99.6% and R@1 from 96.2% to 49.4%. Which metric you watch
+  determines whether you notice.
+
+- **Fuse comparable systems; route mixed query loads.** If one retriever
+  dominates on your queries, use it. If your users send both kinds, classify
+  the query and dispatch — and evaluate the router separately.
+
+- **A similarity model is not a retrieval model.** The two were 2.4 points
+  apart on the easy condition and **25.3** apart on the hard one. Component
+  quality only becomes visible on the inputs that are hard for that component,
+  which is an argument for keeping a difficult slice in your evaluation.
+
+- **Hard negatives are the whole game in dense training.** In-batch negatives
+  teach topical separation; mined hard negatives teach the distinction your
+  users need. Re-mine as the model improves, and mine slightly below the top
+  of the list to avoid training against unlabelled relevant documents.
+
+- **Retrieve broadly, rerank precisely.** A cross-encoder is more accurate and
+  cannot be precomputed, so it reorders a shortlist. It can only reorder what
+  stage one returned — **the first stage sets a ceiling the second cannot
+  raise**.
+
+- **Report recall@k for the k you actually pass downstream.** It is the hard
+  bound on any RAG system: a generator cannot ground an answer in a document
+  it never received, and 80% recall@10 means 20% of questions are unanswerable
+  before generation starts.
+
+- **Keep the vectors where the data is until scale forces otherwise.** Under
+  100k documents, exhaustive search is exact and instant. What eventually
+  forces a dedicated store is filtered search at scale, not raw volume.
