@@ -1,8 +1,13 @@
 # Decoding and Structured Output {#sec-decoding}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: first section drafted, rest in outline.** The sampling
-explorer below is fully functional.
+**Chapter status: drafted.** The measurements were run on the same Turkish
+product-review corpus as @sec-bake-off and @sec-classification, on a balanced
+sample so that accuracy reads against a 50% floor. Two models were used
+deliberately — `qwen3.5:9b` and `llama3.2:3b` — because
+@sec-decoding-constrained's finding is that constrained decoding buys almost
+nothing on one and a great deal on the other. Software: `ollama` 0.24.0,
+Python 3.14.5. The sampling explorer below is fully functional.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -133,41 +138,486 @@ exist mainly to stop the model from ever picking `recursive` in a sentence
 about tired students. This trio is the cheapest lever you have in every
 applied system from here on.
 
-<!-- TODO(draft): add greedy and beam search alongside these three, plus
-     min-p as the newer alternative that adapts its cutoff to the
-     distribution's peak rather than to a fixed mass. -->
+### Greedy, beam, and min-p
 
-## Repetition, degeneration, and sampling pathologies
+Three more policies complete the picture.
 
-<!-- TODO(draft): the repetition trap; why greedy decoding loops;
-    repetition penalties and their side effects. -->
+**Greedy** takes the argmax at every step. It is temperature 0 in the limit,
+and it is the right default whenever there is one correct answer.
 
-## Constrained decoding: JSON Schema, grammars, regex
+**Beam search** keeps the *k* best partial sequences and extends all of them,
+so it optimises the whole sequence rather than each token.
+@sec-machine-translation measures it properly on translation and finds two things worth carrying here:
+the gains die quickly — beam 1 to 2 bought +0.61 BLEU and beam 2 to 64 bought
++0.57 more for seven times the compute — and the folkloric "curse of beam
+search" did not appear at all on a model that normalises by length during the
+search.
 
-<!-- TODO(draft): masking the logits to the set of legal next tokens; what
-    this costs and what it cannot fix (valid JSON that is factually
-    wrong). -->
+**Min-p** [@nguyen2024minp] is the newer cutoff. Where top-p keeps a fixed
+*mass* and top-k a fixed *count*, min-p keeps every token whose probability is
+at least a fraction of the top token's:
 
-## Making tool arguments reliable
+$$
+\text{keep } i \quad\text{if}\quad p_i \;\ge\; m \cdot \max_j p_j
+$$
 
-<!-- TODO(draft): the single highest-leverage use of constrained decoding;
-    forward-reference @sec-tool-design. -->
+That makes the cutoff adapt to the shape of the distribution rather than to a
+constant. When the model is confident — one token at 0.9 — min-p keeps almost
+nothing, which is what you want. When it is genuinely uncertain across twenty
+plausible continuations, min-p keeps them all, where top-p 0.9 would have kept
+an arbitrary prefix of the list.
 
-## Logprobs for confidence, routing, and abstention
+::: {.column-margin}
+The general rule underneath all five: [the policy should depend on how many
+good answers the task has]{.hl}. Extraction, classification and translation
+have one, so greedy or a narrow beam. Drafting, brainstorming and dialogue
+have many, so sample. @sec-machine-translation measured the cost of getting
+this backwards — a chat-default temperature of 1.0 took a translation model
+from 30.17 BLEU to 14.34.
+:::
 
-<!-- TODO(draft): token probability as a calibrated-ish signal; routing
-    hard cases to a bigger model; teaching a system to say 'I do not
-    know'. -->
+## Repetition and degeneration {#sec-decoding-repetition}
 
-## Streaming and incremental parsing
+Greedy and low-temperature decoding have a characteristic failure: the model
+falls into a loop and repeats a phrase until it hits the token limit.
 
-<!-- TODO(draft): partial JSON, incremental validation, and what the user
-    sees while it arrives. -->
+The mechanism is not mysterious. Having produced a phrase once, the model has
+made that phrase part of its own context, and a language model trained on real
+text has learned that repeated phrases are more likely after the first
+repetition. @holtzman2020curious named this and showed the surprising part:
+the loop is not a low-probability accident. **The repeated continuation is
+often the single highest-probability sequence available**, which is why greedy
+decoding walks into it and sampling does not.
 
-## Lab: 100% schema-valid extraction pipeline
+The usual controls, and what each costs:
 
-<!-- TODO(draft): build an extractor that never emits invalid output, then
-    measure how often valid output is still wrong. -->
+| control | what it does | what it breaks |
+|:--|:--|:--|
+| Sampling (top-p, min-p) | takes a non-argmax token sometimes, breaking the loop | variety you may not want in an extraction task |
+| Repetition penalty | divides the logit of any already-used token | punishes legitimately repeated words — names, technical terms, `null` |
+| No-repeat n-gram | forbids any n-gram already emitted | forbids real repeated phrases; ruinous in structured output where `{"type":` recurs |
+| Frequency / presence penalty | a softer, count-scaled version of the above | same failure mode, milder |
+
+: Four ways to stop a loop, and what each one costs {tbl-colwidths="[26,38,36]"}
+
+[The penalties are blunt instruments and they are the wrong tool for
+structured output.]{.hl} A JSON object legitimately repeats keys, braces and
+quote characters; a no-repeat-3-gram constraint on JSON is a way to guarantee
+invalid output. If you are generating structure, the fix for repetition is the
+grammar in @sec-decoding-constrained, not a penalty.
+
+## Constrained decoding {#sec-decoding-constrained}
+
+Everything above reshapes a distribution over the whole vocabulary.
+[Constrained decoding](#gloss-constrained-decoding){#term-constrained-decoding .term-ref}
+does something stricter: at each step it computes which tokens could legally
+continue the output under a grammar, and sets the logits of all the others to
+$-\infty$. Invalid output stops being unlikely and becomes **unreachable**.
+
+::: {#gloss-constrained-decoding .column-margin .term-gloss}
+**constrained decoding** — masking the logits at each step to the tokens a
+grammar allows. Guarantees the *shape* of the output and says nothing about
+whether it is true. [↩](#term-constrained-decoding){.term-back}
+:::
+
+The machinery is a finite-state machine over the tokenizer's vocabulary
+[@willard2023efficient]: compile the JSON Schema (or regex, or CFG) into an
+automaton, track which state you are in, and precompute for each state the set
+of allowed next tokens. @geng2023grammar is the same idea for general
+structured NLP tasks.
+
+### What it actually buys
+
+The interesting question is not whether a grammar can enforce a schema — it
+can — but **where an unenforced model stops complying on its own**, and what
+enforcement costs when it takes over. Four schemas of increasing awkwardness,
+150 balanced reviews, two models, asked-versus-enforced:
+
+```text
+qwen3.5:9b                        parses  schema-ok  accuracy  s/item
+  L1 flat, natural enum   asked   100.0%      98.0%     89.3%    1.23
+  L1 flat, natural enum   forced  100.0%     100.0%     88.7%    1.30
+  L2 unnatural enum       asked    99.3%      99.3%     86.7%    1.33
+  L2 unnatural enum       forced  100.0%     100.0%     87.3%    1.36
+  L3 nested + array       asked   100.0%      98.7%     88.0%    1.44
+  L3 nested + array       forced  100.0%     100.0%     88.0%    1.62
+  L4 nested + nullable    asked   100.0%      98.0%     88.7%    1.73
+  L4 nested + nullable    forced  100.0%     100.0%     88.7%    1.74
+
+llama3.2:3b                       parses  schema-ok  accuracy  s/item
+  L1 flat, natural enum   asked    98.0%      98.0%     83.3%    0.37
+  L1 flat, natural enum   forced  100.0%     100.0%     85.3%    0.56
+  L2 unnatural enum       asked    99.3%      97.3%     78.0%    0.43
+  L2 unnatural enum       forced  100.0%     100.0%     80.0%    5.13
+  L3 nested + array       asked    79.3%      79.3%     70.7%    0.37
+  L3 nested + array       forced  100.0%     100.0%     88.0%    0.70
+  L4 nested + nullable    asked    99.3%      98.7%     86.0%    0.53
+  L4 nested + nullable    forced  100.0%     100.0%     86.7%    9.26
+```
+
+Three findings, and the first is the one that reframes the technique.
+
+**On a strong model, the grammar buys almost nothing.** `qwen3.5:9b` complied
+with the schema 98–99.3% of the time when merely *asked*, at every difficulty
+level including nested objects with a nullable field. Enforcement took that to
+100% and left accuracy unchanged. [Modern instruction-tuned models mostly
+produce the JSON you describe; the grammar is insurance on the last one or two
+percent.]{.hl}
+
+**On a weak model, it is the difference between working and not.**
+`llama3.2:3b` fell to **79.3% schema-valid** on the nested-plus-array schema —
+one output in five unusable. Enforcement took it to 100%, and **accuracy rose
+from 70.7% to 88.0%**, a 17.3-point gain, because the malformed fifth had been
+scored as wrong. The grammar did not make the model smarter; it stopped a
+formatting failure from being counted as a reasoning failure.
+
+**The cost is latency, and it is not where you would guess.** Overhead ranged
+from 1.2× to **17×** (0.53 s to 9.26 s on the weak model at L4), and it was
+not monotone in schema complexity — L1 and L3 were cheap, L2 and L4 expensive.
+The two expensive ones share a property: the schema demands something the
+model does not want to produce, an unnatural enum in one case and a nullable
+field in the other. That is consistent with the grammar having to fight the
+model's distribution rather than ride it, though this measurement establishes
+the pattern rather than the mechanism.
+
+::: {.column-margin}
+Which is a reason to measure rather than reason about it. If the grammar's
+cost depended only on schema complexity you could budget for it from the
+schema; it appears to depend on the *disagreement* between the schema and the
+model, which you cannot see without running both.
+:::
+
+### What it cannot fix
+
+A grammar constrains shape. It has no access to truth, and the failure this
+produces is worth seeing directly. From @sec-summarization, where a schema
+demanded an object with an integer `answer`:
+
+```text
+POST /api/generate   format={"answer": integer}
+prompt: "What is the capital of France?"
+  ->  {"answer": 1}
+```
+
+Schema-valid, parseable, type-correct, and meaningless. [Constrained decoding
+converts a parse failure into a semantic failure]{.hl}, which is usually the
+trade you want — a wrong value you can validate beats a crash — but it is a
+trade, not a fix. Every guarantee it gives you is syntactic.
+
+Two corollaries worth stating plainly:
+
+1. **Validate values, not just structure.** An enum is checkable; a free-text
+   field is not. Push as much of your contract into enumerable types as the
+   task allows.
+2. **A schema is not a substitute for the escape hatch.** If the model has no
+   legal way to say *I do not know*, the grammar guarantees it will say
+   something else instead. Add `null` to the type, and — as
+   @sec-sequence-labeling found — check that the model actually uses it.
+
+## Making tool arguments reliable {#sec-decoding-tools}
+
+The highest-leverage use of everything above is not extraction; it is tool
+calls. A tool call *is* a structured output — a function name and a typed
+argument object — and it has a property that makes correctness matter more
+than usual: **something executes afterwards.**
+
+A malformed summary is a bad summary. A malformed argument object is either a
+crash or, worse, a call that succeeds with the wrong value.
+
+Three rules follow from the measurements above.
+
+**Constrain the arguments, always.** This is the case where the strong-model
+result does not let you off. 98% schema-validity is excellent for extraction
+and unacceptable for execution: at a thousand calls a day it is twenty
+failures a day, each one a stack trace or a wrong action. The grammar takes
+that to zero, and the latency cost is bounded and known.
+
+**Type the arguments as narrowly as the tool allows.** An enum of four
+operations cannot be called with a fifth. A date typed as a string can be
+`"yesterday"`; typed with a pattern, it cannot. Every constraint you can push
+into the schema is a validation you do not have to write and an error class
+that becomes unreachable.
+
+**A valid call is still not a correct call.** The grammar guarantees
+`{"operation": "delete", "id": 4}` is well-formed. It does not know whether 4
+was the right id, and @sec-tool-design is where that problem — and the
+confirmation and authorisation machinery around it — belongs.
+
+## Logprobs, confidence, and abstention {#sec-decoding-logprobs}
+
+Alongside each token, the model reports the log probability it assigned — its
+[logprob](#gloss-logprob){#term-logprob .term-ref}. This is the cheapest
+signal available about how sure the model is, it costs nothing extra to
+obtain, and most pipelines throw it away.
+
+The question is whether it is *usable*. Measured on 400 balanced reviews, with
+the answer constrained to a single token — `A` for positive, `B` for negative
+— so that the first generated token *is* the answer and its probability can be
+renormalised over just those two alternatives into a proper binary
+probability.
+
+::: {#gloss-logprob .column-margin .term-gloss}
+**logprob** — the log probability the model assigned to a token. Interpretable
+as confidence only when the answer is a single token; for a long answer, the
+mean logprob mostly measures how ordinary the phrasing was.
+[↩](#term-logprob){.term-back}
+:::
+
+### It discriminates
+
+```text
+accuracy                                              86.75%
+AUC of P(positive) against the true label             0.9492
+AUC of confidence for predicting its own correctness  0.8268
+
+mean confidence when the model was right              0.9481
+mean confidence when the model was wrong              0.7793
+```
+
+[The score is good and the model knows when it is guessing.]{.hl} An AUC of
+0.9492 says the probability ranks positives above negatives almost as well as
+a trained classifier would; 0.8268 says confidence separates the model's own
+correct answers from its incorrect ones. @kadavath2022language is the general
+version of that second result.
+
+### It is not calibrated
+
+Discrimination and calibration are different properties, and the second one
+fails:
+
+```text
+confidence bin      n    accuracy   mean confidence
+[0.50, 0.55)       15       33.3%             52.4%
+[0.55, 0.60)       10       50.0%             57.5%
+[0.60, 0.65)       10       70.0%             62.5%
+[0.65, 0.70)        8       62.5%             66.4%
+[0.70, 0.75)        7       85.7%             72.7%
+[0.75, 0.80)        8       87.5%             77.6%
+[0.80, 0.85)       13       61.5%             82.7%
+[0.85, 0.90)       20       85.0%             87.6%
+[0.90, 0.95)       25       68.0%             92.6%
+[0.95, 1.00)      284       95.1%             99.4%
+
+ECE = 7.04%
+```
+
+Two things to read here. The model is **overconfident in the middle** — items
+it calls 92.6% likely are right 68.0% of the time. And the bottom bin is worse
+than useless: when the model is genuinely torn between `A` and `B`, it is
+right **33.3%** of the time, which is below chance on a balanced binary task.
+
+That last row is the one to remember. [A near-0.5 logprob does not mean "coin
+flip"; on this task it meant "actively wrong".]{.hl} Do not read the number as
+a probability. @sec-classification's calibration machinery — a held-out slice
+and an isotonic or Platt map — applies here unchanged if you need one.
+
+### It is immediately useful for abstention
+
+Even uncalibrated, the ranking is enough to route:
+
+```text
+abstain on the least-confident    kept    accuracy on what is kept
+                            0%     400                     86.75%
+                            5%     380                     89.47%
+                           10%     360                     90.83%
+                           20%     320                     92.50%
+                           30%     280                     95.00%
+                           50%     200                     97.50%
+```
+
+**Sending the least-confident fifth to a human, or to a larger model, takes
+accuracy from 86.75% to 92.50%** without changing the model at all. That is a
+larger gain than most prompt engineering produces, and it costs one threshold.
+
+::: {.column-margin}
+This is the cheapest routing signal in the book, and it composes with
+everything else: abstain below a threshold, escalate the abstained items to a
+bigger model, and report coverage alongside accuracy. Note that the
+threshold is a *fitted quantity* and belongs on a held-out slice — the same
+discipline @sec-classification applied to its decision threshold. Choosing it
+on the data you report is the same mistake in new clothes.
+:::
+
+### The caveat that limits all of it
+
+This worked because the answer was **one token from a two-token alphabet**.
+That is the easiest possible case, and the technique degrades quickly away
+from it:
+
+- **Multi-token answers.** The mean logprob over a sentence mostly measures
+  how *ordinary the phrasing* was, not how likely the content is to be true.
+- **Open-ended generation.** There is no "the answer token" to read.
+- **Long structured output.** The probability of a well-formed JSON object is
+  dominated by its punctuation, which the model is certain about.
+
+Which is a design argument as much as a caveat: **if you want a confidence
+signal, structure the task so the answer is one constrained token.** That is
+why the classification prompt in @sec-prompting used `A`/`B` rather than
+`olumlu`/`olumsuz` — and, as it turned out, that variant also scored near the
+top on accuracy.
+
+## Streaming and incremental parsing {#sec-decoding-streaming}
+
+Streaming exists because latency is perceived, not measured. A response that
+takes four seconds to arrive complete feels slower than the same response
+whose first words appear in two hundred milliseconds — and the second one is
+strictly worse by every throughput metric.
+
+The tension with everything above is that **structured output and streaming
+want opposite things**. A JSON object is only parseable once its last brace
+arrives, so the natural implementation buffers the whole response and streams
+nothing. Three ways out, in increasing order of effort:
+
+| approach | what the user sees | cost |
+|:--|:--|:--|
+| Buffer and validate | nothing, then everything | simplest; the full latency is perceived |
+| Incremental parse | fields appear as they complete | a parser that accepts prefixes; partial states are visible |
+| Split the call | prose streams, structure arrives after | two calls, and they can disagree with each other |
+
+: Streaming against structure {tbl-colwidths="[24,38,38]"}
+
+The middle row is the one worth building, and the thing to get right is that
+**a partial parse is a different type from a complete one**. `{"duygu": "olu`
+is not a bad object; it is an incomplete one, and a consumer that cannot
+represent *not yet known* will either crash or render garbage. Model it
+explicitly — a field is missing, pending, or present — rather than letting
+`None` mean two things.
+
+One practical note that follows from @sec-decoding-constrained: a grammar and
+an incremental parser are the same automaton looked at from two ends. If you
+are already constraining generation, the state machine that decides which
+tokens are legal is also the one that can tell a consumer which fields are
+final. Most stacks do not connect the two, and it is a reasonable thing to
+build when the interface warrants it.
+
+## Lab: an extractor that cannot emit invalid output {#sec-decoding-lab}
+
+Build the pipeline, then measure what the guarantee did and did not cover.
+
+### Step 1 — write the schema before the prompt
+
+Fields, types, enums wherever the values are enumerable, and an explicit
+nullable for *not present in the source*. The schema is the specification;
+the prompt is how you ask for it.
+
+### Step 2 — measure the unenforced baseline
+
+Ask for the schema in the prompt, no enforcement, on 150 items. Record parse
+rate, schema-validity, and accuracy. On a strong model expect 98%-ish, which
+is the point: **you need this number to know what enforcement is buying.**
+
+### Step 3 — turn the grammar on, and verify it is actually on
+
+Enforce the schema. Then confirm the constraint is live by sending one request
+whose schema the model would otherwise violate — @sec-summarization found a
+server silently ignoring `format` on one endpoint while honouring it on
+another, and the failure is invisible without this check.
+
+### Step 4 — measure the latency cost, per schema
+
+Time both modes. The overhead here ranged from 1.2× to 17× and was not
+monotone in schema complexity, so your schema's cost is an empirical question.
+If it is large, find out which part of the schema is expensive by removing
+fields one at a time.
+
+### Step 5 — count how often valid output is wrong
+
+This is the step the guarantee tempts you to skip. Take the schema-valid
+outputs and check the *values* against your labels. Report validity and
+accuracy as two separate numbers, because a pipeline can be 100% on the first
+and poor on the second, and only one of those is visible in your logs.
+
+### Step 6 — add abstention
+
+Constrain the answer field to a single token, read its logprob, and plot
+accuracy against coverage. Pick a threshold on a held-out slice — not on the
+data you report — and state the coverage you are shipping at.
+
+### What to hand in
+
+A table with validity, accuracy and latency for enforced and unenforced; the
+verification from step 3; the accuracy-versus-coverage curve; and one
+paragraph on which failures your guarantee does not cover.
+
+## Intuition checks {#sec-decoding-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Does lowering temperature make the model more accurate?
+
+It makes it more *deterministic*, which is not the same thing. Temperature
+rescales the logits before the softmax, so it changes the contrast between
+options and never the ranking — the argmax token at $\tau = 0.1$ is the argmax
+token at $\tau = 1.9$.
+
+So if greedy decoding gets an item wrong, lowering the temperature will not
+fix it; it will only make the model wrong more reliably. What temperature
+controls is variance, and the reason to lower it for extraction is
+reproducibility rather than correctness.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your JSON parse failure rate is 2%. Is constrained decoding worth it?
+
+It depends entirely on what happens next. For extraction into a table, 2% is a
+retry and a shrug. For **tool calls, 2% is a wrong action or a stack trace on
+every fiftieth request**, and the answer is yes without further discussion.
+
+Then measure the cost rather than assuming it is small: overhead here ranged
+from 1.2× to 17×, worst where the schema demanded something the model did not
+want to produce.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. A grammar guarantees valid JSON. What does it not guarantee?
+
+Anything about the content. Measured in @sec-summarization: a schema demanding
+an integer `answer` returned `{"answer": 1}` for the capital of France —
+valid, typed, parseable, meaningless.
+
+Constrained decoding converts parse failures into semantic failures. That is
+usually the trade you want, because a wrong value can be validated and a crash
+cannot, but it is a trade. Push what you can into enums, validate values
+separately from structure, and give the model a legal way to say *I do not
+know*.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your weak model is 79% schema-valid. Is it a bad model?
+
+Partly, but less than the number suggests. Measured here: `llama3.2:3b` at
+79.3% schema-validity on a nested schema scored **70.7% accuracy** — and with
+the grammar turned on, 100% valid and **88.0% accurate**.
+
+Seventeen of those points were never a reasoning failure; they were a
+formatting failure being counted as one. Before concluding a small model
+cannot do your task, make sure you are measuring the task rather than its
+punctuation.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. The model says it is 92% confident. Should you believe it?
+
+Not as a probability. Measured on 400 items: the bin of answers the model
+rated 0.90–0.95 was right **68.0%** of the time. Expected calibration error
+was 7.04%, and the near-0.5 bin was right **33.3%** — worse than chance.
+
+But the *ranking* was good — AUC 0.8268 for predicting its own correctness —
+which is enough to route on. Use logprobs to order items, not to quote
+percentages, and calibrate on a held-out slice if you need the number itself.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. You want a confidence score for a free-text answer. How?
+
+Not by averaging the logprobs, which mostly measures how ordinary the phrasing
+was rather than how likely the content is to be right.
+
+Restructure the task instead. Ask for the answer *and* a single constrained
+token that classifies it — a verdict, a category, a yes/no — and read the
+logprob of that token. This chapter's abstention curve works because the
+answer was one token from a two-token alphabet; that property is something you
+design in, not something you find.
+:::
 
 ## Exercises
 
@@ -180,3 +630,137 @@ applied system from here on.
    API. Are the outputs identical? Explain what you find.
 4. Take an extraction task with a 40% JSON failure rate. Add constrained
    decoding and report the new failure rate — and the new error modes.
+
+## Interview questions {#sec-decoding-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: What does temperature actually do?**
+
+Rescales the logits before the softmax, $p_i \propto \exp(z_i/\tau)$. Say the
+consequence that shows you have thought about it: **it never changes the
+ranking**, only the contrast, so temperature cannot fix a wrong argmax. Then
+distinguish it from top-k and top-p, which are hard cutoffs that remove
+candidates entirely, and from min-p, whose cutoff scales with the top token's
+probability so it adapts to how peaked the distribution is.
+
+**Q: How does constrained decoding work?**
+
+Compile the schema into an automaton over the tokenizer's vocabulary, and at
+each step mask the logits of every token that could not legally continue.
+Invalid output becomes unreachable rather than unlikely. The good follow-up:
+it guarantees syntax and nothing else, and it costs latency — measured here
+from 1.2× to 17×, worst when the schema demands something the model does not
+want to produce.
+
+**Q: Why is beam search standard in translation and absent from chat?**
+
+Because beam search optimises for the highest-probability *sequence*, which is
+what you want when the task has approximately one right answer and actively
+not what you want when it has many. @sec-machine-translation measured the cost
+of confusing the two: a chat-default temperature of 1.0 took a translation
+model from 30.17 BLEU to 14.34.
+
+### Testing whether you have shipped one
+
+**Q: Tool calls fail in production about 2% of the time. What do you do?**
+
+Constrain the arguments — this is the case where 98% is not good enough,
+because something executes afterwards. Then narrow the types: enums for
+operations, patterns for dates, so whole error classes become unreachable.
+Then verify the constraint is actually applied, because a server that ignores
+`format` fails silently. And say clearly that a valid call is still not a
+correct call: the id may be well-typed and wrong, which is
+@sec-tool-design's problem rather than the decoder's.
+
+**Q: How would you make your system say "I don't know"?**
+
+Give it a legal way to — a `null` in the schema or an explicit abstain value —
+and then a threshold to decide when to use it. Constrain the answer to a
+single token, read its logprob, and pick a threshold on a held-out slice.
+Measured here: abstaining on the least-confident 20% took accuracy from 86.75%
+to 92.50%, no model change involved. Report coverage alongside accuracy, or
+the number is meaningless.
+
+**Q: Your evaluation says the model is 92% confident and it is right 68% of
+the time. What is wrong?**
+
+Nothing is wrong; you are reading a discrimination signal as a calibration
+one. The logprob ranked answers well — AUC 0.8268 for predicting its own
+correctness — while being badly calibrated, at 7.04% ECE. Use the ordering to
+route and calibrate on held-out data if you need the number itself.
+@sec-classification has the machinery.
+
+## The 2026 toolbox {#sec-decoding-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` and `llama3.2:3b`, and the `format` parameter that enforces a schema |
+| Python stdlib | 3.14.5 | the schema validation and the abstention curve are twenty lines of `json` and `numpy` |
+
+: The stack these numbers came from {tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `outlines` | 1.3.3 | the reference implementation of the automaton in @sec-decoding-constrained [@willard2023efficient]; use it when you need the grammar in your own process rather than behind a server flag |
+| `xgrammar` | 0.2.5 | the same idea optimised for throughput; what to reach for when the 17× overhead measured above is unacceptable |
+| `lm-format-enforcer` | 0.11.3 | schema enforcement that plugs into `transformers` and `vLLM` generation loops |
+| `guidance` | 0.3.1 | interleaves generation with fixed template text, so the model only fills the holes |
+| `pydantic` / `jsonschema` | 2.13.4 / 4.26.0 | validating the values after the grammar has guaranteed the shape — the step @sec-decoding-constrained argues you still owe |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[22,16,62]"}
+
+## What to remember {#sec-decoding-summary}
+
+- **Temperature never changes the ranking.** It rescales logits before the
+  softmax, so it controls variance and not correctness. If greedy gets an item
+  wrong, a lower temperature makes it wrong more reliably.
+
+- **Pick the policy from how many good answers the task has.** One answer:
+  greedy or a narrow beam. Many: sample. @sec-machine-translation measured the
+  cost of getting it backwards at nearly half the BLEU.
+
+- **Repetition loops are high-probability, not accidental**, which is why
+  greedy walks into them. The penalties that fix them are blunt, and they are
+  the wrong tool for structured output, where repeated keys and braces are
+  correct.
+
+- **On a strong model a grammar buys the last one or two percent.**
+  `qwen3.5:9b` was 98–99.3% schema-valid when merely asked, at every schema
+  difficulty tested. Enforcement took it to 100% and left accuracy alone.
+
+- **On a weak model it is the difference between working and not.**
+  `llama3.2:3b` fell to **79.3%** valid on a nested schema; with the grammar
+  it was 100% valid and accuracy rose **70.7% → 88.0%**, because a formatting
+  failure had been counted as a reasoning failure.
+
+- **The grammar's cost is latency and it is unpredictable** — 1.2× to **17×**
+  here, and not monotone in schema complexity. It was worst where the schema
+  demanded what the model did not want to produce. Measure it on your schema.
+
+- **A schema guarantees shape, never truth.** `{"answer": 1}` for the capital
+  of France is valid, typed and meaningless. Constrained decoding converts
+  parse failures into semantic failures, which is a good trade and not a fix.
+
+- **Constrain tool arguments without arguing about it.** 98% is fine for
+  extraction and unacceptable when something executes: at a thousand calls a
+  day that is twenty wrong actions or stack traces.
+
+- **Logprobs discriminate well and calibrate badly.** AUC **0.9492** against
+  the label and **0.8268** for predicting its own correctness, at **7.04%**
+  ECE — with the 0.90–0.95 bin right only 68.0% of the time and the near-0.5
+  bin right **33.3%**, below chance. Rank with them; do not quote them.
+
+- **Abstention is the cheapest accuracy you will buy.** Dropping the
+  least-confident 20% took accuracy from **86.75% to 92.50%** with no model
+  change. Choose the threshold on held-out data and report coverage with it.
+
+- **A usable confidence signal is designed in, not discovered.** It worked
+  here because the answer was one token from a two-token alphabet. Averaging
+  logprobs over free text measures how ordinary the phrasing was.
