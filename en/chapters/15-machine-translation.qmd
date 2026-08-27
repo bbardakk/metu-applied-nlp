@@ -140,6 +140,71 @@ Here is what BLEU makes of it:
   BLEU = 0.9048 x 0.5555 = 50.27
 ```
 
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Edit the translation and watch BLEU move</div>
+```
+
+```{ojs}
+//| echo: false
+viewof bleuRef = Inputs.text({label: "reference",
+  value: "In Istanbul , heavy rain caused flooding on Monday evening .", width: 560})
+```
+
+```{ojs}
+//| echo: false
+viewof bleuHyp = Inputs.text({label: "candidate",
+  value: "Heavy rain in Istanbul caused flooding on Monday evening .", width: 560})
+```
+
+```{ojs}
+//| echo: false
+viewof bleuLower = Inputs.toggle({label: "lowercase both first", value: false})
+```
+
+```{ojs}
+//| echo: false
+bleuScore = {
+  const prep = t => (bleuLower ? t.toLowerCase() : t).trim().split(/\s+/).filter(x => x);
+  const ref = prep(bleuRef), hyp = prep(bleuHyp);
+  const grams = (a, n) => a.slice(0, Math.max(0, a.length - n + 1))
+                           .map((_, i) => a.slice(i, i + n).join(" "));
+  const rows = [];
+  let logsum = 0;
+  for (let n = 1; n <= 4; n++) {
+    const h = grams(hyp, n), r = grams(ref, n);
+    const need = new Map();
+    for (const g of r) need.set(g, (need.get(g) ?? 0) + 1);   // clipped counts
+    let hit = 0;
+    for (const g of h) if ((need.get(g) ?? 0) > 0) { hit++; need.set(g, need.get(g) - 1); }
+    const p = h.length ? hit / h.length : 0;
+    rows.push({n: `${n}-gram`, matched: hit, total: h.length, precision: p});
+    logsum += Math.log(Math.max(p, 1e-12));
+  }
+  const bp = hyp.length > ref.length ? 1 : Math.exp(1 - ref.length / Math.max(hyp.length, 1));
+  const geo = Math.exp(logsum / 4);
+  return {rows, bp, geo, bleu: bp * geo * 100, hlen: hyp.length, rlen: ref.length};
+}
+```
+
+```{ojs}
+//| echo: false
+Inputs.table(bleuScore.rows, {
+  columns: ["n", "matched", "total", "precision"],
+  header: {n: "order", matched: "matched", total: "in candidate", precision: "precision"},
+  format: {precision: v => v.toFixed(4)},
+  width: {n: 90, matched: 90, total: 110, precision: 100},
+  rows: 4})
+```
+
+```{ojs}
+//| echo: false
+md`brevity penalty **${bleuScore.bp.toFixed(4)}** (candidate ${bleuScore.hlen}
+tokens, reference ${bleuScore.rlen}) × geometric mean
+**${bleuScore.geo.toFixed(4)}** = **BLEU ${bleuScore.bleu.toFixed(2)}**`
+```
+:::
+
 **50.27 for a correct translation.** Two things did the damage, and both are
 worth naming because they recur constantly:
 

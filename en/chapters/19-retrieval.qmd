@@ -158,6 +158,73 @@ one. When one parent is at 96% and the other at 36%, the weak parent's
 confident garbage arrives with full weight and displaces the strong parent's
 correct answer.
 
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Fuse two rankers by hand — and watch the right document lose</div>
+```
+
+```{ojs}
+//| echo: false
+viewof rrfGoldStrong = Inputs.range([1, 10], {step: 1, value: 1,
+  label: "gold document's rank in the strong system"})
+```
+
+```{ojs}
+//| echo: false
+viewof rrfGoldWeak = Inputs.range([1, 60], {step: 1, value: 40,
+  label: "its rank in the weak system (60 = not returned)"})
+```
+
+```{ojs}
+//| echo: false
+viewof rrfK = Inputs.range([1, 60], {step: 1, value: 60, label: "RRF constant k"})
+```
+
+```{ojs}
+//| echo: false
+// The weak system is confident about the wrong thing: it ranks a decoy first.
+// The strong system has that decoy far down its own list.
+rrfRows = {
+  const score = (a, b) => 1 / (rrfK + a) + 1 / (rrfK + b);
+  const rows = [
+    {doc: "the right document", strong: rrfGoldStrong, weak: rrfGoldWeak},
+    {doc: "decoy the weak system loves", strong: 20, weak: 1},
+    {doc: "decoy the weak system likes", strong: 25, weak: 2},
+    {doc: "decoy both systems dislike", strong: 15, weak: 15}
+  ].map(r => ({...r, fused: score(r.strong, r.weak)}));
+  const order = [...rows].sort((a, b) => b.fused - a.fused);
+  return rows.map(r => ({...r, rank: order.indexOf(r) + 1}));
+}
+```
+
+```{ojs}
+//| echo: false
+Inputs.table(rrfRows, {
+  columns: ["doc", "strong", "weak", "fused", "rank"],
+  header: {doc: "document", strong: "strong rank", weak: "weak rank",
+           fused: "RRF score", rank: "fused rank"},
+  format: {fused: v => v.toFixed(5)},
+  width: {doc: 240, strong: 100, weak: 100, fused: 100, rank: 90},
+  rows: 5})
+```
+
+```{ojs}
+//| echo: false
+md`**${rrfRows[0].rank === 1
+  ? "The right document survives at rank 1."
+  : `The right document lands at rank ${rrfRows[0].rank}.`}** A document the
+strong system ranked ${rrfGoldStrong === 1 ? "first" : `${rrfGoldStrong}th`} is
+${rrfRows[0].rank === 1 ? "still first" : "no longer first"} once a system that
+is wrong ${rrfRows[0].rank === 1 ? "is" : "gets"} an equal vote.`
+```
+:::
+
+Move the second slider and the mechanism becomes obvious: the weak system does
+not need to be *right* to change the outcome, only confident. And notice what
+`k` does — raising it flattens the differences between ranks, which makes
+fusion gentler and, at the limit, makes every returned document
+interchangeable.
+
 The damage has a shape worth seeing, because it tells you when you can get
 away with it:
 
@@ -268,11 +335,83 @@ It is also unusable as a retriever. Because the score depends on the pair,
 nothing can be precomputed: scoring a query against a million documents means
 a million forward passes. Hence the standard two-stage pattern:
 
-```text
-retrieve  top 50–100     cheap, recall-oriented   (BM25 / dense / both)
-rerank    those 50–100   expensive, precision-oriented (cross-encoder)
-return    top 5–10
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Why the architecture is always two stages</div>
+<svg viewBox="0 0 764 322" style="max-width:744px" role="img"
+     aria-label="A diagram comparing a bi-encoder with a cross-encoder, and then showing the two-stage pipeline that combines them. On the left, the bi-encoder encodes the query and each document separately into vectors that are compared by a dot product; the document vectors are marked as computed offline, so search over a million documents costs one query encoding plus a vector operation. On the right, the cross-encoder concatenates the query and one document and reads them in a single forward pass with attention across both; nothing can be precomputed, so scoring a million documents would cost a million forward passes. Below, a pipeline shows a corpus of one million documents entering a cheap recall-oriented first stage that returns a shortlist of fifty to a hundred, then an expensive precision-oriented cross-encoder reranking that shortlist, then the top five to ten returned. A label states that the first stage sets a ceiling the second cannot raise.">
+
+  <text x="10" y="16" class="t-xs t-b t-muted">BI-ENCODER — SEPARATE, SO IT PRECOMPUTES</text>
+  <text x="400" y="16" class="t-xs t-b t-muted">CROSS-ENCODER — JOINT, SO IT CANNOT</text>
+
+  <rect x="10"  y="28" width="110" height="30" rx="6" class="chip"/>
+  <text x="65"  y="48" class="t-xs t-mid t-b">query</text>
+  <rect x="10"  y="66" width="110" height="30" rx="6" class="chip"/>
+  <text x="65"  y="86" class="t-xs t-mid t-b">document</text>
+
+  <rect x="136" y="28" width="86" height="30" rx="6" class="box-accent"/>
+  <text x="179" y="48" class="t-xs t-mid t-b t-accent">encoder</text>
+  <rect x="136" y="66" width="86" height="30" rx="6" class="box-accent"/>
+  <text x="179" y="86" class="t-xs t-mid t-b t-accent">encoder</text>
+  <path d="M124 43 L 132 43" class="ln"/><path d="M124 81 L 132 81" class="ln"/>
+
+  <path d="M226 43 L 250 43" class="ln"/><path d="M226 81 L 250 81" class="ln"/>
+  <rect x="254" y="44" width="76" height="34" rx="6" class="box"/>
+  <text x="292" y="59" class="t-xs t-mid t-b">dot</text>
+  <text x="292" y="72" class="t-xs t-mid t-b">product</text>
+
+  <text x="179" y="112" class="t-xs t-mid t-navy t-b">document side: computed once, offline</text>
+  <text x="179" y="126" class="t-xs t-mid t-muted">1M documents = 1 query encoding + a vector op</text>
+
+  <rect x="400" y="28" width="200" height="30" rx="6" class="chip"/>
+  <text x="500" y="48" class="t-xs t-mid t-b">query ⧺ document</text>
+  <path d="M500 60 L 500 70" class="ln"/><path d="M496 70 l 4 8 l 4 -8 z" class="head"/>
+
+  <rect x="400" y="80" width="200" height="34" rx="6" class="box-rose"/>
+  <text x="500" y="101" class="t-xs t-mid t-b t-rose">one forward pass, attention across both</text>
+  <path d="M610 97 L 634 97" class="ln"/>
+  <rect x="638" y="80" width="76" height="34" rx="6" class="box"/>
+  <text x="676" y="101" class="t-xs t-mid t-b">score</text>
+
+  <text x="500" y="132" class="t-xs t-mid t-rose t-b">nothing can be precomputed</text>
+  <text x="500" y="146" class="t-xs t-mid t-muted">1M documents = 1M forward passes</text>
+
+  <path d="M10 166 L 754 166" class="ln-thin ln-dash"/>
+  <text x="10" y="186" class="t-xs t-b t-muted">SO THE PIPELINE USES BOTH</text>
+
+  <rect x="10"  y="198" width="128" height="46" rx="6" class="chip"/>
+  <text x="74"  y="220" class="t-sm t-mid t-b">corpus</text>
+  <text x="74"  y="235" class="t-xs t-mid t-muted">1,000,000 docs</text>
+  <path d="M142 221 L 172 221" class="ln"/><path d="M172 217 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="184" y="198" width="180" height="46" rx="6" class="box-accent"/>
+  <text x="274" y="217" class="t-xs t-mid t-b t-accent">STAGE 1 — RETRIEVE</text>
+  <text x="274" y="231" class="t-xs t-mid t-muted">cheap, recall-oriented</text>
+  <text x="274" y="241" class="t-xs t-mid t-muted">BM25 / dense / both</text>
+  <path d="M368 221 L 398 221" class="ln"/><path d="M398 217 l 8 4 l -8 4 z" class="head"/>
+  <text x="383" y="210" class="t-xs t-mid t-muted">50–100</text>
+
+  <rect x="410" y="198" width="180" height="46" rx="6" class="box-rose"/>
+  <text x="500" y="217" class="t-xs t-mid t-b t-rose">STAGE 2 — RERANK</text>
+  <text x="500" y="231" class="t-xs t-mid t-muted">expensive, precision-oriented</text>
+  <text x="500" y="241" class="t-xs t-mid t-muted">cross-encoder</text>
+  <path d="M594 221 L 624 221" class="ln"/><path d="M624 217 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="636" y="198" width="118" height="46" rx="6" class="chip"/>
+  <text x="695" y="226" class="t-sm t-mid t-b">top 5–10</text>
+
+  <path d="M184 254 L 184 268 L 590 268 L 590 254" class="ln-accent"/>
+  <text x="387" y="286" class="t-xs t-mid t-b t-accent">stage 1 sets a ceiling stage 2 cannot raise</text>
+  <text x="387" y="300" class="t-xs t-mid t-muted">a reranker can only reorder what it was given</text>
+</svg>
 ```
+
+::: {.fig-cap}
+The bi-encoder is fast because it never sees a pair; the cross-encoder is
+accurate because it only ever sees pairs. Neither property is negotiable, so
+production systems buy recall with the first and precision with the second.
+:::
+::::
 
 Three consequences worth internalising:
 
@@ -584,6 +723,89 @@ everything downstream.
 7. **Query-type census.** Sample 100 production queries and classify them.
    Predict, from this chapter's tables, which retriever should win your mix.
    Then measure and see whether you were right.
+
+## Interview questions {#sec-retrieval-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: Write down BM25 and explain what `k1` and `b` are doing.**
+
+The scoring function is IDF times a saturating term frequency, with a length
+correction:
+
+$$
+\text{BM25}(q,d) = \sum_{t \in q} \text{IDF}(t) \cdot
+\frac{f_{t,d}\,(k_1+1)}{f_{t,d} + k_1\left(1 - b + b\,\frac{|d|}{\text{avgdl}}\right)}
+$$
+
+The part worth saying out loud is *why* it saturates. In @sec-text-as-data's
+TF-IDF the tenth occurrence of a term counts exactly as much as the first;
+here $k_1$ bounds the contribution, so a document that repeats a word twenty
+times cannot outrank one that uses it three times in a better context. And $b$
+interpolates length normalization: $b=0$ ignores document length, $b=1$
+divides it out fully. If you add that `sublinear_tf` in `scikit-learn` is the
+crude version of the same idea, you have connected the two chapters.
+
+**Q: Bi-encoder or cross-encoder? Why not use the better one everywhere?**
+
+A bi-encoder embeds query and document *independently*, so documents can be
+encoded once, offline, and search is a vector operation. A cross-encoder reads
+the pair jointly and scores it, which is strictly more informative and cannot
+be precomputed — the cost is one forward pass per candidate at query time.
+That is why the architecture is always both: retrieve a shortlist cheaply,
+rerank it expensively. The follow-up to volunteer is where the shortlist
+saturates, because reranking 1,000 candidates rarely buys more than reranking
+100 and costs ten times as much.
+
+**Q: What is the quality dial in an approximate index, and what is it set to
+right now?**
+
+`efSearch` in HNSW, `nprobe` in IVF — how much of the graph or how many
+clusters get visited. The point of the question is the second half: it has a
+default, the default was chosen by the library author and not by you, and it
+is a *recall* setting wearing a performance costume. An ANN index that silently
+returns 92% of the true neighbours has capped your system at 92% before the
+model sees anything. Measure approximate against exhaustive on a sample and
+you will know the number instead of assuming it.
+
+### Testing whether you have shipped one
+
+**Q: You are handed a corpus and no queries. How do you build an evaluation
+set?**
+
+Collect a hundred *real* queries — from logs, from support tickets, from the
+people who will use it — because invented queries are systematically cleaner
+than real ones and will flatter every system you test. Then pool: run two or
+three different retrievers, label the union of their top-10, and you have
+relevance judgements without reading the whole corpus. Say explicitly that a
+hundred labelled queries beats a thousand unlabelled ones, and that the set is
+worth more than any model choice you will make afterwards.
+
+**Q: A stakeholder wants semantic search to replace keyword search. What do
+you tell them?**
+
+That the answer is an empirical question about their queries, and then show
+them the two conditions from this chapter: on inflected keyword queries
+stemmed BM25 scored **96.0%** recall@1 against a dense retriever's **35.9%**;
+on cross-lingual queries the same dense model scored **96.2%** against BM25's
+**23.8%**. Same corpus, opposite verdicts. So the real deliverable is a census
+of their query mix, and if it is genuinely mixed, routing by query type beats
+fusing — this chapter measured RRF *costing* 32.8 and 46.8 recall@1 points
+against the better single retriever.
+
+**Q: Retrieval looks good but the answers are bad. Whose problem is it?**
+
+Do not guess — attribute. Check whether the supporting document was in the
+top-k at all: if it was not, this is a retrieval problem and no prompting fixes
+it; if it was, the model had what it needed and did not use it, which is a
+grounding problem. @sec-rag builds that decomposition properly. The
+one-sentence version, and the reason this chapter exists before that one:
+recall@k is a *ceiling* on the whole system, so it is the first thing to
+measure and the last thing you can fix by tuning a prompt.
 
 ## What to remember {#sec-retrieval-summary}
 
