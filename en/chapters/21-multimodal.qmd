@@ -1,29 +1,684 @@
 # Multimodal Models {#sec-multimodal}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.** Port from the CME 295-based Multimodal LLMs
-material.
+**Chapter status: drafted.** The measurements use `gemma3:27b` through
+`ollama` 0.24.0 on a local GPU, and pages rendered with `Pillow` 12.3.0 from
+the WMT16/17/18 tr-en test sets — the same aligned corpus @sec-machine-translation
+and @sec-turkish-nlp used, so the Turkish and English pages say the same thing
+and a gap between them cannot be a content gap. Software: `Pillow` 12.3.0,
+NumPy 2.5.2 on Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- explain how images become tokens (patch embeddings) and join the same sequence as text;
-- describe contrastive vision–language pretraining and what it buys;
-- scope realistic industrial use cases: documents, dashboards, defect images;
-- anticipate multimodal-specific failure modes (hallucinated detail, OCR limits).
+- explain how an image becomes tokens, and say what that costs in the units
+  you are billed in;
+- describe contrastive vision–language pretraining and what it buys
+  [@radford2021clip];
+- predict where a vision–language model will fail on documents, and why
+  resolution is the variable that decides it;
+- design the control that separates a model reading an image from a model
+  answering plausibly;
+- decide whether a VLM or a dedicated OCR pipeline is the right tool for a
+  document task.
 
-## One sequence, many modalities
+## An image is a fixed number of tokens {#sec-multimodal-tokens}
 
-<!-- TODO(draft): patches-as-tokens; a diagram mapping an image + a
-     question into one token stream. -->
+A transformer takes a sequence of vectors. @sec-transformers never cared where
+those vectors came from, and that is the whole trick: cut an image into
+patches, project each patch to the model's hidden size
+([**patch embedding**](#gloss-patch-embedding){#term-patch-embedding .term-ref}),
+and you have a sequence the same machinery can read [@dosovitskiy2021image].
 
-## What multimodal models are good at today
+::: {#gloss-patch-embedding .column-margin .term-gloss}
+**Patch embedding** — an image cut into fixed squares, each projected to the
+model's hidden size, so a picture becomes a sequence of vectors a transformer
+can read alongside text. [↩](#term-patch-embedding){.term-back}
+::: Text tokens and
+image patches sit in one stream and attend to each other.
 
-<!-- TODO(draft): document understanding, chart reading, visual QA;
-     honest limits; one industrial vignette (quality-control imagery). -->
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">How a page joins the same sequence as the question</div>
+<svg viewBox="0 0 764 250" style="max-width:744px" role="img"
+     aria-label="A diagram showing an image and a question entering one token sequence. On the left, a page of text is cut into a grid of patches. An arrow labelled vision encoder maps the whole grid to a fixed block of 256 vectors, with a note that the count does not depend on what is on the page. Below, the question text is tokenized into a variable number of vectors. Both blocks feed into a single sequence, drawn as one row of vectors, which enters the transformer. A label states that attention runs across the whole row, so image vectors and text vectors can attend to each other, and that this is the only mechanism involved. A second label notes that the image block is a flat 256 vectors whether the page holds one sentence or fourteen lines.">
 
-## Exercises
+  <text x="10" y="16" class="t-xs t-b t-muted">THE PAGE</text>
+  <rect x="10" y="26" width="150" height="104" rx="4" class="box"/>
+  <g class="ln-thin">
+    <line x1="47.5" y1="26" x2="47.5" y2="130"/><line x1="85" y1="26" x2="85" y2="130"/>
+    <line x1="122.5" y1="26" x2="122.5" y2="130"/>
+    <line x1="10" y1="52" x2="160" y2="52"/><line x1="10" y1="78" x2="160" y2="78"/>
+    <line x1="10" y1="104" x2="160" y2="104"/>
+  </g>
+  <text x="85" y="146" class="t-xs t-mid t-muted">cut into patches</text>
 
-1. Collect three images from your own work (a table scan, a chart, a
-   photo). Predict, before testing, which one a VLM will misread — then
-   check.
+  <path d="M166 78 L 202 78" class="ln"/><path d="M202 74 l 8 4 l -8 4 z" class="head"/>
+  <text x="184" y="68" class="t-xs t-mid t-muted">vision</text>
+  <text x="184" y="94" class="t-xs t-mid t-muted">encoder</text>
+
+  <rect x="216" y="56" width="196" height="44" rx="6" class="box-accent"/>
+  <text x="314" y="74" class="t-xs t-mid t-b t-accent">256 VECTORS</text>
+  <text x="314" y="90" class="t-xs t-mid t-muted">always 256, whatever is on the page</text>
+
+  <text x="10" y="180" class="t-xs t-b t-muted">THE QUESTION</text>
+  <rect x="10" y="190" width="150" height="30" rx="6" class="chip"/>
+  <text x="85" y="210" class="t-xs t-mono t-mid t-b">"Bu tabloda…"</text>
+  <path d="M166 205 L 202 205" class="ln"/><path d="M202 201 l 8 4 l -8 4 z" class="head"/>
+  <text x="184" y="196" class="t-xs t-mid t-muted">tokenizer</text>
+
+  <rect x="216" y="188" width="196" height="34" rx="6" class="box-warm"/>
+  <text x="314" y="209" class="t-xs t-mid t-b t-warm">n VECTORS — varies with the text</text>
+
+  <path d="M418 78 L 452 132" class="ln"/><path d="M418 205 L 452 152" class="ln"/>
+  <path d="M452 142 l -9 -3 l 1 9 z" class="head"/>
+
+  <text x="466" y="112" class="t-xs t-b t-muted">ONE SEQUENCE</text>
+  <rect x="466" y="122" width="26" height="34" rx="4" class="box-accent"/>
+  <rect x="496" y="122" width="26" height="34" rx="4" class="box-accent"/>
+  <rect x="526" y="122" width="26" height="34" rx="4" class="box-accent"/>
+  <text x="566" y="144" class="t-sm t-mid t-muted">…</text>
+  <rect x="586" y="122" width="26" height="34" rx="4" class="box-accent"/>
+  <rect x="620" y="122" width="26" height="34" rx="4" class="box-warm"/>
+  <rect x="650" y="122" width="26" height="34" rx="4" class="box-warm"/>
+  <rect x="680" y="122" width="26" height="34" rx="4" class="box-warm"/>
+  <text x="586" y="114" class="t-xs t-mid t-accent">image</text>
+  <text x="663" y="114" class="t-xs t-mid t-warm">text</text>
+
+  <path d="M466 166 L 466 176 L 706 176 L 706 166" class="ln"/>
+  <text x="586" y="194" class="t-xs t-mid t-b">the same transformer stack, unmodified</text>
+  <text x="586" y="210" class="t-xs t-mid t-muted">attention runs across the whole row, both ways</text>
+</svg>
+```
+
+::: {.fig-cap}
+There is no separate image pathway. Patches become vectors, the question
+becomes vectors, and one sequence goes into the same stack — which is why a
+model that can read text can be taught to read pages without changing its
+architecture.
+:::
+::::
+
+The consequence people skip is what this does to your bill, and it is
+measurable in one line. Every image in this chapter's experiment — 320 of
+them, four font sizes, two languages, sparse pages and dense ones — cost
+**exactly the same 290 prompt tokens**:
+
+```text
+  font size   image tokens   what is on the page
+       34 px           290   ~5 lines, comfortable
+       22 px           290   ~7 lines
+       15 px           290   ~10 lines
+       11 px           290   ~14 lines, tight
+```
+
+[An image costs a flat rate.]{.hl} The vision encoder resizes to a fixed grid,
+so 256 image tokens plus the prompt is what you pay whether the page holds a
+sentence or a spreadsheet.
+
+Two things follow, and the second one predicts the rest of the chapter.
+
+**Pixels are an expensive way to send text.** Measured on the same sentences,
+sent both ways:
+
+```text
+                chars   as text   as image   premium
+  English         222      46.6        260     5.57x
+  Turkish         233      62.4        260     4.17x
+```
+
+If you already have the text, photographing it costs four to five times more
+for the same content — a premium paid by every pipeline that screenshots a
+page it has already parsed.
+
+Look at the two rows together, though, because they say something less
+obvious. The image rate is flat, so **the premium is smaller for Turkish** —
+not because pixels are cheaper there, but because @sec-turkish-nlp's tokenizer
+penalty makes the *text* expensive: 62.4 tokens against English's 46.6 for the
+same sentence, a 1.34× ratio consistent with what that chapter measured on a
+much larger sample. A flat-rate encoder partially absorbs an agglutinative
+language's token tax. Hold that thought until @sec-multimodal-ocr, which
+measures what you give up to collect it.
+
+**As the page gets denser, the budget does not grow.** Fourteen lines of
+11-pixel type has to fit through the same 256 vectors as five lines of
+34-pixel type. Nothing about the model changes; the information per token
+does. So if transcription accuracy falls with font size, that is not the model
+getting confused — it is a bottleneck you can compute in advance.
+
+## Where the alignment comes from {#sec-multimodal-contrastive}
+
+Patches give you a sequence. They do not give you a sequence whose vectors mean
+anything to a *language* model — a projected patch is just pixels in a new
+basis. Something has to teach the two spaces to agree, and the answer that
+made everything since possible is contrastive pretraining.
+
+CLIP [@radford2021clip] is the canonical version of
+[**contrastive pretraining**](#gloss-contrastive-pretraining){#term-contrastive-pretraining .term-ref}
+and the idea is one sentence long:
+
+::: {#gloss-contrastive-pretraining .column-margin .term-gloss}
+**Contrastive pretraining** — training an image encoder and a text encoder
+together so that a picture and its caption land close in one space, and
+mismatched pairs land apart. The captions are the supervision, so no one
+labels anything. [↩](#term-contrastive-pretraining){.term-back}
+::: take a large collection of images with their captions, encode each image
+and each caption, and train so that **matching pairs land near each other and
+mismatched pairs land apart**. Nothing labels what is in the image. The caption
+is the supervision, and the internet supplies both halves for free.
+
+::: {.column-margin}
+Which is the same bargain @sec-pretraining described for text: the supervision
+was already lying around, and the trick was noticing it counted as
+supervision. Every scaling story in this book has that shape.
+:::
+
+Two consequences are worth carrying forward.
+
+**It buys zero-shot classification.** Because captions are text, the label
+space is open: to ask *is this a defective weld*, encode that sentence and
+compare. You are no longer restricted to the categories someone enumerated at
+training time, which is what made vision models useful in places nobody had
+labelled a dataset for.
+
+**It buys a shared space, which is what a VLM is built on.** Once image
+vectors live somewhere a language model can interpret, you can attach a
+projection to a pretrained LLM and fine-tune on image–instruction pairs —
+Flamingo [@alayrac2022flamingo] and then LLaVA [@liu2023visual] are the designs
+everything now follows. The vision encoder in this chapter's model is a
+descendant of CLIP with a different loss [@zhai2023sigmoid], and its fixed
+output size is why an image costs a flat rate.
+
+What contrastive pretraining does *not* buy is any guarantee about detail. The
+objective rewards matching an image to its caption, and a caption describes what
+a photograph is *about*, not what every region of it contains. That is the root
+of the failure this chapter measures next, and it has been documented since
+before the current generation of models: caption models assert objects that are
+not in the image [@rohrbach2018object].
+
+## Reading a document, measured {#sec-multimodal-ocr}
+
+The obvious industrial use of a vision–language model is reading documents:
+scanned invoices, forms, contracts, screenshots of dashboards. So the question
+worth answering is not *can it read* — it can — but **where it stops being
+able to**, and whether that boundary sits in the same place for every
+language.
+
+@sec-turkish-nlp's method transfers directly, and this is the reason to use it
+here. Take the WMT16/17/18 Turkish–English test sets, which are professional
+translations, so the two languages say the same thing. Render each sentence as
+a page image in the same font at four sizes, from a comfortable scan down to a
+bad phone photo. Any gap between the two languages cannot be a content gap.
+
+Two scores. **Character error rate**, edit distance over reference length, for
+overall damage. And **diacritic retention** — of the `ç ğ ı ö ş ü İ` that
+should be on the page, how many survived — because a model that quietly
+deasciifies Turkish is doing something specific, and CER alone would hide it
+inside a general error rate.
+
+```text
+gemma3:27b, 40 aligned sentence pairs, one font, four sizes
+
+ language   font px    CER    diacritics kept   image tokens
+  English       34   0.04%                  —            290
+  English       22   0.05%                  —            290
+  English       15   0.22%                  —            290
+  English       11   1.33%                  —            290
+  Turkish       34   0.26%              99.8%            290
+  Turkish       22   0.25%              99.6%            290
+  Turkish       15   1.30%              99.3%            290
+  Turkish       11   6.67%              95.1%            290
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">The resolution ladder — where each language falls off</div>
+```
+
+```{ojs}
+//| echo: false
+vlmData = [
+  {lang: "English", size: 34, cer: 0.04, diac: null},
+  {lang: "English", size: 22, cer: 0.05, diac: null},
+  {lang: "English", size: 15, cer: 0.22, diac: null},
+  {lang: "English", size: 11, cer: 1.33, diac: null},
+  {lang: "Turkish", size: 34, cer: 0.26, diac: 99.8},
+  {lang: "Turkish", size: 22, cer: 0.25, diac: 99.6},
+  {lang: "Turkish", size: 15, cer: 1.30, diac: 99.3},
+  {lang: "Turkish", size: 11, cer: 6.67, diac: 95.1}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof vlmScale = Inputs.radio(new Map([["linear", "linear"], ["log", "log"]]),
+  {value: "log", label: "error axis"})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 360, marginLeft: 62, marginBottom: 46,
+  x: {label: "font size (px) — larger is easier", domain: [10, 36],
+      ticks: [11, 15, 22, 34], grid: true, reverse: true},
+  y: {type: vlmScale, label: "character error rate (%)", grid: true,
+      domain: vlmScale === "log" ? [0.03, 10] : [0, 7]},
+  color: {legend: true, domain: ["English", "Turkish"],
+          range: ["#0E7C7B", "#C1666B"]},
+  marks: [
+    Plot.line(vlmData, {x: "size", y: "cer", stroke: "lang", strokeWidth: 2}),
+    Plot.dot(vlmData, {x: "size", y: "cer", fill: "lang", r: 5}),
+    Plot.text(vlmData, {x: "size", y: "cer", dy: -14, fontSize: 11,
+      fill: "lang", text: d => d.cer.toFixed(2) + "%"})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+md`On a log axis the two lines are close to parallel — Turkish sits roughly
+**5× above English at every resolution**, which is the ratio staying constant.
+Switch to a linear axis and the same data looks like a cliff, because at 11 px
+the gap is 5.3 percentage points rather than 0.2. Both readings are true, and
+which one you show decides whether anyone acts on it.`
+```
+:::
+
+### What it says
+
+[Turkish costs about five times the error rate of English, at every
+resolution, on identical content.]{.hl} 6.5× at 34 px, 5.0× at 22, 5.9× at 15,
+5.0× at 11. The ratio is remarkably stable; what changes is the absolute
+damage, and at 11 pixels it becomes a real number — 6.67% of characters wrong
+against English's 1.33%.
+
+This is @sec-turkish-nlp's pattern arriving through a door that chapter never
+opened. There is no tokenizer here, no stemmer, no lowercasing — just pixels
+and a vision encoder. And the tool still works measurably worse in Turkish,
+still without raising anything you could catch in a log.
+
+Note also **where the cliff is**. Between 22 px and 15 px, English degrades by
+a factor of four from a tiny number; Turkish degrades by a factor of five to a
+number you would notice. Between 15 px and 11 px, Turkish degrades by another
+factor of five. Resolution is not a smooth dial, it is a threshold, and the
+threshold sits at a different place for the two languages — which means a
+scanning setting validated on English documents is not validated for Turkish
+ones.
+
+### The failure is not the one you would predict
+
+I expected the errors to be diacritics: `ş` read as `s`, `ğ` as `g`. Some of
+that happens — diacritic retention falls to 95.1% at 11 px, so roughly one in
+twenty Turkish-specific characters vanishes. But it is a minority of the
+damage, and the majority is more interesting.
+
+```text
+REF  ... ailesinin Mississippi, Greenville banliyölerinde bulunan evine ...
+HYP  ... ailesinin Mississippi, Greenville'de bulunan evine ...
+```
+
+The model did not drop a diacritic or garble a letter. It replaced a word it
+could not resolve with a **shorter, grammatical, plausible** alternative. That
+is not OCR failing; that is a language model doing what language models do —
+filling an uncertain region with something likely — and it is the specific
+reason a VLM is a different risk profile from a classical OCR engine. A
+dedicated OCR system produces garbage when it fails, and garbage is easy to
+detect. A VLM produces *fluent Turkish that was never on the page*.
+
+::: {.column-margin}
+Which gives a practical rule with teeth: if a downstream step will treat the
+transcription as ground truth, prefer a tool whose failures look like
+failures. @sec-multimodal-tools names the dedicated OCR engines. Use the VLM
+where the task is understanding rather than transcription — *what is this
+document about*, *which field is the total* — and where a wrong answer is
+checked by something other than its own fluency.
+:::
+
+## Does it read the image, or answer plausibly? {#sec-multimodal-hallucination}
+
+The transcription result raises a sharper question. If the model fills
+illegible regions with likely text, how much of *any* answer it gives about an
+image is actually coming from the pixels?
+
+That is answerable with the control this book keeps returning to. Render
+tables of **invented** figures — Turkish city names against numbers no model
+could know or guess — and ask two kinds of question about each:
+
+- **present**: a row that is in the table. Scored on exact match.
+- **absent**: a plausible Turkish city that is *not* in the table. Scored on
+  whether the model says so.
+
+The second is the whole experiment. A model that answers everything
+confidently is indistinguishable from a model that reads well, right up until
+you ask it something the image does not contain.
+
+```text
+gemma3:27b, 30 tables of 8 invented rows, 180 questions
+
+  value present in the table   read correctly   89/90  =  98.9%
+  value NOT in the table       refused          90/90  = 100.0%
+```
+
+**It refused every single time.** Ninety opportunities to invent a plausible
+number for a plausible city, and it took none of them. The one error in the
+other column was a misread digit, not an invention.
+
+### The two results together are the finding
+
+Read on its own, that table says the model is trustworthy about images. Read
+next to @sec-multimodal-ocr, it says something much more specific and much more
+useful:
+
+```text
+  asked for something that is NOT in the image     refuses, 100%
+  asked to transcribe something it CANNOT resolve  invents fluent Turkish
+```
+
+[The model knows what is not there. It does not know what it cannot read.]{.hl}
+
+The distinction is not a quirk; it follows from how the two questions are
+posed. *Is Trabzon in this table* is a categorical judgement the model can make
+from evidence that is actually present — it can see the eight rows, and Trabzon
+is not among them. *What does this smudge say* has no such evidence to check
+against: the region is uncertain, the model's job at every step is to emit a
+likely continuation, and a likely continuation is exactly what it emits. There
+is no internal signal that separates "I read this" from "I inferred this",
+because both come out of the same forward pass.
+
+::: {.column-margin}
+This is the same shape as @sec-decoding's calibration result, arriving in a
+different modality: a model's confidence discriminates well between things it
+was *asked* about and badly between things it *produced*. Abstention works when
+there is something to abstain about. It does not work inside a generated
+string.
+:::
+
+That gives a rule you can hold on to. **Ask a VLM questions.** Do not ask it to
+be an OCR engine and then trust the output as a transcript, because the failure
+mode is silent and fluent. If you need a transcript that fails loudly, use a
+tool that fails loudly.
+
+## VLM or OCR? {#sec-multimodal-choosing}
+
+The two are not competing implementations of one thing; they have different
+failure modes, and the failure mode should pick the tool.
+
+A [**vision-language model (VLM)**](#gloss-vision-language-model-vlm){#term-vision-language-model-vlm .term-ref}
+and an [**optical character recognition (OCR)**](#gloss-optical-character-recognition-ocr){#term-optical-character-recognition-ocr .term-ref}
+engine are built for different jobs, and it shows in what they do when they are
+wrong.
+
+::: {#gloss-vision-language-model-vlm .column-margin .term-gloss}
+**Vision-language model (VLM)** — a language model with a vision encoder
+attached, so images and text occupy one sequence. Reads pages, charts and
+photographs, and answers questions about them.
+[↩](#term-vision-language-model-vlm){.term-back}
+:::
+
+::: {#gloss-optical-character-recognition-ocr .column-margin .term-gloss}
+**Optical character recognition (OCR)** — turning an image of text into text.
+A dedicated engine fails visibly, which is its main advantage over a model
+that fails fluently.
+[↩](#term-optical-character-recognition-ocr){.term-back}
+:::
+
+| | Dedicated OCR | Vision–language model |
+|:--|:--|:--|
+| Output when confident | text, with per-character confidences | text, no usable per-character signal |
+| Output when it fails | [garbage — visibly wrong, easy to gate on]{.pro} | [fluent, plausible, wrong]{.con} |
+| Layout and reading order | needs its own model or heuristics | [handled, often well]{.pro} |
+| Answering *about* a document | [not its job — you build that on top]{.con} | [the thing it is for]{.pro} |
+| Charts and diagrams | [nothing useful]{.con} | reads them, with the caveat above |
+| Cost per page | cheap, local, no GPU needed | a flat 256+ tokens, plus generation |
+| Turkish specifically | depends entirely on the engine's language packs | measured above: ~5× the English error rate |
+
+: Two tools, two failure modes {tbl-colwidths="[24,36,40]"}
+
+The practical architecture for document work in 2026 is usually **both**: a
+dedicated engine produces the transcript, and the VLM answers questions over
+the transcript *and* the image. That way the text you index is text that failed
+loudly if it failed, and the model is used for the part it is uniquely good at
+— reading layout, finding the field, understanding the chart.
+
+## Lab: find your own resolution cliff {#sec-multimodal-lab}
+
+### Step 1 — twenty real pages, not clean ones
+
+Take twenty documents from your actual pipeline, including the bad scans.
+Clean test data is the reason resolution problems reach production.
+
+### Step 2 — build the ladder
+
+Render or downsample each page at four resolutions spanning comfortable to
+marginal. You are looking for a threshold, so you need points either side of it.
+
+### Step 3 — transcribe and score with edit distance
+
+You need reference text for twenty pages. Type it. It is two hours and it is
+the only part of this lab that cannot be skipped, because every number
+afterwards depends on it.
+
+### Step 4 — score the language-specific characters separately
+
+Count how many of your language's diacritics survived. A general error rate
+averages this away, and it is the part that breaks downstream matching.
+
+### Step 5 — run the absence control
+
+Ask ten questions whose answers are *not* on the page. Count confident
+answers. Do the same for ten that are.
+
+### Step 6 — find where the fluent inventions start
+
+Read the transcriptions at your worst resolution by hand and mark every
+passage that is grammatical and wrong. That count, not the character error
+rate, is what tells you whether the output is safe to index.
+
+### What to hand in
+
+The error-rate ladder with the cliff marked, the diacritic retention at each
+step, the two control counts, and one sentence naming the minimum resolution
+you would accept in production.
+
+## Intuition checks {#sec-multimodal-intuition}
+
+Answer these before opening the callout.
+
+::: {.callout-note collapse="true"}
+## 1. Is sending an image cheaper than sending the text?
+
+No, and it is not close. The same sentence measured both ways cost **46.6
+tokens as English text and 260 as an image** — a 5.57× premium, 4.17× in
+Turkish. The image rate is *flat*, which is the part that surprises people: a
+page holding one line and a page holding fourteen cost exactly the same. So
+photographing text you already have is pure waste, and the waste is larger the
+less the page contains.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Why does transcription accuracy fall as the font gets smaller, if the model is unchanged?
+
+Because the token budget does not fall with it. The encoder emits a fixed
+number of vectors regardless of what is on the page, so a denser page pushes
+more information through the same bottleneck. You can predict the direction of
+this effect before running anything — and it means the fix is resolution and
+cropping, not prompting.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your VLM reads English documents at 0.2% character error. What will it do on Turkish?
+
+Worse, and by a factor you should measure rather than assume. Here it was
+**about 5× at every resolution** on professionally translated pairs, so the
+content was identical and only the script differed — 6.67% against 1.33% at
+the smallest size. The general lesson is @sec-turkish-nlp's, arriving with no
+tokenizer involved: a pipeline validated on English is not validated for
+another language, even when the component has nothing linguistic in it.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. A VLM transcribed a page and the output reads perfectly. Is it correct?
+
+Not necessarily, and fluency is *evidence against* rather than for. The
+measured failure mode is not garbled characters; it is a word the model could
+not resolve replaced by a shorter, grammatical, plausible one — output that
+looks better than an honest failure would. Classical OCR produces detectable
+garbage when it fails. If a downstream step will treat the transcript as truth,
+that difference decides the tool.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Do VLMs hallucinate answers about images?
+
+Less than their reputation, in the case that is easy to test: asked 90 times
+for a value that was not in the table, this model refused **90 times**. What it
+does do is invent inside things it *is* generating, like a transcript of an
+illegible region. Absence it can detect; illegibility it cannot, because
+nothing in a forward pass separates reading from inferring.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Should you replace your OCR pipeline with a VLM?
+
+Usually you should run both. Use the dedicated engine for the transcript, so
+failures are loud and gateable, and the VLM for the things it is uniquely good
+at — layout, locating a field, reading a chart, answering questions about the
+page. Replacing a loud failure mode with a silent one is a downgrade even when
+the average accuracy improves.
+:::
+
+## Interview questions {#sec-multimodal-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: How does an image get into a language model?**
+
+Cut into patches, each patch projected to the model's hidden size by a vision
+encoder, and the resulting vectors concatenated with the text tokens into one
+sequence. Attention then runs across the whole thing, both directions. The
+consequence worth adding, because it shows you have used one: the encoder emits
+a *fixed* number of vectors, so image cost does not scale with what is on the
+page — measured here at a flat 260 tokens whether the page held one line or
+fourteen.
+
+**Q: A model reads your documents well in testing and badly in production.
+Where do you look?**
+
+Resolution first, because it is the variable with a cliff rather than a slope.
+The fixed token budget means a denser or smaller-typed page pushes more
+information through the same bottleneck, and the degradation is not gradual —
+here English went from 0.05% to 1.33% character error across the ladder and
+Turkish from 0.25% to 6.67%. Then check whether production pages differ from
+test pages in language, because the cliff sits in a different place for
+different scripts.
+
+### Testing whether you have shipped one
+
+**Q: How would you evaluate a VLM on document extraction?**
+
+With two controls, and say why each exists. First, character error rate against
+typed references, broken out by any resolution and language you actually
+encounter — the aggregate hides the cliff. Second, an **absence control**:
+questions whose answers are not on the page, scored on refusal. Without the
+second you cannot distinguish a model that reads from a model that answers
+plausibly. And read the worst-case transcripts by hand for passages that are
+grammatical and wrong, because that class of error survives every automatic
+check you are likely to run.
+
+**Q: When would you not use a VLM?**
+
+When you need a transcript that a downstream system will trust. The failure
+mode is fluent and undetectable, so a silent error propagates into whatever you
+index or compute. Use a dedicated OCR engine there, keep the VLM for
+understanding rather than transcription, and if you need both, run both — the
+extra cost is small next to a wrong number nobody caught.
+
+## The 2026 toolbox {#sec-multimodal-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `gemma3:27b` locally, images and all |
+| `Pillow` | 12.3.0 | rendering the aligned pages and the invented tables |
+| `numpy` | 2.5.2 | the scoring |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `paddleocr` | 3.7.0 | a strong dedicated OCR engine with layout analysis; the default first try for a transcript that must fail loudly |
+| `surya-ocr` | 0.22.1 | modern OCR plus reading-order and table detection, multilingual |
+| `easyocr` / `pytesseract` | 1.7.2 / 0.3.13 | lighter options; `pytesseract` wraps Tesseract, which is old, fast, and honest about failing |
+| `docling` | 2.123.0 | document conversion end to end, the @sec-rag stage-1 problem |
+| `pdf2image` | 1.17.0 | PDF pages to images, when you need the pixels rather than the text layer |
+| `transformers` | 5.16.1 | running open vision–language models yourself, when a local server is not enough |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## Exercises {#sec-multimodal-exercises}
+
+1. **Predict, then check.** Collect three images from your own work — a table
+   scan, a chart, a photo. Predict which one the model will misread and how,
+   *in writing*, before testing. Then check. The value of this exercise is
+   entirely in having written the prediction down.
+2. **Find your cliff.** Take one page and render it at eight resolutions.
+   Plot character error rate against resolution. Is it a slope or a step? Mark
+   the resolution you would set as a minimum, and say what it costs to
+   guarantee it.
+3. **The absence control.** Write ten questions whose answers are not in a
+   document you have. Ask them. Count confident answers. If the count is zero,
+   make the questions harder — plausible-sounding fields that a similar
+   document *would* have — and try again.
+4. **Fluent and wrong.** Transcribe five pages at your worst realistic
+   resolution and mark every passage that is grammatical and not on the page.
+   Compare that count to the character error rate. Which one would have
+   warned you?
+5. **Two languages, one content.** If you work in more than one language, find
+   or make an aligned pair and run the ladder on both. Report the ratio. If it
+   is near 1, you have evidence your pipeline generalises; if it is 5, you have
+   a number to take to whoever sets the scanning policy.
+6. **Price it.** Compute what your document volume costs as images versus as
+   text, using the flat image rate you measure for your own model. Then find
+   the place in your pipeline that sends an image of text it already had.
+7. **The hybrid.** Build the two-tool architecture from
+   @sec-multimodal-choosing on ten documents: dedicated OCR for the transcript,
+   VLM for the questions. Measure whether the combination beats either alone on
+   your task, and say what it costs.
+
+## What to remember {#sec-multimodal-summary}
+
+- **An image is a flat rate.** Every one of the 320 pages in this chapter cost
+  the same **290 prompt tokens** — 256 image vectors plus the prompt —
+  regardless of font size or content. Image cost does not scale with what is on
+  the page, which is the single most useful thing to know when budgeting.
+- **Photographing text you already have costs 4–5×.** The same sentence: 46.6
+  tokens as English text, 62.4 as Turkish text, **260 as an image**. The
+  premium is *smaller* for Turkish only because @sec-turkish-nlp's tokenizer
+  penalty already made the text expensive.
+- **Resolution is a cliff, not a slope, and the cliff is language-specific.**
+  Because the token budget is fixed, a denser page pushes more information
+  through the same bottleneck. English went 0.04% → **1.33%** character error
+  across the ladder; Turkish went 0.26% → **6.67%**.
+- **Turkish cost about 5× the error rate of English at every resolution**, on
+  professionally translated pairs where the content was identical. No
+  tokenizer, no stemmer, no `lower()` — just pixels, and the tool still worked
+  measurably worse outside English. @sec-turkish-nlp's pattern does not need a
+  text pipeline to appear.
+- **The failure mode is fluency, not garbage.** Diacritic loss was the minority
+  of the damage (95.1% retained at the worst setting). The majority was a word
+  the model could not resolve, replaced with a shorter, grammatical, plausible
+  one. Classical OCR fails visibly; a VLM fails in correct Turkish.
+- **The model knows what is not there; it does not know what it cannot read.**
+  Asked 90 times for a value absent from a table, it refused **90 times** and
+  read the present values at 98.9%. Absence is checkable against evidence;
+  illegibility is not, because nothing in a forward pass separates reading from
+  inferring.
+- **So use both tools.** Dedicated OCR for the transcript, where failures are
+  loud and gateable; the VLM for layout, locating fields, charts, and questions
+  about the page. Replacing a loud failure mode with a silent one is a
+  downgrade even when average accuracy improves.
