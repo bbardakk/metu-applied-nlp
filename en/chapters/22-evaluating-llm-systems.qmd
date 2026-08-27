@@ -1,42 +1,723 @@
 # Evaluating LLM Systems {#sec-llm-eval}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.** Port from the CME 295-based LLM Evaluation
-material — likely the chapter where the statistics audience contributes
-most, so invite that explicitly.
+**Chapter status: drafted.** The judge audit runs `qwen3.5:9b` and
+`gemma3:27b` through `ollama` 0.24.0 on 60 XL-Sum Turkish articles; the
+sizing tables are simulated with `scipy` and checked against the closed-form
+result. Software: NumPy 2.5.2, `scipy` 1.18.1, `ollama` 0.24.0 on Python
+3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- distinguish model benchmarks from *system* evaluation, and know which one you need;
-- build a small, versioned eval set and defend its sampling;
-- use LLM-as-judge with the right amount of suspicion (agreement checks, bias probes);
-- report results with uncertainty, not vibes.
-
-## Benchmarks are not your evaluation
-
-<!-- TODO(draft): public benchmark caveats (contamination, saturation);
-     the case for task-specific evals. -->
+- distinguish model benchmarks from *system* evaluation, and know which one
+  you need;
+- size an eval set from the difference you need to detect, rather than from
+  what felt reasonable;
+- audit an LLM judge before believing it, with controls that have known
+  right answers;
+- report results with uncertainty, and choose a paired design when it
+  actually helps.
 
 This is the chapter your statistics training was made for: applied LLM
-evaluation is, at bottom, [measurement design under distribution shift]{.hl}.
+evaluation is, at bottom, [measurement design under distribution
+shift]{.hl}. Most of what follows is not new statistics. It is ordinary
+statistics applied to a setting where almost nobody applies it.
 
-## Building an eval set
+## Benchmarks are not your evaluation {#sec-llm-eval-benchmarks}
 
-<!-- TODO(draft): sampling from real traffic; labeling protocols;
-     inter-rater agreement; versioning evals like code. -->
+A public benchmark answers *how does this model compare to other models on a
+task someone else chose*. Your evaluation answers *does this system do my job
+well enough to ship*. Those are different questions and the first one is only
+occasionally evidence about the second.
 
-## LLM-as-judge, carefully
+Three specific reasons, in the order they will bite you.
 
-<!-- TODO(draft): judge prompts; position and verbosity bias; calibrating
-     against human labels; when pairwise beats absolute scoring. -->
+**[Contamination](#gloss-benchmark-contamination){#term-benchmark-contamination .term-ref}.**
+A benchmark published before a model was trained may be inside that model's
+training data, and you usually cannot check.
 
-## Reporting
+::: {#gloss-benchmark-contamination .column-margin .term-gloss}
+**Benchmark contamination** — test items that were in a model's training data,
+so its score reports memorisation rather than capability. Usually
+unmeasurable from outside, which is why it is a reason to distrust benchmarks
+rather than a thing to correct for.
+[↩](#term-benchmark-contamination){.term-back}
+::: This book
+measured the effect on a smaller scale in @sec-sequence-labeling: **13.06% of
+WikiANN's Turkish test set is byte-identical to a training sentence**, and the
+score bonus that leakage produced fell monotonically with how much a system
+memorises — +26.50 span F1 for a gazetteer, +16.25 for a CRF, +7.65 for a
+fine-tuned encoder. Nobody had to be dishonest for that to happen.
 
-<!-- TODO(draft): confidence intervals on small evals; regression testing
-     across model/prompt versions. -->
+**Saturation.** When the headline models are at 88, 89 and 90, the benchmark
+has stopped measuring capability and started measuring the last few percent of
+label noise. Differences at the top of a saturated leaderboard are frequently
+smaller than that benchmark's own error rate.
 
-## Exercises
+**Construct mismatch.** The benchmark measures a task; you have a *system*,
+which is a prompt, a retrieval step, a parser, a fallback, and a model. A
+benchmark score cannot tell you that your JSON parser drops 2% of responses —
+@sec-decoding measured a case where formatting failures were being counted as
+reasoning failures, and enforcement moved accuracy from 70.7% to 88.0% with no
+change to the model at all.
 
-1. Design a 30-item eval set for one task from your own domain. Specify
-   the rubric, the judge, and the failure analysis you would run.
+::: {.column-margin}
+The useful role for public benchmarks is *screening*: they cheaply eliminate
+models that are obviously unfit, and they tell you what is broadly possible.
+Treat a leaderboard as a way to pick three candidates, never as a way to pick
+one.
+:::
+
+## How big does your eval set need to be? {#sec-llm-eval-size}
+
+Here is the question almost every LLM project answers by feel, and it has an
+exact answer. Given a system that is right about 80% of the time, how large
+must an eval set be to detect an improvement of *d* points, at 80%
+[**statistical power**](#gloss-statistical-power){#term-statistical-power .term-ref}
+and the conventional 5% significance level?
+
+::: {#gloss-statistical-power .column-margin .term-gloss}
+**Statistical power** — the probability that your evaluation detects a real
+difference of a given size. Low power does not produce wrong answers; it
+produces *no* answer, reported as if it were one.
+[↩](#term-statistical-power){.term-back}
+:::
+
+```text
+smallest difference detectable at 80% power (two proportions, base 80%)
+
+     items      smallest detectable difference
+        30            none — see below
+        50                    17.5 points
+       100                    13.4 points
+       200                    10.0 points
+       500                     6.6 points
+     1,000                     4.8 points
+     2,000                     3.4 points
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Size your own eval set</div>
+```
+
+```{ojs}
+//| echo: false
+viewof evalBase = Inputs.range([0.50, 0.95], {step: 0.01, value: 0.80,
+  label: "current accuracy"})
+```
+
+```{ojs}
+//| echo: false
+viewof evalDiff = Inputs.range([1, 20], {step: 1, value: 5,
+  label: "difference you need to detect (points)"})
+```
+
+```{ojs}
+//| echo: false
+viewof evalPower = Inputs.radio(new Map([["80%", 0.80], ["90%", 0.90]]),
+  {value: 0.80, label: "power"})
+```
+
+```{ojs}
+//| echo: false
+// Abramowitz–Stegun 26.2.23 inverse normal, good to ~4.5e-4 — plenty here
+evalZ = p => {
+  const t = Math.sqrt(-2 * Math.log(p < 0.5 ? p : 1 - p));
+  const x = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) /
+            (1 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+  return p < 0.5 ? -x : x;
+}
+```
+
+```{ojs}
+//| echo: false
+evalN = {
+  const d = evalDiff / 100, pa = evalBase, pb = Math.min(pa + d, 0.999);
+  const za = evalZ(0.975), zb = evalZ(evalPower);
+  const pbar = (pa + pb) / 2;
+  const n = Math.pow(za * Math.sqrt(2 * pbar * (1 - pbar)) +
+                     zb * Math.sqrt(pa * (1 - pa) + pb * (1 - pb)), 2) / (d * d);
+  return Math.ceil(n);
+}
+```
+
+```{ojs}
+//| echo: false
+md`To detect **${evalDiff} points** on top of ${(evalBase * 100).toFixed(0)}%
+at ${(evalPower * 100).toFixed(0)}% power, you need about
+**${evalN.toLocaleString()} items per system** — ${evalN > 500
+  ? "more than most teams label, which is the useful thing to find out before running the comparison rather than after"
+  : "a size you can realistically label"}.
+A paired design needs fewer *if* the two systems mostly agree, and fewer still
+the more they agree; see the table below.`
+```
+:::
+
+[At thirty items there is no answer, because no difference is large enough.]{.hl}
+Against a system that is right 80% of the time, even a *perfect* replacement —
+one that is right 100% of the time — reaches only 75% power on thirty items.
+A hundred items detects 13.4 points. Most real improvements are two to five.
+
+That is worth sitting with, because thirty items is a common size; it is the
+size this chapter's own exercise asked for in draft.
+
+This does **not** mean small eval sets are useless. It means they answer a
+different question, and the distinction is the most practically useful thing
+in this chapter:
+
+| eval set size | what it is genuinely for |
+|:--|:--|
+| **20–50 items** | finding *failure modes*. Read every output by hand. You are looking for categories of wrongness, not for a number, and thirty items surfaces them well — this is a real job, and the size is right for it |
+| **100–300 items** | catching *large* regressions — a broken parser, a prompt that stopped working, a model swap that went badly |
+| **500+ items** | comparing two systems that are actually close, which is the case whenever you are tuning rather than fixing |
+
+: Three different jobs, three different sizes {tbl-colwidths="[22,78]"}
+
+The failure to distinguish these is why so much prompt engineering is
+folklore. Thirty examples were tried, one prompt looked better, and the
+difference was smaller than the noise floor by an order of magnitude.
+
+### What pairing buys, and when it does not
+
+@sec-prompting used McNemar's test to establish a 14.67-point spread that
+overlapping confidence intervals would have called inconclusive. The
+comparison there was **paired** — the same 150 reviews through every prompt —
+and pairing is the standard advice.
+
+The advice is right and it is not unconditional, because McNemar's test throws
+away every item the two systems agree on. So what pairing buys depends on how
+often they disagree, which is an empirical property of *your* systems:
+
+```text
+power to detect a 5-point difference (alpha = 0.05)
+
+   items   unpaired    paired, by how often the two systems disagree
+                          10%       20%       30%       40%
+      30       0.08      0.01      0.03      0.03      0.04
+      50       0.10      0.07      0.06      0.07      0.05
+     100       0.15      0.24      0.14      0.10      0.10
+     200       0.26      0.55      0.30      0.21      0.16
+     500       0.56      0.94      0.68      0.51      0.39
+   1,000       0.84      1.00      0.94      0.81      0.69
+```
+
+**Pairing pays when your systems mostly agree.** At 10% disagreement it more
+than doubles your power at n = 200. At 30% it is a wash. At 40% it is worse
+than the unpaired test, because there are so many discordant pairs that the
+test is estimating a coin flip from a large sample rather than exploiting
+agreement.
+
+That has a clean practical reading. Comparing two prompts, two checkpoints, or
+two decoding settings — cases where the systems agree on most items — use the
+paired design and gain real power. Comparing two genuinely different
+architectures that disagree constantly, pairing buys you little, and the honest
+move is a bigger eval set rather than a cleverer test.
+
+::: {.column-margin}
+I got this backwards on the first attempt. I fixed the disagreement rate at
+@sec-prompting's measured 30.7%, found that pairing was *worse* than the
+unpaired test, and briefly believed I had refuted a textbook result. The
+simulation was right; the framing was wrong — a single disagreement rate
+cannot answer a question whose whole content is how the answer varies with
+that rate. The closed-form check in the script would not have caught it either,
+because the unpaired side was correct all along.
+:::
+
+## Building an eval set {#sec-llm-eval-building}
+
+An eval set is a **sample**, and everything your statistics training says
+about samples applies. Three decisions do almost all the work.
+
+**Sample from real traffic, not from imagination.** Invented test cases are
+systematically cleaner, better spelled, and more typical than what users send.
+If you have no traffic yet, use whatever is closest — support tickets, search
+logs, a colleague's real questions — and label the gap explicitly. A hundred
+real items beat a thousand invented ones, and this is the single highest-value
+decision in the chapter.
+
+**Stratify deliberately, then say what you did.** Real traffic is dominated by
+easy cases, so a uniform sample spends most of its items confirming that the
+easy cases still work. Oversample the hard slices, the rare-but-costly
+categories, and the languages you actually serve — and then, when you report a
+headline number, either reweight to the traffic distribution or say plainly
+that the number is on a stratified sample. Both are fine; silence is not.
+
+**Include the cases with no good answer.** Questions your system should refuse,
+inputs that are out of scope, documents that do not contain the answer.
+@sec-rag found this to be the test nobody runs, and @sec-multimodal found a
+model that refused 90 times out of 90 when asked for something absent — a
+result you only learn by asking.
+
+### Label the data before you look at model output
+
+The order matters more than it sounds. Labels written after seeing a system's
+answers drift toward those answers, and the drift is invisible afterwards.
+Write the rubric, label a sample against it, measure how often two labellers
+agree, and *then* run anything. If agreement between two humans is 70%, no
+system can score meaningfully above 70% and every point above that is noise
+you are reading as signal — @sec-data-annotation has the machinery.
+
+### Version the eval like code
+
+The eval set is a dependency of every number you report, so it belongs in the
+repository, in a file, under review, with a changelog. Two rules that pay for
+themselves:
+
+- **Never edit an item in place.** Add a new one and retire the old, so a
+  score from March remains comparable to a score from June, and a score that
+  moved because the *test* changed is distinguishable from one that moved
+  because the system did.
+- **Keep a held-out slice you look at rarely.** An eval set you tune against
+  every day is a training set. @sec-classification's split discipline is the
+  same discipline, one level up.
+
+### The harness bugs that produce good numbers
+
+A broken evaluation harness usually does not crash. It reports something
+plausible, and there is an asymmetry that makes this dangerous: **a bad number
+gets investigated, a good one gets published.** Two bugs from this book's own
+work, both caught late:
+
+- A reasoning model was given a 24-token generation budget. `ollama` returns
+  chain-of-thought in a separate `thinking` field, so the whole budget went
+  there, the answer field stayed empty, every response failed to parse, and
+  each failure fell through to a majority-class default. The run reported
+  **93.75% accuracy** — which was exactly the majority baseline.
+- A tuned threshold was applied to the wrong side of a probability, scoring a
+  model at 51.50 macro-F1 instead of 80.23.
+
+Neither raised an error. The guards that would have caught them are cheap:
+**log the parse rate per run and abort below 50%**, smoke-test every
+model×condition on two dozen items before an overnight queue, and quote
+*median* seconds per item rather than the mean — machine stalls in this book's
+own runs made one mean nine times its median.
+
+## LLM-as-judge, audited {#sec-llm-eval-judge}
+
+Using a model to grade another model's output is now the default for anything
+that cannot be scored with an exact match. It is a reasonable idea and it is
+also **a measuring instrument you did not calibrate**. So calibrate it — with
+probes whose right answer you already know, which means you can score the
+judge rather than trust it.
+
+Three probes, on 60 Turkish news articles, comparing summaries:
+
+1. **Identical.** A and B are the same text. The only correct verdict is a
+   tie. This is @sec-summarization's copied-text control, moved from metrics
+   to preferences.
+2. **Position.** A real comparison — the professional summary against the
+   article's first sentence — run in **both orders**. A judge without
+   [**position bias**](#gloss-position-bias){#term-position-bias .term-ref}
+   returns the same winner both times.
+
+3. **Verbosity.** The same summary, padded with contentless filler. No
+   information is added, so preferring the padded version is preferring
+   length.
+
+::: {#gloss-position-bias .column-margin .term-gloss}
+**Position bias** — a judge preferring whichever candidate it saw first.
+Measured directly by running the same comparison in both orders and counting
+how often the verdict flips. [↩](#term-position-bias){.term-back}
+:::
+
+```text
+                                       qwen3.5:9b     gemma3:27b     Fisher p
+
+ 1. identical texts → called a tie        100.0%         100.0%            —
+
+ 2. same winner in both orders             61.7%          85.0%      0.00674
+    picked whichever was in slot A         57.5%          54.2%            —
+    preferred the professional summary     51.7%          74.2%      0.00048
+
+ 3. preferred the padded copy              28.3%           0.0%      <0.0001
+```
+
+### Both judges pass the test everyone runs
+
+The identical-text control is the sanity check a careful team would think to
+run, and **both models score 100%**. Sixty pairs of byte-identical text, sixty
+ties, no exceptions. If that were your whole audit you would conclude you have
+two sound judges and pick on price.
+
+Then the probes that discriminate:
+
+[The small judge changes its answer on 38% of items when you swap the
+order.]{.hl} Same two texts, same question, different verdict. That is not a
+hard-comparison problem — it is a property of the instrument, and it means
+more than a third of its verdicts carry no information about the summaries at
+all.
+
+It is also **at chance** on the actual comparison: 51.7% for the professional
+BBC summary over the article's opening sentence, with a confidence interval
+[42.8, 60.4] that comfortably contains 50. In fairness to the model, a news
+lead is a genuinely strong summary — @sec-summarization measured lead-3 at
+14.03 ROUGE-1 against an extractive oracle of 24.89, so this is not an absurd
+thing to find difficult. But a judge that cannot separate those two should not
+be ranking your system's outputs either.
+
+The larger judge is better on every probe: 85.0% order-consistency, 74.2% on
+the real comparison, and it never once fell for the padding. All three
+differences are significant at n = 60.
+
+::: {.column-margin}
+Which is a nice internal check on @sec-llm-eval-size: the sizing table says an
+eval of 50 items detects a 17.5-point difference, and the judge gap here is
+23.3 points at n = 60. The experiment was adequately powered *for the
+difference it found* — and would have been badly underpowered for a 5-point
+one, which is worth remembering before reading anything into the slot-A
+numbers (57.5% against 54.2%), where the design has no power at all.
+:::
+
+### Verbosity bias did not reproduce
+
+The folklore says judges prefer longer answers. Neither of these did:
+`qwen3.5:9b` preferred the padded copy 28.3% of the time and `gemma3:27b`
+never. I will state that narrowly, the way @sec-rag's needle result had to be
+stated: my filler was **obviously** contentless boilerplate — three sentences
+of "the situation is as described above" — and detecting that is a much easier
+task than resisting a genuinely more detailed, better-organised, longer answer.
+What I measured is that both judges reject obvious padding. What I did not
+measure is what they do with elaboration that adds real structure but no
+correctness, which is the case the folklore is actually about.
+
+### What to do about it
+
+- **Run the probes before you run the eval.** All three take an afternoon and
+  they change which judge you use.
+- **Randomise or average over order.** Present each pair in both orders and
+  count only the items where the verdict agrees, or randomise and accept the
+  extra variance. Reporting a single-order pairwise result from a judge with
+  38% flip rate is reporting the coin, not the systems.
+- **Prefer pairwise over absolute scoring**, but know what it costs. Asking
+  "which is better" is more reliable than asking for a 1–5 rating, because a
+  rating scale drifts between calls and has no anchor. The cost is that
+  pairwise comparisons do not aggregate into a score without more structure.
+- **Calibrate against human labels on a subsample.** Fifty items labelled by
+  hand tells you the judge's agreement rate with the thing you actually care
+  about. Without that number, a judge score is a measurement in unknown units.
+- **Never let the judge be the same model as the system under test**, or at
+  least never without measuring the self-preference that setup invites.
+
+## Reporting a result someone can act on {#sec-llm-eval-reporting}
+
+A number without an interval is a rumour. Four rules, all cheap:
+
+**Report an interval, and say how you got it.** For a proportion, Wilson
+beats the textbook normal approximation at the small sample sizes this field
+actually uses — it does not produce impossible bounds below 0 or above 1.
+Every percentage in this chapter carries one.
+
+**Use the paired test when the systems mostly agree**, per
+@sec-llm-eval-size, and say which you used. Two overlapping marginal intervals
+are not evidence of no difference: @sec-prompting's 14.67-point spread had
+overlapping intervals and McNemar found p = 0.0009.
+
+**Quote medians for latency, never means.** One stalled request rewrites a
+mean. This book's own timing runs produced a mean nine times its median, and a
+concurrent job made one configuration look nineteen times slower than an
+identical one — which is why no chapter here publishes a latency number
+collected while something else was running.
+
+**Report coverage alongside accuracy whenever anything can abstain, fail to
+parse, or time out.** An accuracy computed only over successful responses is
+not an accuracy — @sec-decoding's abstention result moved 86.75% to 92.50%
+purely by declining the hardest fifth, which is an improvement only if you
+also say you answered 80% of the questions.
+
+### Regression testing, which is the point of all this
+
+The eval set earns its keep when a change lands. Run it on every prompt
+change, model version, and dependency bump, and store the per-item results
+rather than the summary — because the useful question after a drop is *which
+items changed*, and a stored aggregate cannot answer it.
+
+Two thresholds worth agreeing in advance, before anyone has a stake in the
+answer: the size of drop that blocks a release, and the size that merely opens
+an investigation. Set them from @sec-llm-eval-size's table rather than from a
+round number, because a rule that blocks on a 2-point drop in a 100-item eval
+will fire constantly on noise and then be ignored, which is worse than having
+no rule.
+
+## Lab: audit a judge, then size your eval {#sec-llm-eval-lab}
+
+### Step 1 — write 50 items from real traffic
+
+Real inputs, and include five your system should refuse. Label them yourself
+before running anything.
+
+### Step 2 — measure human agreement
+
+Have a second person label 25 of them. Compute agreement. That number is the
+ceiling on every score you will report afterwards.
+
+### Step 3 — run the identical-text probe
+
+Ask your judge to compare an output with itself, 30 times. If it does not call
+a tie, stop and fix the prompt before doing anything else.
+
+### Step 4 — run the position probe
+
+Take 30 real comparisons and run each in both orders. Report the flip rate. If
+it is above about 20%, every single-order result you have collected so far is
+partly noise.
+
+### Step 5 — calibrate against your own labels
+
+On the 50 labelled items, how often does the judge agree with you? That is the
+number that converts judge scores into something meaningful.
+
+### Step 6 — size the next eval
+
+Decide the smallest difference that would change a decision. Use
+@sec-llm-eval-size's table to find the item count it requires. If the count is
+larger than you can label, say so explicitly rather than shipping an
+underpowered comparison and calling it a result.
+
+### What to hand in
+
+The two probe results, the judge–human agreement rate, the human–human
+agreement rate, and one sentence naming the smallest difference your eval set
+can actually detect.
+
+## Intuition checks {#sec-llm-eval-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Your model scores 91 on a public benchmark. What have you learned?
+
+That it is not obviously unfit, and little else. You have not learned whether
+the benchmark was in its training data — @sec-sequence-labeling found **13.06%
+of one benchmark's test set duplicated in its own training split** — nor
+whether the benchmark is saturated, nor whether it measures your task.
+Benchmarks are a screen for picking three candidates. Your eval decides
+between them.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Is a 30-item eval set worth building?
+
+Yes, for the right question — but not for comparing systems. At thirty items
+there is **no** difference detectable at 80% power against an 80%-accurate
+baseline: even a replacement that is right every single time reaches only 75%.
+What thirty items is excellent at is *finding failure modes*: read all thirty outputs by hand and
+you will find categories of wrongness that no aggregate score would surface.
+Use small sets to learn what breaks, large sets to decide what ships.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Should you always use a paired test?
+
+Usually, but know why. McNemar discards every item the systems agree on, so
+its power depends on the disagreement rate. Measured here: at 10% disagreement
+pairing more than doubles power at n = 200; at 30% it is a wash; at **40% it
+is worse** than the unpaired test. Comparing two prompts — which agree on most
+items — pair. Comparing two very different systems, pairing buys little and a
+bigger eval set is the honest fix.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your LLM judge gives two identical texts a tie every time. Is it reliable?
+
+You have learned that it passes the easiest possible check, and nothing more.
+Both judges here scored **100%** on that probe and then diverged sharply: one
+flipped its verdict on 38% of items when the order was swapped and was at
+chance on the real comparison; the other flipped on 15% and was at 74.2%. The
+control everyone runs is the one that discriminates least.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Two prompts score 84% and 79% on your 100-item eval. Is the first better?
+
+You cannot tell from those numbers. A 100-item eval detects about **13 points**
+at 80% power, and this is 5. If the comparison is paired — the same 100 items
+through both prompts — run McNemar on the disagreements, which may well find
+it. If it is not paired, the honest report is "no detectable difference at this
+sample size", which is a different statement from "no difference".
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your eval harness reports 93.75% accuracy. What do you check first?
+
+The parse rate. That exact number came from a run where a reasoning model
+spent its whole token budget in a `thinking` field, every answer failed to
+parse, and each failure defaulted to the majority class — so the harness was
+reporting the **majority baseline** as a result. A bad number gets
+investigated and a good one gets published, so a suspiciously good number
+deserves the same scrutiny a bad one gets automatically.
+:::
+
+## Exercises {#sec-llm-eval-exercises}
+
+1. **Size your current eval.** Take an eval set you already use, find its item
+   count in @sec-llm-eval-size's table, and write down the smallest difference
+   it can detect. Compare that to the differences you have been reporting.
+2. **Audit your judge.** Run the identical-text and position probes on
+   whatever judge you use now. Report the tie rate and the flip rate.
+3. **Both orders.** Take a pairwise evaluation you have already run and rerun
+   it with the order swapped. How many verdicts change? What does that do to
+   your conclusion?
+4. **Find the agreement ceiling.** Have two people label the same 30 items
+   independently. Compute agreement. Compare it to the accuracy you have been
+   reporting for your system.
+5. **Build the absence slice.** Add ten items your system should refuse.
+   Measure how often it does. This is usually the fastest way to find a real
+   problem.
+6. **Break your own harness.** Set a generation budget too small for a
+   reasoning model and see what your pipeline reports. Then add the parse-rate
+   guard that would have caught it.
+7. **Power in reverse.** Pick the smallest improvement that would change a
+   decision at your organisation. Compute the eval size it needs. If you
+   cannot afford it, write down what you will do instead — that sentence is a
+   more useful deliverable than most eval reports.
+
+## Interview questions {#sec-llm-eval-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the measurement
+
+**Q: How would you evaluate an LLM feature?**
+
+Start by separating the two questions — is the model capable, and does my
+system work — and say that public benchmarks answer only the first. Then give
+the structure: a versioned eval set sampled from real traffic, sized from the
+difference you need to detect, including cases the system should refuse, with
+human labels collected before any model output is seen. Finish on reporting:
+intervals, paired tests where the systems mostly agree, and coverage alongside
+accuracy.
+
+**Q: Your eval set has 100 items and the new prompt scores 5 points higher.
+Ship it?**
+
+Not on that evidence. A hundred items detects about 13 points at 80% power, so
+5 points is inside the noise — unless the design is paired, in which case run
+McNemar on the disagreements, which can find effects the marginal intervals
+cannot. The answer that shows judgement is naming what you would do next:
+either enlarge the eval, or ship it as a low-risk change while explicitly not
+claiming an improvement.
+
+**Q: What is wrong with using GPT-4-class models as judges?**
+
+Nothing, provided you calibrate one first. The failure is treating it as an
+oracle rather than an instrument. Name the specific biases and how you would
+measure each: position, by running both orders — measured here at a 38% flip
+rate for a small judge and 15% for a large one; verbosity, by padding an
+answer without adding information; self-preference, by never letting the judge
+grade its own family without checking. And calibrate against human labels on a
+subsample, because otherwise the score has no units.
+
+### Testing whether you have shipped one
+
+**Q: How do you catch a broken evaluation?**
+
+With controls that have known answers, because a broken harness usually
+returns something plausible rather than crashing. Score a reference against
+itself and require a perfect result. Log the parse rate and abort below a
+threshold. Compare against a majority-class baseline every run — if your model
+matches it exactly, that is a bug and not a coincidence. And say the thing
+that makes all of it necessary: a bad number gets investigated, a good one
+gets published.
+
+**Q: Your production quality dropped and the eval did not move. What
+happened?**
+
+Most likely the eval no longer resembles traffic — inputs drifted, a new
+customer segment arrived, or the eval was built from imagined cases in the
+first place. Check the input distribution before touching the model. The
+second candidate is that the failure is in a part of the system the eval does
+not exercise: a parser, a retrieval step, a timeout. That is why per-item
+results are stored rather than aggregates, and why coverage is reported
+alongside accuracy.
+
+
+## Where to go deeper {#sec-llm-eval-deeper}
+
+Before reading anything: count the items in your current eval set and look up
+the smallest difference it can detect. If you have been reporting differences
+below that, everything else here is urgent.
+
+| resource | what it is |
+|:--|:--|
+| [Hamel Husain on evals](https://hamel.dev/blog/posts/evals/) and [on LLM judges](https://hamel.dev/blog/posts/llm-judge/) | the best applied writing on this subject anywhere — start here, before any paper |
+| [Eugene Yan on evals](https://eugeneyan.com/writing/evals/) | a well-sourced tour of task-specific evaluation, with the failure cases named |
+| [HELM](https://crfm.stanford.edu/helm/) | Stanford's holistic benchmark; worth reading for its *methodology* even if you never use the leaderboard |
+| [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness) | the standard harness; read how it does answer extraction before you write your own |
+| [`lighteval`](https://github.com/huggingface/lighteval) | a lighter alternative with the same idea, easier to read end to end |
+| [`promptfoo`](https://github.com/promptfoo/promptfoo) | run the same eval across prompts and models, with assertions; makes @sec-llm-eval-lab routine |
+| [`ragas`](https://github.com/explodinggradients/ragas) / [`deepeval`](https://github.com/confident-ai/deepeval) | judge-based metrics with the decomposition already built |
+| [Chip Huyen's blog](https://huyenchip.com/blog/) | the product framing — what an eval is *for*, and when the answer is not a number |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| a model as the judge, measured against humans | @zheng2023judging |
+| and the biases that come with it | @wang2024large |
+| holistic benchmarking, done deliberately | @liang2023holistic |
+| why benchmark contamination has to be measured | @sainz2023nlp |
+| the paired test this chapter keeps using | @mcnemar1947note |
+| the interval that behaves at small *n* | @wilson1927probable |
+| judge-based metrics for generation | @liu2023geval |
+| what automatic summarization metrics miss | @fabbri2021summeval |
+| whether models know what they know | @kadavath2022language |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## The 2026 toolbox {#sec-llm-eval-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `scipy` | 1.18.1 | the power simulation, Fisher exact tests and Wilson intervals |
+| `numpy` | 2.5.2 | the sampling |
+| `ollama` | 0.24.0 | serving both judges locally |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `lm-evaluation-harness` | on GitHub | reproducing a public benchmark number the way everyone else computed it |
+| `lighteval` | 0.13.0 | the same job, smaller and easier to modify |
+| `promptfoo` | 0.122.1 (npm) | sweeping prompts and models against assertions in CI; the PyPI package of this name is a thin wrapper, so take the npm version |
+| `ragas` | 0.4.3 | the retrieval/generation split of @sec-rag-failures, scored |
+| `deepeval` | 4.2.0 | judge-based metrics wired into a test-runner, so evals fail like unit tests |
+| `statsmodels` | 0.15.0 | `proportion_confint` and `mcnemar` if you would rather not write them |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## What to remember {#sec-llm-eval-summary}
+
+- **A public benchmark screens; your eval decides.** Contamination is real and
+  usually unmeasurable from outside — @sec-sequence-labeling found **13.06%**
+  of one benchmark's test set duplicated in its training split — and a
+  saturated leaderboard measures label noise rather than capability.
+- **Size the eval from the difference you need to detect.** At 80% power on a
+  system that is right 80% of the time, **30 items can detect nothing at all**
+  — even a perfect replacement reaches only 75% power — 100 items detects 13.4
+  points, and 1,000 detects 4.8. Most real improvements are 2–5 points, so most
+  eval sets in use cannot see the thing they were built to see.
+- **Small eval sets are for finding failure modes, not for comparing
+  systems.** Twenty to fifty items read by hand will tell you *what* breaks.
+  Five hundred or more is what it takes to tell you *which is better*.
+- **Pairing helps in proportion to how much the systems agree.** At 10%
+  disagreement it more than doubles power; at 30% it is a wash; at **40% it is
+  worse** than the unpaired test, because McNemar discards every agreement.
+- **Audit the judge with controls that have known answers.** Both judges here
+  scored **100%** on identical-text ties — and then one flipped its verdict on
+  **38% of items** when the order was swapped and sat at chance (51.7%) on the
+  real comparison, while the other flipped on 15% and reached 74.2%. The
+  control everyone runs is the one that discriminates least.
+- **Run pairwise comparisons in both orders**, and count only the items where
+  the two agree. A single-order result from a judge with a 38% flip rate is
+  reporting the coin.
+- **Verbosity bias did not reproduce here** — neither judge preferred an
+  obviously padded copy — but that is a narrow claim about obvious padding,
+  not about the elaborate-but-empty answers the folklore is really about.
+- **A bad number gets investigated; a good one gets published.** That
+  asymmetry, not the bug, is what to design against. Log parse rates, keep a
+  majority-class baseline in every run, score a reference against itself, and
+  treat a suspiciously good result with the suspicion a bad one gets for free.
