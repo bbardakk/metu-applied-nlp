@@ -1,54 +1,665 @@
 # Tool Design as API Design {#sec-tool-design}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** The measurements run `qwen3.5:9b` through
+`ollama` 0.24.0. Nothing is executed in the schema experiment — it scores the
+*call* the model emits, so the model's arithmetic cannot contaminate a result
+about schemas. @sec-agent-anatomy owns the loop; this chapter owns what the
+loop reaches for. Software: NumPy 2.5.2 on Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- write tool schemas that a model uses correctly on the first try;
-- design error messages that a model can recover from;
-- keep a large tool surface usable through search and progressive disclosure;
-- evaluate a tool by whether the model actually calls it right.
+- write tool schemas a model uses correctly on the first try, and say which
+  part of the schema did the work;
+- design error messages a model can recover from, and measure whether it does;
+- decide what a tool should return, and what it must never return;
+- keep a large tool surface usable, and know when to stop adding tools.
 
-## Tool schemas: naming, typing, and description-as-prompt
+## The description is prompt text {#sec-tool-design-schema}
 
-<!-- TODO(draft): the description is prompt text, not documentation.
-    Naming that disambiguates; enums over free strings; the cost of
-    optional parameters. -->
+A [**tool schema**](#gloss-tool-schema){#term-tool-schema .term-ref} looks
+like documentation and behaves like a prompt.
 
-## Error messages are prompts: designing for model readability
+::: {#gloss-tool-schema .column-margin .term-gloss}
+**Tool schema** — the name, description, types and enums a model sees before
+choosing a call. Prompt text rather than documentation, because the model gets
+one shot from it and cannot check a guess.
+[↩](#term-tool-schema){.term-back}
+::: That single
+sentence is the chapter, and everything below is its consequences.
 
-<!-- TODO(draft): a stack trace teaches the model nothing; a sentence
-    saying what to do next teaches it everything. Before/after examples. -->
+The distinction matters because the two are written by different instincts.
+Documentation is written for a reader who can ask a colleague, read the source,
+or try it and see. [A model gets one shot, from the schema alone, with no way
+to check.]{.hl} It cannot open your codebase. It cannot see an example call.
+Whatever the schema does not say, the model guesses — and a guess that
+type-checks is indistinguishable from an understanding.
 
-## Idempotency, dry-run, and confirmation semantics
+So the schema carries four separate jobs, and it is worth being able to name
+which one you are doing:
 
-<!-- TODO(draft): tools that can be safely retried; dry-run as a
-    first-class mode; which tools must require confirmation — connect to
-    @sec-guardrails. -->
+| the field | the job it does |
+|:--|:--|
+| **name** | tells the model *when* this tool applies, before it reads anything else |
+| **description** | resolves the cases the name leaves ambiguous, and rules out the ones it should not be used for |
+| **parameter types and enums** | make wrong calls unrepresentable rather than merely discouraged — @sec-decoding's argument, one level up |
+| **parameter descriptions** | carry the mapping from how a user phrases a thing to what your API calls it |
 
-## Result truncation, pagination, and summarization
+: Four jobs, one object {tbl-colwidths="[30,70]"}
 
-<!-- TODO(draft): a tool that returns 50,000 tokens has broken the agent.
-    Budget-aware results — connect to @sec-context-engineering. -->
+The last row is the one people skip, and it is where most misuse comes from.
+Your users say *how much did we spend*; your API calls it `budget_allocated`.
+Something has to bridge that, and if the schema does not, the model invents a
+bridge.
 
-## Scaling past 50 tools: tool search and progressive disclosure
+### Measured: which part of the schema does the work?
 
-<!-- TODO(draft): why flat tool lists stop working; search-then-load;
-    namespacing. -->
+Four versions of one tool, differing only in how they are described. The task
+is to fetch one numeric field about a project, and the questions **never name
+the field literally** — *how much money was allocated* has to become
+`alan="butce"`. So the schema is the only thing that can carry the mapping.
+Nothing is executed; what is scored is the call the model emits.
 
-## Code mode: letting the agent write code instead of calling tools
+```text
+qwen3.5:9b, 60 questions, one tool, four descriptions
 
-<!-- TODO(draft): when a sandboxed interpreter beats fifty tool
-    definitions, and the security cost of that choice. -->
+ variant         called a tool  project right  field right  fully correct
+ A. opaque               58.3%           0.0%         0.0%           0.0%
+ B. named               100.0%         100.0%        25.0%          25.0%
+ C. enum                100.0%         100.0%       100.0%         100.0%
+ D. described           100.0%         100.0%       100.0%         100.0%
+```
 
-## Tool evaluation: does the model actually use it correctly?
+[The enum did all of the work.]{.hl} Going from free strings to an enumerated
+list took field accuracy from **25% to 100%**, and adding careful prose
+descriptions on top of that added **nothing measurable**. That is the opposite
+of where most effort goes: people write the description and leave the parameter
+as a string.
 
-<!-- TODO(draft): per-tool call precision and recall; the schema change
-    that fixed a 30% failure rate. -->
+Two rows deserve their own explanation, because each teaches something the
+totals hide.
 
-## Exercises
+**The opaque schema did not make wrong calls. It made no calls.** With a tool
+named `f1` taking `a` and `b`, the model called it 58.3% of the time and,
+when it did not, answered from parametric memory instead — inventing a
+paragraph about what `ZRG-14` supposedly is. That is a far worse failure than a
+malformed call: a wrong call errors, and an invented answer looks like an
+answer.
 
-1. Take a tool with a 20%+ misuse rate. Rewrite only its description and enum values. Measure the change.
-2. Write the three worst error messages a tool could return, then rewrite each so a model can recover.
+**Without the enum, the model echoes the user's vocabulary into your API.**
+Here is the whole of variant B, one row per phrasing:
+
+```text
+  MISS  wanted butce     got "bütçe"           ← "ne kadar para ayrildi?"
+  MISS  wanted butce     got "mali buyukluk"   ← "mali buyuklugu nedir?"
+  OK    wanted personel  got "personel"        ← "kac kisi calisiyor?"
+  MISS  wanted personel  got "ekip mevcudu"    ← "ekip mevcudu nedir?"
+  OK    wanted sure      got "sure"            ← "kac ay surüyor?"
+  MISS  wanted sure      got "takvim"          ← "takvimi ne kadar?"
+```
+
+The two it got right are the two where the user's phrasing happened to contain
+the API's own word. Everywhere else it passed the question's vocabulary
+straight through — *mali buyukluk*, *ekip mevcudu*, *takvim*. The model is not
+guessing badly; it has no way to know that your API says `butce`, so it says
+what the user said.
+
+And note the first row, which is @sec-turkish-nlp arriving in a new place: the
+model wrote **`bütçe`** where the API expects **`butce`**. Correct Turkish,
+wrong identifier. Any API whose parameter values are ASCII-folded versions of
+real words has this failure waiting in it, and an enum removes it entirely.
+
+::: {.column-margin}
+The honest scope: one model, one tool, three fields. What generalises is the
+*ordering* — constraints beat prose — not the exact numbers. A larger model
+might infer `butce` from context; a schema with twelve fields would make the
+enum matter more, not less. Run the variant sweep on your own tools; it is an
+afternoon and it is the highest-yield afternoon in this chapter.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Which change buys what — schema variants and error styles</div>
+```
+
+```{ojs}
+//| echo: false
+toolRows = [
+  {set: "schema", label: "A. opaque",     tried: 58.3,  right: 0.0},
+  {set: "schema", label: "B. named",      tried: 100.0, right: 25.0},
+  {set: "schema", label: "C. enum",       tried: 100.0, right: 100.0},
+  {set: "schema", label: "D. described",  tried: 100.0, right: 100.0},
+  {set: "errors", label: "bare Error",    tried: 23.3,  right: 1.7},
+  {set: "errors", label: "stack trace",   tried: 15.0,  right: 11.7},
+  {set: "errors", label: "vague wording", tried: 36.7,  right: 3.3},
+  {set: "errors", label: "actionable",    tried: 100.0, right: 100.0}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof toolWhich = Inputs.radio(
+  new Map([["tool schema variants", "schema"], ["error message styles", "errors"]]),
+  {value: "schema", label: "Show"})
+```
+
+```{ojs}
+//| echo: false
+toolLong = toolRows.filter(d => d.set === toolWhich).flatMap(d => [
+  {label: d.label, kind: "tried at all", v: d.tried},
+  {label: d.label, kind: "did the right thing", v: d.right}])
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 320, marginLeft: 130, marginBottom: 44,
+  x: {label: "% of tasks", domain: [0, 108], grid: true},
+  color: {legend: true, domain: ["tried at all", "did the right thing"],
+          range: ["#9BB7B6", "#0E7C7B"]},
+  marks: [
+    Plot.barX(toolLong, Plot.groupY({x: "sum"},
+      {y: "kind", x: "v", fy: "label", fill: "kind", sort: {fy: null}})),
+    Plot.text(toolLong, {y: "kind", x: "v", fy: "label", dx: 20, fontSize: 11,
+      text: d => d.v.toFixed(1) + "%"})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+md`${toolWhich === "schema"
+  ? "The jump is entirely between **B** and **C** — free string to enum, 25% to 100%. The prose descriptions added in **D** changed nothing. And **A** shows the failure worth fearing: it did not call the tool at all on 41.7% of tasks, and answered from memory instead."
+  : "One sentence separates the last row from the other three. The stack trace — what most tools return by default — is the *worst* of the four, at 81.7% abandonment against a bare Error's 76.7%."}`
+```
+:::
+
+### So write schemas in this order
+
+1. **Enumerate everything enumerable.** Every parameter with a fixed value set
+   becomes an `enum`. This is the change with the measured effect.
+2. **Name the tool for when it applies**, not for what it wraps. `find_orders`
+   over `db_query_orders`.
+3. **Write the parameter description as a mapping**, from the words users use
+   to the value your API wants: *butce = the money allocated*.
+4. **Then** write the tool description, for the cases the name leaves open —
+   including what the tool is *not* for, which is the part that stops a model
+   reaching for it wrongly.
+5. **Make optional parameters rare.** Every optional parameter is a decision
+   the model has to make with no information, and a default you did not
+   document is a guess it will make differently each time.
+
+## Error messages are prompts {#sec-tool-design-errors}
+
+@sec-agent-anatomy's line 6 turned an exception into an observation. That makes
+the error string prompt text too — the model reads it and decides what to do
+next — and almost nobody writes it that way, because error messages are written
+for a human who will be reading a log.
+
+The claim is testable. Hold everything fixed and change only what the tool
+returns when it fails. To make every condition face exactly the same failure,
+the first tool call is rejected **unconditionally**, whatever the model asked
+for; the score is on the *second* call.
+
+```text
+qwen3.5:9b, 60 tasks, first call always rejected, four error styles
+
+ error style     retried  valid field  right field   gave up
+ bare              23.3%         1.7%         1.7%     76.7%
+ traceback         15.0%        11.7%        11.7%     81.7%
+ vague             36.7%         3.3%         3.3%     63.3%
+ actionable       100.0%       100.0%       100.0%      0.0%
+```
+
+The four strings were:
+
+```text
+ bare        "Error"
+
+ traceback   Traceback (most recent call last):
+               File "server.py", line 118, in veri_getir
+                 return RECORDS[proje][alan]
+             KeyError: 'bütçe'
+
+ vague       "HATA: gecersiz alan adi."
+
+ actionable  "HATA: 'bütçe' gecerli bir alan degil.
+              Gecerli alanlar sunlardir: butce, personel, sure."
+```
+
+[One sentence took recovery from 1.7% to 100%.]{.hl} Not a model change, not a
+prompt change, not a retry policy — a different string returned by a function.
+
+Three things in that table are worth taking seriously.
+
+**The stack trace is the worst of the four.** It is also the one your tools
+almost certainly return today, because it is what happens if you do nothing.
+Worse than a bare `"Error"`: 81.7% gave up against 76.7%. A traceback is dense,
+authoritative-looking, and contains no statement of what would have worked, so
+it reads as *this is broken* rather than *try this instead*. Structured
+uselessness is not better than plain uselessness.
+
+**Giving up is the dominant failure, not looping.** Three of the four styles
+produced abandonment in the majority of cases — the model stopped calling tools
+and answered without the data. That is worse than a retry loop, which at least
+announces itself in the transcript. @sec-agent-anatomy found the opposite
+failure, an agent that would not stop; here the same architecture will not
+*continue*, and the deciding factor is a sentence.
+
+**"Invalid" is barely better than nothing.** The `vague` style names the
+problem in words and still recovered 3.3% of the time. Saying that something is
+wrong is not the useful part. Saying what would be right is.
+
+### The rule this gives you
+
+An error message a model can use has three parts, and the last one is the one
+that matters:
+
+```text
+  1. what failed        'bütçe' is not a valid field
+  2. why                (optional; often unnecessary)
+  3. what would work    valid fields are: butce, personel, sure
+```
+
+Write the third part and the rest is optional. Omit it and you have written a
+log line, not a tool.
+
+Two corollaries worth building in:
+
+- **Enumerate the valid options in the error**, exactly as you would in an
+  enum. If the set is too large to list, list the nearest few — `did you mean
+  butce?` is a complete recovery instruction.
+- **Never return a raw exception.** Catch it, and translate. The translation is
+  a one-line function and, on this evidence, it is worth more than any other
+  single change you can make to a tool.
+
+## What a tool returns is part of its design {#sec-tool-design-results}
+
+A tool's return value goes straight into the transcript, which
+@sec-agent-anatomy established *is* the agent's state. So a return value is not
+output — it is a write to shared memory that every subsequent step will read
+and pay for.
+
+Three rules follow, and all three are routinely broken by tools that were
+written for humans first.
+
+**A tool that returns 50,000 tokens has broken the agent**, not merely slowed
+it. It has consumed context that later steps needed, pushed earlier
+observations toward the middle where they are used less well, and multiplied
+the cost of every remaining model call. Return what the *task* needs: the
+three fields, not the whole record; the matching rows, not the table.
+
+**Paginate, and say so in the result.** `"showing 10 of 247 matches; call again
+with offset=10 for more"` is a sentence the model can act on. Silently
+truncating to ten is a tool that lies, and the model has no way to find out.
+
+**Summarise on the tool side when the raw form is unusable.** A tool that
+wraps a 40-page PDF should not return 40 pages. What it returns is a design
+decision about what the agent is for, and making it inside the tool keeps it
+out of every prompt that uses the tool.
+
+### Actions need different semantics from lookups
+
+Everything above is about reading. Tools that *do* things need three
+properties that read-only tools can ignore, and the cheapest time to add them
+is before the first incident.
+
+| property | why an agent specifically needs it |
+|:--|:--|
+| **Idempotent** | the loop will retry. A step cap, a timeout, or a model that did not see the result will all produce a second call — and "create the invoice" must not create two |
+| **Dry-run mode** | lets the agent, or you, see the effect before committing to it. A first-class `dry_run: true` parameter is worth more than any amount of prompt instruction |
+| **Confirmation-gated** | some actions should not execute on a model's say-so at all. That gate belongs in the runtime, not the prompt — @sec-guardrails is where this becomes a chapter |
+
+: Three properties read-only tools can skip {tbl-colwidths="[26,74]"}
+
+The general principle is @sec-agent-anatomy's, restated for the tool author:
+the model emits arguments and the runtime decides. Anything you would not let
+an unreviewed pull request do automatically, do not let a tool call do
+automatically.
+
+## Scaling past fifty tools {#sec-tool-design-scale}
+
+Every tool definition sits in the context of every call, so a flat list of
+fifty tools is a large fixed tax on every step, paid whether or not any of them
+is relevant. It also gets *less* accurate: more near-duplicate options means
+more chances to pick a neighbouring one.
+
+Three ways out, in increasing order of how much they change your architecture:
+
+- **Namespace and prune.** Most large tool surfaces contain three tools that do
+  the same thing for historical reasons. Merging them is free accuracy.
+- **Search, then load** —
+  [**progressive disclosure**](#gloss-progressive-disclosure){#term-progressive-disclosure .term-ref}.
+  Expose one `find_tools(query)` and load only the matching definitions for
+  that step. This is @sec-retrieval applied to your
+  own API surface, and it is the standard answer above roughly fifty tools.
+- **Give it an interpreter instead.** If your tools are mostly small
+  transformations, a sandboxed code environment replaces fifty definitions
+  with one — the model composes what it needs rather than picking from a menu.
+
+::: {#gloss-progressive-disclosure .column-margin .term-gloss}
+**Progressive disclosure** — loading only the tool definitions relevant to the
+current step instead of all of them, so a large surface does not tax every
+call. [↩](#term-progressive-disclosure){.term-back}
+:::
+
+### Code mode, and what it costs
+
+That third option — [**code mode**](#gloss-code-mode){#term-code-mode .term-ref}
+— deserves naming clearly, because it is increasingly the default in serious
+systems.
+
+::: {#gloss-code-mode .column-margin .term-gloss}
+**Code mode** — giving an agent a sandboxed interpreter instead of a fixed
+tool list. Composition, loops and intermediate variables come free; a readable
+whitelist does not. [↩](#term-code-mode){.term-back}
+::: Instead of `filter_rows`, `sum_column` and
+`join_tables`, you expose a sandbox and let the model write the composition.
+It is genuinely more expressive: composition, loops and intermediate variables
+come free, and they are exactly what a fixed tool list makes awkward.
+
+The cost is that [you have replaced a whitelist with an interpreter]{.hl}. A
+tool list is a security boundary you can read; a sandbox is a security boundary
+you have to build and keep believing in. That is a real trade and it belongs to
+@sec-agent-security rather than to a paragraph here — but the design decision
+is made in this chapter, when you choose what surface to expose.
+
+## Evaluating a tool {#sec-tool-design-eval}
+
+A tool is not correct because it works. It is correct when **the model calls it
+right**, which is a property of the pair and can only be measured by asking.
+
+The evaluation is small enough to build in an afternoon and it is the same
+shape as this chapter's two experiments:
+
+1. **Collect twenty real requests** that should reach this tool, phrased the
+   way users phrase them rather than the way your API is named. This is where
+   the misuse hides.
+2. **Score the call, not the outcome.** Was the right tool chosen; are the
+   arguments right? Executing muddles a schema problem with everything
+   downstream — the schema experiment above deliberately executed nothing.
+3. **Count the three failure kinds separately**, because they have different
+   fixes:
+
+| failure | what it means | what fixes it |
+|:--|:--|:--|
+| **Not called** | the model answered without the tool, or picked a neighbour | the *name*, and the description's "use this when" |
+| **Called wrong** | right tool, wrong arguments | types and enums, then parameter descriptions |
+| **Not recovered** | a failed call the model could not act on | the error string |
+
+: Three failure kinds, three different fixes {tbl-colwidths="[20,44,36]"}
+
+4. **Add the twenty requests to your regression set.** A tool description is
+   prompt text, so changing it is a change to system behaviour and deserves the
+   same treatment as changing a prompt — @sec-llm-eval sized how many items you
+   need before a difference means anything.
+
+The "not called" row is the one worth instrumenting in production, because it
+is invisible otherwise. A tool that is never selected produces no errors and no
+logs; it just quietly does not participate, while the model answers from memory
+— which is exactly what the opaque schema did, 41.7% of the time, in prose that
+looked like an answer.
+
+## Lab: fix a tool by measuring it {#sec-tool-design-lab}
+
+### Step 1 — pick a tool the model gets wrong
+
+If you do not know which one, you have found the first task: log tool calls
+with their arguments for a day.
+
+### Step 2 — write twenty requests in users' words
+
+Not in your API's words. The gap between the two is the thing being measured.
+
+### Step 3 — score the call, executing nothing
+
+Right tool, right arguments, both or neither. Record the baseline.
+
+### Step 4 — change one thing: add enums
+
+Every parameter with a fixed value set. Re-measure. On this chapter's tool that
+single change was worth 75 points.
+
+### Step 5 — now rewrite the descriptions
+
+Re-measure again. Report the delta honestly, including if it is zero, as it was
+here.
+
+### Step 6 — break it on purpose and fix the error string
+
+Force a failing call. Try the bare error, then the actionable one. Count how
+often the model recovers.
+
+### What to hand in
+
+The four-row table of your own — baseline, enums, descriptions, error string —
+and one sentence saying which change you would have predicted was largest, and
+whether you were right.
+
+## Intuition checks {#sec-tool-design-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Where should you spend your time on a tool schema?
+
+On enums, before prose. Measured here, moving one parameter from a free string
+to an enumerated list took correct calls from **25% to 100%**, and adding
+careful descriptions on top added nothing measurable. Constraints make wrong
+calls unrepresentable; descriptions only make them less likely, and the model
+has no way to check whether it guessed your vocabulary right.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your tool has a badly named, undocumented schema. What is the failure?
+
+Usually not a wrong call — **no call**. With an opaque schema the model here
+invoked the tool only 58.3% of the time and otherwise answered from parametric
+memory, producing a confident paragraph about something it could not know. A
+wrong call raises an error you can see; an unused tool produces a plausible
+answer and no signal at all.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Why does a model pass "mali buyukluk" where your API wants "butce"?
+
+Because nothing told it otherwise, so it echoes the user's vocabulary into your
+parameter. In this chapter's measurement the only phrasings that worked were
+the two where the user's words happened to contain the API's own word. One case
+is worth noticing specially: the model wrote `bütçe` where the API expects
+`butce` — correct Turkish, wrong identifier, and a failure waiting inside any
+API whose values are ASCII-folded words.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. What should a tool return when it fails?
+
+What would have worked. Measured across four styles, recovery went from **1.7%
+to 100%** purely by naming the invalid value and listing the valid ones. The
+striking row is the stack trace: at **81.7% abandonment** it was worse than a
+bare `"Error"`, because it is dense, authoritative, and contains no statement
+of what to try instead. Never return a raw exception.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. A tool returns the full record — 8,000 tokens. Is that a problem?
+
+Yes, and it is a problem for the whole run rather than that step. The return
+value goes into the transcript, which @sec-agent-anatomy showed *is* the
+agent's state, so it is re-sent on every subsequent model call and it crowds
+out what later steps need. Return the fields the task needs, paginate with the
+pagination stated in the result, and summarise on the tool side when the raw
+form is unusable.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. When do you stop adding tools and expose an interpreter instead?
+
+When the tools are mostly small transformations that users want to *compose* —
+filter, then sum, then join — because composition is exactly what a fixed list
+makes awkward and what code makes free. Be explicit about the price: you have
+replaced a whitelist you can read with a sandbox you have to build and keep
+trusting. That is a security decision made in this chapter and paid for in
+@sec-agent-security.
+:::
+
+## Exercises {#sec-tool-design-exercises}
+
+1. **The enum sweep.** Take one tool with a free-string parameter that has a
+   fixed value set. Measure correct calls, add the enum, measure again. Report
+   both numbers.
+2. **Users' words, not yours.** Write twenty requests for one of your tools in
+   the vocabulary your users actually use. Count how many produce the right
+   arguments. The gap is your parameter descriptions' job.
+3. **Rewrite the worst error.** Find the ugliest error string a tool of yours
+   can return. Rewrite it in the three-part form. Measure recovery before and
+   after.
+4. **Find the silent tool.** Instrument which tools are never selected. For
+   each one, decide whether it is redundant or badly named — both are fixable,
+   and both are invisible without the instrumentation.
+5. **Budget a return value.** Take a tool that returns a whole record and
+   compute what it costs across a ten-step run. Then decide what it should
+   return instead.
+6. **Dry-run.** Add a `dry_run` parameter to a tool that writes something.
+   Measure whether the agent uses it when asked to be careful, and whether the
+   instruction is even necessary once the parameter exists.
+7. **The ASCII trap.** If your API uses ASCII-folded identifiers derived from
+   words in a language with diacritics, write the test that catches
+   `bütçe`/`butce` before a user does.
+
+## Interview questions {#sec-tool-design-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: What makes a good tool schema?**
+
+Start from the framing that decides everything else: the schema is prompt text,
+not documentation, because the model gets one shot from it with no way to check.
+Then order the work by effect. Enums first — measured here, enumerating one
+parameter took correct calls from 25% to 100% while prose descriptions on top
+added nothing. Then a name that says *when* the tool applies. Then parameter
+descriptions written as a mapping from users' words to your API's words,
+because otherwise the model passes the user's vocabulary straight through.
+
+**Q: Your agent ignores a tool that would answer the question. Why?**
+
+Most likely the name and description do not say when it applies, so the model
+does not recognise the situation as this tool's. The important half of the
+answer is what that failure looks like: not an error, but an answer from
+parametric memory. In this chapter's measurement an opaque schema went uncalled
+41.7% of the time and produced confident invented prose instead. So instrument
+*selection*, not just failures.
+
+**Q: What should a tool return on error?**
+
+A sentence saying what would have worked, with the valid options enumerated.
+Measured across four styles, that took recovery from 1.7% to 100%. And say the
+counterintuitive part, because it is the useful one: a stack trace was the
+*worst* of the four — worse than a bare "Error" — because it looks
+authoritative and contains no path forward. Catch the exception and translate
+it.
+
+### Testing whether you have shipped one
+
+**Q: How do you evaluate a tool?**
+
+By whether the model calls it correctly, which is a property of the pair. Twenty
+requests in users' phrasing, scored on the emitted call rather than the outcome
+so a schema problem is not confounded with everything downstream, bucketed into
+not-called, called-wrong and not-recovered — because those have three different
+fixes. Then keep the twenty in the regression set, since a description change is
+a behaviour change.
+
+**Q: You have eighty tools and accuracy is falling. What do you do?**
+
+First merge and prune, because large surfaces accumulate near-duplicates and
+every extra near-neighbour is another chance to pick the wrong one. Then move
+from a flat list to search-then-load, so only the relevant definitions occupy
+the context — @sec-retrieval applied to your own API. If the tools are mostly
+small composable transformations, consider replacing them with a sandboxed
+interpreter, and be explicit that you are trading a readable whitelist for a
+security boundary you now have to maintain.
+
+## Where to go deeper {#sec-tool-design-deeper}
+
+Do this before reading anything: take one tool, add enums to every parameter
+that has a fixed value set, and measure the change. It is twenty minutes.
+
+| resource | what it is |
+|:--|:--|
+| [Writing tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents) — Anthropic | the closest thing to a specification for this chapter's subject, from people who watch tool misuse at scale |
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | the surrounding argument: what to build before you need tools at all |
+| [`pydantic-ai`](https://github.com/pydantic/pydantic-ai) | tools as typed functions, with validation errors that are already model-readable — the error-message finding, built in |
+| [`outlines`](https://github.com/dottxt-ai/outlines) | @sec-decoding's constrained generation, which is the mechanism that makes an enum a guarantee rather than a suggestion |
+| [`smolagents`](https://github.com/huggingface/smolagents) | includes code-mode agents, so you can compare the two surfaces on your own task |
+| [JSON Schema documentation](https://json-schema.org/understanding-json-schema) | the constraint vocabulary you are actually writing in; most people use a tenth of it |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| models learning to call functions | @schick2023toolformer |
+| reasoning interleaved with tool use | @yao2023react |
+| making the schema a hard constraint | @willard2023efficient |
+| what self-correction does and does not fix | @huang2024large |
+| tool use at scale, and its failure modes | @qin2024toolllm |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## The 2026 toolbox {#sec-tool-design-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` with tool calling |
+| `numpy` | 2.5.2 | task generation and scoring |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `pydantic-ai` | 2.35.3 | typed tools where the validation error is already a good error message |
+| `outlines` | 1.3.3 | enforcing the schema at decode time rather than hoping |
+| `jsonschema` | 4.26.0 | validating arguments before execution, which is where the runtime boundary lives |
+| `openai-agents` | 0.22.0 | tool definitions with guardrails attached |
+| `smolagents` | 1.26.0 | comparing a tool list against code mode on the same task |
+| `mcp` | 2.1.1 | exposing tools over a standard protocol — @sec-mcp |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## What to remember {#sec-tool-design-summary}
+
+- **A tool schema is prompt text, not documentation.** The model gets one shot
+  from it, cannot read your source, and cannot check a guess. Whatever the
+  schema does not say, it invents.
+- **Enums do the work; prose does not.** Moving one parameter from a free
+  string to an enumerated list took correct calls from **25% to 100%**, and
+  adding careful descriptions on top added **nothing measurable**. Spend the
+  time where the measurement is.
+- **A bad schema produces no call, not a wrong call.** The opaque variant went
+  uncalled **41.7%** of the time and answered from parametric memory instead —
+  a confident invented paragraph, which is worse than an error because it looks
+  like an answer.
+- **Without constraints the model echoes the user's vocabulary into your API.**
+  *mali buyukluk*, *ekip mevcudu*, *takvim* — and `bütçe` where the API wanted
+  `butce`, which is @sec-turkish-nlp's problem arriving inside a function
+  signature.
+- **The error string is worth more than any other single change.** Recovery
+  went from **1.7% to 100%** by naming the invalid value and listing the valid
+  ones. Write what *would* have worked; the rest is optional.
+- **A stack trace is worse than nothing.** At **81.7% abandonment** it beat a
+  bare `"Error"` for uselessness, because it looks authoritative and offers no
+  path forward. Catch and translate.
+- **The dominant failure after an error is giving up, not looping.** Three of
+  four error styles made the model stop calling tools and answer without the
+  data — a quieter failure than a retry loop and a worse one.
+- **What a tool returns is a write to the agent's state.** Return the fields
+  the task needs, state the pagination in the result, and summarise on the tool
+  side. A tool that returns 50,000 tokens has not slowed the agent down; it has
+  taken the context later steps needed.
+
+
