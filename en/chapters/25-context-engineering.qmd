@@ -1,56 +1,585 @@
 # Context Engineering {#sec-context-engineering}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** The measurements run `qwen3.5:9b` through
+`ollama` 0.24.0 on invented facts embedded in real Turkish news articles, so a
+correct answer can only have come from the context. This chapter is the
+consequence of @sec-agent-anatomy's finding that the transcript *is* the
+agent's state; @sec-memory covers what persists between runs. Software: NumPy
+2.5.2 on Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- treat the context window as a budget with a measurable return;
-- measure degradation as context grows instead of assuming a big window is free;
-- apply compaction, isolation, and just-in-time retrieval deliberately;
-- cut an agent's token usage substantially without losing task accuracy.
+- treat the context window as a budget with a measurable return rather than a
+  container with a capacity;
+- measure degradation on your own task instead of assuming either that a big
+  window is free or that it is ruinous;
+- apply compaction, isolation and just-in-time retrieval deliberately, knowing
+  what each one costs;
+- cut an agent's token usage substantially without losing accuracy.
 
-## Context as a budget, not a container
+## A budget, not a container {#sec-context-engineering-budget}
 
-<!-- TODO(draft): every token competes; the framing that the rest of the
-    chapter builds on. -->
+The window is usually described as a capacity: *200k tokens, so you can fit
+200k tokens*. That framing is wrong in a way that matters, because it suggests
+the only question is whether things fit.
 
-## Context rot and lost-in-the-middle: measuring degradation
+Three results from earlier chapters say otherwise, and together they make the
+case for treating the window as a budget where **every token competes**:
 
-<!-- TODO(draft): a measured curve of accuracy against context length and
-    position, on your own task. -->
+- @sec-rag measured the price of not choosing: eighty documents instead of the
+  one that mattered cost **148× the input tokens for identical accuracy**. The
+  model was not confused by the extra material. You simply paid for it, on
+  every request, forever.
+- @sec-agent-anatomy showed that in an agent the context is not something you
+  compose once — the transcript *is* the state, it only grows, and every model
+  call re-sends all of it.
+- @sec-tool-design showed that a tool's return value is therefore a **write to
+  that state**, which is why a tool returning 50,000 tokens does not slow an
+  agent down so much as take the space its later steps needed.
 
-## Compaction, summarization, and rolling history
+[So the question is never "does it fit". It is "what is each token earning".]{.hl}
 
-<!-- TODO(draft): what to keep verbatim, what to summarise, what to drop;
-    where compaction loses information that mattered. -->
+That reframing has an immediate practical consequence: you cannot answer it
+without instrumentation. The first move in context engineering is not a
+technique, it is a **budget by category** — how many tokens went to the system
+prompt, to tool definitions, to retrieved documents, to observations, to
+history. Almost everyone who runs that count for the first time finds one
+category they did not know was there and would not have guessed.
 
-## Sub-agent context isolation
+::: {.column-margin}
+The categories that surprise people, in rough order of frequency: tool
+definitions, which are re-sent on every call and scale with the number of
+tools; a system prompt that accumulated instructions nobody has read in
+months; and retrieved documents whose *k* was set once and never revisited.
+None of these are visible without counting.
+:::
 
-<!-- TODO(draft): give the specialist a clean window and return only the
-    result — connect to @sec-multi-agent. -->
+## Does a long context actually degrade? {#sec-context-engineering-rot}
 
-## Just-in-time retrieval vs. eager loading
+The budget argument above is about money. There is a second, louder claim —
+that long contexts degrade *accuracy* — and it deserves separating from the
+first, because the two lead to different engineering.
 
-<!-- TODO(draft): load-on-demand as the default; the latency it costs. -->
+@sec-rag tested it and found nothing: 640 queries, sixteen conditions, up to
+16,775 tokens, **100% at every context size and every position**. I ran a
+harder local version for this chapter — two invented figures to find and add
+rather than one to locate — and the curve was still essentially flat:
 
-## The filesystem as external memory; scratchpads and note-taking
+```text
+qwen3.5:9b, 60 tasks, two invented figures to find and sum
 
-<!-- TODO(draft): writing state out and reading it back; why this beats a
-    longer window. -->
+ distractor docs  accuracy   95% CI          prompt tokens
+               0    100.0%   [94.0, 100.0]             142
+               4     93.3%   [84.0,  97.4]             863
+              12     88.3%   [77.8,  94.2]           2,319
+              28     88.3%   [77.8,  94.2]           5,228
+              60     96.7%   [88.7,  99.1]          11,048
+```
 
-## Structure-aware context: when text retrieval is not enough
+Sixty distractors scored *higher* than twelve. The intervals overlap almost
+completely. On this task, at this scale, adding 78× the tokens cost accuracy
+nothing that this sample can detect.
 
-<!-- TODO(draft): schemas, tables, and code where chunked text retrieval
-    fails outright. -->
+### Why the easy test finds nothing
 
-## Lab: cut a working agent's token usage by 60% without losing accuracy
+It would be comfortable to conclude that context rot is folklore. It is not,
+and the reason my two experiments missed it is specific and worth
+understanding, because it is the same reason most in-house evaluations miss it.
 
-<!-- TODO(draft): profile the context, apply the techniques in order, and
-    report tokens and score after each step. -->
+**Both of my tests allowed literal matching.** The question contained
+`ZRG-14`; so did the needle. Attention is extremely good at finding a rare
+string that is already in the query. @modarressi2025nolima was built exactly
+to remove that crutch — its needles share minimal lexical overlap with the
+question, so the model has to infer the association rather than match it — and
+the result is stark: across **13 models that all claim 128K contexts, 11 fall
+below half their short-context baseline at 32K tokens**. GPT-4o goes from
+**99.3% to 69.7%**.
 
-## Exercises
+@hsieh2024ruler reaches the same place from a different direction, and states
+the trap plainly: models show near-perfect scores on vanilla
+needle-in-a-haystack while **large drops appear as soon as the task requires
+multi-hop tracing or aggregation**. Across 17 models claiming 32K or more,
+only half maintain satisfactory performance at 32K.
 
-1. Instrument an agent and produce a token budget by category. Which category surprised you?
-2. Run the same task at 8k, 32k, and 128k of context. Plot accuracy and cost. Was the bigger window worth it?
+So the honest synthesis, which is more useful than either result alone:
+
+| what you measure | what you will find |
+|:--|:--|
+| Locating a rare string that appears in the query | no degradation; this is what my tests and vanilla NIAH measure |
+| Locating information by *meaning*, not by string match | large degradation past ~32K [@modarressi2025nolima] |
+| Tracing across several facts, or aggregating them | large degradation, earlier [@hsieh2024ruler] |
+
+: Three tasks, three different answers about the same window {tbl-colwidths="[46,54]"}
+
+[A model's advertised context length is a capacity, not a competence]{.hl} —
+its [**effective context length**](#gloss-effective-context-length){#term-effective-context-length .term-ref}
+is an empirical quantity and usually much shorter.
+
+::: {#gloss-effective-context-length .column-margin .term-gloss}
+**Effective context length** — the length at which a model still performs, as
+opposed to the length it accepts. Routinely far shorter than the advertised
+window. [↩](#term-effective-context-length){.term-back}
+:::
+And the widely-run test that would reassure you — needle-in-a-haystack — is
+precisely the one designed-in lexical overlap makes easy. If you take one
+operational thing from this section, make it this: **evaluate long context on
+your own task with your own paraphrases, never on literal matches**, because
+the literal-match version will pass and tell you nothing.
+
+::: {.column-margin}
+Which is @sec-rag's lesson restated in a place where it costs real money: a
+test that everything passes is not a test. My local experiment is small — one
+9B model, 60 tasks, up to 11k tokens — and it agrees with the published
+result *about the easy case*, which is the most it can establish. The
+published benchmarks are the evidence for the hard case, and they were run at
+a scale no laptop reaches.
+:::
+
+## Compaction: what to keep, summarise, and drop {#sec-context-engineering-compaction}
+
+@sec-agent-anatomy established that the transcript only grows.
+[**Compaction**](#gloss-compaction){#term-compaction .term-ref} is what you do
+about that, and it is a lossy compression problem with an unusual property:
+**you choose what to lose, and you choose it before you know what will be
+needed.**
+
+::: {#gloss-compaction .column-margin .term-gloss}
+**Compaction** — summarising or dropping parts of an agent's transcript so the
+context stops growing. Lossy, and the loss is chosen before you know what will
+be needed. [↩](#term-compaction){.term-back}
+:::
+
+The useful move is to stop treating the transcript as one thing. It has parts
+with very different value per token:
+
+| part of the transcript | keep it how | why |
+|:--|:--|:--|
+| The **task** — what the user actually asked | verbatim, always, and re-state it near the end | it is short, it is the thing being optimised against, and it is what gets lost when history dominates |
+| **Decisions** the agent made and their reasons | summarised | *what* was decided is needed; the deliberation that produced it usually is not |
+| **Tool results** that are still live | verbatim | these are facts the answer depends on. Summarising a number is how you lose it |
+| **Tool results** already superseded or consumed | drop, or reduce to one line | the ten search results you rejected are pure cost from the moment you rejected them |
+| **Errors** already recovered from | drop | @sec-agent-anatomy's point: a stale error keeps conditioning the model toward the confusion it caused |
+
+: Not all tokens are worth the same {tbl-colwidths="[26,18,56]"}
+
+Three failure modes are worth knowing before you build this.
+
+**Summarising numbers.** A summariser will happily turn *the budget is 4,318
+lira* into *the budget was discussed*. Any value the final answer must contain
+should be exempt from compaction by rule, not by hope — the safest
+implementation keeps a structured `facts` list beside the prose and never
+summarises it.
+
+**Compacting the task away.** As history grows, the original request drifts
+toward the middle of a long context, which — per @sec-context-engineering-rot
+— is where models attend least reliably. Re-stating the objective at the end
+of the context is nearly free and removes the problem.
+
+**Compaction that is not idempotent.** Summarising a summary loses more each
+time, and long-running agents do this repeatedly. Compact from the *original*
+where you can, or accept and measure the drift.
+
+### Rolling history, concretely
+
+The pattern that works in practice is a three-tier window:
+
+```text
+  [ system prompt + tools ]     fixed, always present
+  [ compacted history      ]    everything older than the last N steps,
+                                summarised once, with a facts list kept verbatim
+  [ last N steps           ]    verbatim, because recent detail is what the
+                                next decision is actually about
+  [ the task, restated     ]    last, so it is never in the middle
+```
+
+Choosing N is an empirical question with a cheap answer: run your eval at
+N = 3, 5 and 10 and take the smallest that does not lose accuracy.
+
+## Isolation: give the specialist a clean window {#sec-context-engineering-isolation}
+
+Compaction reduces a context you have already polluted.
+[**Context isolation**](#gloss-context-isolation){#term-context-isolation .term-ref}
+avoids polluting it.
+
+::: {#gloss-context-isolation .column-margin .term-gloss}
+**Context isolation** — running a read-heavy sub-task in its own window and
+returning only its conclusion, so the parent never pays for what it read.
+[↩](#term-context-isolation){.term-back}
+:::
+
+The idea is simple and it is the single largest lever in this chapter: a
+sub-task that needs to read a great deal — search fifty documents, scan a log,
+try six queries — runs in **its own context**, and returns only its
+conclusion. The parent never sees the fifty documents. It sees one paragraph.
+
+```text
+  without isolation           with isolation
+  ─────────────────           ──────────────
+  parent reads 50 docs        sub-agent reads 50 docs in a fresh window
+  parent context: 40k         sub-agent returns 200 tokens
+  and stays 40k forever       parent context: +200
+```
+
+The saving is not the 40k. It is the 40k **multiplied by every subsequent
+model call in the parent's loop**, which is the quadratic term
+@sec-agent-anatomy identified.
+
+What it costs is equally real and usually understated:
+
+- **The parent cannot see what the sub-agent saw.** If the returned paragraph
+  is wrong or incomplete, the parent has no way to notice — it has lost the
+  evidence. Return a short result *and* a pointer to where the full material
+  lives.
+- **Coordination is not free.** Every isolated call is at least one extra
+  round trip, and the specialist has to be given enough context to do its job,
+  which is a prompt you now maintain.
+- **Errors compound quietly.** A summary that is 90% right, consumed by a
+  parent that treats it as fact, is a failure mode with no error message.
+  @sec-multi-agent is where this gets its own chapter.
+
+The heuristic worth applying: **isolate when the sub-task's inputs are large
+and its output is small.** Searching, scanning, filtering, verifying. Do not
+isolate when the parent will need the detail — you will only pay the round
+trip and then ask for it again.
+
+## Just-in-time retrieval beats eager loading {#sec-context-engineering-jit}
+
+The instinct when building an agent is to load what it might need: the schema,
+the docs, the recent tickets, the user's history. It is one fewer failure
+mode, and it feels like preparation.
+
+It is also paying for everything on every call. The alternative — give the
+agent the *ability* to fetch and let it fetch what it needs — is almost always
+cheaper, and @sec-rag's measurement is the reason to believe it: eighty
+documents instead of one cost 148× the input for identical accuracy. Eager
+loading is that trade, made silently, on every request.
+
+Two things make just-in-time work, and both are @sec-tool-design's subject:
+
+- **The agent has to know what is available.** A tool named `find_orders` with
+  a description saying when it applies is what makes fetching-on-demand
+  possible at all. This is why the two chapters are adjacent.
+- **Identifiers beat payloads.** Pass around order IDs, file paths and URLs;
+  fetch the contents when needed. A pointer costs ten tokens and a document
+  costs two thousand, and most pointers are never dereferenced.
+
+What it costs is **latency**: a round trip you would not have paid, on the
+steps that need the data. That is a real trade and it has an obvious middle
+ground — eagerly load the one or two things needed on nearly every request,
+fetch everything else on demand. What makes it a decision rather than a habit
+is measuring the hit rate: if you eagerly load something that is used 15% of
+the time, you are paying for it 85% of the time for nothing.
+
+## The filesystem as external memory {#sec-context-engineering-filesystem}
+
+There is a move that sounds like a workaround and is closer to the right
+architecture: **let the agent write things down and read them back.**
+
+A scratchpad file, a notes directory, a structured JSON of findings so far.
+The context holds a *reference* — `findings.md`, 340 lines — and the agent
+reads the part it needs when it needs it.
+
+This is better than a longer window for reasons that have nothing to do with
+capacity:
+
+- **It survives compaction.** Anything written to a file is still there after
+  the transcript is summarised, which makes it the natural home for exactly
+  the facts that compaction destroys.
+- **It is addressable.** The agent can re-read one section rather than
+  re-reading everything, which a linear transcript cannot offer.
+- **It is inspectable by you.** A file is a debugging artefact and a
+  transcript is a haystack. When a long run goes wrong, the notes file is
+  usually where you find out why.
+- **It survives the run.** Which is where this chapter hands over to
+  @sec-memory, whose subject is what should persist *between* runs rather than
+  within one.
+
+The discipline that makes it work: **write structured, read selectively.** A
+notes file that becomes free-form prose is a second transcript with the same
+problem. Give it headings, or make it JSON, so a later step can read one field
+rather than the lot.
+
+## When text retrieval is not enough {#sec-context-engineering-structure}
+
+One caveat on everything above, because it is where a well-built context
+pipeline still fails.
+
+@sec-rag's machinery — chunk, embed, retrieve — assumes the information is
+*text with local meaning*: a passage that means roughly the same thing on its
+own as it did in the document. Three common cases break that assumption
+outright, and no amount of chunking repairs them:
+
+- **Tables and schemas.** A row is meaningless without its header, and a
+  column name is meaningless without the table's purpose. @sec-rag measured
+  what chunking does to structure; the fix here is not better chunking but
+  serialising each row into a self-contained sentence, or not retrieving at
+  all and letting the agent query the table.
+- **Code.** A function's meaning depends on its callers, its types and the
+  module's conventions — all of which live elsewhere in the repository.
+  Retrieving the function body alone retrieves the least useful part.
+- **Anything relational.** *Which customers churned after the March incident*
+  is a join, not a search. Embedding rows and hoping is the expensive way to
+  get a worse answer than a query would have given.
+
+The rule: **when the data has structure, give the agent a way to query the
+structure.** A `run_sql` tool over a real schema beats any amount of embedded
+rows, and a `grep`-and-`read` pair beats embedding a codebase. That is a
+context-engineering decision, because it determines what ends up in the window
+— and it is usually the difference between an agent that works on your data
+and one that works on a demo.
+
+## Lab: cut an agent's token usage without losing accuracy {#sec-context-engineering-lab}
+
+The order of these steps matters — measure, then cut the largest category,
+then re-measure. Doing it in any other order produces savings you cannot
+attribute.
+
+### Step 1 — build the budget by category
+
+Instrument one real run. Count tokens for: system prompt, tool definitions,
+retrieved documents, tool results, conversation history. Print the table. Do
+not skip to the techniques; the point of this step is that you will be wrong
+about which category is largest.
+
+### Step 2 — fix the fixed costs first
+
+System prompt and tool definitions are re-sent on *every* call, so they are
+multiplied by the step count. This is usually the cheapest large saving: prune
+tools nobody uses, and delete the instructions that accumulated.
+
+### Step 3 — cut what tools return
+
+Per @sec-tool-design, return the fields the task needs rather than whole
+records. Re-measure. Also check the *shape*: a 40-row result the agent only
+reads two rows of should be paginated.
+
+### Step 4 — isolate one read-heavy sub-task
+
+Pick the step with large input and small output. Run it in its own context and
+return only the conclusion. This is normally the single biggest number in the
+lab.
+
+### Step 5 — compact history, keeping facts verbatim
+
+Summarise everything older than the last N steps, and keep a structured facts
+list untouched. Sweep N over 3, 5 and 10.
+
+### Step 6 — re-measure accuracy, not just tokens
+
+Every step above can silently cost accuracy. Run your eval — sized per
+@sec-llm-eval, because a 30-item set cannot detect the regression you care
+about — and report tokens and score together. A 60% token reduction that costs
+four points may or may not be worth it, but you cannot have that conversation
+without both numbers.
+
+### What to hand in
+
+The category table before and after, the token reduction per step, the
+accuracy at each stage with an interval, and one sentence on which step you
+would keep if you could only keep one.
+
+## Intuition checks {#sec-context-engineering-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Your model has a 200K window. Can you stop thinking about context?
+
+No, for two separate reasons that are easy to conflate. The **cost** reason is
+unconditional: every token is re-sent on every model call, so a context you
+did not curate is a bill you pay forever — @sec-rag measured 148× the input
+for identical accuracy. The **capability** reason is conditional but real: a
+window is a capacity, not a competence, and @hsieh2024ruler found that of 17
+models claiming 32K or more, only half held up at 32K.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. You ran needle-in-a-haystack and scored 100%. What have you learned?
+
+Almost nothing about your task. NIAH lets the model match a rare string that
+is already in the question, which is the easiest thing attention does — this
+book's own two attempts at it both returned flat 100% curves.
+@modarressi2025nolima removed exactly that crutch and **11 of 13 models fell
+below half their short-context baseline at 32K**, GPT-4o from 99.3% to 69.7%.
+Test with paraphrases, not literal matches.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. What is the first thing to do when an agent costs too much?
+
+Count, by category — system prompt, tool definitions, retrieved documents,
+tool results, history. Not because counting is virtuous but because the
+largest category is routinely not the one people assume, and the fixed costs
+(system prompt, tool definitions) are multiplied by every step in the loop, so
+they pay back more than they look like they should.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. When should a sub-task get its own context?
+
+When its inputs are large and its output is small: searching, scanning,
+filtering, verifying. The saving is not the tokens the sub-task read, it is
+those tokens multiplied by every remaining model call in the parent's loop.
+Do not isolate when the parent will need the detail — you pay a round trip and
+then ask for it again. And return a pointer alongside the summary, because the
+parent has otherwise lost the evidence and cannot notice a wrong conclusion.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. What must never be summarised?
+
+Numbers, identifiers, and anything the final answer has to contain. A
+summariser will turn *the budget is 4,318 lira* into *the budget was
+discussed* without any signal that it did. Keep a structured facts list beside
+the prose and exempt it from compaction by rule. Also worth protecting: the
+original task, restated at the end of the context rather than left to drift
+into the middle.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your agent works on your demo data and fails on the real database. Why?
+
+Often because the real data has structure and the pipeline treats it as text.
+A table row means nothing without its header; a function means nothing without
+its callers; *which customers churned after the March incident* is a join
+rather than a search. Chunking does not repair any of those. Give the agent a
+way to query the structure — `run_sql` over a real schema, `grep` plus `read`
+over a repository — instead of embedding rows and hoping.
+:::
+
+## Exercises {#sec-context-engineering-exercises}
+
+1. **The budget table.** Instrument one real agent run and produce tokens by
+   category. Write down, before you look, which category you expect to be
+   largest. Most people are wrong.
+2. **Multiply by steps.** Take your system prompt and tool definitions, and
+   multiply their token count by the average number of model calls per run.
+   That number is what pruning them is worth.
+3. **Paraphrase your NIAH.** If you have a long-context evaluation, rewrite
+   the questions so they share no distinctive words with the answers. Re-run.
+   Report both curves.
+4. **Isolate one step.** Find your most read-heavy sub-task, run it in a
+   separate context, and measure the parent's token count before and after.
+5. **Break compaction on purpose.** Compact a transcript containing a number
+   the answer needs, and check whether the number survived. Then add the
+   structured facts list and check again.
+6. **Hit-rate audit.** For each thing you load eagerly, measure how often it
+   is actually used. Anything below about half is a candidate for
+   just-in-time.
+7. **Notes file.** Give an agent a scratchpad it must write findings to, and a
+   tool to read sections back. Compare token usage and accuracy against the
+   same agent without one, on a task long enough to need compaction.
+
+## Interview questions {#sec-context-engineering-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: Why does context engineering matter if windows keep growing?**
+
+Separate the two arguments, because they have different strengths. Cost is
+unconditional: the transcript is re-sent on every model call, so an uncurated
+context is multiplied by the step count — and @sec-rag measured 148× the input
+tokens for identical accuracy when you skip the choosing. Capability is
+conditional but documented: a claimed window is not an effective one, and
+@hsieh2024ruler found half of 17 models failing to hold up at the 32K they
+advertise.
+
+**Q: Someone shows you a perfect needle-in-a-haystack result. What do you
+say?**
+
+That it is the easy version, and say why: the needle shares a rare string with
+the question, so the model matches rather than infers. Cite the contrast if you
+can — @modarressi2025nolima removed the lexical overlap and 11 of 13 models
+dropped below half their short-context baseline at 32K. Then give the practical
+form: evaluate with paraphrases and with multi-fact aggregation, because those
+are the shapes real tasks have.
+
+**Q: What actually grows in an agent's context, and why does it cost more than
+it looks?**
+
+The transcript, monotonically — every decision and every observation is
+appended and nothing is removed. It costs more than it looks because each
+model call re-sends all of it, so the total is the sum of a growing series
+rather than the final length. That is why fixed costs like tool definitions
+matter disproportionately: they are paid once per *call*, not once per run.
+
+### Testing whether you have shipped one
+
+**Q: An agent costs three times its budget. Walk me through fixing it.**
+
+Measure by category first, and say why: the largest category is usually not
+the assumed one. Then in order of return — prune tool definitions and the
+system prompt, because they are multiplied by every step; cut what tools
+return to the fields actually used; isolate the read-heavy sub-task into its
+own context; then compact history with the facts kept verbatim. Re-measure
+accuracy at every stage with an interval, because each of those can cost
+points quietly.
+
+**Q: How do you decide between eager loading and fetching on demand?**
+
+By hit rate. Anything used on nearly every request can be loaded up front;
+anything below roughly half should be a tool call, because you are otherwise
+paying for it on every request that does not need it. Say what just-in-time
+costs — a round trip of latency on the steps that need the data — and how to
+get most of both: pass identifiers rather than payloads, and dereference them
+only when a step actually needs the contents.
+
+## Where to go deeper {#sec-context-engineering-deeper}
+
+Before reading: instrument one run and produce the token table by category. It
+takes an hour and it decides which of the sections above you actually need.
+
+| resource | what it is |
+|:--|:--|
+| [Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — Anthropic | the most complete practitioner treatment of this chapter's subject, including compaction and sub-agent isolation |
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | the surrounding architecture, and when *not* to add machinery |
+| [`RULER`](https://github.com/NVIDIA/RULER) | the benchmark that separates claimed from effective context length; runnable on your own model |
+| [`NoLiMa`](https://github.com/adobe-research/NoLiMa) | the needle set built without lexical overlap — the evaluation to copy rather than the vanilla one |
+| [`tiktoken`](https://github.com/openai/tiktoken) | counting tokens honestly, which is step one of everything here |
+| [`langgraph`](https://github.com/langchain-ai/langgraph) | state as an explicit object rather than an accumulating list, which makes compaction a design decision |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| claimed context length versus effective | @hsieh2024ruler |
+| what the needle test hides | @modarressi2025nolima |
+| position effects in long contexts | @liu2024lost |
+| irrelevant context as active harm | @shi2023large |
+| the agent's transcript as memory | @packer2023memgpt |
+| retrieval as the alternative to a longer prompt | @lewis2020rag |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## What to remember {#sec-context-engineering-summary}
+
+- **The window is a budget, not a container.** The question is never whether
+  something fits; it is what each token earns. Every token is re-sent on every
+  model call, so an uncurated context is multiplied by the number of steps.
+- **Count before you cut.** Tokens by category — system prompt, tool
+  definitions, retrieved documents, tool results, history. The largest
+  category is routinely not the assumed one, and fixed costs are paid per
+  *call* rather than per run.
+- **A claimed context length is a capacity, not a competence.** Of 17 models
+  claiming 32K or more, only half held up at 32K [@hsieh2024ruler].
+- **Needle-in-a-haystack is the easy test, and it will pass.** This book's own
+  two attempts returned flat 100% curves — because the needle shared a rare
+  string with the question. Remove that overlap and **11 of 13 models fall
+  below half their short-context baseline at 32K**, GPT-4o from 99.3% to 69.7%
+  [@modarressi2025nolima]. Evaluate with paraphrases.
+- **Isolation is the largest single lever.** A read-heavy sub-task in its own
+  context returns a paragraph instead of forty thousand tokens — and the saving
+  is that figure multiplied by every remaining call in the parent's loop.
+- **Compaction is lossy, and you choose the loss in advance.** Keep the task
+  and live tool results verbatim, summarise decisions, drop consumed results
+  and recovered errors. Never summarise a number the answer must contain.
+- **Prefer identifiers to payloads.** A pointer costs ten tokens and a
+  document costs two thousand, and most pointers are never dereferenced. Load
+  eagerly only what is used on nearly every request.
+- **When the data has structure, query the structure.** Tables, code and
+  relational questions defeat chunk-and-embed outright; `run_sql` over a real
+  schema beats any amount of embedded rows.
