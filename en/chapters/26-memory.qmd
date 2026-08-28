@@ -1,52 +1,533 @@
 # Memory Architectures {#sec-memory}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One small local measurement — a contradiction
+probe on `qwen3.5:9b` through `ollama` 0.24.0, short prompts, minutes to run —
+plus published results where the question needs scale this book cannot supply.
+@sec-context-engineering covers what happens *within* a run; this chapter is
+about what survives *between* them. Software: NumPy 2.5.2 on Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- distinguish working, episodic, and semantic memory and pick storage for each;
-- define a write policy: what gets remembered, when, and who decides;
+- distinguish working, episodic and semantic memory, and pick storage for each;
+- define a write policy — what gets remembered, when, and who decides;
 - handle staleness and contradiction instead of accumulating stale facts;
-- reason about consent and privacy in a system that remembers users.
+- reason about consent and deletion in a system that remembers people.
 
-## Working, episodic, and semantic memory
+## Three kinds of memory, three different problems {#sec-memory-kinds}
 
-<!-- TODO(draft): the three-way split and what each is for; mapping onto
-    concrete storage. -->
+"Memory" in an agent covers three things that share a word and almost nothing
+else. Separating them is most of the design work, because each has a different
+lifetime, a different storage answer, and a different failure mode.
 
-## Storage choices: vector, graph, relational, hybrid
+| | what it holds | lifetime | where it lives | how it fails |
+|:--|:--|:--|:--|:--|
+| **Working** | the current transcript — the task, recent steps, live tool results | one run | the context window | it fills up. @sec-context-engineering is entirely about this |
+| **Episodic** | what happened, and when: past conversations, actions taken, outcomes | across runs | append-only log, retrievable | it accumulates. Volume grows without bound and old episodes crowd out useful ones |
+| **Semantic** | durable facts: preferences, entities, relationships, learned rules | until contradicted | a store you can update *and* delete from | it goes **stale**, and stale facts are worse than absent ones |
 
-<!-- TODO(draft): the honest comparison; why 'just embed everything' fails
-    on structured facts. -->
+: One word, three problems {tbl-colwidths="[14,32,12,20,22]"}
 
-## Write policies: what to remember, when, and who decides
+The distinction that matters most in practice is the last column. Working
+memory fails loudly — you hit the window. Episodic memory fails slowly — the
+system gets more expensive and less relevant. [Semantic memory fails
+silently]{.hl}: a fact recorded in March is still returned confidently in
+July, and nothing in the system knows it has expired.
 
-<!-- TODO(draft): model-decided vs. rule-based vs. user-confirmed writes;
-    the failure mode of remembering everything. -->
+::: {.column-margin}
+The human analogy is where the vocabulary comes from and it is worth not
+leaning on too hard. What matters here is engineering: episodic memory is an
+event log, semantic memory is a mutable key-value store with provenance, and
+the fact that people's memory blurs the two is not a reason for your system
+to.
+:::
 
-## Retrieval and forgetting; staleness and conflict resolution
+## Storage: stop reaching for a vector database first {#sec-memory-storage}
 
-<!-- TODO(draft): recency and salience; what happens when two memories
-    contradict; TTL and decay. -->
+The default instinct is to embed everything and retrieve by similarity. It is
+the wrong default for semantic memory, and the reason is the same one
+@sec-context-engineering gave for structured data: **similarity search cannot
+express the operations memory actually needs.**
 
-## Memory as a tool vs. memory as infrastructure
+The operations are: *get this user's current preference*, *update it*,
+*delete everything about this person*, *list what changed since March*. Those
+are lookups and mutations on keys. None of them is a nearest-neighbour query.
 
-<!-- TODO(draft): explicit remember/recall tools vs. transparent
-    injection; the trade-off in predictability. -->
+| store | what it is genuinely good for | where it fails as memory |
+|:--|:--|:--|
+| **Relational** | preferences, entities, anything with an identity you can key on; updates and deletes that actually delete | needs a schema, so it cannot absorb whatever the model decides to remember |
+| **Vector** | episodic recall — *have we discussed something like this before* | [no natural update or delete of a *fact*]{.con}; two contradicting memories both retrieve happily, ranked by similarity rather than truth |
+| **Graph** | relationships between entities, multi-hop questions about them | operationally heavy, and most projects never ask a question that needs it |
+| **Key–value / document** | a small structured profile per user, read whole | scales badly once you want to query across users |
 
-## Session state, checkpointing, and resume
+: Four stores, and what each is actually for {tbl-colwidths="[16,42,42]"}
 
-<!-- TODO(draft): durable conversations; resuming after a crash — connect
-    to @sec-deployment. -->
+The architecture that works for most systems is unglamorous and hybrid:
 
-## Privacy and consent in persistent memory
+```text
+  semantic memory   →  a table.   user_id, key, value, source, written_at
+  episodic memory   →  a log, embedded for retrieval, with pointers back
+                       to the full record
+```
 
-<!-- TODO(draft): what a system may retain about a person; deletion that
-    actually deletes — connect to @sec-governance. -->
+[Facts go in rows; episodes go in vectors.]{.hl} The single most common
+production mistake in this area is putting facts in vectors, because it makes
+*update* and *delete* impossible to do properly — and both of those turn out
+to be requirements rather than nice-to-haves, one for correctness and one for
+law.
 
-## Exercises
+## Write policies: the decision nobody makes on purpose {#sec-memory-write}
 
-1. Design a write policy for a support agent. Write down three things it must remember and three it must never store.
-2. Create a contradiction in a memory store, then decide the resolution rule and defend it.
+What gets remembered is a policy, and if you do not choose one you have chosen
+"whatever the model decides", which is a policy with known failure modes.
+
+| who decides | how it behaves | when to use it |
+|:--|:--|:--|
+| **Rule-based** | you write the extractor: these fields, from these events | [predictable and auditable]{.pro}; the right default for anything that matters |
+| **Model-decided** | the agent calls a `remember` tool when it judges something durable | flexible, and it will remember things you would not have — including things it should not |
+| **User-confirmed** | the system proposes, the person approves | [highest precision and the only one that gives real consent]{.pro}; costs a interaction each time |
+
+: Three write policies {tbl-colwidths="[20,44,36]"}
+
+Three rules that survive contact with production:
+
+**Remember decisions and preferences, not conversation.** *The user prefers
+invoices at the Levent office* is a fact with a shelf life. The paragraph in
+which they said it is an episode, and belongs in the log rather than the
+profile.
+
+**Record provenance with every write.** When it was written, what event caused
+it, and how confident the extractor was. Without provenance you cannot resolve
+conflicts, cannot expire anything, and cannot answer *why does the system
+think this about me* — which is a question you will be asked.
+
+**Never write on a single mention.** A preference stated once and a preference
+stated three times are different things. The cheapest useful policy is a
+confirmation threshold: write on the second occurrence, or on an explicit
+statement, and not on an inference.
+
+::: {.column-margin}
+The failure mode of remembering everything is not storage cost — storage is
+cheap. It is that the *retrieval* gets worse: every irrelevant memory is
+another candidate competing with the relevant one, and @sec-retrieval's
+measurements apply directly. A memory system that remembers everything is a
+retrieval system with a deliberately degraded index.
+:::
+
+## Contradiction, measured {#sec-memory-conflict}
+
+A store that accumulates facts will eventually hold two that disagree. The
+design question is whether you have to *handle* that, or whether the model
+sorts it out when it reads both.
+
+It is a cheap question to answer, so here is the answer. Thirty invented
+contradictions — the user preferred email in March and phone in July — under
+three conditions with identical facts. Scored on whether the answer matches
+the **newer** value. Half the items list the newer fact first, so position is
+separated from recency.
+
+```text
+qwen3.5:9b, 30 contradictions per condition, n = 30
+
+ condition     chose newer   95% CI        hedged   newer listed first / last
+ bare                 0.0%   [ 0.0, 11.4]   83.3%          0.0%  /   0.0%
+ dated               33.3%   [19.2, 51.2]   66.7%         33.3%  /  33.3%
+ dated+rule          83.3%   [66.4, 92.7]   16.7%         66.7%  / 100.0%
+```
+
+Three things, in order of how much they should change what you build.
+
+**Timestamps alone are not enough.** Adding *[recorded 12 March 2025]* and
+*[recorded 28 July 2025]* moved the model from never choosing the newer fact
+to choosing it a third of the time. Two-thirds of the time it still declined
+to choose. If your memory design is "store the date and let the model work it
+out", this is the measurement that says it will not.
+
+**An explicit rule does most of the work, and not all of it.** Adding one
+sentence — *when facts conflict, use the most recently recorded one* — took it
+to 83.3%. That is a large, cheap improvement and it is still one answer in six
+going the other way. [Conflict resolution belongs in your retrieval code, not
+in your prompt.]{.hl} Resolve before you inject: return one fact, the one your
+policy chose, and the model has nothing to be inconsistent about.
+
+**The default behaviour is hedging, not lying.** In the bare condition the
+model picked the *older* fact 16.7% of the time and gave both or neither
+**83.3%** of the time. That is better than confidently picking wrong — but a
+system that answers "your preference is email, or possibly phone" has failed
+the user just as thoroughly, and it fails in a form that is harder to detect
+than a wrong answer.
+
+::: {.column-margin}
+Small measurement, narrow claim: one model, thirty items, intervals around ±17
+points. What it establishes is the *ordering* — bare < dated < dated+rule —
+and the practical conclusion, which does not depend on the exact figures: do
+not leave contradiction resolution to the model when a `WHERE` clause and an
+`ORDER BY written_at DESC LIMIT 1` will do it exactly.
+:::
+
+### So what should the retrieval side do?
+
+Resolve, then inject. Concretely, four rules that cover almost every case:
+
+- **One fact per key.** If the store can hold two values for *preferred
+  channel*, the ambiguity reaches the model. Make the write path an upsert and
+  the ambiguity never exists.
+- **Recency wins by default**, because it is right more often than any other
+  simple rule and it is the one users expect. Where it is wrong — a stated
+  preference should outrank an inferred one regardless of date — encode
+  *that*, explicitly, as a precedence over source rather than time.
+- **Expire on a schedule, not on faith.** Anything time-sensitive gets a TTL
+  at write time. A shipping address does not expire; a *current project* does.
+- **Surface conflicts you cannot resolve.** If two sources of equal precedence
+  disagree, the honest move is to ask, not to guess — and it is a much better
+  user experience than either answer.
+
+## Forgetting is a feature {#sec-memory-forgetting}
+
+Systems that only accumulate get worse, and the degradation is not obvious
+because nothing errors. Three mechanisms, all cheap to add at the start and
+awkward to retrofit:
+
+- **TTL at write time.** Every fact carries an expiry or an explicit "does not
+  expire". The decision is easy when you are writing the extractor and
+  impossible six months later.
+- **Decay for episodes.** Rank retrieval by relevance *and* age. An episode
+  from last week is usually more useful than an identical one from last year,
+  and a pure similarity ranking cannot express that.
+- **Deletion that deletes.** Not a `deleted` flag that the retriever forgets
+  to filter on. This is @sec-governance's requirement and it is a good reason
+  on its own to keep facts in a store where `DELETE` means what it says.
+
+
+
+## A tool the agent calls, or infrastructure it never sees? {#sec-memory-interface}
+
+There are two ways to wire memory into an agent, and they trade the same thing
+@sec-agent-anatomy's autonomy ladder traded: capability against predictability.
+
+**Memory as a tool.** The agent gets `remember(fact)` and `recall(query)` and
+decides when to use them. It is visible in the transcript, so you can audit
+what was written and why, and the agent can choose not to bother. The cost is
+that it is another decision the model can get wrong — and @sec-tool-design
+measured what a badly-specified tool does: it goes uncalled, silently.
+
+**Memory as infrastructure.** Before every run, your code retrieves what is
+relevant and injects it into the system prompt. The agent never knows there is
+a memory system; it simply knows things. This is predictable, testable, and
+costs no model decisions — and it is the right default for the same reason a
+fixed pipeline is the right default in @sec-agent-anatomy.
+
+The combination most production systems land on: **read as infrastructure,
+write as a tool.** Recall happens automatically because it should happen every
+time; writing is an explicit act, because it is the one you want in the log.
+
+## Sessions, checkpoints, and resume {#sec-memory-sessions}
+
+A long-running agent will be interrupted — a deploy, a timeout, a crash, a
+user closing the tab. What survives that is a design decision, and the useful
+framing is that **the transcript is a value you can persist**, not a thing
+that lives in a process.
+
+- **Checkpoint after every step**, not at the end. The unit is one loop
+  iteration: the messages so far, plus whatever your runtime needs to continue.
+- **Store the tool results, not just the calls.** Replaying a run by
+  re-executing its tools is wrong for anything that writes, and slow for
+  everything else.
+- **Make resume the same code path as start.** A resumed run that takes a
+  different branch is a second implementation you will not test.
+
+@packer2023memgpt is the reference design for taking this seriously — an agent
+that manages its own paging between a small context and external storage, and
+the paper worth reading if you want the operating-system analogy done
+properly.
+
+## Privacy, consent, and deletion {#sec-memory-privacy}
+
+A system that remembers people has obligations that a stateless one does not,
+and the engineering decisions that satisfy them are made in
+@sec-memory-storage rather than in a policy document written afterwards.
+
+**Deletion has to actually delete.** This is the concrete reason facts belong
+in a store with a real `DELETE`, and the reason "we embed everything" becomes
+a problem the first time someone exercises a right to erasure: you cannot
+remove a fact from a vector index by name, because the index has no names.
+Reconstructing an index to honour one deletion request is the cost of the
+architecture decision, paid later.
+
+**Provenance is what makes an answer possible.** *Why does this system think I
+prefer phone calls?* is a question with a good answer only if you recorded
+which event caused the write. It is one column, added at the start.
+
+**Inference is not consent.** A preference the user stated is different from
+one your extractor inferred, and users experience the second as surveillance
+even when it is accurate. Store the distinction, use it in precedence rules —
+and when a memory drives something visible, be able to show what it was based
+on.
+
+**Retention is a decision, not a default.** Everything written gets an expiry
+or an explicit exemption. @sec-governance is where this becomes a regime; the
+part that belongs here is that a TTL column costs nothing at write time and is
+close to impossible to add convincingly after the fact.
+
+::: {.column-margin}
+The uncomfortable version of this section: most memory systems are built by
+adding writes until the demos improve, and the privacy work is done at the end
+by someone else. Almost every requirement above is a *schema* decision —
+provenance, source, expiry, deletability — which means it is cheap on day one
+and expensive on day two hundred.
+:::
+
+## Lab: build a memory that can be wrong safely {#sec-memory-lab}
+
+### Step 1 — write the policy before the code
+
+Three things your system must remember, three it must never store, and for
+each of the three it stores: who decides, and when does it expire.
+
+### Step 2 — a table, not an index
+
+`user_id, key, value, source, written_at, expires_at`. Upsert on
+`(user_id, key)` so two values for one key cannot exist.
+
+### Step 3 — plant a contradiction
+
+Write a preference, then write a different one. Query it. If your retrieval
+returns both, fix the retrieval — this chapter measured what happens when the
+model is left to resolve it.
+
+### Step 4 — measure staleness
+
+Age the timestamps on a copy of your store by six months and ask ten questions.
+Count how many answers are now wrong. That number is what a TTL is worth.
+
+### Step 5 — delete a user, then look
+
+Run your deletion path, then search the raw store, the index, the logs, and
+any cache for the person's data. Report where it survived.
+
+### Step 6 — answer "why do you think that?"
+
+For three memories, produce the event that caused each write. If you cannot,
+add the provenance column now.
+
+### What to hand in
+
+The policy from step 1, the staleness count from step 4, the list of places
+data survived deletion in step 5, and one sentence naming the memory your
+system should stop writing.
+
+## Intuition checks {#sec-memory-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Should memory go in a vector database?
+
+Episodes yes, facts no. Similarity search is right for *have we discussed
+something like this* and wrong for *what is this user's current preference*,
+because a fact needs update and delete and a vector index offers neither by
+name. Facts go in rows keyed by `(user, key)`; episodes go in an index with
+pointers back to the record. Putting facts in vectors is the most common
+production mistake in this area, and the bill arrives at the first erasure
+request.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Two memories contradict. Will the model sort it out?
+
+Not reliably. Measured here: with both facts present and no timestamps, the
+model chose the newer one **0%** of the time and hedged on 83.3%. Adding
+timestamps got it to 33.3%. Adding an explicit "prefer the most recent" rule
+got it to 83.3% — better, and still one in six going the other way. Resolve in
+the retrieval layer and inject one fact.
+:::
+
+::: {.column-margin}
+Note which direction the failure goes: hedging, not confident error. That is
+the better failure, but a system that answers "email, or possibly phone" has
+still failed, and it fails in a form that no accuracy metric flags.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. What should trigger a write to memory?
+
+Not a single mention. The cheapest policy that works is to write on an
+explicit statement or a second occurrence, never on a first inference — and to
+record provenance with every write, because without it you cannot resolve
+conflicts, expire anything, or answer why the system believes something. The
+failure mode of remembering everything is not storage cost but retrieval
+quality: every irrelevant memory competes with the relevant one.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Which memory type fails most dangerously?
+
+Semantic. Working memory fails loudly — you hit the window. Episodic memory
+fails slowly — retrieval gets worse and costs rise. Semantic memory fails
+**silently**: a fact recorded in March is returned confidently in July, with
+nothing in the system aware it expired. That asymmetry is why TTLs belong at
+write time rather than on a cleanup backlog.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Should the agent decide what to remember?
+
+Only where a wrong write is cheap. Model-decided writes are flexible and will
+remember things you would not have chosen, including things you are not
+allowed to keep. Rule-based extraction is predictable and auditable and is the
+right default for anything that matters; user-confirmed writes cost an
+interaction and are the only mechanism that gives real consent. Most systems
+want read-as-infrastructure and write-as-an-explicit-act.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your agent crashed mid-run. What should survive?
+
+The transcript, checkpointed after every step rather than at the end, with
+tool *results* stored and not just the calls — replaying a run by re-executing
+its tools is wrong for anything that writes. And resume should be the same code
+path as start, because a separate resume path is a second implementation that
+will not get tested.
+:::
+
+## Exercises {#sec-memory-exercises}
+
+1. **The write policy.** For a support agent: three things it must remember,
+   three it must never store, and for each stored item who decides and when it
+   expires. One page, before any code.
+2. **Plant a contradiction.** Put two conflicting facts in your store, then
+   decide the resolution rule and defend it against the case where recency is
+   the wrong answer.
+3. **Age your store.** Move every timestamp back six months and re-ask ten
+   questions. Count the answers that are now wrong; that is what you are
+   buying with a TTL.
+4. **Delete and hunt.** Run your deletion path for one user, then search every
+   store, index, log and cache. Write down where the data survived.
+5. **Provenance audit.** Pick five memories and produce the event that caused
+   each. If you cannot for any of them, that is the finding.
+6. **Facts versus episodes.** Take your current memory store and classify every
+   entry as one or the other. If facts are in the vector index, estimate what
+   moving them costs now against what it costs in a year.
+7. **Tool or infrastructure.** Implement recall both ways on the same task and
+   compare: how often does the agent forget to call the tool, and what does
+   automatic injection cost you in tokens?
+
+## Interview questions {#sec-memory-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the design
+
+**Q: How would you design memory for a conversational agent?**
+
+Start by splitting the word: working memory is the transcript and belongs to
+context engineering; episodic memory is an event log, retrieved by similarity;
+semantic memory is facts, and belongs in rows keyed by user and attribute with
+provenance and an expiry. Then say what each store must support — facts need
+update and delete, episodes need ranking by relevance and age — and note that
+this is why "embed everything" fails: it cannot express an update.
+
+**Q: Two memories contradict. What happens?**
+
+Resolve before injection, in code, and give the model one fact. If you leave it
+to the model, expect inconsistency: measured on a small probe, timestamps alone
+produced the newer answer a third of the time, and an explicit recency rule
+still left one answer in six going the other way. The interesting follow-up is
+where recency is the *wrong* rule — a stated preference should outrank an
+inferred one whatever the dates — which is why precedence is over source as
+well as time.
+
+### Testing whether you have shipped one
+
+**Q: A user asks you to delete everything you know about them. What happens?**
+
+Walk the actual data path: the fact store, the vector index, the episode log,
+backups, and any cache. The honest answer names the hard one — a vector index
+has no names, so removing a specific fact means rebuilding or maintaining a
+mapping you should have built at the start. Say that this is a schema decision
+made on day one, not a feature added later, and that it is the strongest
+practical argument for keeping facts in a relational store.
+
+**Q: Your agent keeps acting on outdated information. Where do you look?**
+
+At write time, not read time. Ask whether anything carried a TTL, whether
+writes upsert or append, and whether retrieval returns one fact per key or
+several. Most "stale memory" bugs are really "two values for one key" bugs, and
+the fix is a unique constraint rather than a smarter prompt.
+
+## Where to go deeper {#sec-memory-deeper}
+
+Before reading: take your memory store and classify ten entries as fact or
+episode. If facts are living in a vector index, you have found your first task.
+
+| resource | what it is |
+|:--|:--|
+| [`letta`](https://github.com/letta-ai/letta) | the MemGPT design as a working system — the clearest way to see self-managed paging between context and storage |
+| [`mem0`](https://github.com/mem0ai/mem0) | a memory layer with explicit extraction and update policies; useful to read for the policy vocabulary even if you build your own |
+| [`zep`](https://github.com/getzep/zep) | memory with temporal reasoning built in, which is the contradiction problem taken seriously |
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | the surrounding argument for why less machinery usually wins |
+| [Lil'Log on agents](https://lilianweng.github.io/posts/2023-06-23-agent/) | the survey post that popularised the working/episodic/semantic split in this setting |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| an agent that pages its own memory | @packer2023memgpt |
+| what a long context does and does not retain | @hsieh2024ruler; @modarressi2025nolima |
+| retrieval quality as memory grows | @thakur2021beir |
+| the loop this all hangs from | @yao2023react |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## The 2026 toolbox {#sec-memory-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for the contradiction probe |
+| `numpy` | 2.5.2 | task construction and scoring |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `letta` | 0.16.8 | self-managed memory paging, the MemGPT lineage |
+| `mem0ai` | 2.0.19 | extraction, update and conflict policies as a library |
+| `zep-python` | 2.0.2 | temporal knowledge-graph memory, when *when* matters as much as *what* |
+| `langmem` | 0.0.30 | memory primitives for LangGraph agents |
+| `pgvector` | 0.5.0 | episodes in the database that already holds your facts — usually the right answer |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## What to remember {#sec-memory-summary}
+
+- **Three memories, three failure modes.** Working memory fails loudly when the
+  window fills; episodic memory fails slowly as volume degrades retrieval;
+  **semantic memory fails silently**, returning a March fact confidently in
+  July.
+- **Facts in rows, episodes in vectors.** A fact needs update and delete, and a
+  vector index offers neither by name. Putting facts in an index is the common
+  production mistake, and the bill arrives at the first erasure request.
+- **The model will not resolve contradictions for you.** With both facts
+  present and no timestamps it chose the newer one **0%** of the time and
+  hedged on 83.3%; timestamps alone took it to 33.3%; an explicit recency rule
+  took it to 83.3% and left one in six wrong. Resolve in retrieval, inject one
+  fact.
+- **Hedging is the default failure.** Not a confident wrong answer but "email,
+  or possibly phone" — better than lying, still a failed answer, and invisible
+  to accuracy metrics.
+- **Write on the second mention, never the first inference**, and record
+  provenance every time. Without provenance you cannot resolve, expire, or
+  explain.
+- **Forgetting is a feature.** TTL at write time, decay for episodes, and
+  deletion that actually deletes rather than a flag the retriever might forget.
+- **Read as infrastructure, write as a tool.** Recall should happen every time
+  and needs no model decision; writing is the act you want visible in the
+  transcript.
+- **Privacy requirements are schema decisions.** Provenance, source, expiry and
+  deletability cost nothing on day one and are close to impossible to add
+  convincingly on day two hundred.
+
+
