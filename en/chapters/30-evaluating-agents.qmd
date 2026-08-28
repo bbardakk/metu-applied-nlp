@@ -1,50 +1,468 @@
 # Evaluating Agents {#sec-agent-eval}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One small measurement: the same thirty runs scored
+two ways, minutes to produce. @sec-llm-eval established how to size an eval set
+and how to audit a judge; this chapter is about the thing agents add, which is
+that an answer now has a *path* behind it and the path can be wrong while the
+answer is right. Software: `ollama` 0.24.0 serving `qwen3.5:9b`, NumPy 2.5.2 on
+Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- separate outcome evaluation from trajectory evaluation and use both;
-- score tool use with precision, recall, step count, and cost;
+- separate outcome evaluation from trajectory evaluation, and say what each
+  one misses on its own;
+- score tool use with a concrete metric set rather than a vibe;
 - build scenario tests that catch regressions before users do;
 - convert a production failure into a permanent regression test.
 
-## Outcome evaluation vs. trajectory evaluation
+## An answer now has a path behind it {#sec-agent-eval-two}
 
-<!-- TODO(draft): did it get there, and did it get there sensibly; why
-    outcome-only evaluation hides expensive nonsense. -->
+Everything in @sec-llm-eval still applies: size the set from the difference you
+need to detect, audit the judge before believing it, report intervals. Agents
+add one thing, and it changes what "correct" means.
 
-## Tool-call precision/recall, step count, and cost metrics
+A classifier produces an answer. An agent produces an answer **and a
+trajectory** — the sequence of decisions, tool calls, observations and retries
+that led there. Two runs can agree on the answer and differ completely in what
+they did to get it, and only one of those differences shows up in an accuracy
+number.
 
-<!-- TODO(draft): the concrete metric set with definitions and a worked
-    example. -->
+| | what it asks | what it misses |
+|:--|:--|:--|
+| **Outcome evaluation** | did it produce the right answer? | how much it cost, how many wrong turns it took, whether it got there by luck, whether it did something destructive on the way |
+| **Trajectory evaluation** | did it get there sensibly? | whether the answer was actually right — an efficient path to a wrong answer scores well |
 
-## Rubric-based judging for multi-step behavior
+: Two evaluations, neither sufficient {tbl-colwidths="[22,34,44]"}
 
-<!-- TODO(draft): extending @sec-llm-eval's judge design to trajectories. -->
+[Outcome-only evaluation is the default, and it hides expensive
+nonsense.]{.hl} An agent that answers correctly after fifteen redundant tool
+calls scores identically to one that answers correctly in two — until the bill
+arrives, or until one of those redundant calls writes something.
 
-## Simulation and scenario testing
+## The metric set {#sec-agent-eval-metrics}
 
-<!-- TODO(draft): simulated users and environments; deterministic replay. -->
+Six numbers cover almost every agent evaluation. They are worth defining
+precisely, because "tool accuracy" means four different things to four people.
 
-## Benchmarks: tau-bench, SWE-bench, GAIA, WebArena, BFCL, AgentDojo
+| metric | definition | what it catches |
+|:--|:--|:--|
+| **Outcome accuracy** | the final answer is correct | the thing you actually want |
+| **Tool-call precision** | of the calls made, the share that were necessary | redundant work, repeated queries, exploration that went nowhere |
+| **Tool-call recall** | of the calls needed, the share that were made | the agent that answered without checking — usually from parametric memory |
+| **Step count** | tool calls, and model calls, counted separately | @sec-agent-anatomy's finding: they are different numbers and only one predicts your bill |
+| **Termination rate** | the share that stopped on their own rather than hitting the cap | the failure mode that looks like success in an outcome-only report |
+| **Cost per correct answer** | tokens ÷ accuracy | the only cost number that compares two systems fairly |
 
-<!-- TODO(draft): what each measures and what it does not; why leaderboard
-    position is weak evidence for your task. -->
+: Six metrics {tbl-colwidths="[22,38,40]"}
 
-## Turning production failures into regression tests
+The two that get skipped are recall and termination, and both hide specific
+disasters. Low tool-call recall means the agent is answering from memory rather
+than from your data — @sec-tool-design measured an opaque schema going uncalled
+41.7% of the time while producing confident invented prose. A low termination
+rate means runs are ending because the budget ran out, and an outcome metric
+records the ones that happened to be right by then as successes.
 
-<!-- TODO(draft): the trace-to-test loop — connect to
-    @sec-production-eval. -->
+### Scoring the same runs both ways
 
-## Lab: an agent eval suite with trajectory scoring
+Thirty tasks needing exactly two lookups and one addition, over invented data
+so nothing is guessable. Outcome passes if the sum is right. Trajectory passes
+if the agent made exactly the two necessary calls, no repeats, no wrong
+targets, and stopped on its own. Two systems: the structured tool loop, and a
+hand-rolled text protocol.
 
-<!-- TODO(draft): build a suite that scores outcome and trajectory, then
-    break the agent and confirm the suite catches it. -->
+```text
+qwen3.5:9b, 30 tasks, 2 lookups needed
 
-## Exercises
+                        native loop    text protocol
+ outcome pass                100.0%            36.7%
+ trajectory pass             100.0%            33.3%
 
-1. Take one agent failure from a real trace. Write the regression test that would have caught it.
-2. Score the same 20 runs on outcome only and on trajectory. Find a run that passes one and fails the other.
+   both pass                 100.0%            33.3%
+   outcome only                0.0%             3.3%
+   trajectory only             0.0%             0.0%
+   neither                     0.0%            63.3%
+
+ tool calls (ideal 2)           2.00             7.10
+   of which repeats             0.00             5.00
+ hit the step cap               0.0%            63.3%
+ tokens                          829            1,557
+```
+
+The first thing to say is what this did *not* show. **Only one run in thirty
+passed on outcome and failed on trajectory.** I expected more, and the reason
+there are not more is worth understanding: when this system takes a bad path it
+usually also gets the wrong answer, so the two metrics agree on most runs.
+
+That is a useful corrective to a claim that gets made loosely — that
+trajectory evaluation earns its place by catching runs outcome evaluation
+passes. On this task it barely does. It earns its place through the other three
+rows instead, and those are the ones to build your suite around.
+
+**It tells you what the system is doing.** The text protocol made **7.10 tool
+calls for a task needing 2**, and **5.00 of them were repeats** — 70% of all
+its tool calls asked for something it had already been told. The outcome number,
+36.7%, contains none of that. You would ship this system knowing it works a
+third of the time and not knowing it spends most of its effort asking the same
+question again.
+
+**It tells you why runs failed.** A 63.3% cap-hit rate says these are not wrong
+answers, they are *unfinished* runs — @sec-agent-anatomy's termination problem,
+and a completely different repair from a reasoning problem. Accuracy alone
+cannot distinguish "answered wrongly" from "never stopped".
+
+**It changes the cost comparison.** On raw tokens the text protocol looks 1.9×
+more expensive. Per *correct answer* it is **5.1×** — 4,246 tokens against 829.
+[The cost metric that ignores outcome understates the real gap by nearly
+three-fold]{.hl}, which is why tokens-per-correct-answer is the only cost
+number worth putting in a comparison.
+
+::: {.column-margin}
+Small measurement, thirty runs, one model, intervals around ±17 points on the
+percentages. The 3.3% disagreement figure in particular is one run and should
+not be quoted as a rate. What the table establishes solidly is the size of the
+waste the outcome metric conceals — 7.10 calls against 2, and 70% of them
+repeats — and the direction of the cost correction.
+:::
+
+## Judging a trajectory {#sec-agent-eval-judge}
+
+Some trajectory questions have exact answers — call counts, repeats,
+termination. Others do not: *was that a reasonable thing to try?* And for those
+the instrument is @sec-llm-eval's judge, with every caution from that chapter
+carried over, plus one that is specific to trajectories.
+
+@sec-llm-eval measured a judge flipping its verdict on **38% of items** when
+the two candidates were swapped. A trajectory is a *sequence*, so it has more
+positions to be biased about, not fewer. Before trusting any rubric score:
+
+- **Run the identical-trajectory control.** Score a trajectory against itself.
+  Both judges in @sec-llm-eval passed this and then diverged sharply on the
+  probes that mattered, so passing it establishes only that the instrument is
+  not broken.
+- **Score criteria separately, not holistically.** *Did it call the right
+  tools*, *did it avoid redundant work*, *did it recover from errors* — three
+  scores you can act on, instead of one number out of five that moves for
+  reasons nobody can name.
+- **Let the exact metrics do the work they can do.** Do not ask a judge to
+  count tool calls. Count them.
+
+The judge's real job is the residue: whether an exploratory path that looks
+wasteful was actually a reasonable hypothesis, and whether a recovery was
+sensible or lucky.
+
+## Scenario tests and simulated users {#sec-agent-eval-scenarios}
+
+A unit test for an agent is a scenario: a fixed environment, a fixed request,
+and an assertion about what should happen. The environment is the hard part,
+and it is worth building properly because everything else depends on it.
+
+- **Fixture the world, not just the prompt.** A scenario needs a database in a
+  known state, tool responses that are deterministic, and a clock. Otherwise
+  yesterday's pass and today's fail differ for reasons unrelated to your agent.
+- **Record and replay real traces.** Capture production tool responses and
+  replay them. This makes a regression test out of an incident, and it is the
+  cheapest source of realistic scenarios you will ever have.
+- **Simulate the user for multi-turn work.** A second model playing the user
+  makes multi-turn evaluation possible — and inherits every judge caveat above,
+  because a simulated user is a model with a rubric.
+- **Assert on the trajectory, not only the reply.** *It must call
+  `check_inventory` before `place_order`* is the kind of assertion that catches
+  a real regression, and an outcome-only test cannot express it.
+
+## Benchmarks, and what a leaderboard tells you {#sec-agent-eval-benchmarks}
+
+| benchmark | what it measures | what it does not |
+|:--|:--|:--|
+| [**τ-bench**](https://github.com/sierra-research/tau-bench) | tool-agent-user interaction in retail and airline domains, with rule-following and a simulated user | your domain, your tools, your rules |
+| [**SWE-bench**](https://www.swebench.com/) | resolving real GitHub issues, verified by the repository's own tests | anything that is not a Python repository with good tests |
+| [**GAIA**](https://huggingface.co/spaces/gaia-benchmark/leaderboard) | multi-step reasoning with web and file tools, on questions easy for humans and hard for models | whether the capability transfers to your task |
+| [**WebArena**](https://github.com/web-arena-x/webarena) | agents operating realistic self-hosted websites end to end | API-based work, and any site not in the suite |
+| [**BFCL**](https://github.com/ShishirPatil/gorilla) | function-calling accuracy across many schemas, including parallel and multi-step calls | whether the model uses *your* tools well — @sec-tool-design measured how much the schema decides that |
+| [**AgentDojo**](https://github.com/ethz-spylab/agentdojo) | robustness to prompt-injection attacks in agentic settings | ordinary capability |
+
+: Six benchmarks {tbl-colwidths="[16,46,38]"}
+
+These are worth knowing and they are weak evidence about your system, for
+@sec-llm-eval's reasons: contamination you cannot check, saturation at the top
+of the table, and construct mismatch — a benchmark measures a task and you have
+a *system*. Use them to screen candidate models down to two or three. Decide
+between those on your own suite.
+
+## From incident to regression test {#sec-agent-eval-regression}
+
+The highest-value evaluation work is not designing metrics. It is the loop that
+turns every production failure into a permanent test, and it is mostly
+logistics:
+
+```text
+  1. a failure is reported            with its trace id
+  2. pull the full trajectory         every call, argument, result, and decision
+  3. reduce it to a scenario          fixture the tool responses, keep the request
+  4. assert what should have happened  outcome AND trajectory
+  5. confirm it fails                 a regression test that passes on day one
+                                      tests nothing
+  6. fix, and keep the test forever
+```
+
+Step 5 is the one people skip and it is the one that makes the rest real. Step 2
+is the one that has to be designed in advance: if you are not persisting full
+trajectories with correlation ids, an incident gives you a complaint rather
+than a test. @sec-multi-agent said the same thing about distributed traces, and
+it is the same instrumentation.
+
+Two habits that compound:
+
+- **Every incident becomes a test the same day.** The suite grows from real
+  failures rather than from imagined ones, which is the difference between an
+  eval set that predicts production and one that flatters it.
+- **Keep the failing traces, not just the tests.** When a fix breaks something
+  else, the original trace explains what the test was protecting, which a
+  three-line assertion cannot.
+
+## Lab: an eval suite that catches a break {#sec-agent-eval-lab}
+
+### Step 1 — twenty scenarios from real requests
+
+Fixtured environment, deterministic tool responses. Real phrasing, including
+the messy ones.
+
+### Step 2 — score outcome
+
+Accuracy. This is the number you already have.
+
+### Step 3 — add the trajectory metrics
+
+Tool-call precision and recall against the calls each task needs, repeats,
+step count, termination rate. Record per run, not aggregated.
+
+### Step 4 — compute cost per correct answer
+
+Not per request. Compare it to the raw token figure; here the two differed by
+2.7×.
+
+### Step 5 — break the agent on purpose
+
+Three ways, one at a time: remove a tool description, halve the step cap, and
+make one tool return a bare `"Error"` instead of an actionable one — the change
+@sec-tool-design measured taking recovery from 100% to 1.7%.
+
+### Step 6 — check which metric caught each break
+
+Report the table. If outcome accuracy caught all three, your scenarios are too
+easy; if it caught none, you have just justified the trajectory metrics.
+
+### What to hand in
+
+The per-run scores, the cost-per-correct-answer figures, and the table from
+step 6 showing which metric detected which break.
+
+## Intuition checks {#sec-agent-eval-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Your agent is 85% accurate. What have you not measured?
+
+Everything about how it got there: how many tool calls it made against how many
+it needed, how many were repeats, whether it stopped on its own or ran out of
+budget, and what a correct answer costs. Measured here, a system at 36.7%
+outcome accuracy was making **7.10 tool calls for a task needing 2, 70% of them
+repeats**, and hitting its cap on 63.3% of runs. None of that is visible in an
+accuracy number.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Does trajectory evaluation catch runs that outcome evaluation passes?
+
+Rarely, in this measurement — one run in thirty. When a system takes a bad path
+it usually gets the wrong answer too, so the two metrics mostly agree on *which
+runs* fail. Trajectory evaluation earns its place differently: it tells you what
+the system is doing, why runs failed (a 63.3% cap-hit rate is unfinished runs,
+not wrong ones), and what correctness actually costs.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Which cost number should you report?
+
+Tokens per *correct* answer. On raw tokens one system here looked 1.9× more
+expensive than the other; per correct answer it was **5.1×**. The outcome-blind
+figure understated the real gap by nearly three-fold, and it is the figure most
+comparisons quote.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Why measure tool-call recall?
+
+Because low recall means the agent answered without consulting your data —
+from parametric memory, fluently, with no error anywhere. @sec-tool-design
+measured an opaque schema going uncalled **41.7%** of the time while producing
+confident invented prose. An uncalled tool generates no logs and no failures,
+so nothing surfaces it except counting the calls you expected.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Can an LLM judge score a trajectory?
+
+For the part that has no exact answer — was that a reasonable thing to try —
+with every caution from @sec-llm-eval and one more. A trajectory is a sequence,
+so it offers *more* positions for a judge to be biased about, and that chapter
+measured a judge flipping on 38% of items from a swap alone. Score criteria
+separately rather than holistically, run the identical-trajectory control
+first, and never ask a judge to count something you can count.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your agent tops a public agent benchmark. Should you ship it?
+
+You have learned it is not obviously unfit. Benchmarks carry @sec-llm-eval's
+three problems — contamination you cannot check, saturation at the top, and
+construct mismatch, since a benchmark measures a task and you have a system
+with a prompt, a parser and a fallback. Use leaderboards to screen to two or
+three candidates and decide between them on scenarios drawn from your own
+traffic.
+:::
+
+## Exercises {#sec-agent-eval-exercises}
+
+1. **Two scorings, one set of runs.** Score twenty runs on outcome and on
+   trajectory. Report the 2×2. Predict the disagreement rate first.
+2. **Count the repeats.** Instrument one agent for a day and compute what share
+   of its tool calls asked for something it already had.
+3. **Cost per correct answer.** Compute it for two of your systems, alongside
+   raw tokens per request. Which comparison changes the decision?
+4. **Incident to test.** Take one real failure trace and turn it into a
+   regression test. Confirm it fails before the fix.
+5. **Break it three ways.** Remove a tool description, halve the step cap, and
+   degrade an error message. Record which metric caught which.
+6. **Termination audit.** What share of your runs end because the model stopped
+   versus because a cap fired? If you cannot answer, that is the first thing to
+   instrument.
+7. **Simulate a user.** Build a two-model multi-turn scenario, then run
+   @sec-llm-eval's position probe on the simulated user itself. It is a model
+   with a rubric and it has the same biases.
+
+## Interview questions {#sec-agent-eval-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the measurement
+
+**Q: How do you evaluate an agent?**
+
+Two axes, and say what each misses alone. Outcome: did it answer correctly.
+Trajectory: tool-call precision and recall, repeats, step count separated into
+tool and model calls, and termination rate. Then the cost metric that ties them
+together — tokens per *correct* answer, because the per-request figure flatters
+a system that is often wrong. The detail that shows experience: a low
+termination rate means runs are ending on a cap, which is a different repair
+from a reasoning error and invisible in accuracy.
+
+**Q: Why is trajectory evaluation worth building?**
+
+Not primarily to catch runs outcome evaluation passes — measured on one task,
+that was one run in thirty, because a bad path usually produces a bad answer.
+It is worth building because it tells you what the system is *doing*: a system
+at 36.7% accuracy was making 7.10 tool calls for a task needing 2, with 70% of
+them repeats. You would ship that knowing it works a third of the time and not
+knowing where the effort went.
+
+### Testing whether you have shipped one
+
+**Q: A user reports the agent did something wrong. What happens next?**
+
+Pull the full trajectory by trace id, reduce it to a fixtured scenario, write
+assertions on both outcome and trajectory, and confirm the test fails before
+fixing anything — a regression test that passes on day one tests nothing. Say
+that step two is an architectural prerequisite: without persisted trajectories
+and correlation ids an incident produces a complaint rather than a test, and
+that instrumentation has to exist before the incident.
+
+**Q: How would you catch an agent regression before users do?**
+
+Scenarios from real traffic with a fixtured environment and deterministic tool
+responses, asserting on trajectory as well as answer — *it must call
+`check_inventory` before `place_order`* is a regression an outcome test cannot
+express. Then validate the suite by breaking the agent deliberately in a few
+known ways and checking which metric catches which. A suite that has never
+caught a planted break is a suite with unknown sensitivity.
+
+## Where to go deeper {#sec-agent-eval-deeper}
+
+Before reading: take twenty runs you already have and count tool calls against
+tool calls needed. That ratio is usually the first surprise.
+
+| resource | what it is |
+|:--|:--|
+| [τ-bench](https://github.com/sierra-research/tau-bench) | the closest public benchmark to a real tool-and-user agent task; read its rubric design even if you never run it |
+| [AgentDojo](https://github.com/ethz-spylab/agentdojo) | prompt-injection robustness as a measurable property, which most suites omit entirely |
+| [SWE-bench](https://www.swebench.com/) | verification by the repository's own tests — the cleanest example of an outcome metric that cannot be gamed by fluency |
+| [Hamel Husain on evals](https://hamel.dev/blog/posts/evals/) | the applied case for building the suite from real failures rather than imagined ones |
+| [`langsmith`](https://github.com/langchain-ai/langsmith-sdk) / [`arize-phoenix`](https://github.com/Arize-ai/phoenix) | trace capture and trajectory inspection; the instrumentation the regression loop depends on |
+| [`ragas`](https://github.com/explodinggradients/ragas) | for the retrieval half, scored separately, per @sec-rag-failures |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| a model as judge, and its biases | @zheng2023judging; @wang2024large |
+| the paired test for comparing two agents | @mcnemar1947note |
+| benchmark contamination, measured | @sainz2023nlp |
+| holistic benchmarking as a methodology | @liang2023holistic |
+| tool-use benchmarks at scale | @qin2024toolllm |
+| the loop being evaluated | @yao2023react |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## The 2026 toolbox {#sec-agent-eval-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for both loops |
+| `numpy` | 2.5.2 | task construction and scoring |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `langsmith` | 0.11.2 | trace capture, dataset management, and trajectory diffing |
+| `arize-phoenix` | 20.4.0 | open-source tracing and evaluation, self-hosted |
+| `braintrust` | 0.35.0 | eval runs wired into CI with per-run scoring |
+| `openinference-instrumentation` | 0.1.59 | OpenTelemetry conventions for LLM and agent spans |
+| `ragas` | 0.4.3 | the retrieval half of an agentic RAG system, scored separately |
+| `deepeval` | 4.2.0 | judge-based metrics that fail like unit tests |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## What to remember {#sec-agent-eval-summary}
+
+- **An agent produces an answer and a path, and accuracy scores only one of
+  them.** Outcome evaluation asks whether it was right; trajectory evaluation
+  asks what it did to get there.
+- **Trajectory metrics rarely flag different *runs*.** One in thirty here — a
+  bad path usually produces a bad answer. They earn their place by showing what
+  the system is doing and why it failed.
+- **The waste outcome hides can be enormous.** A system at 36.7% accuracy made
+  **7.10 tool calls for a task needing 2**, with **70% of them repeats**, and
+  hit its step cap on **63.3%** of runs.
+- **Report tokens per *correct* answer.** Raw tokens made one system look 1.9×
+  more expensive; per correct answer it was **5.1×** — the outcome-blind figure
+  understated the gap by nearly three-fold.
+- **Measure tool-call recall and termination rate**, the two everyone skips.
+  Low recall means answering from parametric memory with no error anywhere; a
+  low termination rate means runs ending on a cap, which accuracy cannot
+  distinguish from wrong answers.
+- **A judge can score the residue, not the countable part.** Never ask it to
+  count tool calls, score criteria separately rather than holistically, and run
+  the identical-trajectory control first — a trajectory is a sequence, so it
+  offers more positions for the position bias @sec-llm-eval measured at 38%.
+- **Benchmarks screen; your scenarios decide.** Contamination, saturation and
+  construct mismatch all apply, and a benchmark measures a task while you have
+  a system.
+- **Every incident becomes a test the same day** — and confirm it fails before
+  you fix anything, because a regression test that passes on day one tests
+  nothing. That requires persisted trajectories with correlation ids, designed
+  in before the first incident.
