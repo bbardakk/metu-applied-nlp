@@ -1,58 +1,484 @@
 # Multi-Agent Patterns {#sec-multi-agent}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** The cost model is arithmetic, with its constants
+taken from measurements earlier in the book — @sec-mcp's 89 tokens per tool
+definition and @sec-agent-anatomy's loop accounting — rather than from
+estimates. It answers a token question and deliberately not an accuracy
+question; the difference is the point of @sec-multi-agent-honest. Software:
+Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
 
 - choose a topology from the shape of the work rather than from fashion;
-- recognise the shared-state problems that make multi-agent systems fail;
-- state the case for a single agent and know when it wins;
-- measure a multi-agent system against a single-agent baseline.
+- compute whether splitting work across agents saves context or costs it;
+- recognise the shared-state problems that make these systems fail;
+- state the case for a single agent, and measure against it before adding one.
 
-## Hub-and-spoke: coordinator and specialists
+## The single agent is the baseline {#sec-multi-agent-baseline}
 
-<!-- TODO(draft): the default pattern and why it works; the coordinator as
-    a context firewall. -->
+Multi-agent architectures are the most over-applied idea in this part of the
+book, and the reason is that they are *interesting*. A coordinator delegating
+to specialists is a satisfying diagram. A while-loop is not.
 
-## Sequential, parallel, and loop topologies
+So this chapter starts where @sec-agent-anatomy ended: [one agent with good
+tools is the thing to beat]{.hl}, and adding a second one has to be justified
+by a measurement rather than a diagram. There are exactly three justifications
+that survive contact with production, and all three are structural rather than
+aesthetic:
 
-<!-- TODO(draft): matching topology to task structure; where parallelism
-    is real and where it is imaginary. -->
+1. **Context.** The work produces more material than one window should hold.
+   This is arithmetic, and @sec-multi-agent-cost computes it.
+2. **Parallelism.** Independent subtasks can genuinely run at once, and the
+   wall-clock saving is real rather than imagined.
+3. **Isolation.** Different subtasks need different tools, different
+   permissions, or different models — and mixing them makes each worse.
 
-## Handoff vs. delegation; stateless specialists
+Anything else — "the task is complex", "it has stages", "different expertise"
+— describes a task a single agent handles with a longer prompt and a few more
+tools.
 
-<!-- TODO(draft): who owns the conversation; why stateless specialists are
-    easier to reason about. -->
+## Topologies, and what each is for {#sec-multi-agent-topologies}
 
-## Shared state: the hardest problem
+| topology | shape | when it fits | what it costs |
+|:--|:--|:--|:--|
+| **Hub-and-spoke** | one coordinator, N specialists, no lateral links | the default when you split at all. The coordinator is a *context firewall*: specialists' raw observations never reach it | the coordinator becomes a bottleneck and a single point of failure |
+| **Sequential** | a pipeline of agents, each consuming the last | stages with genuinely different requirements — extract, then verify, then write | [it is a pipeline. Ask whether it needs agents at all]{.con} |
+| **Parallel fan-out** | N specialists on independent slices, results merged | read-heavy work over separable inputs: many documents, many repositories | merging is a real design problem, not a `join` |
+| **Loop / debate** | agents critique or refine each other's output | narrow: where an independent check genuinely catches things | expensive, and @sec-reasoning measured self-correction failing to fix what it could not already see |
 
-<!-- TODO(draft): consistency, races, conflicting writes; the failure mode
-    nobody plans for. -->
+: Four topologies {tbl-colwidths="[16,24,34,26]"}
 
-## When not to go multi-agent
+The useful heuristic is one sentence: **read-heavy work parallelises, and
+write-heavy work does not.** Ten agents reading ten documents is ten times
+faster. Ten agents editing one codebase is a distributed-systems problem you
+did not intend to take on, and @sec-multi-agent-state is about why.
 
-<!-- TODO(draft): the central honest argument: read-heavy work
-    parallelises, write-heavy work does not. A single agent is the
-    baseline to beat. -->
+### Handoff or delegation?
 
-## Event-driven agents, queues, and dead-letter handling
+Two things get called the same thing, and they have different failure modes.
 
-<!-- TODO(draft): decoupling with a queue; what to do with a poisoned
-    message. -->
+**Delegation** — the coordinator keeps the conversation, sends a subtask, gets
+a result back. The specialist is a function call with a model inside it, and it
+should be **stateless**: everything it needs arrives in the request. This is
+the pattern that behaves.
 
-## Framework survey: ADK, LangGraph, Pydantic AI, OpenAI Agents SDK, CrewAI
+**Handoff** — the coordinator passes the conversation itself to another agent,
+which now owns it. Cheaper, and it loses the firewall: whatever the second
+agent does is now in the same transcript, and there is no coordinator left to
+summarise or reject it.
 
-<!-- TODO(draft): what each opts you into. Keep vendor-neutral and dated;
-    this section will need refreshing. -->
+Prefer delegation with stateless specialists. A specialist that remembers
+previous calls is a distributed cache with no invalidation story.
 
-## Lab: coordinator plus three specialists, measured against a single agent
+## Does splitting actually save context? {#sec-multi-agent-cost}
 
-<!-- TODO(draft): same task, both architectures; report score, tokens,
-    latency, and cost. Report the result even if the single agent wins. -->
+The first justification — context — is the one people assert and nobody
+computes. It is arithmetic, so here it is.
 
-## Exercises
+A single agent re-sends its whole transcript on every model call, so its cost
+grows with the *square* of the number of steps. A coordinator with specialists
+pays a fixed cost in each agent — system prompt plus tool definitions,
+@sec-mcp measured the latter at 89 tokens per tool — but each specialist starts
+from a clean window and the coordinator sees summaries instead of raw results.
 
-1. Take a task you assumed needed multiple agents. Implement it with one. Compare on score, cost, and latency.
-2. Design a shared-state scheme for two agents that can both write. Then describe the race condition you just created.
+Taking the fixed cost as 1,450 tokens (a system prompt plus fourteen tool
+definitions) and a specialist's report back as 120:
+
+```text
+ steps  obs size   single agent   3 specialists    ratio
+     6       200         11,700          14,010    1.20x
+     6       800         20,700          15,810    0.76x
+     6     3,000         53,700          22,410    0.42x
+    12       200         30,600          25,710    0.84x
+    12       800         70,200          36,510    0.52x
+    12     3,000        215,400          76,110    0.35x
+    24       200         90,000          56,310    0.63x
+    24       800        255,600         106,710    0.42x
+    24     3,000        862,800         291,510    0.34x
+```
+
+And the crossover — how large an observation has to be before three
+specialists become cheaper than one agent:
+
+```text
+    6 steps  ->    400 tokens per observation
+   12 steps  ->    100 tokens per observation
+   24 steps  ->     50 tokens per observation
+```
+
+Two readings, and both matter.
+
+**On short work with small results, splitting is more expensive.** Six steps
+returning 200 tokens each costs **1.20×** as a three-agent system, because you
+paid the fixed per-agent cost three extra times to save transcript you never
+accumulated. This is the case people build anyway, and it is the case where the
+diagram is doing the arguing.
+
+**On long work with large results, splitting wins enormously.** Twenty-four
+steps returning 3,000 tokens each is **862,800 tokens as one agent and 291,510
+as three** — 0.34×, a two-thirds saving. The mechanism is the quadratic: the
+single agent carries every observation through every subsequent call, and the
+specialists do not.
+
+[The dial is not how complex your task is. It is how much material it
+produces.]{.hl} Long transcripts with big observations are what splitting is
+for. Short ones are not.
+
+::: {.column-margin}
+Note what this model deliberately does not include: prompt caching, which
+makes the single agent's repeated prefix cheaper than the raw arithmetic
+suggests and therefore pushes the crossover further out. If your provider
+caches well, treat these numbers as an upper bound on the saving.
+:::
+
+## The saving is paid for in information {#sec-multi-agent-honest}
+
+That table answers a token question. It says nothing about whether the answer
+is still right, and this is where multi-agent architectures actually fail.
+
+**The coordinator sees a summary, not the observations.** That is the whole
+mechanism of the saving — and it means the coordinator is reasoning about a
+lossy compression of what the specialist saw. Anything the specialist did not
+think worth reporting is gone, and nothing downstream can recover it.
+@sec-summarization measured what summarisation does to faithfulness; the same
+applies when the summariser is your own subagent and the reader is your own
+coordinator.
+
+**Errors compound across a boundary you cannot see through.** A specialist
+that is 90% right hands a confident report to a coordinator that has no way to
+check it. Three such specialists give roughly 0.9³ — about 73% — and that is
+before the coordinator's own synthesis, which @sec-agent-anatomy measured as
+the step that actually breaks: tool use was perfect at every step count while
+accuracy fell from 100% to 40%, purely in aggregation.
+
+**Debugging gets qualitatively harder.** One agent produces one transcript.
+Five agents produce five, plus the delegation decisions between them, and the
+question "why did it answer that" now requires reconstructing a distributed
+trace. @sec-agent-anatomy's argument that an agent trades debuggability for
+open-endedness applies again, one level up and more sharply.
+
+So the honest test before splitting is two-sided:
+
+```text
+  does it save tokens?   compute it. The table above is the shape.
+  does it stay right?    measure it, against the single agent, on your task.
+```
+
+If you cannot answer the second, you have not evaluated an architecture; you
+have chosen a diagram.
+
+## Shared state is the hardest part {#sec-multi-agent-state}
+
+Everything above assumes specialists only read. The moment two agents can
+*write* to the same thing, you have a distributed system, and the ordinary
+distributed-systems problems arrive without the ordinary distributed-systems
+discipline.
+
+| problem | how it shows up here |
+|:--|:--|
+| **Lost update** | two agents read a file, both edit, the second write erases the first. Neither notices, and neither reports an error |
+| **Inconsistent read** | a specialist reads state another is midway through changing, and reasons confidently from a half-written value |
+| **Conflicting conclusions** | two agents reach opposite answers from the same data and the coordinator has no rule for choosing — @sec-memory measured what a model does with contradictions, and it mostly hedges |
+| **Non-determinism** | the run is not reproducible, so the bug you saw yesterday cannot be recreated today |
+
+: Four ways shared state fails {tbl-colwidths="[26,74]"}
+
+The mitigations are the boring ones, and they are boring because they work:
+
+- **Give each agent its own workspace.** A branch, a scratch directory, a
+  transaction. Merge deliberately, at a point you chose.
+- **Make writes single-threaded.** One agent — usually the coordinator — owns
+  every mutation. Specialists propose; the owner applies.
+- **Make tools idempotent**, per @sec-tool-design, because retries are certain
+  and a second `create_invoice` is not a rounding error.
+- **Prefer append-only.** A log of proposals that someone reconciles beats
+  concurrent mutation of shared state, and it leaves a trace you can debug.
+
+## Queues, and what to do with a poisoned message {#sec-multi-agent-queues}
+
+Once agents are separate processes, the connection between them is a design
+decision. Direct calls are simple and couple the caller's lifetime to the
+callee's; a queue decouples them and buys the things queues always buy —
+backpressure, retries, and the ability to restart one side without the other.
+
+Three rules that are ordinary infrastructure practice and get skipped here
+because the payloads look like conversation rather than messages:
+
+- **Bound the retries.** An agent task that fails will fail again, usually
+  identically and usually expensively — every retry is a fresh model bill.
+  @sec-agent-anatomy's step cap, one level up.
+- **Have a dead-letter queue, and read it.** A task that cannot be processed
+  goes somewhere a human looks. Without this, poisoned messages either loop
+  forever or vanish, and both are worse than an alert.
+- **Make the payload self-contained.** A message that refers to state
+  elsewhere — *continue the analysis we were doing* — cannot be retried or
+  replayed. This is the stateless-specialist rule from
+  @sec-multi-agent-topologies, enforced by the transport.
+
+## Frameworks, as of 2026 {#sec-multi-agent-frameworks}
+
+Every framework here opts you into a model of control flow, and that choice
+matters more than the API. This section will date; check versions.
+
+| framework | what it opts you into |
+|:--|:--|
+| **LangGraph** | the loop as an explicit state machine. Verbose, and the right choice when the control flow deserves to be a diagram you can inspect |
+| **OpenAI Agents SDK** | a small loop with handoffs and guardrails; the closest thing to @sec-agent-anatomy's fourteen lines with production edges added |
+| **Pydantic AI** | typed tools and typed results; strongest when the boundary between agents needs validation rather than prose |
+| **CrewAI** | roles and tasks as first-class concepts. Fast to a working demo; the abstraction is opinionated about a topology you may not want |
+| **AutoGen** | conversational multi-agent, with agents talking to each other. Powerful, and the pattern most likely to produce the failures in @sec-multi-agent-honest |
+| **Google ADK** | agents as deployable services, oriented at operating them rather than prototyping |
+
+: Six frameworks and their commitments {tbl-colwidths="[24,76]"}
+
+The advice that outlasts any of them: **build the single agent first, with no
+framework**. You will then be choosing between these on the basis of what you
+already know your control flow needs, rather than adopting someone else's
+answer before you have the question.
+
+## Lab: earn the second agent {#sec-multi-agent-lab}
+
+### Step 1 — build the single agent
+
+One loop, the tools the task needs, a step cap. Measure score, tokens, and
+wall-clock on twenty real tasks. This is the number to beat.
+
+### Step 2 — compute the split before building it
+
+Take your observed step count and observation size and run
+@sec-multi-agent-cost's arithmetic. If the model says splitting costs more,
+that is your result — write it down and stop.
+
+### Step 3 — build the coordinator and three specialists
+
+Delegation, not handoff. Stateless specialists. The coordinator sees summaries.
+
+### Step 4 — measure the same twenty tasks
+
+Score, tokens, wall-clock. Report all three, including if the single agent won.
+
+### Step 5 — find what the summaries lost
+
+Take five tasks the multi-agent system got wrong and read the specialist
+transcripts. How often was the information present in a specialist's window
+and absent from its report?
+
+### Step 6 — introduce a write
+
+Give two specialists the ability to modify the same resource. Run twenty tasks
+and count the inconsistencies. This is the step that decides whether your
+architecture is a distributed system.
+
+### What to hand in
+
+The two three-column results tables, the count from step 5, the inconsistency
+count from step 6, and one sentence: did the second agent earn its place?
+
+## Intuition checks {#sec-multi-agent-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. When does a task need multiple agents?
+
+When one of three structural conditions holds: the work produces more material
+than a window should hold, independent subtasks can genuinely run at once, or
+different subtasks need different tools, permissions or models. "The task is
+complex" is not on that list — complexity is handled by a longer prompt and
+better tools. The single agent is the baseline, and the second agent has to
+beat it on a measurement.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Does splitting work across agents save tokens?
+
+It depends on how much material the work produces, and the arithmetic is
+worth running. Six steps with 200-token observations costs **1.20×** as three
+agents — splitting is *more* expensive, because you pay the per-agent fixed
+cost three extra times. Twenty-four steps with 3,000-token observations costs
+**0.34×** — a two-thirds saving, because a single agent carries every
+observation through every later call. The dial is material produced, not
+difficulty.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. What does the token saving cost you?
+
+Information. The saving exists precisely *because* the coordinator sees a
+summary rather than the observations, so it reasons about a lossy compression
+of what the specialist saw. Errors also compound across a boundary nobody can
+check: three specialists at 90% give about 73% before the coordinator's own
+synthesis, which @sec-agent-anatomy measured as the step that breaks first.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Why does write-heavy work not parallelise?
+
+Because concurrent writes make it a distributed system: lost updates where the
+second write erases the first with no error, inconsistent reads of half-written
+state, conflicting conclusions the coordinator has no rule to resolve, and
+non-determinism that makes yesterday's bug unreproducible. Ten agents reading
+ten documents is ten times faster; ten agents editing one codebase is a problem
+you did not intend to take on.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Handoff or delegation?
+
+Delegation, with stateless specialists. The coordinator keeps the conversation,
+sends a self-contained subtask, and receives a result — which preserves the
+context firewall and makes every specialist retryable. A handoff passes the
+conversation itself, so the second agent's output lands in the same transcript
+with no coordinator left to summarise or reject it, and a specialist that
+remembers previous calls is a distributed cache with no invalidation story.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Which framework should you use?
+
+Build the single agent with no framework first. Each of these opts you into a
+model of control flow — an explicit state machine, roles and tasks,
+conversational agents — and that commitment matters more than the API. Choosing
+after you know what your control flow needs is a different activity from
+adopting someone else's answer before you have the question.
+:::
+
+## Exercises {#sec-multi-agent-exercises}
+
+1. **Beat the baseline.** Take a task you assumed needed multiple agents.
+   Implement it with one. Compare score, cost and latency, and report the
+   result even when the single agent wins.
+2. **Run the arithmetic.** Measure your real step count and observation size,
+   then compute the crossover for your system. How far are you from it?
+3. **Find the lost information.** For five failed runs, read the specialist
+   transcripts and count how often the answer was present in a specialist's
+   window and missing from its report.
+4. **Create the race.** Design a shared-state scheme for two agents that can
+   both write. Then describe the race condition you just created, and the
+   smallest change that removes it.
+5. **Poison a queue.** Send a message your agent cannot process. Watch what
+   happens: does it loop, vanish, or reach a dead-letter queue somebody reads?
+6. **Compound the errors.** Measure one specialist's accuracy in isolation,
+   then predict the three-specialist system's accuracy before measuring it.
+   Compare your prediction to the result.
+7. **Delete an agent.** Take a working multi-agent system and remove one agent,
+   folding its job into a neighbour. Measure. Removals are as informative as
+   additions and nobody runs them.
+
+## Interview questions {#sec-multi-agent-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.**
+:::
+
+### Testing whether you understand the trade
+
+**Q: When would you use a multi-agent architecture?**
+
+Name the three structural conditions — context volume, genuine parallelism,
+different tools or permissions — and say explicitly that task complexity is not
+one of them. Then show you have costed it: splitting pays when the work
+produces a lot of material, because a single agent's cost grows with the square
+of its steps, and it *loses* on short work because the per-agent fixed cost is
+paid in every agent. The strongest answer names what the saving costs: the
+coordinator sees summaries, not observations.
+
+**Q: Why does write-heavy work not parallelise?**
+
+Because it becomes a distributed system with none of the usual guarantees.
+Give the concrete failures — lost updates that raise no error, inconsistent
+reads, conflicting conclusions the coordinator cannot resolve — and then the
+mitigations, which are unglamorous: one writer, per-agent workspaces merged
+deliberately, idempotent tools, append-only proposals.
+
+### Testing whether you have shipped one
+
+**Q: Your multi-agent system is less accurate than the single agent it
+replaced. What happened?**
+
+Two candidates, and you can distinguish them from the transcripts. Either the
+summaries lost something — read specialist windows for information that was
+present and unreported — or the errors compounded, which you check by measuring
+each specialist alone and multiplying. Say that this comparison should have
+existed before the migration, and that the single agent is the baseline for
+exactly this reason.
+
+**Q: How do you debug a five-agent system?**
+
+By admitting it is a distributed tracing problem and building for it in
+advance: a correlation id through every delegation, every specialist transcript
+persisted, and the coordinator's delegation decisions logged as first-class
+events. The honest addition is that this is a real cost of the architecture —
+one agent produces one transcript, and that is a debugging property you gave up
+deliberately.
+
+## Where to go deeper {#sec-multi-agent-deeper}
+
+Before reading: build the single agent and measure it. Every argument below is
+easier to evaluate once you have a baseline.
+
+| resource | what it is |
+|:--|:--|
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | argues for the simplest thing that works, and is the best counterweight to this chapter's subject |
+| [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system) — Anthropic | the other side, from production: where fan-out earned its cost and what it broke |
+| [`langgraph`](https://github.com/langchain-ai/langgraph) | control flow as an inspectable state machine |
+| [`openai-agents`](https://github.com/openai/openai-agents-python) | handoffs and guardrails in a small readable loop |
+| [`autogen`](https://github.com/microsoft/autogen) | conversational multi-agent, and the clearest way to see the failure modes for yourself |
+| [`crewAI`](https://github.com/crewAIInc/crewAI) / [`adk-python`](https://github.com/google/adk-python) | roles-and-tasks, and agents-as-services |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| the loop each agent runs | @yao2023react |
+| why self-critique does not rescue a wrong answer | @huang2024large; @madaan2023selfrefine |
+| planning as a separate search | @yao2023tree |
+| what a long shared context does to retrieval | @hsieh2024ruler |
+
+: The primary sources {tbl-colwidths="[46,54]"}
+
+## The 2026 toolbox {#sec-multi-agent-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| Python | 3.14.5 | the cost model in @sec-multi-agent-cost is arithmetic and needs nothing else |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `langgraph` | 1.2.11 | explicit graphs, checkpointing, and human-in-the-loop interrupts |
+| `openai-agents` | 0.22.0 | handoffs and guardrails with very little machinery |
+| `pydantic-ai` | 2.35.3 | typed boundaries between agents |
+| `crewai` | 1.15.18 | roles and tasks, fastest to a demo |
+| `autogen-agentchat` | 0.7.5 | conversational multi-agent research |
+| `google-adk` | 2.8.0 | agents packaged as deployable services |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## What to remember {#sec-multi-agent-summary}
+
+- **The single agent is the baseline, and the second agent must beat it on a
+  measurement.** Three structural justifications qualify — context volume,
+  genuine parallelism, different tools or permissions. "It is complex" does
+  not.
+- **Compute the split before you build it.** Six steps with 200-token results
+  costs **1.20×** as three agents; twenty-four steps with 3,000-token results
+  costs **0.34×**. The dial is how much material the work produces, not how
+  hard it is.
+- **The saving is paid for in information.** The coordinator sees summaries
+  because that *is* the mechanism, so it reasons about a lossy compression —
+  and three specialists at 90% give about 73% before the coordinator's own
+  synthesis, the step @sec-agent-anatomy measured as the first to break.
+- **Read-heavy work parallelises; write-heavy work does not.** Concurrent
+  writes turn an architecture into a distributed system with lost updates that
+  raise no error and bugs that will not reproduce.
+- **One writer, own workspaces, idempotent tools, append-only proposals.**
+  The mitigations are boring because they are the ones that work.
+- **Delegate to stateless specialists; do not hand off the conversation.** A
+  self-contained subtask is retryable and preserves the context firewall.
+- **Debugging is a cost you pay deliberately.** One agent, one transcript. Five
+  agents need correlation ids, persisted specialist transcripts, and logged
+  delegation decisions — built in advance, not after the first incident.
