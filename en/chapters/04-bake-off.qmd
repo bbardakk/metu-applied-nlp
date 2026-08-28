@@ -160,7 +160,7 @@ chapters claimed.
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-URL = ("https://huggingface.co/datasets/turkish_product_reviews/"
+URL = ("https://huggingface.co/datasets/fthbrmnby/turkish_product_reviews/"
        "resolve/main/data/train-00000-of-00001.parquet")
 df = pd.read_parquet(URL).rename(
     columns={"sentence": "text", "sentiment": "label"})
@@ -217,9 +217,9 @@ the confusion matrix:
 
 ```text
 ### majority baseline, in full
-                   predicted neg   predicted pos
-actual neg    632              0             632
-actual pos  9,368              0           9,368
+                 predicted neg   predicted pos   total
+   actual neg          0             632          632
+   actual pos          0           9,368        9,368
 
 precision (neg)   undefined — it never predicts negative
 recall    (neg)   0.0%       — it finds none of the 632
@@ -308,7 +308,7 @@ tr_lower("İYİ")        # → 'iyi'
 ```
 
 ```text
-### the same string, two casefolding rules
+### the same string, two lowercasing rules
              str.lower()      tr_lower()
 "IYI"        iyi              ıyı
 "İYİ"        i̇yi̇             iyi
@@ -346,6 +346,13 @@ median                             19
 95th percentile                    56
 longest                           296
 ```
+
+::: {.column-margin}
+A careful reader will try subtracting these: 74,317 − 43,579 = 30,738, but
+round 1's table reports a 30,195-dimensional vocabulary. The **543** in
+between are words that occur two or more times in the corpus but all inside
+*one document*. `min_df` counts **document** frequency, not corpus frequency.
+:::
 
 **58.6% of the vocabulary appears exactly once.** @sec-embeddings measured
 50.0% on Turkish Wikipedia; user-generated review text is worse, because on
@@ -387,13 +394,16 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 PAT = r"[a-zçğıöşü]+"
+# lowercase=False + preprocessor=tr_lower: otherwise scikit-learn calls
+# Python's str.lower() and commits the bug we warned about above
+LOC = dict(preprocessor=tr_lower, lowercase=False)
 schemes = {
-  "bag of words":    CountVectorizer(min_df=2, token_pattern=PAT),
-  "tf-idf":          TfidfVectorizer(min_df=2, sublinear_tf=True, token_pattern=PAT),
+  "bag of words":    CountVectorizer(min_df=2, token_pattern=PAT, **LOC),
+  "tf-idf":          TfidfVectorizer(min_df=2, sublinear_tf=True, token_pattern=PAT, **LOC),
   "tf-idf 1-2 gram": TfidfVectorizer(min_df=2, sublinear_tf=True,
-                                     ngram_range=(1, 2), token_pattern=PAT),
+                                     ngram_range=(1, 2), token_pattern=PAT, **LOC),
   "tf-idf char 3-5": TfidfVectorizer(min_df=3, sublinear_tf=True,
-                                     analyzer="char_wb", ngram_range=(3, 5)),
+                                     analyzer="char_wb", ngram_range=(3, 5), **LOC),
 }
 clf = LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42)
 ```
@@ -407,6 +417,30 @@ tf-idf                   90.07      71.95     49.41   30,195    0.5 s
 tf-idf 1-2 gram          92.57      76.21     56.47  101,659    1.0 s
 tf-idf char_wb 3-5       88.63      70.39     47.14   94,939    3.3 s
 ```
+
+::: {.callout-note collapse="true"}
+## It made no difference on this corpus — write it this way anyway
+
+The `lowercase=False` line above was added later, because the first version
+committed exactly the bug this chapter warns about two sections earlier. Both
+versions were then measured, and round 1's table came out **byte-identical**.
+
+The reason is the corpus itself: there is **not a single uppercase character**
+in these 233,508 reviews — the dataset ships already lowercased. So the two
+paths coincide here.
+
+Why fix it anyway? Because the reader copying this code will not have that
+corpus. The measured difference is:
+
+```text
+'İYİ'.lower()  ->  'i̇yi̇'  ->  under [a-zçğıöşü]+  ['i', 'yi']   split in two
+'IYI'.lower()  ->  'iyi'   ->                      ['iyi']       wrongly merged
+```
+
+The same warning applies to `analyzer="char_wb"`. Character n-grams are sold
+as language-independent, but the lowercasing step in front of them is still
+locale-dependent.
+:::
 
 Three things in that table are worth stopping for.
 
@@ -734,7 +768,7 @@ to one. The interesting question is what the 272 look like.
 
 ```text
 ### averaged fastText right, tf-idf wrong        (gold: positive)
-  "en guvenli alısveriş sitesi"        no diacritics at all
+  "en guvenli alısveriş sitesi"        diacritics partly dropped
   "çok hizli ve temi̇z tesli̇mat"        broken diacritics mid-word
   "çok sessiz çalışıyor makina ."      "makina" — colloquial for "makine"
 
@@ -748,8 +782,8 @@ The dense wins are exactly the promised ones: misspellings and missing
 diacritics, where a count vector sees an unknown column and a subword model
 sees a familiar shape. The dense losses are the promised ones too — the
 second example is a `ne … ne …` construction ("neither very bad nor very
-good") in which every individual word is positive and the *structure* carries
-the negation.
+good") in which the individual words give mixed signals and the *structure*
+carries the decision.
 
 That points at the real cause, and it is testable directly.
 
@@ -826,9 +860,11 @@ practice is: *how many labels do you have?*
 
 The embedding models were trained without labels — they read the raw text and
 learned from co-occurrence alone. That knowledge is already paid for before
-the first review is annotated. TF-IDF has no such head start: its axes are
-just words, and everything it knows about sentiment must come out of the
-labelled set.
+the first review is annotated. TF-IDF's head start is far weaker: its axes
+are just words, and everything it knows about sentiment must come out of the
+labelled set. To be exact, TF-IDF does take something from the unlabelled
+data — its IDF weights come from all 40,000 documents — but what it takes is
+only document frequencies. It learns the vocabulary, not the meaning.
 
 So hold the representations fixed and vary only the number of labels the
 classifier sees.
@@ -985,7 +1021,9 @@ Two entries deserve comment.
 
 **Character n-grams are expensive out of proportion to their benefit.** 144.8
 MB and 301 non-zeros per document, for 70.39 macro-F1 — worse than plain
-bag-of-words at 9.7 MB. They are the right tool when spelling is the problem
+word tf-idf at 9.7 MB — fifteen times the memory for a lower macro-F1. (The
+bag-of-words matrix has the same sparsity pattern and therefore the same size;
+only the tf-idf row appears in the table.) They are the right tool when spelling is the problem
 (and they were the *best* sparse method at 1,000 labels, where they beat word
 TF-IDF by 3.2 points), but they are not a free upgrade.
 
@@ -1009,8 +1047,10 @@ accuracy   89.36     macro-F1   71.65     F1(neg)   49.24
 ```
 
 It beats both of its parts — char TF-IDF alone scored 70.39, fastText alone
-61.36 — and it loses to plain word bigrams by 4.6 points while taking 6.2
-seconds to fit against the bigram model's 0.1. Concatenation is a real
+61.36 — and it loses to plain word bigrams by 4.6 points. It also costs far
+more to build: **34.5 seconds** against the bigram model's **0.9**, because
+the hybrid has to fit the character vectoriser (2.9 s) *and* train fastText
+(31.6 s), both from the cost table above. Concatenation is a real
 technique and this is a real
 gain over the components, but it did not rescue the dense representation, and
 reporting it as a success by comparing only against its parts would be
@@ -1024,7 +1064,7 @@ exactly the kind of selective baseline this chapter is arguing against.
 | **TF-IDF (words)** | The standard strong baseline. Down-weights ubiquitous words. Trivially interpretable and auditable. | [Hurt]{.con} by IDF on short texts — lost to raw counts here. One column per word form: 895 columns for one Turkish verb. Zero generalisation to unseen forms. | Documents are long enough for term frequency to mean something, and you have thousands of labels. |
 | **TF-IDF (word bigrams)** | Best score in this chapter, 76.21. Captures multi-word negation that unigrams miss. Still a linear model you can read. | 3.4× the columns. Gains shrink as documents get longer. Still blind to unseen vocabulary. | You have labels and the task turns on short phrases — sentiment, intent, triage. This should be your default. |
 | **TF-IDF (char n-grams)** | Immune to spelling: no vocabulary to fall outside of. Strongest sparse method in the low-label regime. Language-agnostic — no tokeniser to get wrong. | 144.8 MB and 301 non-zeros per document. Lower macro-F1 than plain counting at full data. Coefficients are not human-readable. | Spelling is unreliable, the language is agglutinative, or you have no trustworthy tokeniser. |
-| **Averaged word2vec** | 100 dimensions for 61.4 macro-F1 — 302× fewer dimensions than word tf-idf. Trained without labels. [Ahead of every sparse method]{.pro} under ~1,500 labels. Semantic neighbours you can inspect. | `KeyError` on 46.4% of unseen word forms. Confident nonsense on rare in-vocabulary words. Averaging dilutes negation. Word order gone. | Labels are scarce, or you need compact vectors for similarity search over millions of documents. |
+| **Averaged word2vec** | 100 dimensions for 61.4 macro-F1 — 302× fewer dimensions than word tf-idf. Trained without labels. [Ahead of both sparse methods tested here]{.pro} under ~1,500 labels. Semantic neighbours you can inspect. | `KeyError` on 46.4% of unseen word forms. Confident nonsense on rare in-vocabulary words. Averaging dilutes negation. Word order gone. | Labels are scarce, or you need compact vectors for similarity search over millions of documents. |
 | **Averaged fastText** | Every string gets a vector — coverage is 100% by construction. Handles the missing diacritics and typos in real user text. Best of any method at 250 labels. | Neighbours are [orthographic, not semantic]{.con}: `kalitesiz` → `kalitesi`. 2× word2vec's training time. Bought perfect coverage for +0.0 macro-F1 here. | The text is user-generated and misspelled, the language is agglutinative, and you cannot control the input vocabulary. |
 | **doc2vec** | One vector per document with no averaging heuristic. Learns document-level structure averaging cannot. | [Worst]{.con} score here, 55.13. Inference needs gradient steps: 16× slower per document, forever. Extra hyperparameters. | Documents are long and clean and you have measured that it beats averaging on *your* data. Rarely, on short text. |
 
@@ -1182,7 +1222,7 @@ change your answer. An answer with no number is an opinion; an answer with no
 1. **Embeddings or TF-IDF for text classification?** Ask how many labels they
    have, because that is the axis the answer turns on. On this corpus the
    curves cross at roughly **1,500 labels**: at 250 labels averaged fastText
-   scores 63.10 macro-F1 against TF-IDF's 48.84 — which is the do-nothing
+   scores 63.10 macro-F1 against TF-IDF's 48.53 — which is the do-nothing
    baseline — and at 40,000 TF-IDF scores 76.21 against 61.36. The embeddings
    were trained without labels, so their knowledge is paid for before the first
    annotation; TF-IDF has to buy everything it knows out of the labelled set.

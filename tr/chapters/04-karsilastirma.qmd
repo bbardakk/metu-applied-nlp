@@ -157,7 +157,7 @@ iddialarından birini sınıyor.
 
 1. **Türkçe**, yani @sec-gommeler bölümünün biçimbilim argümanı kâğıt
    üstünde kalmıyor, yargılanıyor.
-2. **Gerçekten dengesiz** — olumlu sınıf on dört kat daha büyük — yani metrik
+2. **Gerçekten dengesiz** — olumlu sınıf yaklaşık on beş kat daha büyük — yani metrik
    sorusundan kaçmak mümkün değil.
 3. **Alt örnekleme yapacak kadar büyük**; bu da pratikte işi asıl karara
    bağlayan soruyu sormamıza izin veriyor: *kaç etiketiniz var?*
@@ -166,7 +166,7 @@ iddialarından birini sınıyor.
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-URL = ("https://huggingface.co/datasets/turkish_product_reviews/"
+URL = ("https://huggingface.co/datasets/fthbrmnby/turkish_product_reviews/"
        "resolve/main/data/train-00000-of-00001.parquet")
 df = pd.read_parquet(URL).rename(
     columns={"sentence": "text", "sentiment": "label"})
@@ -223,9 +223,9 @@ yazdığınız anda gözünüze batar:
 
 ```text
 ### majority baseline, in full
-                   predicted neg   predicted pos
-actual neg    632              0             632
-actual pos  9,368              0           9,368
+                 predicted neg   predicted pos   total
+   actual neg          0             632          632
+   actual pos          0           9,368        9,368
 
 precision (neg)   undefined — it never predicts negative
 recall    (neg)   0.0%       — it finds none of the 632
@@ -316,7 +316,7 @@ tr_lower("İYİ")        # → 'iyi'
 ```
 
 ```text
-### the same string, two casefolding rules
+### the same string, two lowercasing rules
              str.lower()      tr_lower()
 "IYI"        iyi              ıyı
 "İYİ"        i̇yi̇             iyi
@@ -356,6 +356,13 @@ median                             19
 longest                           296
 ```
 
+::: {.column-margin}
+Dikkatli okur bu iki sayıyı çıkarmayı deneyecek: 74.317 − 43.579 = 30.738,
+ama 1. raunt tablosunda sözlük 30.195 boyut. Aradaki **543** kelime, derlemde
+iki veya daha fazla kez geçen ama hepsi *tek bir belgenin içinde* geçen
+kelimeler. `min_df` derlem frekansını değil, **doküman** frekansını sayar.
+:::
+
 **Sözlüğün %58,6'sı tam olarak bir kez geçiyor.** @sec-gommeler Türkçe
 Wikipedia'da %50,0 ölçmüştü; kullanıcıların yazdığı yorum metni daha kötü,
 çünkü Türkçe biçimbilimin üstüne bir de yazım hataları biniyor ve her yazım
@@ -375,15 +382,23 @@ düşün    195 forms   düşünüyorum, düşünmeden, düşünenlere, düşün
 
 ::: {#gloss-bag-of-words .column-margin .term-gloss}
 **bag-of-words** (kelime torbası) — bir belgenin hangi kelimeleri içerdiğini
-sayar, geliş sıralarını unutur. "Köpek adamı ısırdı" ile "adam köpeği ısırdı"
-aynı belge haline gelir. [↩](#term-bag-of-words){.term-back}
+sayar, geliş sıralarını unutur. "kalite iyi fiyat kötü" ile "kalite kötü fiyat
+iyi" aynı belge haline gelir. [↩](#term-bag-of-words){.term-back}
 :::
 
 Bir [bag-of-words](#gloss-bag-of-words){#term-bag-of-words .term-ref}
-modelinde, Türkçe konuşan birinin tek bir fiil olarak algıladığı şey sekiz yüz
-doksan beş ayrı sütuna dönüşüyor [@oflazer1994two]. Bu sütunların her biri kendi
-avuç dolusu örneğinden ayrı ayrı kestiriliyor ve `kullanışlı` hakkında
-öğrenilen hiçbir şey `kullanıyorum`'a aktarılmıyor. 3. bölümün şikâyeti,
+modelinde, Türkçe konuşan birinin tek bir kök ailesi olarak algıladığı şey —
+`kullan-` kökünden türeyen fiiller, sıfatlar ve isimler — sekiz yüz doksan beş
+ayrı sütuna dönüşüyor. Bu sütunların her biri kendi avuç dolusu örneğinden
+ayrı ayrı kestiriliyor ve `kullanışlı` hakkında öğrenilen hiçbir şey
+`kullanıyorum`'a aktarılmıyor.
+
+Bir uyarı: beş karakterlik önek gerçek biçimbilimsel çözümleme değil, kaba bir
+vekil ölçüt. `kulla` grubunda `kullanışlı` (sıfat), `kullanım` (isim) ve
+`kullanıcı` (isim) yan yana duruyor; bunlar tek bir fiilin çekimleri değil.
+Gerçek çözümleme için sonlu durum aygıtları gerekir [@oflazer1994two] ve
+sayıyı değiştirir — ama argümanı değiştirmez, çünkü mesele grubun tam boyutu
+değil, tek bir kökün onlarca sütuna dağılması. 3. bölümün şikâyeti,
 2. bölümün birimleriyle ve gerçek veri üzerinde ifade edilmiş hali budur.
 
 895 sayısını aklınızda tutun. Embedding'ler lehine bütün savunma buna
@@ -399,13 +414,16 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 PAT = r"[a-zçğıöşü]+"
+# lowercase=False + preprocessor=tr_lower: aksi hâlde scikit-learn Python'ın
+# str.lower()'ını çağırır ve yukarıda uyardığımız hatayı biz yaparız
+LOC = dict(preprocessor=tr_lower, lowercase=False)
 schemes = {
-  "bag of words":    CountVectorizer(min_df=2, token_pattern=PAT),
-  "tf-idf":          TfidfVectorizer(min_df=2, sublinear_tf=True, token_pattern=PAT),
+  "bag of words":    CountVectorizer(min_df=2, token_pattern=PAT, **LOC),
+  "tf-idf":          TfidfVectorizer(min_df=2, sublinear_tf=True, token_pattern=PAT, **LOC),
   "tf-idf 1-2 gram": TfidfVectorizer(min_df=2, sublinear_tf=True,
-                                     ngram_range=(1, 2), token_pattern=PAT),
+                                     ngram_range=(1, 2), token_pattern=PAT, **LOC),
   "tf-idf char 3-5": TfidfVectorizer(min_df=3, sublinear_tf=True,
-                                     analyzer="char_wb", ngram_range=(3, 5)),
+                                     analyzer="char_wb", ngram_range=(3, 5), **LOC),
 }
 clf = LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42)
 ```
@@ -419,6 +437,30 @@ tf-idf                   90.07      71.95     49.41   30,195    0.5 s
 tf-idf 1-2 gram          92.57      76.21     56.47  101,659    1.0 s
 tf-idf char_wb 3-5       88.63      70.39     47.14   94,939    3.3 s
 ```
+
+::: {.callout-note collapse="true"}
+## Bu derlemde fark etmedi — ve yine de böyle yazın
+
+Yukarıdaki `lowercase=False` satırı sonradan eklendi, çünkü ilk sürüm tam da
+bu bölümün iki kısım önce uyardığı hatayı yapıyordu. Sonra iki sürüm de
+ölçüldü ve 1. raunt tablosu **bayt bayt aynı** çıktı.
+
+Sebebi derlemin kendisi: bu 233.508 yorumun içinde **tek bir büyük harf yok**;
+veri kümesi zaten küçük harfe çevrilmiş hâlde dağıtılıyor. Yani iki yol
+burada çakışıyor.
+
+Bunu neden yine de düzelttik? Çünkü kodu kopyalayan okurun derlemi böyle
+olmayacak. Ölçülen fark şu:
+
+```text
+'İYİ'.lower()  ->  'i̇yi̇'  ->  [a-zçğıöşü]+ ile  ['i', 'yi']   ikiye bölünür
+'IYI'.lower()  ->  'iyi'   ->                    ['iyi']       yanlış birleşir
+```
+
+Aynı uyarı `analyzer="char_wb"` için de geçerli. Karakter n-gram'ları
+"dilden bağımsız" diye tanıtılır, ama küçük harfe çevirme adımı hâlâ yerel
+ayara bağlıdır.
+:::
 
 Bu tabloda durup bakmaya değer üç şey var.
 
@@ -484,7 +526,7 @@ kaliteli     +4.32       kalmadım     -5.33
 
 Bunların her biri bir alan uzmanına tek cümlede savunulabilir ve ikisi dil
 hakkında değil, gerçekten alan hakkında bilgi veriyor: `iade` olumsuz bir
-sinyaldir, çünkü ürün iade edenler memnun olmayanlardır; `fakat` ve `ama` ise
+sinyaldir, çünkü ürün iade edenler memnun olmayanlardır; `fakat` ise
 olumsuzdur, çünkü karşıtlık bağlacı içeren bir Türkçe yorum genellikle
 şikâyete geçmek üzeredir. Bu kuralları kimse yazmadı; hepsi 40.000 etiketin
 içinden kendiliğinden çıktı.
@@ -650,8 +692,9 @@ kalitesiz
 **word2vec'in komşuları anlamsal, fastText'inkiler yazımsal.** `kalitesiz`
 neye benzer diye sorulduğunda word2vec, bir ürünün kötü olduğunu söylemenin
 beş ayrı yoluyla cevap veriyor. fastText ise `kalitesi` kelimesiyle cevap
-veriyor — ki bu bir eşanlamlı değil, baştaki altı harfi paylaşan *zıt*
-kutuptur.
+veriyor — ki bu bir eşanlamlı değil, tam *zıt* kutuptur. Üstelik vurucu
+nokta tam burada: `kalitesiz`in ilk sekiz harfi zaten `kalitesi`nin kendisi,
+yani fastText kelimenin tamamını önek olarak içeren zıt kutbu getiriyor.
 
 Bu, @sec-gommeler bölümünün açıkça ifade ettiği zayıflığın — *benzer yazılışın
 benzer anlam demek olduğunu varsayar* — ölçülebilir bir maliyet olarak
@@ -750,7 +793,7 @@ ilginç soru, o 272 örneğin neye benzediği.
 
 ```text
 ### averaged fastText right, tf-idf wrong        (gold: positive)
-  "en guvenli alısveriş sitesi"        hiç Türkçe karakter yok
+  "en guvenli alısveriş sitesi"        Türkçe karakterler kısmen düşmüş
   "çok hizli ve temi̇z tesli̇mat"        kelime ortasında bozuk karakter
   "çok sessiz çalışıyor makina ."      "makina" — "makine"nin konuşma hali
 
@@ -763,8 +806,9 @@ ilginç soru, o 272 örneğin neye benzediği.
 Yoğun tarafın galibiyetleri tam olarak vaat edilenler: yazım hataları ve eksik
 Türkçe karakterler — sayım vektörünün bilinmeyen bir sütun gördüğü, alt kelime
 modelininse tanıdık bir şekil gördüğü yerler. Yoğun tarafın kayıpları da vaat
-edilenler: ikinci örnek bir `ne … ne …` yapısı ("ne çok kötü ne çok iyi"), ki
-burada tek tek her kelime olumlu ve olumsuzlamayı *yapı* taşıyor.
+edilenler: ikinci örnek bir `ne … ne …` yapısı ("ne çok kötü ne çok iyi"),
+ki burada tek tek kelimeler karışık sinyal veriyor — kararı belirleyen şey
+`ne … ne …` *yapısının* kendisi.
 
 Bu, asıl sebebi işaret ediyor ve o sebep doğrudan sınanabilir.
 
@@ -842,8 +886,11 @@ var?*
 
 Embedding modelleri etiketsiz eğitildi — ham metni okuyup yalnızca birlikte
 geçme örüntülerinden öğrendiler. O bilginin bedeli, ilk yorum etiketlenmeden
-önce zaten ödenmişti. TF-IDF'in böyle bir avansı yok: eksenleri sadece
+önce zaten ödenmişti. TF-IDF'in avansı ise çok daha zayıf: eksenleri sadece
 kelimeler ve duygu hakkında bildiği her şey etiketli kümeden çıkmak zorunda.
+Tam dürüst olmak gerekirse TF-IDF de etiketsiz veriden bir şey alıyor — IDF
+ağırlıkları 40.000 belgenin tamamından geliyor. Ama aldığı şey yalnızca
+doküman frekansları: sözlüğü öğreniyor, anlamı öğrenmiyor.
 
 O halde temsilleri sabit tutup yalnızca sınıflandırıcının gördüğü etiket
 sayısını değiştirelim.
@@ -997,8 +1044,10 @@ doc2vec                    8.5 s          1.73 s       16.0 MB
 İki satır yorum hak ediyor.
 
 **Karakter n-gram'ları, faydalarıyla orantısız biçimde pahalı.** 70,39
-macro-F1 için 144,8 MB ve belge başına 301 sıfır dışı değer — 9,7 MB'lık düz
-bag-of-words'ten daha kötü. Sorun yazımsa doğru araç onlar (ve 1.000 etikette
+macro-F1 için 144,8 MB ve belge başına 301 sıfırdan farklı değer — düz kelime
+tf-idf'inin 9,7 MB'ından on beş kat fazla, üstelik daha düşük macro-F1 için.
+(Bag-of-words matrisi de aynı seyreklik desenine sahip olduğu için aynı
+boyutta; tabloda yalnızca tf-idf satırı var.) Sorun yazımsa doğru araç onlar (ve 1.000 etikette
 kelime TF-IDF'ini 3,2 puan geçerek *en iyi* seyrek yöntemdiler), ama bedava
 bir yükseltme değiller.
 
@@ -1023,9 +1072,11 @@ accuracy   89.36     macro-F1   71.65     F1(neg)   49.24
 ```
 
 Kendi parçalarının ikisini de geçiyor — tek başına karakter TF-IDF'i 70,39,
-tek başına fastText 61,36 almıştı — ama düz kelime bigram'larına 4,6 puan
-kaybediyor ve bigram modelinin 0,1 saniyesine karşılık 6,2 saniyede
-kuruluyor. Birleştirme gerçek bir tekniktir ve bu, bileşenlerine göre
+tek başına fastText 61,36 almıştı — ama düz kelime bigram'larının 4,6 puan
+gerisinde kalıyor. Kurulumu da çok daha pahalı: bigram modelinin **0,9
+saniyesine** karşılık **34,5 saniye**, çünkü melez modelin hem karakter
+vektörleştiricisini kurması (2,9 s) hem de fastText'i eğitmesi (31,6 s)
+gerekiyor — ikisi de yukarıdaki maliyet tablosundan. Birleştirme gerçek bir tekniktir ve bu, bileşenlerine göre
 gerçek bir kazançtır; ama yoğun temsili kurtarmadı ve bunu yalnızca kendi
 parçalarıyla karşılaştırıp başarı diye bildirmek, tam da bu bölümün karşı
 çıktığı şey olurdu: işinize gelen baseline'ı seçmek.
@@ -1038,7 +1089,7 @@ parçalarıyla karşılaştırıp başarı diye bildirmek, tam da bu bölümün 
 | **TF-IDF (kelime)** | Standart güçlü baseline. Her yerde geçen kelimelerin ağırlığını düşürür. Son derece yorumlanabilir ve denetlenebilir. | Kısa metinlerde IDF yüzünden [zarar görür]{.con} — burada ham sayımlara kaybetti. Kelime biçimi başına bir sütun: tek bir Türkçe fiil için 895 sütun. Görülmemiş biçimlere sıfır genelleme. | Belgeler terim frekansının bir anlam ifade edeceği kadar uzunsa ve binlerce etiketiniz varsa. |
 | **TF-IDF (kelime bigram'ları)** | Bu bölümdeki en iyi skor: 76,21. Unigram'ların kaçırdığı çok kelimeli olumsuzlamayı yakalar. Hâlâ okuyabildiğiniz bir doğrusal model. | 3,4 kat daha fazla sütun. Belgeler uzadıkça kazanç azalır. Görülmemiş sözlüğe hâlâ kör. | Etiketiniz varsa ve görev kısa ifadelere dayanıyorsa — duygu, niyet, triyaj. Varsayılanınız bu olmalı. |
 | **TF-IDF (karakter n-gram'ları)** | Yazıma bağışık: dışına düşülecek bir sözlük yok. Az etiket rejimindeki en güçlü seyrek yöntem. Dilden bağımsız — yanlış kurulacak bir tokenizer yok. | 144,8 MB ve belge başına 301 sıfır dışı değer. Tam veride düz saymadan düşük macro-F1. Katsayıları insan tarafından okunamaz. | Yazım güvenilmezse, dil sondan eklemeliyse ya da güvendiğiniz bir tokenizer yoksa. |
-| **Ortalanmış word2vec** | 61,4 macro-F1 için 100 boyut — kelime tf-idf'inden 302 kat az boyut. Etiketsiz eğitilir. ~1.500 etiketin altında [her seyrek yöntemin önünde]{.pro}. İnceleyebileceğiniz anlamsal komşular. | Görülmemiş kelime biçimlerinin %46,4'ünde `KeyError`. Sözlükteki nadir kelimelerde kendinden emin saçmalık. Ortalama alma olumsuzlamayı seyreltir. Kelime sırası kaybolur. | Etiket kıtsa ya da milyonlarca belge üzerinde benzerlik araması için derli toplu vektörlere ihtiyacınız varsa. |
+| **Ortalanmış word2vec** | 61,4 macro-F1 için 100 boyut — kelime tf-idf'inden 302 kat az boyut. Etiketsiz eğitilir. ~1.500 etiketin altında [burada test edilen iki seyrek yöntemin de önünde]{.pro}. İnceleyebileceğiniz anlamsal komşular. | Görülmemiş kelime biçimlerinin %46,4'ünde `KeyError`. Sözlükteki nadir kelimelerde kendinden emin saçmalık. Ortalama alma olumsuzlamayı seyreltir. Kelime sırası kaybolur. | Etiket kıtsa ya da milyonlarca belge üzerinde benzerlik araması için derli toplu vektörlere ihtiyacınız varsa. |
 | **Ortalanmış fastText** | Her karakter dizisi bir vektör alır — kapsama tasarımı gereği %100. Gerçek kullanıcı metnindeki eksik Türkçe karakterleri ve yazım hatalarını kaldırır. 250 etikette bütün yöntemlerin en iyisi. | Komşuları [anlamsal değil, yazımsal]{.con}: `kalitesiz` → `kalitesi`. word2vec'in 2 katı eğitim süresi. Kusursuz kapsamayı burada +0,0 macro-F1'e satın aldı. | Metin kullanıcı üretimiyse ve yazım hatalıysa, dil sondan eklemeliyse ve girdi sözlüğünü siz denetleyemiyorsanız. |
 | **doc2vec** | Ortalama alma sezgiselliği olmadan belge başına tek vektör. Ortalama almanın öğrenemeyeceği belge düzeyi yapıyı öğrenir. | Buradaki [en kötü]{.con} skor: 55,13. Çıkarım gradyan adımı gerektirir: belge başına 16 kat yavaş, sonsuza kadar. Fazladan hiperparametreler. | Belgeler uzun ve temizse ve *kendi* verinizde ortalama almayı geçtiğini ölçtüyseniz. Kısa metinde nadiren. |
 
@@ -1198,7 +1249,7 @@ görüştür; *koşulu* olmayan cevap bir slogandır.
 1. **Metin sınıflandırma için embedding mi, TF-IDF mi?** Kaç etiketleri
    olduğunu sorun, çünkü cevabın döndüğü eksen odur. Bu derlemde eğriler kabaca
    **1.500 etikette** kesişiyor: 250 etikette ortalanmış fastText 63,10 macro-F1
-   alırken TF-IDF 48,84 alıyor — ki bu hiçbir şey yapmayan baseline'ın skoru —
+   alırken TF-IDF 48,53 alıyor — ki bu hiçbir şey yapmayan baseline'ın skoru —
    40.000'de ise TF-IDF 76,21, fastText 61,36 alıyor. Embedding'ler etiketsiz
    eğitildi, dolayısıyla bildikleri şeyin bedeli daha ilk etiketleme yapılmadan
    ödenmişti; TF-IDF ise bildiği her şeyi etiketli kümeden satın almak zorunda.
