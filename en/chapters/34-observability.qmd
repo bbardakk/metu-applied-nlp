@@ -1,56 +1,624 @@
 # Observability for Agents {#sec-observability}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One small measurement: five agent runs
+instrumented with spans shaped by the OpenTelemetry GenAI conventions, to find
+out what a trace actually costs in spans and bytes. The convention details are
+read off the specification rather than recalled — it moved repositories in 2026
+and most of it is still unstable, which is itself something to plan around.
+Software: `ollama` 0.24.0 serving `llama3.2:3b`, Python 3.14.5, Apple Silicon;
+conventions read from `open-telemetry/semantic-conventions-genai` at
+2026-08-27.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- instrument an agent with OpenTelemetry GenAI conventions;
-- navigate a trace hierarchy from session down to a single tool call;
-- attribute token cost to a user, a team, and a feature;
-- debug a real failure from its trace instead of from a log grep.
+- say which parts of an agent trace are ordinary distributed tracing and which
+  three parts genuinely differ;
+- instrument with the GenAI conventions, and know how much of them is settled
+  enough to depend on;
+- read a trace hierarchy from session down to a single tool call;
+- estimate what your telemetry will cost in spans and bytes before you turn it
+  on;
+- attribute token spend to a user, a team and a feature;
+- go from a user complaint to the failing span as a repeatable procedure;
+- say what tracing does not cover, and where that work belongs instead.
 
-## Why LLM traces are just distributed traces (mostly)
+## An agent trace is a distributed trace, with three differences {#sec-observability-same}
 
-<!-- TODO(draft): reuse what you know; name the parts that genuinely
-    differ. -->
+The good news first, because it saves a lot of reinvention. An agent run is a
+tree of nested operations with parents, children, timings and errors — which is
+exactly what distributed tracing was built for. Spans, trace context
+propagation, sampling, exporters and every backend you already run apply
+unchanged.
 
-## OpenTelemetry GenAI semantic conventions
+Three things genuinely differ, and they are where the GenAI conventions earn
+their existence:
 
-<!-- TODO(draft): LLM spans, agent spans, events, and metrics; the
-    attribute names that make tools interoperate. -->
+**The interesting payload is text, and it is large.** An HTTP span records a
+method and a status. An LLM span's most useful content is the prompt and the
+completion, which are kilobytes and which contain whatever the user typed.
+@sec-observability-cost measures what that does to volume, and
+@sec-observability-privacy deals with what it does to your obligations.
 
-## Trace hierarchy: session, run, agent, LLM call, tool call
+**Cost is an attribute, not an afterthought.** Ordinary spans have a duration.
+LLM spans also have input and output token counts, and those convert to money.
+That makes a trace the natural place to answer "what did this feature cost?",
+which is a question tracing systems were not previously asked.
 
-<!-- TODO(draft): a worked trace diagram — a good candidate for a
-    hand-authored SVG. -->
+**Failure is often not an error.** A span with `status=OK` can contain a
+confidently wrong answer, a hallucinated tool argument, or an agent that hit
+its step ceiling and stopped. @sec-deployment made hitting a ceiling a
+first-class outcome for exactly this reason: nothing in the transport layer
+knows the run failed.
 
-## Token and cost attribution by user, team, and feature
+## The conventions, and how much of them is settled {#sec-observability-semconv}
 
-<!-- TODO(draft): the reporting that makes @sec-governance's unit
-    economics possible. -->
+Instrumenting with your own attribute names works until you want a vendor's UI,
+a shared dashboard, or a migration. The OpenTelemetry **GenAI semantic
+conventions** are the agreed vocabulary, and two facts about their current state
+matter more than any individual attribute name.
 
-## Session replay and root-cause workflow
+**They moved.** As of 2026 the GenAI conventions live in their own repository,
+`open-telemetry/semantic-conventions-genai`, split out of the main
+`semantic-conventions` repo — where the old paths now carry nothing but a
+forwarding notice. Documentation, blog posts and instrumentation libraries
+written before the split point at pages that no longer hold the spec.
 
-<!-- TODO(draft): from a user complaint to the exact failing span, as a
-    repeatable procedure. -->
+**Most of them are not stable.** Counting the stability badges in the current
+span, agent-span and metric documents: **286 of 308 marked items in the span
+conventions are `Development`, and only 22 are `Stable`** — with much the same
+ratio in the agent and metric documents. The new repository has no tagged
+release at all.
 
-## What OpenTelemetry does not cover
+::: {.callout-warning appearance="simple"}
+[A convention marked `Development` can change its attribute names between
+versions, and roughly nine in ten of these are.]{.hl} That is not a reason to
+avoid them — they are still the only common vocabulary — but it is a reason to
+pin the version you instrumented against, to record it, and to expect a
+migration rather than to be surprised by one.
+:::
 
-<!-- TODO(draft): output quality and safety scoring are the eval layer,
-    not the tracing layer. -->
+With that stated, the shape is stable enough to teach. Span names are formulaic
+rather than free text:
 
-## Sensitive data in telemetry: redaction and residency
+| operation | span name | example |
+|:--|:--|:--|
+| a model call | `{gen_ai.operation.name} {gen_ai.request.model}` | `chat llama3.2:3b` |
+| a tool call | `execute_tool {gen_ai.tool.name}` | `execute_tool lookup` |
+| a retrieval | `{gen_ai.operation.name} {gen_ai.data_source.id}` | `embeddings kb-main` |
+| an agent turn | `{gen_ai.operation.name}` | `invoke_agent` |
 
-<!-- TODO(draft): prompts contain personal data; redact at the boundary. -->
+: Span naming, as the specification defines it {tbl-colwidths="[20,42,38]"}
 
-## Lab: instrument an agent, then debug a real failure from the trace
+The operation names are a closed set, and reading the current list tells you
+what the working group thinks an agent *is*: `chat`, `text_completion`,
+`generate_content`, `embeddings`, `execute_tool`, `invoke_agent`,
+`create_agent`, `invoke_workflow`, `create_memory`, `fetch_response`. Memory
+and workflow operations arriving in a tracing spec is a fair summary of where
+@sec-memory and @sec-deployment ended up.
 
-<!-- TODO(draft): add instrumentation, inject a fault, and find it using
-    only the trace. -->
+The attributes worth knowing by heart are few, out of 65 in the span document
+alone:
 
-## Exercises
+```text
+gen_ai.operation.name        chat, execute_tool, invoke_agent, ...
+gen_ai.provider.name         who served it
+gen_ai.request.model         what you asked for
+gen_ai.response.model        what answered — not always the same
+gen_ai.usage.input_tokens    the cost that dominates (@sec-serving)
+gen_ai.usage.output_tokens
+gen_ai.conversation.id       what stitches a session together
+gen_ai.agent.name            which agent, when you have several
+gen_ai.tool.name             which tool
+gen_ai.input.messages        the prompt — see @sec-observability-privacy
+gen_ai.output.messages       the completion
+```
 
-1. Instrument an agent and produce a cost-per-session breakdown by feature. Which feature is most expensive per resolved task?
-2. Take a failing session and write the root-cause analysis using only the trace. Note what you wished you had instrumented.
+Two of those repay attention. `gen_ai.response.model` differs from
+`gen_ai.request.model` whenever an alias resolves to a dated version — which is
+@sec-gateway's pinning problem, visible in your traces if you record both and
+invisible if you record one. And `gen_ai.conversation.id` is what turns a pile
+of spans into a session you can replay.
+
+The metrics are similarly formulaic, and one of them should look familiar:
+
+```text
+gen_ai.client.token.usage             tokens, by type
+gen_ai.client.operation.duration      end-to-end per call
+gen_ai.server.time_to_first_token     @sec-serving's TTFT, as a metric
+gen_ai.server.time_per_output_token   the decode rate, as a metric
+gen_ai.execute_tool.duration
+gen_ai.invoke_agent.duration
+```
+
+[The serving measurements from @sec-serving are not a separate exercise; they
+are two of the standard metrics.]{.hl} If you instrument to the convention you
+get the prefill/decode split as a dashboard rather than as a one-off
+experiment.
+
+## The hierarchy, and where to hang each id {#sec-observability-hierarchy}
+
+A trace is only navigable if the levels are consistent. Five, and the mistake
+teams make is collapsing the middle two:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">One agent run, as spans</div>
+<svg viewBox="0 0 760 268" role="img" aria-label="Nested span diagram for a single agent run, showing session, run, agent, model call and tool call levels">
+  <text x="8" y="18" class="t-xs t-muted t-b">SESSION &#183; gen_ai.conversation.id &#183; many runs, one user</text>
+  <rect x="8" y="26" width="744" height="32" rx="6" class="box"/>
+  <text x="20" y="47" class="t-sm t-mono">conv-042</text>
+  <text x="736" y="47" class="t-xs t-muted t-end">days</text>
+
+  <text x="28" y="80" class="t-xs t-muted t-b">RUN &#183; one user request</text>
+  <rect x="28" y="88" width="704" height="32" rx="6" class="box"/>
+  <text x="40" y="109" class="t-sm t-mono">invoke_agent maintenance-bot</text>
+  <text x="716" y="109" class="t-xs t-muted t-end">2.6 s</text>
+
+  <text x="48" y="142" class="t-xs t-accent t-b">STEPS &#183; alternating model call and tool call</text>
+
+  <rect x="48"  y="150" width="150" height="30" rx="5" class="box-accent"/>
+  <text x="58"  y="170" class="t-xs t-mono">chat llama3.2:3b</text>
+  <rect x="206" y="150" width="118" height="30" rx="5" class="box"/>
+  <text x="216" y="170" class="t-xs t-mono">execute_tool</text>
+  <rect x="332" y="150" width="150" height="30" rx="5" class="box-accent"/>
+  <text x="342" y="170" class="t-xs t-mono">chat llama3.2:3b</text>
+  <rect x="490" y="150" width="118" height="30" rx="5" class="box"/>
+  <text x="500" y="170" class="t-xs t-mono">execute_tool</text>
+  <rect x="616" y="150" width="116" height="30" rx="5" class="box-accent"/>
+  <text x="626" y="170" class="t-xs t-mono">chat</text>
+
+  <path d="M8,200 H752" class="ln-thin"/>
+  <text x="8"   y="222" class="t-xs t-muted t-b">ON THE MODEL SPANS</text>
+  <text x="8"   y="240" class="t-xs t-mono">usage.input_tokens &#183; usage.output_tokens &#183; response.model</text>
+  <text x="8"   y="256" class="t-xs t-muted">cost lives here, and rolls up to every level above</text>
+  <text x="440" y="222" class="t-xs t-muted t-b">ON THE TOOL SPANS</text>
+  <text x="440" y="240" class="t-xs t-mono">tool.name &#183; call.arguments &#183; call.result</text>
+  <text x="440" y="256" class="t-xs t-muted">what the agent actually did</text>
+</svg>
+```
+
+::: {.fig-cap}
+Five levels, and the two ids that make them navigable: a conversation id that
+survives across runs, and a trace id per run. Token counts sit on the model
+spans and roll up; everything above them is arithmetic. The measured run here
+averaged 4.8 spans — one agent span, 2.4 model calls and 1.4 tool calls.
+:::
+::::
+
+The two collapses to avoid: putting every run in one trace, which makes a
+week-long conversation a single unnavigable tree; and giving each step its own
+trace, which loses the run. **One trace per run, one conversation id across
+runs** is the shape that supports both "show me this request" and "show me this
+user's week".
+
+## What a trace costs {#sec-observability-cost}
+
+Instrumentation is usually adopted without an estimate, and the bill arrives
+later. Five agent runs, spans shaped as above:
+
+```text
+ task  spans  chat  tool    bytes  w/o content
+    1      4     2     1     2467         1363
+    2      6     3     2     4059         2029
+    3      6     3     2     4260         2032
+    4      4     2     1     2489         1370
+    5      4     2     1     2562         1388
+
+spans per run        4.8
+bytes per run        3,167
+  without content    1,636
+content share        48.3%
+```
+
+Half the volume is the prompt and completion text — and [these are toy prompts,
+so 48.3% is a floor, not an estimate]{.hl}. The runs above averaged 301 prompt
+tokens. @sec-summarization measured a realistic single-shot request at **890
+prompt tokens**, and @sec-serving worked with contexts of 4,258. Holding the
+measured structure fixed and scaling only the text:
+
+| prompt size per call | bytes per run | content share |
+|:--|--:|--:|
+| 301 tokens (measured here) | 3,167 | 48.3% |
+| 890 tokens (@sec-summarization) | 10,180 | 83.9% |
+| 4,258 tokens (@sec-serving) | 42,513 | 96.2% |
+
+: Trace volume against prompt size, structure held fixed
+{tbl-colwidths="[40,28,32]"}
+
+At a million runs a month that is 4.8M spans and **1.6 GB of structure against
+10.2 GB with realistic prompts recorded** — a six-fold difference that is
+entirely the decision to log content, and a twenty-six-fold one at long context.
+
+So the decision to record prompts is a storage decision, a retention decision
+and a privacy decision at the same time, and it should be made deliberately
+rather than by leaving a default on. The usual resolution is to sample:
+structure on every run, content on a small percentage and on every error.
+
+## Attributing cost {#sec-observability-attribution}
+
+Token counts on model spans are what make @sec-governance's unit economics
+possible, and the mechanism is unglamorous: put the dimensions you will want to
+group by on the span, because you cannot add them retrospectively.
+
+The four that are almost always wanted, and none of which are in the GenAI
+conventions because they are yours rather than the model's: user id, team or
+tenant, feature, and environment. Attach them once at the root and let them
+propagate.
+
+[The number worth reporting is not spend, it is spend per unit of value.]{.hl}
+Cost per session flatters a feature nobody finishes; @sec-agent-eval made the
+same argument for cost per *correct* answer. Cost per resolved ticket, per
+completed task, per accepted suggestion — those are the numbers that survive a
+budget review, and computing them needs the outcome on the trace too.
+
+## From a complaint to the failing span {#sec-observability-rootcause}
+
+The point of tracing is that debugging becomes a procedure rather than an
+inspiration. A workable one:
+
+1. **Find the session.** From a user report, `gen_ai.conversation.id` — which
+   is why the id must reach your support tooling and not only your dashboard.
+2. **Find the run.** One trace per run, ordered by time. If the complaint is
+   "it was wrong", the run is the one before the complaint.
+3. **Read the tool spans first, not the model spans.** What the agent *did* is
+   in `gen_ai.tool.name` and its arguments, and it is far quicker to scan than
+   the prompts.
+4. **Find the first step where the trajectory diverges.** @sec-agent-eval's
+   distinction applies here: the wrong answer is usually several steps after
+   the wrong decision.
+5. **Only then read that span's prompt and completion.** If you sampled content
+   away, this is the step that fails — which is the argument for keeping content
+   on errors.
+6. **Turn it into a test.** @sec-agent-eval's regression discipline: the trace
+   you just read is a scenario.
+
+## What OpenTelemetry does not cover {#sec-observability-not}
+
+Worth stating plainly, because vendors blur it. Tracing records **what
+happened**: which model, how long, how many tokens, which tools, what errors.
+It has nothing to say about whether the output was any good.
+
+Faithfulness, accuracy, safety and quality are the evaluation layer —
+@sec-llm-eval, @sec-agent-eval and @sec-production-eval — and they attach *to*
+traces rather than being produced by them. A judge score can be recorded as a
+span attribute; it is not something the tracing SDK knows.
+
+The practical consequence is that "we have observability" and "we know whether
+it works" are different claims, and a dashboard full of green spans is
+compatible with a product that is confidently wrong on a third of requests.
+
+## Sensitive data in telemetry {#sec-observability-privacy}
+
+Prompts contain whatever users type, which in a support product is names,
+addresses, order numbers and occasionally card details. Recording
+`gen_ai.input.messages` therefore copies personal data into a system that was
+designed for latency histograms.
+
+Three consequences that follow, and they are engineering work rather than
+policy statements:
+
+**Redact at the boundary, before export.** A span processor that scrubs before
+the exporter is the only place it can be done once. Redacting in the backend
+means it was transmitted; redacting per instrumentation means five
+implementations, which is @sec-gateway's argument in a different building.
+
+**Telemetry has residency and retention obligations too.** The data is a copy of
+the same personal data your database holds, and the fact that it lives in a
+monitoring vendor does not exempt it. @sec-governance is where the obligations
+themselves live.
+
+**Sampling content is a privacy control, not only a cost one.** The measurement
+above frames it as storage; it is also the difference between holding every
+user's text and holding a small sample. Those happen to be the same decision,
+which is convenient, and it is worth making it for both reasons at once.
+
+## Lab: instrument an agent, then debug it from the trace alone {#sec-observability-lab}
+
+### Step 1 — instrument one agent to the convention
+
+Model spans and tool spans, named as the specification says, carrying
+`gen_ai.operation.name`, the request and response model, both token counts, and
+a conversation id. Record which version of the conventions you instrumented
+against — you will want it when the attribute names move.
+
+### Step 2 — measure your own trace volume
+
+Run twenty realistic requests and record spans per run, bytes per run, and bytes
+with content stripped. Multiply by your monthly traffic. Do this *before*
+turning on content recording, so the number informs the decision instead of
+explaining the bill.
+
+### Step 3 — add your own dimensions
+
+User, team, feature, environment. Attach them at the root and confirm they
+propagate to every child span. Then produce cost per feature for a day.
+
+### Step 4 — produce cost per unit of value
+
+Add the outcome — resolved, abandoned, escalated — to the root span, and
+recompute cost per *resolved* task. Compare the two rankings. If a feature
+changes place, that is the point of the step.
+
+### Step 5 — inject a fault and find it blind
+
+Have somebody else break something: a tool returning stale data, a step ceiling
+lowered, a prompt truncated. Then find it using only the trace, timing yourself.
+Write down what you wished you had instrumented — that list is the real output
+of this lab.
+
+### Step 6 — redact, and prove it
+
+Add a span processor that scrubs personal data before export. Send a request
+containing an email address and a phone number, then search your backend for
+both. Finding either is a failed step, not a finding.
+
+### What to hand in
+
+Your spans-per-run and bytes-per-run with and without content, projected to your
+traffic; a cost-per-resolved-task table by feature; the time it took to find the
+injected fault and the instrumentation you wished you had; and evidence that
+redaction happens before export.
+
+## Intuition checks {#sec-observability-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. You already run distributed tracing. What actually changes?
+
+Less than vendors imply, and three things genuinely.
+
+The payload is text and it is large, so volume is dominated by prompts rather
+than by span count. Cost is an attribute rather than an afterthought, because
+token counts convert to money and roll up. And failure is often not an error:
+a span with `status=OK` can hold a confidently wrong answer or a run that hit
+its step ceiling.
+
+Everything else — context propagation, sampling, exporters, your backend — is
+what you already have.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Should you record prompts and completions?
+
+It is a storage decision, a retention decision and a privacy decision at once,
+so make it once, deliberately.
+
+Measured here, content was 48.3% of trace volume on toy prompts of 301 tokens.
+At @sec-summarization's realistic 890 tokens it is 83.9%, and at
+@sec-serving's long contexts 96.2% — a six- to twenty-six-fold difference in
+bytes that is entirely this one setting.
+
+The usual resolution is to sample: structure on every run, content on a small
+percentage and on every error. That keeps debugging possible where it matters
+and stops you holding every user's text.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your dashboard is green and users say the agent is wrong. Contradiction?
+
+No — you are reading the wrong instrument.
+
+Tracing records what happened: models, durations, tokens, tools, exceptions. It
+does not know whether the answer was any good, and a run that returns a fluent
+falsehood in 900 ms is a healthy span by every transport-layer measure.
+
+Quality lives in the evaluation layer (@sec-llm-eval, @sec-agent-eval,
+@sec-production-eval) and attaches *to* traces as scores. "We have
+observability" and "we know whether it works" are different claims.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Why record both the requested and the responded model?
+
+Because they differ exactly when it matters.
+
+`gen_ai.request.model` is what you asked for; `gen_ai.response.model` is what
+answered. When an unversioned alias resolves to a dated version — @sec-gateway's
+silent-upgrade problem — the second changes and the first does not. Record both
+and the upgrade appears in your traces on the day it happens; record one and you
+find out from an output-quality regression weeks later.
+
+It is two attributes and it converts an invisible dependency change into a
+visible one.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. You instrumented to the GenAI conventions last year and names have changed.
+
+Expected, and the fix is to have recorded which version you targeted.
+
+The conventions moved repository in 2026 — into
+`open-telemetry/semantic-conventions-genai` — and of the marked items in the
+current span document, 286 are `Development` against 22 `Stable`. The new
+repository has no tagged release at all.
+
+That is not an argument against using them; they remain the only common
+vocabulary, and a vendor UI that understands them is worth a lot. It is an
+argument for pinning, for recording the pin next to the instrumentation, and
+for budgeting a migration rather than being surprised by one.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Which cost number should a budget review see?
+
+Cost per unit of value, not cost per session.
+
+Cost per session flatters a feature nobody completes and punishes one that does
+real work in several steps. @sec-agent-eval made the same argument for
+evaluation with cost per *correct* answer; here it is cost per resolved ticket,
+per completed task, per accepted suggestion.
+
+Computing it means the outcome has to be on the trace, which is a two-line
+change at the root span and impossible to add retrospectively — you cannot
+group by a dimension you did not record.
+:::
+
+## Exercises {#sec-observability-exercises}
+
+1. **Volume before the bill.** Instrument one workload, measure spans and bytes
+   per run with and without content, and project to monthly traffic. Then decide
+   your content sampling rate and write down the reasoning.
+
+2. **Find the alias.** Record `gen_ai.request.model` and
+   `gen_ai.response.model` for a week against a hosted provider. Report whether
+   they ever diverged, and what you would have noticed if they had.
+
+3. **Cost per resolved task.** Produce two rankings of your features — by cost
+   per session and by cost per resolved task. Explain any feature that changes
+   place.
+
+4. **Blind debugging, timed.** Have a colleague inject a fault. Find it using
+   only the trace and record the time. Repeat after adding the instrumentation
+   you wished you had, and compare.
+
+5. **The redaction test.** Send a request containing an email address and a
+   phone number through your instrumented path, then search your telemetry
+   backend for both. If either is present, your redaction is in the wrong place.
+
+6. **Conventions drift.** Take an instrumentation library you use and find which
+   version of the GenAI conventions it targets. Diff its attribute names against
+   the current specification and list what would break.
+
+7. **Sampling that keeps errors.** Implement content sampling that records 5% of
+   successful runs and 100% of failures. Verify on real traffic that no failed
+   run lost its prompt.
+
+## Interview questions {#sec-observability-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurement makes answerable.
+:::
+
+### Testing whether you understand the layer
+
+**Q: How is tracing an LLM agent different from tracing a microservice?**
+
+Structurally it is not — spans, parents, context propagation and your existing
+backend all apply. Three things differ: the payload is text and dominates
+volume, so the interesting attribute is kilobytes rather than a status code;
+cost is an attribute, because token counts convert to money and roll up the
+tree; and a successful span can contain a wrong answer, so `status=OK` is not
+evidence the run worked.
+
+**Q: What would you put on an LLM span?**
+
+Operation name, provider, requested *and* responded model, both token counts, a
+conversation id, and your own dimensions — user, team, feature, environment —
+because you cannot group by what you did not record. Then say what you would
+sample rather than always record: the prompt and completion, which is most of
+the volume.
+
+**Q: How much telemetry will this generate?**
+
+Answer with a method, not a number. Spans per run times traffic, plus bytes per
+run — and note that bytes are dominated by prompts. Measured here at 4.8 spans
+and 3.2 KB per run on toy prompts; at realistic prompt sizes the same structure
+is 10 KB, and content becomes 84% of it. So the estimate turns almost entirely
+on whether you record content.
+
+### Testing whether you have shipped one
+
+**Q: A user says the agent gave a wrong answer yesterday. Walk me through it.**
+
+Conversation id from the support ticket — which means that id has to reach
+support tooling, not just the dashboard. Then the run before the complaint, then
+the tool spans before the model spans, because what the agent *did* is faster to
+scan than what it read. Find the first step where the trajectory diverges, since
+the wrong answer is usually several steps after the wrong decision. Then read
+that span's prompt. Then turn it into a regression test.
+
+**Q: Your monitoring bill tripled after adding LLM tracing. Why?**
+
+Almost certainly content. Structure is small and roughly fixed per run; prompts
+are not, and they grow with context. Measured here, moving from 301-token
+prompts to 4,258-token ones takes a run from 3.2 KB to 42.5 KB with the same
+number of spans. The fix is sampling content while keeping structure on
+everything, and keeping content on errors.
+
+**Q: How do you keep personal data out of your traces?**
+
+Redact before export, in a span processor, so it happens once for every
+instrumentation rather than five times differently. Then say the two things
+people miss: telemetry inherits the same residency and retention obligations as
+the database, because it is a copy of the same data; and content sampling is a
+privacy control as well as a cost one, which makes it an easy decision to
+justify twice.
+
+## The 2026 toolbox {#sec-observability-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `llama3.2:3b` for the instrumented agent runs |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `opentelemetry-sdk` | 1.44.0 | the tracing SDK itself; the vendor-neutral floor everything else builds on |
+| `opentelemetry-instrumentation` | 0.65b0 | auto-instrumentation packages, including the GenAI ones — note the pre-release version, which matches the conventions' own maturity |
+| `openinference-instrumentation` | 0.1.59 | Arize's instrumentation for LLM frameworks, OTel-compatible |
+| `arize-phoenix` | 20.4.0 | an open-source trace UI you can run locally, useful while learning what to record |
+| `langfuse` | 4.15.1 | LLM-focused tracing with evaluation and prompt management attached |
+| `traceloop-sdk` | 0.62.3 | OpenLLMetry's SDK, wrapping OTel with LLM-specific defaults |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[30,12,58]"}
+
+## What to remember {#sec-observability-summary}
+
+- **An agent trace is a distributed trace, with three differences.** The payload
+  is text and dominates volume; cost is an attribute rather than an afterthought,
+  because token counts convert to money and roll up; and failure is often not an
+  error, so a span with `status=OK` can hold a confidently wrong answer or a run
+  that hit its ceiling.
+
+- **The GenAI conventions moved, and most of them are unstable.** They now live
+  in `open-telemetry/semantic-conventions-genai`, split out of the main
+  semantic-conventions repository, which still carries forwarding notices at the
+  old paths. Of the marked items in the current span document, **286 are
+  `Development` against 22 `Stable`**, and the new repository has no tagged
+  release. Use them — they are the only shared vocabulary — but pin the version
+  and record the pin.
+
+- **Span names are formulaic, not free text.** `{operation} {model}` for a model
+  call, `execute_tool {tool.name}` for a tool call. Getting this right is what
+  makes someone else's dashboard work on your traces.
+
+- **Record the responded model as well as the requested one.** They diverge
+  exactly when an alias silently resolves to a new version — @sec-gateway's
+  problem — and two attributes turn an invisible dependency change into a
+  visible one.
+
+- **@sec-serving's measurements are standard metrics.**
+  `gen_ai.server.time_to_first_token` and
+  `gen_ai.server.time_per_output_token` are in the specification, so the
+  prefill/decode split is a dashboard rather than a one-off experiment.
+
+- **Estimate telemetry volume before you turn content recording on.** Measured
+  here: **4.8 spans and 3,167 bytes per run**, of which **48.3% was prompt and
+  completion text** — and that was on 301-token prompts. Holding the structure
+  fixed and scaling the text to @sec-summarization's realistic 890 tokens gives
+  10,180 bytes and **83.9% content**; at @sec-serving's 4,258-token contexts,
+  **96.2%**. [Whether you log prompts is a six- to twenty-six-fold decision
+  about your monitoring bill.]{.hl}
+
+- **Sampling content is a cost control and a privacy control at once.**
+  Structure on every run, content on a small share and on every error. Redact
+  before export, in a span processor, so it happens once rather than five times
+  differently — and remember that telemetry inherits the same residency and
+  retention obligations as the database it copies from.
+
+- **Put your own dimensions on the root span.** User, team, feature,
+  environment, and the outcome. You cannot group by a dimension you did not
+  record, and the number a budget review needs is cost per *resolved task*, not
+  cost per session.
+
+- **Tracing tells you what happened, not whether it was any good.** Quality,
+  faithfulness and safety belong to the evaluation layer and attach to traces as
+  scores. A dashboard full of green spans is entirely compatible with a product
+  that is confidently wrong.
