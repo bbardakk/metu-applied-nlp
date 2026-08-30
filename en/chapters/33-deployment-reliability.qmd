@@ -1,56 +1,595 @@
 # Deployment Topologies and Reliability {#sec-deployment}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One small measurement, about a minute of compute:
+48 short calls asking a model to emit the same tool call repeatedly, to find out
+whether retrying an agent step reproduces it. Everything else here is ordinary
+distributed-systems practice applied to a non-deterministic caller, and is cited
+rather than re-derived. Software: `ollama` 0.24.0 serving `llama3.2:3b`, Python
+3.14.5, Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- choose between managed runtimes and self-hosted containers with a stated rationale;
-- make side-effecting agent actions safe to retry;
-- bound an agent by steps, tokens, and wall-clock time;
-- undo what an agent did when it goes wrong.
+- choose between a managed agent runtime and your own containers with a stated
+  rationale rather than a preference;
+- decide where a conversation lives, and what that decision costs you when you
+  scale out;
+- run agents that outlive a request, with progress and cancellation;
+- say what durable execution demands of your tool code before you adopt it;
+- make a side-effecting step safe to retry, and derive the idempotency key from
+  the right place;
+- write the compensating action for each tool, and identify the one that has
+  none;
+- bound a session by steps, tokens and wall-clock time.
 
-## Managed agent runtimes vs. self-hosted containers
+## Where the agent actually runs {#sec-deployment-where}
 
-<!-- TODO(draft): the trade matrix: control, cost, residency, and speed to
-    ship. -->
+The first decision is a boring one, and teams routinely make it by habit. There
+are three shapes, and the honest way to choose is to name which constraint is
+binding.
 
-## Stateless vs. stateful agents; session stores
+| | you get | you give up | choose it when |
+|:--|:--|:--|:--|
+| **Managed agent runtime** | session state, retries, scaling and traces without writing them | control over the loop, the ability to run in your own network, and portability | speed to ship matters more than control, and no data-residency rule blocks it |
+| **Your own containers** | full control of the loop, the network and the data path | building session storage, cancellation, retry semantics and observability yourself | residency or an existing platform makes it necessary — not because it feels more serious |
+| **Serverless functions** | scale-to-zero and no idle cost | long runs, because execution is time-boxed | traffic is spiky and every task finishes in seconds |
 
-<!-- TODO(draft): where the conversation lives; scaling implications. -->
+: Three shapes, and the constraint that should pick one
+{tbl-colwidths="[20,28,28,24]"}
 
-## Long-running and asynchronous agents; queue-backed execution
+[The one that catches teams out is the third.]{.hl} An agent loop is not a
+request handler: it can take minutes, and a platform that caps execution at a
+few seconds will kill it in the middle, after the tools have already run. If
+your runtime has a hard execution ceiling, the loop has to move behind a queue —
+which is @sec-deployment-long, and is a change to the product, not to the
+deployment.
 
-<!-- TODO(draft): agents that run for hours; progress reporting and
-    cancellation. -->
+## Where the conversation lives {#sec-deployment-state}
 
-## Durable execution and workflow engines
+An agent is a loop over messages, so the messages have to be somewhere. Three
+places, in increasing order of what they let you do:
 
-<!-- TODO(draft): surviving a crash mid-task; replay semantics and their
-    constraints on tool design. -->
+**In the process.** Simple, fast, and it means one instance owns a session
+forever. Any restart, deploy or scale-in loses conversations, and load balancing
+has to pin a user to an instance — which is the constraint that eventually
+forces the change.
 
-## Timeouts, retries with jitter, circuit breakers
+**In a session store.** The loop reads the history at the start of a turn and
+writes it back at the end. Any instance can serve any turn, restarts are
+survivable, and the store's latency is now on every turn. This is the default
+that fits almost everything.
 
-<!-- TODO(draft): standard distributed-systems hygiene, applied to a
-    non-deterministic caller. -->
+**In the client.** The caller sends the whole history each turn. The server is
+genuinely stateless and trivially scalable — and the cost lands squarely in
+@sec-serving's arithmetic, because that history is prompt tokens, growing every
+turn, paid for on every request. It also means the client can edit the history,
+which @sec-agent-security has opinions about.
 
-## Idempotency keys for side-effecting tools
+::: {.column-margin}
+The token cost of client-held state is easy to underestimate. A twenty-turn
+conversation resends nineteen turns of history on the last request, so the
+prompt grows roughly quadratically over the session — and @sec-serving's
+measurements show prefill dominating latency well before that becomes a bill
+problem. Prompt caching helps exactly here, provided the history is append-only
+and nothing volatile sits at the top.
+:::
 
-<!-- TODO(draft): the retry that sent the email twice; connect to
-    @sec-tool-design. -->
+## Agents that outlive a request {#sec-deployment-long}
 
-## Compensating transactions: undoing what an agent did
+Once a task takes minutes, holding an HTTP connection open for it stops being
+reasonable: clients time out, load balancers cut idle connections, and a deploy
+kills whatever was in flight.
 
-<!-- TODO(draft): there is no rollback for a sent message; design
-    compensations up front. -->
+The shape that works is the one every long-running system converges on. Accept
+the request, write a job, return an id. A worker picks the job up. The client
+polls or subscribes for progress. Three things that are easy to skip and painful
+to add later:
 
-## Budget ceilings: steps, tokens, and wall-clock per session
+- **Progress that means something.** "Step 4 of an unknown number" is not
+  progress. Emit the step, the tool just called, and tokens spent so far —
+  @sec-observability is where those become traces.
+- **Cancellation that actually stops work.** A cancel flag the loop never checks
+  is decoration. The loop must read it between steps, and the tools must be
+  cancellable or at least idempotent, because a cancel arriving mid-tool-call
+  cannot unring that bell.
+- **A dead-letter path.** Jobs that fail repeatedly must land somewhere a human
+  sees, rather than being retried forever — which is @sec-deployment-retry's
+  problem in a different costume.
 
-<!-- TODO(draft): the three limits every agent needs before it reaches
-    production. -->
+## Durable execution, and what replay demands of your code {#sec-deployment-durable}
 
-## Exercises
+If a worker crashes halfway through a twelve-step agent run, what happens? The
+naive answer — start again — re-executes every tool call, including the ones
+that already sent something.
 
-1. Take an agent with side-effecting tools. Add idempotency keys and prove double-execution is impossible.
-2. Write the compensating action for each side-effecting tool in your system. Which one has no compensation?
+**Durable execution** engines answer this by recording each completed step and
+replaying the history after a crash, so completed work is not repeated. Temporal
+and Restate are the usual examples, and the idea long predates agents.
+
+The part that matters for adopting one is not the engine, it is the contract it
+imposes on your code:
+
+[Replay means your workflow function runs again from the top, and every
+completed step returns its recorded result instead of executing.]{.hl} For that
+to be sound, the function has to be *deterministic*: same history, same
+sequence of decisions. Reading the clock, generating a random id or calling an
+API directly from workflow code all break it, because the replay would take a
+different path than the original.
+
+Which lands awkwardly on agents, and it is worth being blunt about it. **An LLM
+call is the least deterministic thing in your system.** The resolution is
+structural rather than clever: the model call is a *step* — an activity, in
+Temporal's vocabulary — whose result is recorded and replayed, not a decision
+made inside workflow code. The workflow orchestrates; the non-determinism lives
+in the steps it records.
+
+That is a real constraint on tool design (@sec-tool-design), and adopting a
+durable engine after the fact usually means rewriting the loop rather than
+wrapping it.
+
+## Retrying a step is not retrying a request {#sec-deployment-retry}
+
+@sec-gateway dealt with retries against a *provider*: the failure there is
+amplification, and the fix is backoff, jitter, circuit breakers and a retry
+budget. This section is about retrying an *agent step*, where the failure is
+different and worse.
+
+A provider retry that succeeds twice costs you money. An agent-step retry that
+succeeds twice sends the email twice.
+
+The interesting question underneath is one people assume rather than measure:
+**when you retry the step, do you get the same tool call?** Asking a model to
+emit one `send_email` call, eight times, for three tasks:
+
+```text
+    task  temp   seed  identical  distinct to  distinct subj
+   clear   0.0      0       True            1              1
+   clear   0.0   None       True            1              1
+   clear   0.7   None      False            1              1
+   vague   0.0      0       True            1              1
+   vague   0.0   None       True            1              1
+   vague   0.7   None      False            1              6
+  choice   0.0      0       True            1              1
+  choice   0.0   None       True            1              1
+  choice   0.7   None      False            5              2
+```
+
+Read the last row. The task was *"the pump failed, notify whoever needs to
+know"*, and across eight retries at temperature 0.7 the model chose **five
+different recipients**:
+
+```text
+  3x  maintenance@factory.com
+  2x  maintenance@company.com
+  1x  pump_repair_team@example.com
+  1x  maintenance-team@company.com
+  1x  engineering@company.com
+```
+
+[A retry did not repeat the action. It performed a different one.]{.hl} Every
+address is invented, and a retry loop with no idempotency protection would have
+mailed several of them.
+
+Two things this does *not* say, both of which matter.
+
+**Temperature 0 is not the fix, it is a different risk.** At temperature 0 all
+eight retries were byte-identical for every task — including `choice`, which
+deterministically invented `maintenance@company.com`. Reproducible and still
+wrong. Determinism makes a retry *repeatable*; it does not make the underlying
+decision correct.
+
+**And this determinism is a property of a single-stream local server, not a
+guarantee.** Hosted APIs are widely documented as not promising bit-identical
+output at temperature 0, because batching, floating-point reduction order and
+expert routing all vary with what else is in flight. Treat temperature 0 as a
+variance reduction, never as an idempotency mechanism.
+
+::: {.column-margin}
+The pattern in the table is worth more than the individual numbers: temperature
+only did damage where the *task* left the side effect under-specified.
+`clear` — which named the recipient — was stable even at 0.7, while `choice`
+was not. Ambiguity in the instruction is what temperature amplifies, which
+makes this a prompt problem as much as a sampling one.
+:::
+
+## Idempotency keys, and where the key comes from {#sec-deployment-idempotency}
+
+The standard fix for a duplicated side effect is an **idempotency key**: the
+caller supplies a key, the receiver records it, and a second request carrying a
+key it has already seen returns the first result instead of acting again.
+
+The measurement above settles the design question that usually gets hand-waved:
+
+[The key cannot be derived from the model's output.]{.hl} Hashing the tool
+arguments seems natural and fails exactly when you need it: the `choice` retries
+produced five different argument sets, so five different hashes, so five emails.
+A key computed from a non-deterministic value is not a key.
+
+So derive it from something upstream and stable:
+
+| key derived from | dedupes a retry? | notes |
+|:--|:--|:--|
+| Hash of tool arguments | [no]{.con} | changes when the model changes its mind — the failure this section measured |
+| Random id per attempt | [no]{.con} | a new key every retry, which is the same as having none |
+| `(session id, step index)` | [yes]{.pro} | stable across retries of the same step; the usual right answer |
+| Upstream request id | [yes]{.pro} | right when one request must produce at most one side effect end to end |
+
+: Four candidate keys, and the two that work {tbl-colwidths="[26,18,56]"}
+
+Two implementation notes that decide whether it works in practice. The record
+must be written **in the same transaction as the effect**, or a crash between
+them re-opens the window. And it needs a retention window long enough to cover
+your longest retry, which is easy to set to five minutes and then discover was
+needed for six hours.
+
+## Compensation: there is no rollback for a sent email {#sec-deployment-compensation}
+
+Idempotency stops an action happening twice. It does nothing about an action
+that should not have happened once.
+
+Databases give you transactions. The tools an agent calls mostly do not, so the
+pattern is a **compensating action**: for each side effect, the operation that
+undoes it — and the discipline is to write that column before shipping the tool,
+not after the incident.
+
+| tool | compensation | honest? |
+|:--|:--|:--|
+| Create a record | delete it | [yes]{.pro} |
+| Charge a card | refund | mostly — the fee and the statement line survive |
+| Book a slot | cancel | usually, unless it released a hold someone else took |
+| Post to a channel | delete the message | [no — people read it]{.con} |
+| Send an email | [nothing]{.con} | [no]{.con} |
+
+: Compensations, and the two rows that admit there is none
+{tbl-colwidths="[24,30,46]"}
+
+[The bottom two rows are the design constraint.]{.hl} When a tool has no
+compensation, the control has to move *earlier* — an approval gate before the
+action rather than an undo after it, which is @sec-guardrails' subject. That is
+a product decision disguised as an engineering one, and the compensation table
+is what forces somebody to make it deliberately.
+
+A useful habit when writing tools (@sec-tool-design): give every side-effecting
+tool a dry-run mode. It makes the compensation table testable and it gives the
+agent a way to check its own plan before committing to it.
+
+## Three ceilings every agent needs {#sec-deployment-ceilings}
+
+@sec-agent-anatomy measured what happens without them: runs that never
+terminate, and an outcome metric that records the ones which happened to be
+right as successes. Three limits, and they catch different failures:
+
+| ceiling | catches | what to do at the limit |
+|:--|:--|:--|
+| **Steps** | the loop that keeps calling tools | stop, return partial work, mark it unfinished |
+| **Tokens** | the run that stays cheap per step and expensive overall | stop and report spend — @sec-gateway enforces the same limit per key |
+| **Wall clock** | the tool that hangs, which neither other limit sees | cancel, and make sure cancellation reaches the tool |
+
+: Three ceilings, three different failures {tbl-colwidths="[16,42,42]"}
+
+All three are needed because each is blind to the others' failure. A step cap
+does not stop one tool hanging for an hour; a wall-clock timeout does not stop
+sixty fast steps burning a budget; a token cap does not stop a loop that reads
+the same small file forever.
+
+And hitting a ceiling is a **result**, not an error to swallow. It must appear
+in the response, in the trace, and in your evaluation as a distinct outcome —
+@sec-agent-eval's termination rate is exactly this number, and an agent that
+looks 85% accurate while hitting its cap on a third of runs is not an 85%
+accurate agent.
+
+## Lab: make a step safe to retry {#sec-deployment-lab}
+
+Take an agent with at least one side-effecting tool. If you do not have one, a
+`send_email` that appends to a file is enough — the point is to *see* the
+duplicate.
+
+### Step 1 — reproduce the duplicate
+
+Run the agent, kill the worker after the tool executes but before the result is
+recorded, and restart. Count the effects. You should get two. If you cannot make
+it happen on purpose, you cannot claim it will not happen by accident.
+
+### Step 2 — measure your own retry determinism
+
+Ask your model for the same tool call ten times at your production temperature.
+Count distinct argument sets. Then repeat with one deliberately under-specified
+task. The gap between those two numbers is how much your prompt is protecting
+you.
+
+### Step 3 — add an idempotency key from the right place
+
+Key on `(session id, step index)`, not on the arguments. Repeat step 1. The
+second execution must return the first result without acting.
+
+### Step 4 — put the key and the effect in one transaction
+
+Then re-run step 1, killing the worker *between* the effect and the record.
+If the duplicate comes back, the write was not atomic — which is the bug this
+step exists to expose.
+
+### Step 5 — write the compensation table
+
+Every side-effecting tool, its compensating action, and an honest note on
+whether the compensation is real. Circulate it. The rows with no compensation
+are the ones that need an approval gate, and that is a conversation with
+somebody outside engineering.
+
+### Step 6 — set the three ceilings and trip each one
+
+Steps, tokens, wall clock. Write a task that trips each ceiling separately —
+a loop, an expensive run, a hanging tool — and confirm the agent stops, reports
+which ceiling it hit, and that the outcome is distinguishable from success.
+
+### What to hand in
+
+The duplicate count before and after the key; your distinct-argument counts for
+a clear and a vague task; the compensation table with its honest column; and
+evidence that each of the three ceilings fires and is reported.
+
+## Intuition checks {#sec-deployment-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Your agent runs fine locally and gets killed in production after 30 seconds.
+
+You deployed a loop onto a request handler.
+
+Serverless platforms and many load balancers cap execution, and an agent loop is
+not a request: it can take minutes, and the cap arrives mid-run — after some
+tools have already executed. The symptom is a truncated run with real side
+effects and no result.
+
+The fix is structural, not a timeout setting: accept the request, enqueue a job,
+return an id, and let a worker run the loop. That change also gives you the
+place to put progress, cancellation and a dead-letter path.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Is temperature 0 enough to make a retry safe?
+
+No, and it confuses two different properties.
+
+Measured here, temperature 0 made eight retries byte-identical for every task —
+including one where the model deterministically invented a recipient address.
+Reproducible and wrong. Determinism makes a retry *repeatable*; it does not make
+the decision correct, and it does nothing about the effect having already
+happened.
+
+It is also not a guarantee. Hosted APIs do not promise bit-identical output at
+temperature 0, because batching and reduction order vary with what else is in
+flight. Idempotency has to come from a key, not from sampling settings.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Why not hash the tool arguments for the idempotency key?
+
+Because the arguments are the model's output, and the model's output is exactly
+what varies between retries.
+
+Measured: for the task *"the pump failed, notify whoever needs to know"*, eight
+retries at temperature 0.7 produced **five different recipient addresses**. Five
+argument sets, five hashes, five emails — the key would have deduped nothing at
+the moment it was needed.
+
+Derive the key from something upstream and stable: `(session id, step index)`,
+or the request id when one request must produce at most one effect.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Which of your tools has no compensating action?
+
+Usually the one that talks to a person.
+
+Creating a record can be deleted; a charge can be refunded, allowing for the fee
+and the statement line; a booking can be cancelled. But a posted message can
+only be deleted *after* people have read it, and a sent email cannot be undone
+at all.
+
+That is why the compensation table has to be written before shipping rather than
+after an incident. Where the compensation column says "none", the control moves
+earlier — an approval gate before the action (@sec-guardrails) — and somebody
+outside engineering has to agree to it.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. You added durable execution and your agent now behaves strangely on replay.
+
+Something non-deterministic is running inside workflow code.
+
+Replay re-runs the workflow function from the top, returning recorded results
+for completed steps. That is only sound if the function takes the same path
+every time, so reading the clock, generating a random id, or calling an API
+directly from workflow code all break it.
+
+For agents the specific trap is obvious once stated: the LLM call is the least
+deterministic thing you have, so it must be a recorded *step*, not a decision
+made in workflow code. The workflow orchestrates; the non-determinism lives in
+the steps it records.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. A step cap is set. Do you still need a timeout?
+
+Yes, because they are blind to each other.
+
+A step cap does not stop one tool hanging for an hour — that is zero additional
+steps. A wall-clock timeout does not stop sixty fast steps burning a budget. A
+token cap does not stop a loop that reads the same small file forever.
+
+Set all three, and treat hitting any of them as a distinct outcome that appears
+in the response, the trace and the evaluation. @sec-agent-eval's termination
+rate is that number, and an agent reported as 85% accurate while capping out on
+a third of runs has not been measured honestly.
+:::
+
+## Exercises {#sec-deployment-exercises}
+
+1. **Force the duplicate.** Kill a worker between a tool executing and its
+   result being recorded. Count the effects. Then add an idempotency key and
+   show the count returns to one.
+
+2. **Your determinism number.** Ask your production model for the same tool call
+   ten times at your production temperature, and count distinct argument sets.
+   Repeat with a deliberately vague instruction. Report both.
+
+3. **The compensation table.** One row per side-effecting tool in a system you
+   work on: the tool, its compensation, and whether the compensation is honest.
+   Identify the rows that need an approval gate instead.
+
+4. **Atomicity.** Find out whether your idempotency record is written in the
+   same transaction as the effect it guards. If it is not, construct the
+   interleaving that produces a duplicate, and say how likely it is at your
+   traffic.
+
+5. **Trip all three ceilings.** Write three tasks that exhaust steps, tokens and
+   wall clock respectively. Confirm each stops the agent, and that the three are
+   distinguishable in your logs.
+
+6. **The state decision, priced.** For a twenty-turn conversation, compute the
+   prompt tokens under client-held history versus a session store. Use
+   @sec-serving's arithmetic to turn that into latency and cost, then say which
+   you would choose and why.
+
+7. **Cancellation, honestly.** Send a cancel to a running agent and measure how
+   long until work actually stops, and whether the in-flight tool call
+   completed. If nothing checks the flag between steps, you do not have
+   cancellation.
+
+## Interview questions {#sec-deployment-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurement makes answerable.
+:::
+
+### Testing whether you understand the failure
+
+**Q: Your agent's worker crashes mid-run. What did it leave behind?**
+
+Whatever the completed tool calls already did, with no record that they
+completed. A naive restart re-executes them. Name the two answers: durable
+execution, which records each step and replays the history so completed work is
+not repeated; or idempotency keys on the side-effecting tools, so re-execution
+is harmless. Most systems need the second regardless, because the first only
+covers crashes inside the engine.
+
+**Q: Is retrying an LLM step idempotent?**
+
+Not by default, and not for the reason people expect. Beyond the effect having
+already happened, the retry may not even repeat the same action — measured here,
+a vague task produced five different recipient addresses across eight retries.
+Temperature 0 made retries byte-identical on a local server, but that is a
+variance reduction, not a guarantee, and hosted APIs do not promise it.
+
+**Q: Where does an idempotency key come from?**
+
+Somewhere upstream and stable — `(session id, step index)`, or the request id.
+Explicitly *not* a hash of the tool arguments, because those are the model's
+output and vary between retries. Then two details that decide whether it works:
+the key must be recorded in the same transaction as the effect, and the
+retention window must outlast your longest retry.
+
+### Testing whether you have shipped one
+
+**Q: Design deployment for an agent whose tasks take twenty minutes.**
+
+Queue-backed, because a twenty-minute HTTP request does not survive a deploy or
+a load balancer. Accept, enqueue, return an id; a worker runs the loop; the
+client polls or subscribes. Then the three things that are painful to add later:
+meaningful progress, cancellation the loop actually checks between steps, and a
+dead-letter path so failures reach a human instead of retrying forever. Add the
+three ceilings and make hitting one a reported outcome.
+
+**Q: Where does the conversation live, and what does that cost?**
+
+In the process is simplest and pins a user to an instance, so restarts lose
+sessions. A session store is the default: any instance serves any turn, at the
+cost of the store's latency on every turn. Client-held history makes the server
+stateless but resends the whole conversation every turn, which is prompt tokens
+growing over the session — @sec-serving's cost arithmetic — and lets the client
+edit the history, which is a security question (@sec-agent-security).
+
+**Q: An agent posted a wrong message to a customer channel. What is your review about?**
+
+Not the model. Whether that tool had a compensation, whether the compensation is
+real — deleting a message people already read is not an undo — and if it is not,
+why the action was not behind an approval gate. Then whether it could have been
+a duplicate rather than a decision, which is the idempotency question, and
+whether the run hit a ceiling and was reported as a success.
+
+## The 2026 toolbox {#sec-deployment-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `llama3.2:3b` for the retry-determinism measurement |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `temporalio` | 1.32.0 | durable execution with replay; the mature option, and the one whose determinism contract this chapter describes |
+| `restate-sdk` | 1.0.4 | durable execution with a lighter operational footprint |
+| `dbos` | 2.31.0 | durable workflows backed by Postgres, when you already run one |
+| `prefect` | 3.8.4 | workflow orchestration with retries and observability, closer to data pipelines than to agents |
+| `celery` | 5.6.3 | the long-standing Python task queue when you need queue-backed workers and nothing more |
+| `rq` | 2.12.0 | a smaller queue on Redis, when Celery is more than the job needs |
+| `ray` | 2.58.0 | distributed execution when the agent fans out across machines |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[22,14,64]"}
+
+## What to remember {#sec-deployment-summary}
+
+- **An agent loop is not a request handler.** It takes minutes, so a platform
+  with an execution ceiling will kill it mid-run, after some tools have already
+  fired. Once tasks outlive a request the shape is queue-backed: accept,
+  enqueue, return an id, and add progress, cancellation and a dead-letter path
+  while it is still cheap to add them.
+
+- **Where the conversation lives is a cost decision.** In-process pins a user to
+  an instance and loses sessions on deploy. A session store is the default. A
+  client-held history makes the server stateless and turns the conversation into
+  prompt tokens that grow every turn — @sec-serving's arithmetic, and prefill
+  dominates latency long before it dominates the bill.
+
+- **Durable execution imposes determinism on your workflow code.** Replay re-runs
+  the function and returns recorded results for completed steps, so clocks,
+  random ids and direct API calls inside workflow code break it. The LLM call is
+  the least deterministic thing you have, so it belongs in a recorded *step*,
+  not in workflow code. Adopting an engine later usually means rewriting the
+  loop.
+
+- **Retrying a step is not retrying a request.** @sec-gateway's retry problem is
+  amplification; this one is duplication. And the retry may not even repeat the
+  same action: asked to *notify whoever needs to know*, a model produced **five
+  different recipient addresses across eight retries** at temperature 0.7.
+
+- **Temperature 0 is variance reduction, not idempotency.** All eight retries
+  were byte-identical at temperature 0 in this measurement — including the run
+  that deterministically invented an address. Reproducible is not correct, and
+  hosted APIs do not promise bit-identical output at temperature 0 anyway,
+  because batching and reduction order vary with what else is in flight.
+
+- **Derive the idempotency key from upstream, never from the model's output.**
+  Hashing tool arguments fails exactly when it is needed — five argument sets
+  means five hashes means five emails. Use `(session id, step index)` or the
+  request id, write the record in the same transaction as the effect, and give
+  it a retention window longer than your longest retry.
+
+- **Write the compensation table before shipping the tool.** A record can be
+  deleted, a charge refunded, a booking cancelled. A posted message can only be
+  deleted after people have read it, and a sent email cannot be undone at all.
+  [Where the compensation column says "none", the control moves earlier]{.hl} —
+  an approval gate rather than an undo — and that is a decision for somebody
+  outside engineering.
+
+- **Set all three ceilings, because each is blind to the others.** A step cap
+  does not stop a hanging tool; a timeout does not stop sixty cheap steps
+  burning a budget; a token cap does not stop a loop reading the same file
+  forever. Hitting one is a *result*: it belongs in the response, the trace and
+  the evaluation, and @sec-agent-eval's termination rate is where an agent that
+  looks accurate while capping out gets caught.
