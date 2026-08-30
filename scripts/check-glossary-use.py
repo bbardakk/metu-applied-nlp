@@ -64,6 +64,52 @@ def slug(term):
     return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
 
 
+def turkish_terms():
+    """What the Turkish edition may call a glossary entry.
+
+    The Turkish chapters keep the English gloss *id* -- #gloss-span-level-f1
+    -- because the id is what links the two editions to one appendix. The
+    bolded term is whatever that chapter calls the thing, which is the
+    English headword when the book keeps it English and the CSV's Turkish
+    column when it does not. Both are allowed; anything else is drift.
+    """
+    terms = set()
+    with CSV_PATH.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            for col in ("english", "turkish"):
+                head = row[col].replace("\u25c6", "").strip()
+                variants = {head}
+                m = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", head)
+                if m:
+                    variants |= {m.group(1), m.group(2)}
+                for v in list(variants):
+                    variants |= {p.strip() for p in v.split("/") if p.strip()}
+                terms |= {v.casefold() for v in variants if v}
+    return terms
+
+
+def known_slugs():
+    """Every #gloss- id the appendix can be linked to.
+
+    The id is built from the English headword and is the same in both
+    editions, because it is what ties a Turkish margin note to the one
+    shared appendix. A chapter may shorten "byte-pair encoding (BPE)" to
+    byte-pair-encoding, so the parenthetical-stripped form counts too.
+    """
+    slugs = set()
+    with CSV_PATH.open(encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            head = row["english"]
+            variants = {head}
+            m = re.match(r"^(.*?)\s*\(([^)]+)\)\s*$", head)
+            if m:
+                variants |= {m.group(1), m.group(2)}
+            for v in list(variants):
+                variants |= {p.strip() for p in v.split("/") if p.strip()}
+            slugs |= {slug(v) for v in variants if v}
+    return slugs
+
+
 def known_terms():
     """Every form a chapter may legitimately use to name a glossary entry.
 
@@ -89,11 +135,15 @@ def known_terms():
 
 
 def main():
-    terms = known_terms()
+    term_sets = {"en": known_terms(), "tr": turkish_terms()}
+    slugs = known_slugs()
     problems = []
     counts = {}
 
-    for path in sorted((ROOT / "en" / "chapters").glob("*.qmd")):
+    paths = [(ed, p) for ed in ("en", "tr")
+             for p in sorted((ROOT / ed / "chapters").glob("*.qmd"))]
+    for edition, path in paths:
+        terms = term_sets[edition]
         rel = path.relative_to(ROOT)
         text = path.read_text(encoding="utf-8")
         seen = {}
@@ -124,12 +174,20 @@ def main():
             else:
                 seen[key] = line
 
-            # 5. the gloss and the word it explains must point at each other
-            sl = slug(term)
-            if f"#gloss-{sl}" not in attrs:
+            # 5. the gloss and the word it explains must point at each other.
+            # Keyed on the id in the attrs, not on the bolded term: the
+            # Turkish edition keeps the English id and translates the term.
+            id_m = re.search(r"#gloss-([a-z0-9-]+)", attrs)
+            if not id_m:
                 problems.append(
-                    f"{rel}:{line}: '{term}' is missing its "
-                    f"{{#gloss-{sl}}} id, so nothing can link to it")
+                    f"{rel}:{line}: '{term}' has no {{#gloss-...}} id, so "
+                    f"nothing can link to it")
+                continue
+            sl = id_m.group(1)
+            if sl not in slugs:
+                problems.append(
+                    f"{rel}:{line}: #gloss-{sl} is not a glossary entry — "
+                    f"add it to glossary.csv, or use the entry's id")
             if f"](#term-{sl}){{.term-back}}" not in body:
                 problems.append(
                     f"{rel}:{line}: '{term}' has no [↩](#term-{sl})"
