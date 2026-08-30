@@ -1,56 +1,732 @@
 # The Gateway Layer: Routing, Cost, and Governance {#sec-gateway}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** Two small measurements, both seconds of compute:
+fifteen labelled query pairs through `nomic-embed-text` to ask whether one
+similarity threshold can separate a cache hit from a bug, and a follow-up that
+characterises a defect in that embedder which the first measurement exposed.
+The routing and reliability material is cited rather than measured — a retry
+storm is not something to reproduce on a laptop, and the routing argument rests
+on published cascades plus a signal measurement this book already made in
+@sec-classification. Software: `ollama` 0.24.0 serving `nomic-embed-text`, on
+Python 3.14.5, Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- justify a model gateway in terms of the problems it removes;
-- enforce budgets, quotas, and rate limits per team and per key;
-- build fallback and failover across providers;
-- route by cost and capability without degrading quality.
+- name the specific problems a model gateway removes, and say when you do not
+  have them yet;
+- enforce budgets and quotas knowing which half of a request's cost you can
+  price in advance and which half you cannot;
+- design failover across providers without building the retry storm that turns
+  a degradation into an outage;
+- judge a cost-routing proposal by the signal it depends on rather than by the
+  architecture;
+- treat exact-match and semantic response caching as different features with
+  different risks;
+- pin model versions and migrate off deprecated ones behind an eval gate.
 
-## Why a model gateway exists at all
+## What a gateway is for {#sec-gateway-why}
 
-<!-- TODO(draft): the problems that appear at the second team and the
-    third provider. -->
+@sec-serving was about one request against one model. A gateway is what appears
+when there is more than one of either: a single service that every LLM call in
+the organisation passes through, presenting one API and hiding which provider
+answers.
 
-## Virtual keys, budgets, quotas, and rate limits
+It is worth being precise about *when* that becomes worth building, because a
+gateway is infrastructure and infrastructure has a standing cost. The problems
+it removes do not exist on day one:
 
-<!-- TODO(draft): per-team attribution; hard ceilings vs. alerts. -->
+| the problem | when it shows up |
+|:--|:--|
+| Provider keys are pasted into several services, and rotating one means finding them all | the second service |
+| Nobody can say which team spent what | the second team |
+| A runaway loop bills for six hours before anyone notices | the first agent |
+| Switching provider means editing every caller | the second provider |
+| A model is deprecated and you cannot enumerate who calls it | the first deprecation |
+| Policy — redaction, residency, audit — is implemented three times, differently | the first audit |
 
-## Fallback, failover, and multi-provider resilience
+: Six problems, and the moment each one arrives {tbl-colwidths="[62,38]"}
 
-<!-- TODO(draft): what to do when a provider degrades; the retry that made
-    the incident worse. -->
+[Every one of those is an *attribution* problem or a *choke point* problem, and
+both are solved by having exactly one place the traffic passes through.]{.hl}
+That is the whole argument. A gateway does not make any single request better —
+@sec-serving is where request-level performance lives — it makes the
+*population* of requests governable.
 
-## Cost-aware and capability-aware model routing
+The corresponding anti-pattern is building one before the second team exists,
+which adds a hop, a failure mode and an on-call rotation in exchange for
+problems you do not have.
 
-<!-- TODO(draft): routing easy traffic to a small model; measuring the
-    quality cost of doing so. -->
+## Budgets, quotas, and the half you cannot price in advance {#sec-gateway-budgets}
 
-## Semantic and exact-match caching
+The usual gateway control is a **virtual key**: a per-team, per-service or
+per-feature credential that maps to the real provider key and carries limits of
+its own. Three limits, routinely confused, failing differently:
 
-<!-- TODO(draft): exact caching is free money; semantic caching is a
-    correctness risk — treat them differently. -->
+| control | what it bounds | what happens at the limit |
+|:--|:--|:--|
+| **Rate limit** | requests or tokens per second | requests are shed or queued; recovers on its own |
+| **Quota** | requests or tokens per period | the caller is blocked until the period rolls over |
+| **Budget** | money per period | [the interesting one]{.hl} |
 
-## Model version pinning and deprecation migration
+: Three limits that are not the same thing {tbl-colwidths="[18,38,44]"}
 
-<!-- TODO(draft): the silent-upgrade failure; a migration procedure with
-    an eval gate — connect to @sec-production-eval. -->
+Budgets are the interesting one because of an asymmetry that comes straight out
+of @sec-serving's two halves. **You know the input tokens before the request
+runs and the output tokens only after.** Prefill is countable in advance — the
+prompt is right there — but decode produces an unknown number of tokens, and on
+most providers output is the dearer half per token.
 
-## One choke point for policy: the governance argument
+So a pre-request budget check is necessarily approximate, and there are three
+honest ways to handle that:
 
-<!-- TODO(draft): redaction, audit, and residency enforced in one place —
-    connect to @sec-governance. -->
+**Reserve the maximum.** Price the request as if it will generate `max_tokens`,
+check that against the remaining budget, reconcile down afterwards. Safe, and it
+under-serves: a budget with room for one maximal request refuses ten small ones.
 
-## Lab: stand up a proxy with budgets and per-team cost attribution
+**Admit optimistically and reconcile.** Charge input cost plus an estimate,
+settle the real number on completion. This is what most gateways do, and it
+means a budget can be exceeded by roughly one request's worth of output per
+concurrent caller. Usually fine — but state it, so nobody is surprised.
 
-<!-- TODO(draft): deploy a gateway, set a budget, and watch it stop a
-    runaway loop. -->
+**Cap the output.** Set `max_tokens` per virtual key, which turns an unknown
+into a known and makes the first option cheap. This is the one teams skip, and
+it is the only one that makes the arithmetic exact.
 
-## Exercises
+::: {.column-margin}
+The same asymmetry decides what a cost dashboard can *do*. Input cost is
+knowable at admission and can therefore be enforced; output cost is observable
+only at completion and can only be reported. Any control that must *stop*
+something has to act on the input side or on a cap — which is why `max_tokens`
+is a budget control and not only a quality one.
+:::
 
-1. Add exact-match caching to a real workload and measure the hit rate and the saving.
-2. Design a routing rule that sends 70% of traffic to a cheaper model. Prove the quality loss is acceptable.
+Whether the ceiling is hard is a product decision, not an engineering one. A
+hard ceiling stops the spend and stops the feature; an alert preserves the
+feature and does not stop the spend. A workable default is a hard ceiling on
+*non-production* keys, where a runaway loop is the likeliest cause, and alerting
+with a much higher ceiling on production, where the likeliest cause is success.
+
+## Failover, and the retry that made it worse {#sec-gateway-failover}
+
+Multi-provider failover is why many teams adopt a gateway, and it is where a
+gateway most easily makes an incident worse instead of better.
+
+The mechanism is well documented outside this field. When a provider degrades,
+every client sees slow or failing requests and retries. Those retries arrive
+exactly when the provider has least spare capacity, so more requests fail, so
+more clients retry. Google's SRE book treats this as a cascading failure, and the
+remedies it describes generalise directly [@beyer2016sre].
+
+Three controls, and a gateway is the natural home for all three because it is
+the only component that sees the whole population:
+
+- **Exponential backoff with jitter.** Backoff alone re-synchronises the fleet;
+  the jitter is what de-synchronises it. Clients retrying at exactly 1s, 2s, 4s
+  reproduce the thundering herd at every step.
+- **A circuit breaker.** After a threshold of failures, stop sending to that
+  provider for a cooling period rather than continuing to spend latency
+  rediscovering that it is still down.
+- **A retry budget.** Google runs two [@beyer2016sre], and the second is the one
+  people skip: a
+  per-request cap of three attempts, *and* a per-client cap where each client
+  tracks the share of its requests that are retries and stops retrying once that
+  ratio passes 10%. A per-request limit bounds one caller's patience; only the
+  fraction bounds fleet-wide amplification.
+
+There is also a failure mode specific to LLM gateways, and it is not a
+reliability problem at all:
+
+[A failover changes the model, and a different model gives different
+answers.]{.hl} Falling back from one provider's flagship to another's is not
+like failing over between replicas of a database. Output format drifts,
+tool-calling syntax differs, refusal behaviour differs, and a structured-output
+parser tuned on one may reject the other's output entirely (@sec-decoding).
+
+Which makes failover an evaluation question. The honest options are to evaluate
+the fallback path on the same suite as the primary — @sec-production-eval is
+where that belongs — or to fail *closed* with a clear error rather than silently
+serving output from a model nobody tested. Failing closed is frequently right
+and rarely the default.
+
+## Routing by cost, and the signal it depends on {#sec-gateway-routing}
+
+The idea is irresistible: most requests are easy, easy requests do not need the
+expensive model, so send those to a cheap one and escalate the rest. Done well
+this is the largest cost lever a gateway has. Done by assertion it quietly
+degrades quality on exactly the requests nobody sampled.
+
+Two shapes, and they fail differently:
+
+| | how it decides | what it needs |
+|:--|:--|:--|
+| **Cascade** | run the cheap model, escalate if the answer looks unreliable | a signal computed *after* the cheap call — so you pay for it |
+| **Router** | classify the request first, send it to one model | a signal computed *before* any call — cheaper, and harder |
+
+: Two ways to route, and what each one costs {tbl-colwidths="[16,44,40]"}
+
+The published results are encouraging. FrugalGPT cascades over a set of APIs and
+reports matching the best individual model's accuracy at a large fraction of the
+cost, or improving accuracy at equal cost [@chen2023frugalgpt]. RouteLLM learns
+a router from preference data and reports large cost reductions while retaining
+most of the strong model's quality on the benchmarks it was tuned for
+[@ong2024routellm].
+
+[But every one of those results is a claim about a *signal*, and the signal is
+where routing succeeds or fails.]{.hl} The architecture is trivial; knowing
+which requests are the hard ones is the entire problem.
+
+This book has already measured the most tempting signal and found it wanting.
+@sec-classification asked a model to state its own confidence in words and then
+tested that confidence as a detector of its own errors: **AUROC 0.667, against
+0.843 for a proper probability**. It is better than nothing — the mean
+confidence really is higher on correct answers — and it is a long way from the
+instrument a routing policy needs. A cascade built on it escalates many easy
+requests and misses many hard ones, and both mistakes are invisible in an
+aggregate accuracy number.
+
+Which produces the rule that matters more than any routing framework:
+
+::: {.callout-warning appearance="simple"}
+**Report the random-escalation baseline.** For any routing policy, compute what
+you would get by escalating the same *fraction* of requests chosen at random.
+If your clever signal does not beat that curve, it is not a signal — you are
+buying accuracy with escalation rate alone, and a coin flip would do it more
+cheaply.
+
+This is the same control discipline as @sec-summarization's copied-text check
+and @sec-agent-eval's outcome-versus-trajectory split: a measurement without a
+baseline that should fail cannot tell you anything.
+:::
+
+Three practical notes, none of which need a paper:
+
+**A cascade pays for the cheap call twice on escalation.** The escalated
+request costs small-model tokens *plus* large-model tokens, so a cascade that
+escalates 50% of traffic saves much less than half. The break-even escalation
+rate is the number to compute before building it, and it depends on your price
+ratio, not on the benchmark's.
+
+**Routing changes the model, so it inherits every problem from
+@sec-gateway-failover.** Different output format, different tool-call syntax,
+different refusal behaviour. A router is a deliberate, permanent version of the
+thing failover does by accident.
+
+**Capability routing is easier than quality routing.** "This request needs
+vision", "this one needs a 200k window", "this one must stay in the EU" are
+properties you can read off the request without predicting anything. They are
+also the routing rules most likely to survive contact with production, because
+they do not depend on a signal that might be AUROC 0.667.
+
+## Two kinds of cache, and only one is safe {#sec-gateway-cache}
+
+Response caching at the gateway is a different mechanism from @sec-serving's
+prompt caching: that one reuses a *prefix's* KV cache inside the server, this
+one returns a stored answer and never calls the model at all.
+
+**Exact-match caching** keys on `(model, full prompt, parameters)` and returns a
+byte-identical previous response. It carries no quality risk by construction: if
+the key matches, the request is the one you already answered. The only real
+decisions are what belongs in the key — the model *version* and the decoding
+parameters, or a temperature change quietly serves stale output — and how long
+entries live.
+
+**Semantic caching** embeds the request and returns a stored answer when some
+previous request is *similar enough*. Same word, different feature, and the
+difference is that this one can be wrong.
+
+[A semantic cache is an approximate nearest-neighbour search whose false
+positives are answers to questions nobody asked.]{.hl} Fifteen pairs of support
+queries, labelled by what a cache *should* do, embedded with
+`nomic-embed-text` and sorted by cosine similarity:
+
+```text
+   sim   hit?   pair
+ 0.982  False   is the pump covered by the warranty?    | is the pump not covered by the warranty?
+ 0.957  False   should i upgrade to the pro plan?       | should i avoid upgrading to the pro plan?
+ 0.957  False   ship 200 units to ankara                | ship 500 units to ankara
+ 0.954   True   how much does the pro plan cost?        | what is the price of the pro plan?
+ 0.917  False   what was revenue in q1 2025?            | what was revenue in q1 2026?
+ 0.913   True   can i get a refund?                     | is a refund possible?
+ 0.907  False   can i use this outdoors?                | can i not use this outdoors?
+ 0.898   True   how do i cancel my subscription?        | how can i end my subscription?
+ 0.891  False   cancel order 4471                       | cancel order 4417
+ 0.856   True   how do i reset my password?             | i forgot my password, how can i change it?
+ 0.851  False   what are your business hours on monday? | what are your business hours on sunday?
+ 0.742  False   what is the price of the pro plan?      | what is the price of the basic plan?
+ 0.712  False   how do i reset my password?             | how do i reset my api key?
+ 0.703  False   how do i export my data?                | how do i delete my data?
+ 0.609   True   what are your business hours?           | when are you open?
+```
+
+Read the top of that list. [The single most similar pair in the whole set is a
+sentence and its negation]{.hl} — 0.982 — and the second and third are a
+negation and a changed quantity. Meanwhile the genuinely identical question,
+*what are your business hours* against *when are you open*, sits at the very
+bottom on 0.609.
+
+The consequence is arithmetic rather than opinion. The lowest true pair is
+0.609 and the highest false pair is 0.982, so **the two classes overlap
+completely and no single threshold separates them**. The best cut available
+still gets five of fifteen wrong, and every one of those five errors is served
+to a user as a confident answer with nothing logged.
+
+This is @sec-embeddings' point about negation arriving with a bill attached: a
+model trained to place related sentences near each other places *is covered* and
+*is not covered* nearly on top of one another, because they are related. They
+are also opposite, and a cache cannot tell.
+
+::: {.callout-warning appearance="simple"}
+**The instrument had a defect, and finding it is the lesson.** The table above
+is lowercased, and it did not start that way. Written naturally, *business hours
+on Monday* and *business hours on Sunday* came back at cosine **1.000** — not
+close, *byte-identical vectors*.
+
+Following that produced a reproducible finding about the tool rather than about
+caching. With `nomic-embed-text` served by `ollama` 0.24.0, any capitalised word
+collapses to one constant token:
+
+```text
+"Monday" == "Cat" == "Ankara" == "Paris" == "Toyota" == "XYZZY" == "Q"
+  -> all byte-identical vectors
+
+"Cat sat on the mat" == "Dog sat on the mat"     identical
+"cat sat on the mat" vs "dog sat on the mat"     cos 0.879, different
+"Monday" vs "monday"                             cos 0.486
+```
+
+All 21 pairs of weekday names are identical to each other; so are January and
+February, and Ankara and Istanbul. Lowercase text behaves normally. It
+reproduces on both `/api/embed` and `/api/embeddings`. Whether the fault is in
+the GGUF conversion, the tokenizer or the server we did not determine — and for
+this chapter it does not matter, because [a semantic cache built on that
+embedder would have served Monday's answer to Sunday's question, at similarity
+1.000, forever, with nothing in any log.]{.hl}
+
+It is the same shape as @sec-summarization's `rouge-score` tokenizer and
+@sec-text-as-data's Turkish lowercasing: the tool did not fail, it returned
+plausible numbers. The only reason it surfaced is that a pair which *had* to
+score low scored highest.
+:::
+
+So treat the two caches as different features with different bars:
+
+| | quality risk | where it belongs |
+|:--|:--|:--|
+| Exact-match | [none by construction]{.pro} | on by default, everywhere |
+| Semantic | [a wrong answer, silently]{.con} | only with a measured false-positive rate on your own traffic, and never on anything consequential |
+
+: Two caches that share a name {tbl-colwidths="[18,38,44]"}
+
+If you do build one, the measurement that makes it defensible is the one nobody
+runs: sample the cache *hits*, check by hand how many were genuinely the same
+question, and report that rate with an interval (@sec-data-annotation). A hit
+rate without a correctness rate is a number that only looks like evidence. And
+before any of that, embed two inputs you know must differ and confirm the
+embedder can tell them apart.
+
+## Pinning versions, and surviving a deprecation {#sec-gateway-versions}
+
+An LLM behind a stable name is not a stable dependency. Providers update the
+model an unversioned alias points at, and the failure that follows has a
+distinctive shape: nothing errors, nothing is logged, and your outputs change.
+
+[A silent model upgrade is a dependency change that bypasses every gate you
+have.]{.hl} It appears in no diff, fails no test that nobody ran, and arrives on
+the provider's schedule rather than yours.
+
+The gateway is where this is fixed, in three parts:
+
+**Callers ask for an alias; the gateway resolves it to a pinned version.**
+Application code says `summarizer`, the gateway maps that to a dated model
+identifier. One edit changes what every caller gets, and — more usefully — one
+query answers "who is still on the old model?"
+
+**Migration runs behind an eval gate.** Point the alias at the new version for a
+small share of traffic, score both on the suite from @sec-production-eval, and
+promote only if it holds. This is ordinary dependency-upgrade discipline; the
+difference is that without a gateway there is nowhere to put the traffic split.
+
+**Deprecations get a countdown you can act on.** Providers retire models with
+notice, and the notice is useless if you cannot enumerate the callers. The
+gateway's request log is that enumeration.
+
+::: {.column-margin}
+Worth pinning even when you never intend to migrate deliberately: an alias that
+moves silently makes every historical evaluation unreproducible. A score from
+three months ago is a score for a model you can no longer name, which quietly
+undermines every regression comparison drawn from it.
+:::
+
+## One choke point for policy {#sec-gateway-policy}
+
+The last argument for a gateway matters most to everybody outside engineering,
+and it is structural rather than technical.
+
+Redaction, audit logging, data residency and retention are all *cross-cutting*:
+they must hold for every call, and a policy that holds for four services out of
+five does not hold. Implementing them per service guarantees drift, because five
+teams will make five slightly different decisions and only one of them will be
+wrong in a way anybody notices.
+
+| policy | what it needs | why it belongs at the gateway |
+|:--|:--|:--|
+| Redaction | strip or tokenize personal data before it leaves | one implementation, uniformly applied — @sec-guardrails has the mechanics |
+| Audit | who called what model with what, and when | the gateway is the only component that sees every call |
+| Residency | route EU data to EU endpoints | a routing decision, and routing already lives here |
+| Retention | do not log prompts containing personal data, or log them briefly | one retention rule rather than five |
+
+: Four policies and why one place beats five {tbl-colwidths="[16,40,44]"}
+
+The obligations themselves — lawful basis, DPIA, the EU AI Act's tiers, KVKK's
+requirements — are @sec-governance's subject. What belongs here is the
+architectural claim they depend on: [a policy you cannot enforce in one place is
+a policy you are hoping about.]{.hl}
+
+There is a cost, and it should be stated plainly. A gateway sits on the critical
+path of every LLM call in the organisation, so its availability is a ceiling on
+everyone's availability and its latency is added to everyone's latency. That is
+a real trade, and it is why the answer to "should we build one?" is "not yet"
+until the problems in @sec-gateway-why actually exist.
+
+## Lab: a gateway that stops a runaway loop {#sec-gateway-lab}
+
+The point of this lab is to watch a control actually fire. A budget nobody has
+seen trigger is a configuration, not a control.
+
+### Step 1 — put one proxy in front of one provider
+
+Any gateway will do, including forty lines of your own. It needs three things:
+it forwards requests, it records `(virtual key, model, input tokens, output
+tokens)` per call, and it can refuse.
+
+### Step 2 — give two callers separate virtual keys
+
+Two keys, two notional teams, one real provider key behind them. Send traffic
+through both and produce a per-key spend table. If you cannot produce that
+table, nothing later in this lab is enforceable.
+
+### Step 3 — set a budget you will actually hit
+
+Small enough to trigger within a few minutes of ordinary traffic. Then run an
+agent loop with no step cap — @sec-agent-anatomy's failure mode — against one of
+the keys and watch the budget stop it. Record how much it spent *after* crossing
+the limit, because that overshoot is what the asymmetry in @sec-gateway-budgets
+costs you.
+
+### Step 4 — cap output on one key, not the other
+
+Set `max_tokens` on one virtual key and repeat step 3. The overshoot should
+shrink to something predictable. Report both numbers; the difference is the
+argument for capping output.
+
+### Step 5 — add exact-match caching and measure the hit rate
+
+Key on `(model, prompt, parameters)`. Replay a realistic hour of traffic — real
+if you have it, synthetic with repeated questions if you do not — and report the
+hit rate and the saving. Then say, honestly, what share of your real traffic you
+expect to repeat exactly.
+
+### Step 6 — check the embedder before you trust a semantic cache
+
+Before measuring any similarity threshold, embed two inputs that *must* differ
+and confirm the model can tell them apart. This chapter's embedder could not:
+every capitalised word collapsed to one vector. Five minutes, and it is the
+difference between a cache and a random-answer generator.
+
+### Step 7 — break failover on purpose
+
+Point a fallback at a *different* model. Send twenty requests whose output you
+parse — structured output from @sec-decoding is ideal — then force the primary to
+fail and send the same twenty. Count how many the parser rejects.
+
+### What to hand in
+
+The per-key spend table; the overshoot with and without an output cap; the cache
+hit rate; your embedder sanity check; the parser failure count on the fallback
+path; and one paragraph on whether your fallback should fail open or closed,
+with the number that justifies it.
+
+## Intuition checks {#sec-gateway-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. One team, one provider, one service. Do you need a gateway?
+
+No, and building one now is a net loss.
+
+Every problem a gateway solves is a problem of *plurality*: several callers to
+attribute, several providers to abstract, several policies to keep identical.
+With one of each you have none of them, and what you gain by adding the layer
+is a network hop, a deployment, and a component whose availability is now a
+ceiling on your own.
+
+The honest trigger is the second of anything — the second team, the second
+provider, or the first agent that can loop. Until then a client library and a
+spending alert cover it.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Can a gateway enforce an exact spending cap?
+
+Not unless it caps output length.
+
+Input tokens are countable before the call; output tokens are known only when
+the call finishes, and output is usually the more expensive half. So admission
+control is either pessimistic — reserve `max_tokens` worth of budget and
+reconcile down, which refuses requests you could have afforded — or optimistic,
+which can overshoot by roughly one request's worth of output per concurrent
+caller.
+
+Setting `max_tokens` per virtual key is what turns the unknown into a known.
+It is the cheapest control in this chapter and the one most often left unset.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your provider is degraded and your gateway retries. What could go wrong?
+
+You can convert a partial degradation into a full outage.
+
+Retries arrive precisely when the provider has least spare capacity, so more
+requests fail, so more clients retry. The controls are backoff *with jitter*,
+because plain backoff re-synchronises the fleet into a herd; a circuit breaker,
+so you stop spending latency to rediscover an outage; and a retry budget as a
+*fraction* of traffic — Google's clients stop retrying once retries pass 10% of
+their requests, on top of a three-attempt per-request cap.
+
+The per-request cap is the one everybody implements and it does not bound
+fleet-wide amplification. Only the fraction does.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your routing policy cut cost 40% and accuracy fell 1 point. Good trade?
+
+Unanswerable until you see the random-escalation baseline.
+
+Escalating *any* 40% of requests to the strong model buys some accuracy back,
+signal or no signal. The question is whether your policy beats a coin flip at
+the same escalation rate — and if it does not, you have not built a router, you
+have built an expensive random number generator.
+
+Run that baseline first. It costs nothing, since you already have both models'
+answers on the evaluation set, and it is the only thing that separates a signal
+from a rate.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Semantic caching gets a 30% hit rate. Ship it?
+
+Not on that number alone, because it does not contain the thing that matters.
+
+A hit rate says how often the cache answered. It says nothing about how often
+it answered *correctly*, and a semantic cache's failure mode is returning a
+fluent answer to a question the user did not ask. Nothing errors and nothing is
+logged.
+
+Sample the hits and check by hand what fraction were genuinely the same
+question, and report it with an interval. Note also that embedding similarity
+does not track meaning where it matters most: @sec-embeddings showed a sentence
+and its negation sitting close together, which is exactly the pair a cache must
+not conflate.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your outputs changed overnight and nothing was deployed. Where do you look?
+
+At the model identifier, and at whether it is pinned.
+
+An unversioned alias points at whatever the provider currently serves, so a
+model upgrade reaches production without a deploy, a diff or a test. It is a
+dependency change that bypasses every gate you own, and it arrives on their
+schedule.
+
+The fix is structural: callers ask for an alias, the gateway resolves it to a
+dated version, and migrations run behind an eval gate on a traffic slice. The
+side benefit is reproducibility — a score against a floating alias is a score
+for a model you can no longer name.
+:::
+
+## Exercises {#sec-gateway-exercises}
+
+1. **The attribution question.** For a system you work on, answer without
+   guessing: which team spent the most on LLM calls last month? Write down how
+   long it took to find out, and what you would need for it to take a minute.
+
+2. **Budget overshoot.** Compute, for a workload you know, how far a budget can
+   be exceeded under optimistic admission: concurrent callers times the cost of
+   `max_tokens` of output. Decide whether that number is tolerable, and cap
+   output if it is not.
+
+3. **The retry storm, on paper.** Take a service with a known request rate and a
+   three-attempt retry policy. Compute the load a provider sees when half of all
+   requests start failing. Recompute with a 10% retry budget and compare.
+
+4. **Fallback equivalence.** Run one prompt you rely on against your primary and
+   your fallback model. Diff the outputs — format, length, refusals, tool-call
+   syntax — and decide whether your parser survives. Write the answer down before
+   you need it at 3am.
+
+5. **Cache hit rate, measured.** Instrument exact-match caching on real traffic
+   for a day. Report the hit rate, the saving, and the share of misses that were
+   *near*-misses. That last number is what a semantic cache would be tempted by.
+
+6. **Audit your embedder.** Take whatever embedding model you would use for
+   retrieval or caching and test it on pairs that must differ: a sentence and its
+   negation, two dates, two order numbers, two proper nouns. Report the
+   similarities. If any pair returns 1.000, stop and find out why.
+
+7. **Routing, with a control.** Build a cascade on your own task: a small model,
+   a large one, and an escalation signal. Report accuracy and cost at several
+   escalation rates, and always report the random-escalation baseline alongside.
+   If your signal does not beat random, say so.
+
+8. **Pin audit.** List every model identifier your code sends. Mark which are
+   dated pins and which are floating aliases. For each floating one, say what
+   would happen — and how you would find out — if the provider moved it tonight.
+
+## Interview questions {#sec-gateway-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurements make answerable.
+:::
+
+### Testing whether you understand the layer
+
+**Q: What does a model gateway actually give you?**
+
+Attribution and a choke point, and nothing else. It does not make a request
+faster — that is @sec-serving — and it adds a hop. What it buys is that spend can
+be attributed per team, keys rotated in one place, providers swapped without
+editing callers, policy enforced once, and a deprecation notice turned into a
+list of callers. Then say when *not* to build one: before the second team and
+the second provider those problems do not exist, and the gateway is pure cost.
+
+**Q: Can a gateway enforce a spending limit exactly?**
+
+Not without capping output. Input tokens are countable before the request runs,
+output tokens only after, and output is usually the dearer half. So enforcement
+is either pessimistic — reserve `max_tokens` worth and reconcile down, which
+under-serves — or optimistic, which can overshoot by about one request's worth of
+output per concurrent caller. Setting `max_tokens` per virtual key converts the
+unknown into a known, and it is the step teams skip.
+
+**Q: Your provider degrades and your gateway starts retrying. What happens?**
+
+Potentially an outage you caused. Retries arrive exactly when the provider has
+least capacity, so failures rise and retries rise with them. Name the three
+controls: exponential backoff *with jitter*, because backoff alone
+re-synchronises the fleet; a circuit breaker, so you stop paying latency to
+rediscover an outage; and a retry budget as a fraction of traffic — Google's
+clients stop retrying once retries pass 10% of their requests, on top of a
+three-attempt per-request cap.
+
+### Testing whether you have shipped one
+
+**Q: Your fallback provider kicked in overnight and nobody noticed. Good or bad?**
+
+Bad, and the reliability part is the least of it. A fallback is a *different
+model*: output format, tool-call syntax and refusal behaviour all differ, so a
+parser tuned on the primary may reject the fallback's output, and quality
+changed without an evaluation. Either the fallback path is on the same eval
+suite as the primary, or the gateway fails closed with a clear error. Silently
+serving an untested model is the option nobody chose and many ship.
+
+**Q: How would you cut LLM spend 30% without a quality regression?**
+
+Measure before choosing. Exact-match response caching first, because it carries
+no quality risk and its hit rate is a property of your traffic you can measure in
+an afternoon. Then the prompt-side levers from @sec-serving, since input
+dominates cost. Only then routing — and say that routing is a claim needing
+evidence: you need the cheap model's accuracy, the expensive one's, and a signal
+that says in advance which requests need which. If the signal does not beat
+random escalation at the same rate, routing is buying nothing.
+
+**Q: Design the migration off a model being retired in 60 days.**
+
+Enumerate the callers from the gateway's request log — the step that is
+impossible without one. Point the alias at the new version for a small traffic
+share, score both on the production eval suite (@sec-production-eval), and
+promote on the evidence. Keep the old version pinned and available for
+comparison until the deadline, and say plainly that an unversioned alias makes
+every historical score unreproducible, which is why the pin comes first.
+
+## The 2026 toolbox {#sec-gateway-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `nomic-embed-text` for the cache-threshold measurement and the embedder defect that followed it |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `litellm` | 1.98.0 | the common open-source answer: one OpenAI-shaped API over many providers, with virtual keys, budgets and fallbacks in the proxy |
+| `portkey-ai` | 2.3.4 | a gateway with routing, retries and caching, hosted or self-hosted |
+| `aisuite` | 0.1.14 | a thin uniform client across providers when you want the abstraction without running a proxy |
+| `helicone` | 1.0.14 | logging and cost attribution in front of provider APIs; overlaps with @sec-observability |
+| Cloudflare AI Gateway | service | caching, rate limiting and analytics at the edge, with no component to operate |
+| Kong AI Gateway | service / plugin | AI routing and policy on an API gateway a platform team may already run |
+| OpenRouter | service | routing across many hosted models behind one key, useful for capability routing without contracts |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,14,62]"}
+
+## What to remember {#sec-gateway-summary}
+
+- **A gateway buys attribution and a choke point, nothing else.** It does not
+  make a request faster — that is @sec-serving — and it adds a hop whose
+  availability becomes a ceiling on everyone's. Build it when the second team,
+  the second provider or the first loop-capable agent arrives, and not before.
+
+- **You cannot price a request before you run it.** Input tokens are countable
+  at admission, output tokens only at completion, and output is usually dearer.
+  So a budget is enforced pessimistically, or it overshoots by about one
+  request's worth of output per concurrent caller — unless you cap `max_tokens`
+  per key, which is the control most often left unset.
+
+- **Retries turn a degradation into an outage.** Backoff *with jitter*, because
+  plain backoff re-synchronises the fleet; a circuit breaker; and a retry budget
+  as a fraction of traffic. Google runs a three-attempt per-request cap *and* a
+  per-client rule that stops retrying once retries pass 10% of that client's
+  requests — the second is the one that bounds fleet-wide amplification.
+
+- **A failover is a model swap, so it is an evaluation problem.** Different
+  format, different tool-call syntax, different refusals; a parser tuned on the
+  primary may reject the fallback. Either evaluate the fallback path on the same
+  suite, or fail closed with a clear error. Silently serving an untested model is
+  the option nobody chose and many ship.
+
+- **Routing is a claim about a signal, not about an architecture.** Published
+  cascades and learned routers report real savings [@chen2023frugalgpt;
+  @ong2024routellm], but every one of those results depends on knowing which
+  requests are hard. The most tempting signal — asking the model how sure it is
+  — was measured in @sec-classification at **AUROC 0.667** against 0.843 for a
+  proper probability. Always report the random-escalation baseline; if the
+  policy does not beat it, the escalation *rate* is doing the work.
+
+- **Exact-match caching is free money; semantic caching is a correctness
+  decision.** Measured on fifteen labelled pairs, the most similar pair in the
+  set was **a sentence and its negation at 0.982**, while a genuinely identical
+  question scored **0.609**. The classes overlap completely, so no single
+  threshold separates them and the best cut still misses five of fifteen.
+
+- **Check the embedder before trusting the cache.** `nomic-embed-text` under
+  `ollama` 0.24.0 maps every capitalised word to one constant token: *Monday*,
+  *Cat*, *Ankara* and *XYZZY* all produce byte-identical vectors, and
+  *Cat sat on the mat* equals *Dog sat on the mat*. Lowercase text is fine. A
+  cache built on it would answer Sunday's question with Monday's answer at
+  similarity 1.000 and log nothing. It surfaced only because a pair that had to
+  score low scored highest.
+
+- **Pin the version; an alias is a dependency that changes without a deploy.**
+  A silent provider upgrade bypasses every gate you own, and it also makes every
+  historical evaluation unreproducible, because the score belongs to a model you
+  can no longer name.
+
+- **Policy belongs at one choke point.** Redaction, audit, residency and
+  retention must hold for every call, and five implementations guarantee drift.
+  A policy you cannot enforce in one place is a policy you are hoping about.
