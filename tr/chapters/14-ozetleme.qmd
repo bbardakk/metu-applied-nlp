@@ -1,0 +1,1213 @@
+# Özetleme {#sec-ozetleme}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 14. bölüm](../../en/chapters/14-summarization.html). Bu sayfadaki
+her sayı XL-Sum Türkçe üzerinde ölçüldü [@hasan2021xlsum] — 27.176 eğitim ve
+3.397 test BBC Türkçe haberi; her birinin yanında gazetecinin yazdığı tek
+cümlelik bir özet var. Çıkarımsal sistemler 3.397'nin tamamında, LLM ise 500
+haberlik bir örneklemde puanlandı; hangisi olduğu geçtiği yerde yazıyor.
+@sec-ozetleme-rouge, Türkçe üzerine yayımlanmış her ROUGE sayısını değiştiren
+bir tokenizer kusurunu raporluyor; bu yüzden buradaki ROUGE hazır kütüphaneden
+alınmadı, elle yazıldı ve o aracın token'layabildiği metinlerde `rouge-score`
+ile on ondalık basamağa kadar doğrulandı. Yazılım: `rouge-score` 0.1.2,
+`snowballstemmer` 3.1.1, NumPy 2.5.2, Python 3.14.5; yerel LLM `ollama` 0.24.0
+üzerinden.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- "özet" kelimesinin birbiriyle bağdaşmayan hangi görevi adlandırdığını
+  söyleyebilir ve biri seçim yapana kadar o şeyi inşa etmeyi reddedebilirsiniz;
+- bir özetleme derlemini modellemeden önce betimleyebilir ve bu betimlemeden
+  çıkarımsal yöntemlerin orada çalışıp çalışamayacağını öngörebilirsiniz;
+- çıkarımsal baseline'ları — tavanı söyleyen oracle dâhil — kurabilirsiniz;
+- ROUGE'un neyi ölçtüğünü, neyi göremediğini ve standart uygulamasının Türkçe
+  için neden bozuk olduğunu açıklayabilirsiniz;
+- içsel (intrinsic) ve dışsal (extrinsic) sadakatsizliği ayırt edebilir ve her
+  birinin oranını ölçebilirsiniz;
+- bir LLM'i hakem olarak kullanırken beraberinde gelen yanlılıkları
+  ölçebilirsiniz;
+- bağlam penceresinden uzun belgeleri özetleyebilir ve bu hattın neyi
+  kaybettiğini söyleyebilirsiniz.
+
+## "Şunu özetle" tek bir görev değildir {#sec-ozetleme-gorevler}
+
+Modellemeye geçmeden önce, özetleme projelerini herhangi bir modelleme
+kararından daha çok batıran bir tanımlama problemi. Bu kelime en az dört farklı
+işi adlandırıyor ve isteyen kişi çoğunlukla hangisini istediğine karar
+vermemiş oluyor:
+
+| eksen | bir uç | öteki uç |
+|:--|:--|:--|
+| Okurun amacı | **belirtici (indicative)** — bunu okumalı mıyım, karar vermeme yardım et | **bilgilendirici (informative)** — okumanın yerine geç |
+| Kapsam | **genel** — bu ne hakkında? | **sorguya odaklı** — bu, X hakkında ne diyor? |
+| Girdi | **tek belge** | **çok belge**; kaynaklar arasındaki çelişki asıl zor kısım hâline gelir |
+| Yöntem | **çıkarımsal** — kaynak cümleleri seç | **soyutlayıcı** — yeni metin üret |
+
+: Dört eksen, on altı görev {tbl-colwidths="[20,40,40]"}
+
+%80 doğru olan belirtici bir özet gayet iyidir; zaten yalnızca belgeyi açıp
+açmayacağınıza karar veriyordunuz. %80 doğru olan bilgilendirici bir özet ise
+bir yükümlülüktür, çünkü okur onu kontrol etmeden ona göre hareket ediyor.
+[Bunlar farklı kabul ölçütleri olan farklı ürünlerdir ve "şunu özetle" ifadesi
+ikisini de ayırt etmez.]{.hl}
+
+Dolayısıyla bir özetleme projesindeki ilk soru *hangi model* değil, **çıktıyı
+kim okuyor ve yanlış olursa ne oluyor**. Bu bölümdeki her şey — hangi metriğin
+raporlanacağı dâhil — o cevaptan çıkıyor.
+
+::: {.column-margin}
+Gereksinim belirsizse işe yarayan zorlayıcı soru şu: *"özet yanlış olsa, okur
+bunu fark eder mi?"* Cevap evetse belirtici bir özet kuruyorsunuz ve hataya
+tahammülünüz var. Hayırsa bilgilendirici bir özet kuruyorsunuz ve önemli olan
+lider tablosu değil, @sec-ozetleme-sadakat.
+:::
+
+## Derlemi modellemeden önce betimlemek {#sec-ozetleme-derlem}
+
+@sec-dizi-etiketleme, derlemi denetlemeyi bir suçlama değil bir alışkanlık
+hâline getirmişti. Burada denetim, doğrudan mühendislik sonucu olan bir soruyu
+cevaplıyor: **çıkarımsal bir sistem bu veride hiç çalışabilir mi?**
+
+```python
+# XL-Sum Türkçe: BBC Türkçe haberleri; her birinin özeti gazeteci tarafından
+# yazılmış, kalabalık kaynaklı (crowdsourced) değil.
+rows = [json.loads(l) for l in open("turkish_test.jsonl")]
+```
+
+```text
+train  27,176 articles   median 303 words, 17 sentences   summary 22 words
+val     3,397 articles   median 300 words, 17 sentences   summary 22 words
+test    3,397 articles   median 296 words, 17 sentences   summary 21 words
+
+compression 14x        83.4% of test summaries are exactly one sentence
+```
+
+@sec-dizi-etiketleme bölümüne hâkim olan sızıntı kontrolü burada temiz
+çıkıyor:
+
+```text
+train articles 27,176, distinct texts 27,173      3 internal duplicates
+test article also in train                        0    0.00%
+test url also in train                            0
+test summary also in train                       24    0.71%
+duplicate texts inside test                       0
+```
+
+[Sıfır haber sızıntısı.]{.hl} Bunu açıkça söylemekte fayda var, çünkü bu
+alışkanlık kolayca kötümserlik sanılıyor: denetimi, sayılara *güvenebilmek*
+için yaparsınız ve bazen denetim size güvenebileceğinizi söyler. Tekrarlanan
+özetlerin %0,71'i, farklı haberlere iliştirilmiş BBC kalıp metinleri —
+göz ardı edilecek kadar küçük, anılacak kadar da büyük.
+
+### Özetin ne kadarı haberin içinde?
+
+Mimariyi belirleyen ölçüm bu. @grusky2018newsroom yöntemiyle her özeti alın ve
+onun kaynakta birebir geçen en uzun parçalarını açgözlü biçimde bulun:
+
+```text
+coverage   0.527    share of summary words found anywhere in the article
+density    1.05     mean squared length of the extractive fragments
+novel     47.3%     summary words that never appear in the article
+verbatim   0/500    summaries that are a copied article sentence
+```
+
+1,05'lik bir yoğunluk, eşleşen parçaların aslında **tek tek kelimeler**
+olduğu anlamına geliyor. Kopyalanmış bir ifade neredeyse hiç yok. Karşılaştırma
+için: özetleme sezgilerinin çoğunun üzerinde oluştuğu derlem olan CNN /
+DailyMail'in özetleri, haberin kendi cümleciklerini yeniden kullanan madde
+başlıklarından kuruluyor. Aynı ölçümü onun 400 test haberinde koşturmak
+karşıtlığı somutlaştırıyor:
+
+| derlem | kapsam | yoğunluk | lead-3 R-1 | oracle R-1 |
+|:--|--:|--:|--:|--:|
+| CNN / DailyMail (İngilizce) | 0,845 | — | 29,44 | **40,58** |
+| XL-Sum Türkçe | 0,527 | 1,05 | 14,03 | **24,89** |
+
+: Aynı kod, iki derlem; her biri kendi dili için doğru olan tokenizer'la
+{tbl-colwidths="[34,16,16,16,18]"}
+
+[XL-Sum Türkçe tam ters rejimde ve bölümün tamamı bundan çıkıyor.]{.hl} Bu
+özetler *yeniden yazılmış*; @narayan2018xsum bu tarza aşırı özetleme (extreme
+summarization) diyordu: tek cümle, seçilmiş değil kurulmuş.
+
+::: {.column-margin}
+CNN / DailyMail için yayımlanmış lead-3 değeri 40,34 [@see2017get]; burada
+ölçülen 29,44'ten yüksek, çünkü o sayı özgün Perl ROUGE-1.5.5'ten, gövdeleme
+açık ve referans kırpılmış hâlde geliyor. Aradaki fark, @sec-ozetleme-rouge
+bölümünün argümanının önizlemesi: ROUGE tek bir sayı değil, bir sayılar ailesi
+ve "ROUGE-1" raporlayan iki makale çoğu zaman aynı niceliği raporlamıyor.
+:::
+
+### Özetin içeriği nereden geliyor?
+
+Özet kopyalanmış değilse, hiç olmazsa haberin başından mı alınmış? Her özeti
+her haber cümlesiyle unigram F1 üzerinden eşleştirip en iyisini alalım:
+
+```text
+best-matching article sentence, 500 test articles
+  sentence  1:   79   15.8%  ###############################
+  sentence  2:   54   10.8%  #####################
+  sentence  3:   50   10.0%  ####################
+  sentence  4:   38    7.6%  ###############
+  sentence  5:   40    8.0%  ################
+  sentence  6:   35    7.0%  ##############
+  sentence  7:   30    6.0%  ############
+  sentence  8:   30    6.0%  ############
+  sentences 9+: 144   28.8%
+```
+
+Lider yanlılığı (lead bias) gerçek ama zayıf: ilk cümle yalnızca %15,8
+oranında kazanıyor ve **özetlerin %28,8'i en iyi, 9. cümle ve sonrasındaki bir
+şeyle eşleşiyor**. Yalnızca girişi okuyan bir sistem, kanıtın çoğunu çöpe
+atıyor.
+
+### O %47,3 üzerine bir uyarı
+
+Yenilik oranını Türkçe şişiriyor ve ne kadar şişirdiği ölçülebilir. Kelimeler
+normalleştirilerek tekrar koşturalım:
+
+```text
+summary words absent from the article
+  exact surface form              47.3%
+  after Snowball Turkish stemming 37.5%
+  after 5-character prefix        32.8%
+```
+
+Bu puanların on ile on beş arası **yeni içerik değil, çekim**:
+
+```text
+summary 'bölgede'      <- article 'bölgedeki'
+summary 'parlamento'   <- article 'parlamentonun'
+summary 'uzmanlara'    <- article 'uzmanlar'
+summary 'işgal'        <- article 'işgali'
+```
+
+Aynı kelime, farklı hâl; yüzey dizilerini karşılaştıran her şey bunları farklı
+sayıyor. Bunu aklınızda tutun: burada bir derlem istatistiği, @sec-ozetleme-rouge
+bölümünde ise alanın standart metriğindeki bir kusura dönüşüyor.
+
+## Çıkarımsal baseline'lar ve tavanları {#sec-ozetleme-cikarimsal}
+
+Çıkarımsal aile, kaynaktan cümle seçer. Halüsinasyon göremez — her kelime
+belgenin içindeydi — ve bir cümlenin altına sıkıştıramaz. Test kümesinin
+tamamı, 3.397 haber:
+
+```text
+system                    R-1     R-2     R-L    words   time
+lead-1                  12.75    3.37   10.69     20.0
+lead-2                  14.04    3.61   10.94     37.6    0.2s
+lead-3                  14.03    3.74   10.44     54.9
+random sentence          8.56    1.73    7.30     17.5
+TextRank (1 sentence)   13.66    3.27   10.88     30.3   25.4s
+oracle sentence         24.89    9.31   20.39     20.1    1.8s
+```
+
+Bu tablodan okunacak üç şey var.
+
+**Lead-3 burada güçlü değil.** Yerleşik kanaat — "lead-3'ü hep raporlayın,
+eğitilmiş modelleri yener" — özetleme hakkında değil, CNN / DailyMail hakkında
+bir olgu; aynı kod orada onu 29,44 R-1 ile puanlıyor. Bu derlemde lead-3
+**14,03** alıyor ve lead-2 onu geçiyor. Üçüncü cümleyi eklemek 17 kelime
+ekliyor, bilgi eklemiyor. [Lead baseline'ını her zaman raporlayın; güçlü
+olduğunu asla varsaymayın.]{.hl}
+
+**TextRank 25 saniyesini hak etmiyor.** Cümle benzerliği grafiğini kurup
+üzerinde merkezîlik çalıştırmak — @sec-kumeleme-konu makinesi, yeni model yok
+— 13,66 alıyor; lead-1 ile lead-2 arasında [@mihalcea2004textrank]. Gerçek bir
+yöntem ve bu derlemde ilk cümleyi almaktan yuvarlama farkı kadar uzakta.
+
+**Bölümü asıl belirleyen sayı oracle.** Oracle, her haber için referansa karşı
+en yüksek ROUGE-1'i veren tek cümleyi seçiyor — cevabı önce okuduğu için bir
+sistem değil, bir *tavan*. Aldığı puan: **24,89**.
+
+::: {.callout-warning appearance="simple"}
+Bu derlemde tek cümlelik hiçbir çıkarımsal sistem 24,89 ROUGE-1'i aşamaz,
+çünkü kusursuz cümle seçiminin ulaştığı değer bu. Lead-2'nin 14,04'ü ile o
+24,89 arasındaki boşluk, daha iyi seçim için mevcut olan bütün alan; 24,89'un
+üstündeki her şey seçmeyi değil *yazmayı* gerektirir.
+
+Bu bir derlem özelliği, 1,8 saniyede hesaplandı ve hiçbir şey eğitmeden önce
+size soyutlayıcı bir modele uzanıp uzanmayacağınızı söylüyor.
+:::
+
+::: {.column-margin}
+Bu oracle'ı elinize geçen her özetleme derleminde koşturun. Yüksekse — CNN /
+DailyMail'inki 50'nin üstünde — çıkarım hem uygulanabilir hem ucuzdur ve
+üretmeye geçmeden önce onu tüketmelisiniz. Buradaki gibi düşükse, referans
+özetler birer kompozisyondur ve çıkarım yapısal olarak tavanlıdır. İki satır
+kod ve mimariyi belirliyor.
+:::
+
+## ROUGE neyi ölçer, neyi bozar {#sec-ozetleme-rouge}
+
+[ROUGE](#gloss-rouge){#term-rouge .term-ref} [@lin2004rouge], aday özet ile
+referans arasındaki n-gram örtüşmesini sayar. ROUGE-1 unigram örtüşmesi,
+ROUGE-2 bigram, ROUGE-L en uzun ortak alt dizi; her biri F1 olarak raporlanır.
+Yirmi yıldır alanın varsayılan metriği ve dürüst bir sebeple ayakta: ucuz,
+deterministik ve apaçık kötü sistemleri apaçık iyi olanların altına
+sıralayacak kadar kaliteyle ilişkili.
+
+::: {#gloss-rouge .column-margin .term-gloss}
+**ROUGE** — bir referans özete karşı n-gram örtüşmesi, F1 olarak raporlanır.
+Ucuz ve yeniden üretilebilir; özetin doğru olup olmadığına kör ve kimsenin
+kontrol etmediği bir tokenizer'a bağımlı. [↩](#term-rouge){.term-back}
+:::
+
+Bu bölümün üç şikâyeti var; sizi ne kadar endişelendirmeleri gerektiğine göre
+artan sırayla.
+
+### Birinci şikâyet: standart uygulama Türkçeyi yok ediyor
+
+Google'ın `rouge-score` paketi referans uygulama. HuggingFace'in `evaluate`'i
+onu sarmalıyor ve 2019'dan bu yana ROUGE raporlayan makalelerin çoğu bunu
+kullandı. Özgün Perl betiğinin davranışını yeniden üreten tokenizer'ı tek
+satır:
+
+```python
+# rouge_score/tokenize.py
+text = text.lower()
+text = re.sub(r"[^a-z0-9]+", " ", text)   # <- geri kalan her şey ayraçtır
+```
+
+`[^a-z0-9]`, `ç`, `ğ`, `ı`, `ö`, `ş`, `ü` ya da `İ` harflerini içermiyor.
+Türkçede bunlar noktalama değil; harf ve altısı dilin en sık geçen harfleri
+arasında. Sonuç:
+
+```text
+görüştü        -> ['g', 'r', 't']
+çiğ            -> ['i']
+köfte          -> ['k', 'fte']
+değişiklik     -> ['de', 'i', 'iklik']
+şehrinde       -> ['ehrinde']
+Türkiye'nin    -> ['t', 'rkiye', 'nin']
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Tokenizer'ı kendiniz çalıştırın — Türkçe yazın, dağılışını izleyin</div>
+```
+
+```{ojs}
+//| echo: false
+viewof rougeTokInput = Inputs.textarea({
+  label: "Türkçe metin",
+  value: "Cumhurbaşkanı dün İstanbul'da iş insanlarıyla görüştü ve değişiklik sözü verdi.",
+  width: 560, rows: 2,
+  placeholder: "herhangi bir Türkçe cümle yapıştırın"})
+```
+
+```{ojs}
+//| echo: false
+// rouge_score/tokenize.py içindeki iki satır, birebir aktarıldı
+rougeTokenize = t => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(x => x)
+```
+
+```{ojs}
+//| echo: false
+properTokenize = t => t.toLocaleLowerCase("tr").match(/[\p{L}\p{N}]+/gu) ?? []
+```
+
+```{ojs}
+//| echo: false
+rougeTokRows = properTokenize(rougeTokInput).map(w => {
+  const pieces = rougeTokenize(w);
+  return {word: w, pieces: pieces.join(" · ") || "(geriye hiçbir şey kalmadı)",
+          n: pieces.length, intact: pieces.length === 1 && pieces[0] === w};
+})
+```
+
+```{ojs}
+//| echo: false
+Inputs.table(rougeTokRows, {
+  columns: ["word", "pieces", "n", "intact"],
+  header: {word: "kelime", pieces: "rouge-score'un gördüğü", n: "parça",
+           intact: "sağ kaldı mı?"},
+  format: {intact: v => v ? "evet" : "HAYIR"},
+  width: {word: 180, pieces: 240, n: 70, intact: 90},
+  rows: 14})
+```
+
+```{ojs}
+//| echo: false
+md`${rougeTokRows.length} kelimenin
+**${rougeTokRows.filter(r => !r.intact).length} tanesi** sağ kalmadı —
+%${(rougeTokRows.filter(r => !r.intact).length /
+Math.max(rougeTokRows.length, 1) * 100).toFixed(1).replace(".", ",")}; aşağıda
+300 referans özet üzerinde ölçülen oran ise %44,4. Her parça hâlâ bir token
+olarak sayılıyor ve parçalar başka parçalarla eşleşiyor.`
+```
+:::
+
+Bu derlemden 300 referans özet üzerinde ölçüldü:
+
+```text
+word tokens, correct Turkish tokenization    6,682
+tokens after rouge-score                     9,660   1.45x as many
+words left intact                            3,713    55.6%
+words split or mutilated                     2,969    44.4%
+average pieces per mutilated word             1.96
+```
+
+[Türkçe kelimelerin yüzde kırk dördü tokenizer'dan sağ çıkmıyor ve enkaz her
+skoru şişiriyor.]{.hl} Tek harflik `g`, `r`, `t`, `i` parçaları belgeler
+arasında rastgele birbirini tutturuyor, dolayısıyla örtüşme yükseliyor:
+
+```text
+system                  correct tokenizer    rouge-score default    inflation
+lead-1                            12.75                  20.37        +59.8%
+lead-2                            14.04                  22.51        +60.3%
+lead-3                            14.03                  22.03        +57.0%
+random sentence                    8.56                  15.44        +80.4%
+TextRank                          13.66                  21.34        +56.2%
+oracle sentence                   24.89                  30.28        +21.7%
+```
+
+: Aynı 3.397 özet üzerinde ROUGE-1, iki tokenizer
+{tbl-colwidths="[30,24,24,22]"}
+
+Hasarı olduğundan büyük göstermek de kendi başına bir hata olurdu, o yüzden
+kesin konuşalım: **sıralama değişmiyor.** İki tokenizer altında da lead-2 >
+lead-3 > TextRank > lead-1. Yok olan şey *karşılaştırılabilirlik* — yayımlanmış
+her Türkçe ROUGE sayısı, okurlarının sandığı nicelikten kabaca %60 daha büyük
+ve bu fark sistemin ne kadar kopyaladığına göre değişiyor. Rastgele bir
+baseline %80 kazanıyor, oracle %22. [Şişme sistemin bir fonksiyonu; dolayısıyla
+sıra ayakta kalsa bile sistemler arasındaki farklar yanlış.]{.hl}
+
+::: {.column-margin}
+Bizim kendi tokenizer'ımız da aynı ailedeki bir düzeltmeye ihtiyaç duydu ve bu,
+@sec-kumeleme-konu bölümünün vahşi doğada bulduğu hatanın aynısı:
+`"İstanbul".lower()` bir `i` artı birleştirici nokta veriyor, `\w+` de bunu `i`
+ve `stanbul` diye ayırıyor; `"IŞIK".lower()` ise `ışık` yerine `işik` veriyor.
+Türkçede küçük harfe çevirme `str.lower()` değildir. İki yönün de ayrıca ele
+alınması gerekiyor ve token'ları yazdırmadıkça hata görünmüyor.
+:::
+
+Argümanın tokenizer hakkında olduğundan, bizim aritmetiğimiz hakkında
+olmadığından emin olmak için, bu bölümde kullanılan ROUGE, her iki
+tokenizer'ın da aynı sonucu verdiği 300 rastgele salt-ASCII çift üzerinde
+`rouge-score`'a karşı doğrulandı:
+
+```text
+max absolute difference vs rouge-score, 900 comparisons:  0.0000000000
+```
+
+Uygulamalar birebir aynı. Türkçedeki bütün fark tokenization'dan geliyor.
+
+### İkinci şikâyet: kimsenin raporlamadığı bir normalleştiriciye bağlı
+
+Türkçe çekim yapar. `bölgede` ile `bölgedeki` aynı işi yapan aynı kelime;
+ROUGE ikisini ilgisiz iki token olarak görüyor. Saymadan önce bir gövdeleyici
+uygulamak her sayıyı oynatıyor:
+
+```text
+system                  surface   5-char prefix   Snowball tr
+lead-1                    12.75           17.85         16.13
+lead-2                    14.04           19.46         17.67
+lead-3                    14.03           19.13         17.48
+TextRank                  13.66           18.24         17.11
+oracle sentence           24.89           29.30         27.77
+```
+
+: Üç normalleştirici altında ROUGE-1 {tbl-colwidths="[28,18,18,18]"}
+
+"Yüzey biçimi" ile "5 karakterlik önek" arasında beş ROUGE-1 puanı duruyor —
+ki bu, makalelerin çoğunun kendi baseline'larına karşı iddia ettiği iyileşmeden
+daha büyük bir fark. **Bir ROUGE sayısı, onu üreten tokenizer ve
+normalleştirici olmadan yorumlanamaz** ve bunlar neredeyse hiç
+belirtilmiyor. Bu bir Türkçe problemi değil; Türkçede daha kötü.
+
+### Üçüncü şikâyet: asıl önemli olan
+
+İlk iki şikâyet yeniden üretilebilirlikle ilgili ve bir uzlaşıyla
+düzeltilebilir. Üçüncüsü düzeltilemez.
+
+[ROUGE, özetin doğru olup olmadığını göremez.]{.hl} Bir referansla kelime
+örtüşmesi saydığı için, doğru kelimeleri gerçeği tersine çeviren bir sırayla
+kopyalayan özet yüksek puan alır; farklı kelimeler kullanan doğru bir yeniden
+ifade ise düşük puan alır. Kaynak cümle şu olsun: *"bakan bankanın satılacağını
+yalanladı"*:
+
+| aday | doğruluk | referansa karşı ROUGE-1 |
+|:--|:--|--:|
+| bakan bankanın satılacağını yalanladı | doğru | yüksek |
+| bakan bankanın satılacağını söyledi | **yanlış** | yüksek — tek kelime farklı |
+| satış bakanlık tarafından reddedildi | doğru | düşük — neredeyse hiç örtüşme yok |
+
+: Örtüşmenin ayırt edemedikleri {tbl-colwidths="[46,18,36]"}
+
+Yanlış özetle doğru özet tek bir token'la ayrılıyor ve anlamın tamamını o
+token taşıyor. @kryscinski2019neural bu savı uzun uzun kurdu;
+@fabbri2021summeval sonra ölçtü ve ROUGE'un insanların *tutarlılık* yargısıyla
+ilişkisini, sistemleri sadakat açısından sıralamak için kullanılamayacak kadar
+zayıf buldu. @goyal2022news ise insan etiketleyicilerin, ROUGE'un fine-tune
+edilmiş modellerin *altına* sıraladığı GPT-3 özetlerini tercih ettiğini buldu.
+
+Yani: ROUGE'u raporlayın, çünkü ortak para birimi ve yokluğu kaçamak
+görünüyor. Ama asla yalnızca ondan sonuç çıkarmayın. Sonraki iki bölüm, buna
+ne ekleneceğini anlatıyor.
+
+## Soyutlayıcı özetleme {#sec-ozetleme-soyutlayici}
+
+Bu derlemde çıkarım 24,89'da tavan yapıyor, dolayısıyla kalan alan *yazan*
+modellerin. Üç çerçeveleme kullanıldı ve tarih iki paragrafı hak ediyor, çünkü
+bugünkü cevabın neden bu kadar sönük göründüğünü açıklıyor.
+
+**Görev üzerinde eğitilmiş encoder-decoder.** Encoder haberi okur, decoder
+özeti yazar ve bütün yapı (haber, özet) çiftleriyle eğitilir. BART, T5, mT5 ve
+devamı. 2022 civarına kadar "bir özetleme modeli" bu demekti ve elinizde bir
+derlem ile sabit bir alan varsa hâlâ kalite başına verimde kazanıyor.
+
+**Talimat verilmiş decoder-only.** @sec-on-egitim bölümündeki sonraki-token
+hedefi, modele her türün metninin nasıl şekillendiğini zaten öğretiyor; bir
+haber girişinin şekli de buna dâhil. @sec-egitim-sonrasi ise modeli, haberi
+sürdürmek yerine *talimatı izleyip* bir giriş üretmeye yönelten şey. Özetleme,
+göreve özgü hiçbir eğitim gerektirmeyen görevlerden biri çıktı — yetenek ön
+eğitimli modelde zaten gizliydi ve talimat ayarı onu açığa çıkardı.
+
+Bu yüzden bu bölümün soyutlayıcı sistemi bir eğitim koşusu değil, bir prompt.
+Ayrıca bu yüzden @goyal2022news, insan etiketleyicilerin ROUGE'ta *daha yüksek*
+puan alan fine-tune edilmiş modeller yerine zero-shot GPT-3 özetlerini tercih
+ettiğini buldu — bu bölüm birazdan aynı sonucu küçük ölçekte yeniden üretecek.
+
+```python
+PROMPT = """Aşağıdaki haber metnini TEK BİR CÜMLEYLE özetle.
+
+Kurallar:
+- Yalnızca tek bir cümle yaz, en fazla 30 kelime.
+- Sadece metinde geçen bilgileri kullan; metinde olmayan hiçbir şey ekleme.
+- Haberin ana olayını ver, ayrıntıları değil.
+- Başlık değil, tam bir cümle yaz.
+- Sadece özeti yaz, başka hiçbir şey yazma.
+
+Haber metni:
+{text}"""
+```
+
+Bu prompt'ta yerini hak eden iki ayrıntı var. Uzunluk sınırı var, çünkü ROUGE-1
+F1 uzun özetleri precision üzerinden cezalandırıyor; sınırsız bir model üç
+cümle yazıyor, hiç de daha az yararlı olmadığı hâlde daha düşük puan alıyor —
+keşfedilecek değil, karşı önlem alınacak bir metrik artefaktı. Yalnızca metinde
+geçeni kullanma talimatı ise sadakat kısıtının açıkça yazılmış hâli;
+@sec-ozetleme-sadakat bunun işe yarayıp yaramadığını ölçüyor.
+
+### Aldığı puan
+
+Altı sistemin hepsi aynı 500 haber üzerinde, Türkçeyi doğru işleyen bir
+tokenizer ile ROUGE-1:
+
+| sistem | R-1 | R-2 | R-L | kelime |
+|:--|--:|--:|--:|--:|
+| lead-1 | 13,24 | 3,36 | 10,85 | 20,1 |
+| lead-2 | 14,69 | 3,79 | 11,16 | 38,0 |
+| lead-3 | 14,52 | 3,95 | 10,74 | 55,4 |
+| TextRank (1 cümle) | 13,92 | 3,29 | 10,93 | 29,8 |
+| **LLM, zero-shot** | **19,29** | **6,00** | **16,08** | 23,7 |
+| *oracle cümle* | *25,05* | *9,21* | *20,29* | *19,5* |
+
+: Aynı 500 haber, yüzey biçimi normalleştiricisi {tbl-colwidths="[34,14,14,14,12]"}
+
+Zero-shot LLM, gerçek çıkarımsal sistemlerin hepsini yaklaşık **4,6 ROUGE-1
+puanıyla** geçiyor ve hâlâ çıkarımsal oracle'ın **5,8 altında** duruyor. İkisi
+de önemli: burada üretim açıkça değmiş durumda, ve *kusursuz cümle seçiminin*
+tavanı, 9B'lik bir modelin serbestçe yazarak bu referanslara karşı aldığı
+puanın hâlâ üstünde.
+
+Bu, metrikten şüphelenmeniz için zaten yeterli olmalı; çünkü var olan en iyi
+tek cümleyi seçen bir sistem, özet yazan bir sistemden apaçık daha iyi
+değildir. @sec-ozetleme-sadakat, bu şüphenin bir ölçümle doğrulandığı yer.
+
+## Uzun belgeler {#sec-ozetleme-uzun}
+
+Yukarıdaki haberler 300 kelime. Gerçek özetleme talepleri 80 sayfalık
+sözleşmeler, çeyreklik raporlar ve bir yıllık destek talebi geçmişleri olarak
+geliyor; o noktada mimari bir model seçimi olmaktan çıkıp bir hat tasarımına
+dönüşüyor.
+
+Neye mal olduklarına ve neyi korduklarına göre artan sırayla üç kalıp:
+
+**Kırpma (truncate).** İlk *n* token'ı verin, gerisini yok sayın. Lider
+yanlılığı güçlüyse dürüst bir seçim; ama bu derlemde özetlerin %28,8'i en iyi
+9. cümle ya da sonrasıyla eşleştiği için kanıtın çoğunu çöpe atıyor. En ucuz
+seçenek ve en sık kazara seçilen.
+
+**Map-reduce.** Parçalayın, her parçayı özetleyin, sonra özetleri özetleyin.
+Maliyet belge uzunluğunda doğrusal, kusursuz paralelleşiyor ve her çerçevede
+varsayılan. Kaybettiği şey, **bir parça sınırını aşan her şey**: on iki sayfa
+sonra kayıtlanan bir sözleşme maddesi, bir tekzip, bir anlatı yayı. Her parça
+özetleyicisi, öncesinde ne geldiğini bilmeden bir pencere görüyor; dolayısıyla
+kendi ayrıntılarından hangisinin bütünde önemli olacağını bilemiyor ve
+indirgeme adımı yalnızca eşleme adımının tuttuğu şeyle çalışabiliyor.
+
+**İyileştirme (refine) ya da hiyerarşik toplama.** İlerleyen bir özeti taşıyın
+ve her parçayla güncelleyin. Parçalar arası sürekliliği koruyor ve tamamen
+sıralı — paralellik yok — ayrıca ilerleyen özet, tekrar tekrar yeniden
+yazıldıkça sapıyor. Geç gelen parçalar erkencilerden daha fazla etki ediyor;
+bu da kırpmanın tam tersi bir başarısızlık.
+
+::: {.column-margin}
+Bunu belirleyen aritmetik @sec-transformerlar bölümünündür. Attention dizi
+uzunluğunda karesel, dolayısıyla 100 bin token üzerinde tek bir geçiş, 10 bin
+üzerindeki bir geçişin on katı değildir. Map-reduce, o kareseli çok sayıda
+küçük karesel geçişin doğrusal toplamıyla takas ediyor; uzun bağlamlı bir model
+belgeyi alabilecek olsa bile maliyette kazanmasının sebebi bu — ve "modelin bir
+milyon token'lık penceresi var" cümlesinin tasarımı neden bitirmediğinin de.
+:::
+
+Üretimle temasta sağ kalan kural şu: [karakter sayısına göre değil, yapıya göre
+parçalayın.]{.hl} Bölümler, maddeler, başlıklar, konuşmacı sıraları, tarihler.
+Bir argümanın ortasından çekilen sınır, her biri yerel olarak makul ama birlikte
+yanlış iki özet üretir; bu başarısızlık da hiçbir otomatik metrikte görünmez —
+belgeyi bilen bir okur ister.
+
+## Kaynağa sadakat {#sec-ozetleme-sadakat}
+
+Bir özet akıcı, konuya uygun, doğru boyutta ve yüksek ROUGE'lu olabilir; yine
+de kaynağın hiç söylemediği bir şeyi iddia edebilir.
+[Kaynağa sadakat](#gloss-faithfulness){#term-faithfulness .term-ref},
+özetteki her iddianın kaynak tarafından desteklenip desteklenmediğidir ve
+özetin iyi okunup okunmadığından ya da bir referansla eşleşip eşleşmediğinden
+farklı bir sorudur.
+
+::: {#gloss-faithfulness .column-margin .term-gloss}
+**faithfulness** (kaynağa sadakat) — bir özetin yalnızca kaynağının
+desteklediği şeyleri iddia edip etmediği. Akıcılıktan bağımsız, referans
+örtüşmesinden bağımsız; ve çıktı üzerine hareket edilip edilemeyeceğini
+belirleyen özellik. [↩](#term-faithfulness){.term-back}
+:::
+
+@maynez2020faithfulness başarısızlığı ikiye ayırdı; ayrım işlevsel olarak
+yararlı, çünkü çözümleri farklı:
+
+- **İçsel (intrinsic)** — özet, kaynakta *bulunan* bir şeyi yanlış aktarıyor.
+  Özne ile nesne yer değiştirmiş, bir olumsuzluk düşmüş, iki varlık birbirine
+  karışmış, bir sayı yanlış şeye iliştirilmiş. Kaynakla karşılaştırarak
+  saptanabilir ve genellikle bir model hatası.
+- **Dışsal (extrinsic)** — özet, kaynakta hiç olmayan bir şey ekliyor. Bazen
+  doğru (model maliye bakanının kim olduğunu biliyor), bazen uydurma.
+  *Desteklenmemiş* olarak saptanabilir; ayrıca *yanlış* olup olmadığına karar
+  vermek belgeyi değil dünyayı gerektirir.
+
+Doğru olduğu ortaya çıkan dışsal bir ekleme bile bilgilendirici bir özette
+kusurdur, çünkü okur hangi cümlelerin kaynağa dayandığını, hangilerinin model
+tarafından eklendiğini ayırt edemez.
+
+### İnsansız saymak
+
+Kaba bir vekil ölçü sizi epey ileri götürüyor: **özette geçen ve kaynakta hiç
+geçmeyen bir sayı ya da özel isim, desteklenmemiş bir iddiadır.** İçsel
+hataları tamamen kaçırıyor — yer değiştirmiş bir özne yalnızca kaynak
+kelimelerini kullanır — ama dışsal olanları yakalıyor ve ürettiğiniz her
+özette koşturmanın maliyeti sıfır.
+
+Kaba vekil ölçülerin bir kontrole ihtiyacı vardır; yoksa ne söylerlerse ona
+inanırsınız. Buradaki kontrol bedava: [lead-2 haberden birebir kopyalanıyor,
+dolayısıyla işaretlenme oranı vekil ölçünün yanlış pozitif oranıdır ve sıfır
+olmak zorundadır.]{.hl}
+
+```text
+system                nums  unsupported   propers  unsupported   summaries flagged
+lead-1  (control)      100            0       521            0       0    ( 0.0%)
+lead-2  (control)      173            0       809            0       0    ( 0.0%)
+```
+
+İkisinde de sıfır; sonraki tabloyu okumaya değer kılan da bu. Buraya gelmek üç
+deneme aldı; iki başarısızlık @sec-ozetleme-vekil-hatalari bölümünde, çünkü
+düzeltmenin kendisinden daha öğretici.
+
+::: {.callout-note collapse="true"}
+## Bu vekil ölçünün yanlış olan iki sürümü {#sec-ozetleme-vekil-hatalari}
+
+**Birinci deneme** özetteki büyük harfle başlayan kelimeleri kaynağın
+*büyük harfle başlayan* kelimeleriyle karşılaştırıyordu — ve "The"yi özel isim
+saymamak için ikisinde de cümle başındakileri atlıyordu. Böylece haberde
+yalnızca cümle başında geçen bir isim, yok sayıldı. Sonuç: **BBC
+gazetecilerinin kendi özetlerinin %56'sı sadakatsiz** çıktı; bu, sizi
+heyecanlandırması değil durdurması gereken türden bir sayı.
+
+**İkinci deneme** bunu kaynağın tamamına bakarak düzeltti, ama özetin token
+kümesini `str.split()` ile, kaynağınkini `\w+` ile kuruyordu. Böylece özetteki
+`İtalya'ya`, kaynaktaki `italya` ile hiç eşleşmedi; `neo-İslamcı` hiç
+`islamcı` ile eşleşmedi ve kaynaktaki `Komisyonu,hemşirenin` gibi bir dizgi
+hatası hiçbir şeyle eşleşmedi. Sadakatsiz olması *imkânsız* olan kopyalanmış
+metin %8 sadakatsiz döndü.
+
+İki hatanın da şekli aynı: **karşılaştırmanın iki tarafı farklı
+token'landı.** Bu, @sec-ozetleme-rouge bölümünün `rouge-score` içinde bulduğu
+kusurun aynısı ve @sec-dizi-etiketleme bölümünün bir LLM çıkarım hattında
+bulduğunun aynısı. Bir metrik metni metinle karşılaştırıyorsa, kontrol
+edilecek ilk şey iki tarafın da aynı tokenizer'dan geçtiğidir; en ucuz kontrol
+yolu da cevabını zaten bildiğiniz bir kontrol koşusudur.
+:::
+
+### Vekil ölçünün bulduğu
+
+::: {.callout-warning appearance="simple"}
+Bu bölümdeki en şaşırtıcı sayı bir modelle ilgili değil.
+
+```text
+system                nums  unsupported   propers  unsupported   summaries flagged
+lead-1  (control)      100            0       521            0       0    ( 0.0%)
+lead-2  (control)      173            0       809            0       0    ( 0.0%)
+LLM (qwen3.5:9b)        61            0       494            3       3    ( 2.0%)
+reference (human)       74           33       644          173      86    (57.3%)
+```
+:::
+
+[Referans özetler, desteklenmemiş içeriği modelin neredeyse otuz katı oranında
+iddia ediyor.]{.hl}
+
+Bu bir ölçüm hatası değil — kontroller temiz — ve BBC gazetecilerinin haber
+uydurması da değil. Derlemin nasıl kurulduğuyla ilgili. XL-Sum'ın "özet"i,
+haberin yanında yer alan koyu giriş satırı; konuya soğuk gelen bir okuru
+yönlendirmek için yazılmış. Dolayısıyla gövdenin verili saydığı arka planı
+sağlıyor: bakanın adı, referandumun tarihi, haberin yalnızca ima ettiği bir
+rapordan gelen rakam. @maynez2020faithfulness aynısını aynı yöntemle kurulmuş
+XSum için belgelemişti; işte aynısı Türkçede.
+
+%57,3'ün bir kısmı, vekil ölçümün bir kısaltma uyuşmazlığını sayması —
+referans *Avrupa Birliği* yazarken haber *AB* yazıyor — o yüzden bunu bir üst
+sınır olarak alın. Yön konusunda ise kuşku yok.
+
+Bundan üç sonuç çıkıyor ve bu bölümün neden bir dipnot olmadığının sebebi
+onlar.
+
+1. **Bu referanslara karşı ROUGE, sadakatsizliği ödüllendiriyor.** Referansın
+   desteklenmemiş arka planını yeniden üreten model daha yüksek puan alıyor.
+   Bunu reddeden model daha düşük alıyor.
+2. **Prompt'umuz modele yalnızca metindekini kullanmasını söyledi ve model
+   uydu** — referansın %57,3'üne karşı %2,0. Metrik onu, istediğimiz şeyi
+   yaptığı için cezalandırıyor.
+3. **Bu derlem üzerinde fine-tuning, bir modele halüsinasyon görmeyi
+   öğretirdi**; çünkü eğitim sinyali %57,3 oranında desteklenmemiş iddia
+   içeriyor. Bu, bölümdeki en güçlü tek argüman: kazınmış bir özetleme derlemi
+   üzerinde, önce denetlemeden eğitim yapmayın.
+
+::: {.column-margin}
+Bu aynı zamanda "peki neden 27.176 eğitim çifti üzerinde mT5'i fine-tune
+etmiyoruz?" sorusunun da cevabı. Edebilirsiniz, ROUGE'ta daha iyi puan
+alacaktır ve öğrendiği şeylerin bir kısmı, girdisinde bulunmayan şeyleri iddia
+etmek olacaktır. Metrik bunu size söylemeyecek. @sec-veri-etiketleme, bu
+problem sınıfını bir modele ulaşmadan önce fark etmeye ayrılmış bölüm.
+:::
+
+## LLM'in hakemliği ve size neye mal olduğu {#sec-ozetleme-hakem}
+
+ROUGE sadakati göremiyor; elle denetim her şeyi görüyor ama ölçeklenmiyor.
+Ortadaki seçenek bir modele sormak; bu artık pratikte varsayılan [@liu2023geval]
+ve beraberinde, varsayıp geçilmek yerine ölçülmesi gereken yanlılıklar
+getiriyor.
+
+Burada kullanılan tasarım, söylenmeye değer üç kurala uyuyor; çünkü herhangi
+birini çiğnemek sonucu sessizce geçersiz kılıyor:
+
+1. **Hakem, üretenden farklı bir model.** `gemma3:27b`, `qwen3.5:9b`'yi
+   yargılıyor. Modeller kendi çıktılarını tercih ediyor ve kendi kendini
+   yargılamış bir skor bir ölçüm değildir.
+2. **Hakem, bir şema altında tek bir dar soruyu cevaplıyor.** "Bu özete 1-5
+   arası puan ver" değil — *bu özetteki her iddia kaynak tarafından
+   destekleniyor mu?* — iki değerli bir enum ile. Tek eksenli bir ölçüt yeniden
+   üretilebilir; beş puanlık genel kalite skoru bir ruh hâlidir.
+3. **İnsan referansı da aynı koşullarda yargılanıyor.** Hakemin skorlarının ne
+   anlama geldiğini bilmenin tek yolu bu — ve @sec-ozetleme-sadakat bölümünün
+   gösterdiği gibi, referans kendiliğinden tavan değil.
+
+### Hakemin söyledikleri
+
+150 haber; hem modelin özeti hem insan referansı aynı koşullarda yargılandı:
+
+| yargılayan | LLM (qwen3.5:9b) | referans (insan) |
+|:--|--:|--:|
+| otomatik vekil ölçü | %3,3 | %57,3 |
+| `gemma3:27b` hakem | %7,3 | %33,3 |
+
+: En az bir desteklenmemiş iddia içeren özetlerin oranı, aynı 150 haber
+{tbl-colwidths="[34,33,33]"}
+
+Hakem yönü doğruluyor: **insan referansları, modelin özetlerinin dört ila beş
+katı sıklıkta desteklenmemiş bulunuyor.** Biri kaba biri pahalı iki yöntem,
+düzey konusunda anlaşamıyor, sıralama konusunda anlaşıyor.
+
+### İki sayıdan da değerli olan kısım
+
+İki yöntemin madde madde uyumu:
+
+```text
+                       proxy flags   judge flags   both   verdicts agreeing
+LLM (qwen3.5:9b)                 5            11      1        90.7%
+reference (human)               86            50     35        56.0%
+```
+
+[Modelin özetlerinde iki yöntem 5 ve 11 maddeyi işaretliyor ve tam olarak
+birinde örtüşüyorlar.]{.hl} O %90,7'lik uyum neredeyse tamamen *temiz*
+özetler üzerindeki uyum; iki yöntemden herhangi biri bir sorun gördüğünde
+neredeyse hiç kesişmiyorlar.
+
+Kuramın öngördüğü şey bu ve unutulması kolay:
+
+- Vekil ölçü yalnızca **dışsal** hataları görebiliyor — kaynakta olmayan bir
+  isim ya da sayı. İçsel olanlara yapısal olarak kör, çünkü yer değiştirmiş bir
+  özne ya da düşmüş bir olumsuzluk yalnızca kaynak kelimelerini kullanıyor.
+- Hakem ikisini de görüyor ve kendi hatalarını ekliyor: vekil ölçünün %3,3
+  gördüğü yerde modeli %7,3 ile işaretliyor ve vekil ölçünün işaretlediği
+  referansları *aklıyor*, çünkü *AB*'yi doğru biçimde *Avrupa Birliği*'ne
+  çözüyor, vekil ölçü ise çözemiyor.
+
+Yani: **güvenilir kısım sıralama, oran değil.** İki ölçümü de raporlayın,
+uyuşmazlığı da raporlayın; ve mutlak bir sayıya ihtiyacınız varsa —
+"gönderdiğimizin ne kadarı yanlış?" — bu ikisinin hiçbiri onu size vermiyor.
+O sayı rastgele bir örneklemi okumaktan gelir; @sec-veri-etiketleme disiplini
+ve @sec-ozetleme-lab bölümünün 6. adımı budur.
+
+### Hakemin maliyeti
+
+```text
+300 judgements with gemma3:27b     20,482s     68.3s each
+```
+
+150 haber-özet çiftini iki kez yargılamak neredeyse altı saat; buna karşılık
+9B'lik modelle 500 özet *üretmek* 20 dakika. [Yargılamak üretmekten daha
+pahalı]{.hl}, çünkü hakem özetin yanında haberin tamamını da okuyor ve onu her
+sistem için bir kez koşturuyorsunuz. Bunu sonradan akla gelen bir şey olarak
+değil, bir değerlendirme maliyeti olarak bütçeleyin ve her şeyi yargılamak
+yerine örnekleyin.
+
+### Yanlılıklar ve bu bölümün hangilerini ölçtüğü
+
+Yukarıdaki tasarım kuralları, LLM hakemlerinin bilinen ve tekrarlanabilir
+başarısızlık biçimleri olduğu için var. Bu bölümün kurulumu bunlardan ikisini
+yapısı gereği önlüyor, üçüncüsünü ölçmüyor:
+
+| yanlılık | nedir | burada nasıl ele alındı |
+|:--|:--|:--|
+| Kendini tercih | model kendi çıktısına daha yüksek puan verir | önlendi: `gemma3:27b`, `qwen3.5:9b`'yi yargılıyor |
+| Konum | ikili karşılaştırmada önce sunulan seçenek daha sık kazanır [@zheng2023judging] | geçerli değil: bu hakem tek seferde tek özet puanlıyor, ikili sıralama yok |
+| Uzunluk | daha uzun ve daha akıcı cevaplar, içerikten bağımsız olarak yüksek puan alır | **burada ölçülmedi** — prompt'taki uzunluk sınırı modelin özetlerini referans uzunluğuna yakın tutuyor (21'e karşı 23,7 kelime); bu maruziyeti azaltıyor ama sınamıyor |
+
+: Hakem yanlılıkları ve bu kurulumun onlara karşı yaptığı
+{tbl-colwidths="[18,48,34]"}
+
+Üçüncüsünü elle savuşturmak yerine açıkça söyleyelim: ikili ya da 1–5 ölçütlü
+bir hakeme geçerseniz konum ve uzunluk yanlılığının ikisi de devreye girer ve
+@zheng2023judging bölümündeki takas testi — iki sırayı da sunun, kararın kaç
+kez döndüğünü sayın — hiçbirine inanmadan önce koşturulacak ölçümdür.
+
+## Üretimde özetleme {#sec-ozetleme-uretim}
+
+Mühendislik soruları her üretken özellikte olan aynı üç soru; özetlemenin
+ikisine alışılmadık biçimde temiz cevapları var.
+
+**Önbellekleme neredeyse bedava para.** Bir özet, (belge, prompt, model,
+çözümleme parametreleri) dörtlüsünün saf bir fonksiyonudur. Önbelleği bu
+dördünün hash'ine anahtarlayın, aynı belge iki kez özetlenmesin. Belgeler
+yazıldığından çok daha sık okunuyor, dolayısıyla isabet oranları yüksek; ve
+çoğu LLM özelliğinin aksine önbelleği bozacak bir kişiselleştirme yok.
+Prompt'u anahtarın içine sürümleyin, yoksa bir prompt değişikliği sonsuza dek
+sessizce bayat çıktı sunar.
+
+**Maliyete çıktı değil girdi hâkim.** Burada özetlenen 500 haber üzerinde
+ölçüldü: **haber başına 890 prompt token'ına karşılık 53 üretilen token**,
+yani neredeyse 17'ye 1 — üstelik bunlar 300 kelimelik haberler, yani
+özetletmek isteyeceğiniz her şeyin kısa ucu. Map-reduce altındaki uzun
+belgelerde oran daha da kötüleşiyor, çünkü ara özetler tekrar okunuyor.
+Aritmetik [servis bölümünün](../../en/chapters/31-serving.html) aritmetiği:
+parasını ödediğiniz şey *okumak*, dolayısıyla kaldıraç ne kadar istediğiniz
+değil ne kadar gönderdiğiniz. Kalıp metni kırpmak — başlıklar, gezinme,
+sorumluluk reddi, imza blokları — genellikle her model değişikliğinden daha
+büyük tasarruf.
+
+**Döngüdeki insan bir yedek çözüm değil, bir tasarım kararı.**
+@sec-ozetleme-gorevler bölümündeki soruya dönün: özet yanlış olursa ne oluyor?
+Maliyet sırasına göre üç biçim:
+
+| kalıp | ne zaman | neye mal olur |
+|:--|:--|:--|
+| Kaynağı yanında göster | okur tek bakışta doğrulayabiliyorsa | arayüz işi, madde başına maliyet yok |
+| Her iddiayı kendi cümlesine bağla | iddialar tek tek kontrol edilebiliyorsa | @sec-dizi-etiketleme bölümündeki çıkarım, artı hizalama |
+| Teslimden önce insan incelemesi | yanlış bir özete göre hareket etmek pahalıysa | madde başına bir kişi |
+
+: Kim kontrol ediyor ve kontrol neye mal oluyor {tbl-colwidths="[32,34,34]"}
+
+[Kaynağı özetin yanında göstermek, çoğu özetleme ürününde en yüksek getirili
+özelliktir]{.hl} ve bir model iyileştirmesi bile değildir. Doğru olmak zorunda
+olan bilgilendirici bir özeti, yalnızca yararlı olması yeten belirtici bir
+özete dönüştürür.
+
+## Sezgi kontrolleri {#sec-ozetleme-sezgi}
+
+::: {.callout-note collapse="true"}
+## 1. Bir satıcı Türkçe haberlerde 41 ROUGE-1 raporluyor. Etkilendiniz mi?
+
+Etkilenemezsiniz; neredeyse kesinlikle belirtmedikleri üç şeyi öğrenene kadar:
+tokenizer, normalleştirici ve referans kümesi.
+
+Bu derlemde aynı tahminler Türkçe için doğru bir tokenizer'la **14,03**,
+`rouge-score`'un varsayılanıyla **22,03** alıyor; o varsayılan `ç`, `ğ`, `ı`,
+`ö`, `ş` ve `ü`'yü noktalama sayıp Türkçe kelimelerin %44,4'ünü sakatlıyor.
+Gövdeleme bunu beş puan daha oynatıyor. Yani "41" güçlü bir sistem de olabilir,
+cömertçe ölçülmüş zayıf bir sistem de; sayı tek başına söyleyemez.
+
+Onu hangi tokenizer'ın ürettiğini sorun. Cevap "standart olan" ise, o sayı
+doğru hesaplanmış hiçbir şeyle karşılaştırılabilir değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Hiçbir şey eğitmeden önce, çıkarımın çalışıp çalışamayacağını nasıl bilirsiniz?
+
+Oracle'ı hesaplayın. Her belge için referansa karşı en yüksek ROUGE'u veren
+tek cümleyi alın ve ortalamasını çıkarın. *Kusursuz* cümle seçiminin ulaştığı
+değer budur; dolayısıyla hiçbir çıkarımsal sistem onu geçemez.
+
+Burada **24,89** ve lead-2 zaten 14,69'a ulaşıyor — yani çıkarımda kalan bütün
+alan on puan ve 24,89'un üstündeki her şey yazmayı gerektiriyor. CNN /
+DailyMail'de aynı ölçüm 40,58 veriyor; çıkarımsal sistemlerin orada on yıl
+boyunca saygın kalmasının sebebi de bu.
+
+İki satır kod ve bir GPU saati harcamadan önce mimarinizi belirliyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Sadakat metriğiniz, insan gazetecilerin özetlerinin %56'sında halüsinasyon gördüğünü söylüyor. Ne yaparsınız?
+
+Yayımlamazsınız. Bu kadar şaşırtıcı bir sayının bir keşif olmasındansa
+ölçümünüzdeki bir hata olması çok daha olası; öğrenmenin yolu da **cevabını
+zaten bildiğiniz bir kontrol** koşturmaktır.
+
+Buradaki kontrol bedava: lead-2 haberden birebir kopyalanıyor, dolayısıyla
+sadakatsiz *olamaz* ve üzerindeki her işaret bir yanlış pozitiftir. Bunu
+koşturmak, vekil ölçünün ardışık iki sürümünde iki hata ortaya çıkardı — ikisi
+de aynı hata: karşılaştırmanın iki tarafını farklı token'lamak.
+
+Referansın oranı ancak kontrol tam olarak sıfır döndükten sonra raporlanmaya
+değer hâle geldi. Yine de yüksekti (%57,3) ve gerçek bir sebeple: derlemin
+özetleri, haber gövdesinin içermediği arka planı sağlayan BBC giriş satırları.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Modeliniz ROUGE'ta fine-tune edilmiş baseline'ın altında kalıyor. Daha mı kötü?
+
+Belki tam tersi. Bu derlemde referans özetler, nasıl ölçtüğünüze bağlı olarak
+vakaların %33–57'sinde desteklenmemiş içerik iddia ediyor; dolayısıyla onlara
+karşı ROUGE, bir modeli bunu yeniden ürettiği için ödüllendiriyor. Prompt'umuz
+modele yalnızca metindekini kullanmasını söyledi; model uydu ve metrik ona bu
+uyum için fatura kesti.
+
+@goyal2022news tam olarak bunu ölçekte buldu — insanlar, ROUGE'un fine-tune
+edilmiş modellerin altına sıraladığı zero-shot GPT-3 özetlerini tercih ediyordu.
+ROUGE ile bir sadakat ölçümü çeliştiğinde, referans kalitenin tanımı değil,
+kalite hakkında bir hipotezdir.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. 80 sayfalık sözleşmeleri özetlemeniz gerekiyor. Map-reduce nerede kaybeder?
+
+Parça sınırlarında ve görünmez biçimde. Her parça özetleyicisi kendi
+penceresini, gerisinden habersiz görüyor; dolayısıyla kendi ayrıntılarından
+hangisinin bütünde önemli olacağını söyleyemiyor ve indirgeme adımı yalnızca
+sağ kalanla çalışabiliyor. On iki sayfa sonra kayıtlanan bir madde, yerel
+olarak doğru ama birlikte yanlış iki özet üretiyor.
+
+Hiçbir otomatik metrik bunu yakalamıyor — iki özet de akıcı, ikisi de kendi
+parçasına dayanıyor. Hafifletici önlemler: karakter sayısına göre değil
+*yapıya* göre parçalamak ve süreklilik paralellikten önemliyse ilerleyen bir
+özeti taşımak (refine).
+:::
+
+::: {.callout-note collapse="true"}
+## 6. 2026'da çıkarımsal özetleme ne zaman doğru cevaptır?
+
+Yanlış olmak pahalıyken, hantal olmak pahalı değilken. Çıkarımsal bir özet
+alıntılanmış metindir: belgenin içermediği hiçbir şeyi iddia edemez ve bu,
+düzenlemeye tabi ya da hukuki bir ortamda akıcılıktan daha değerlidir.
+
+Ayrıca oracle cevabın belgenin *içinde* olduğunu söylediğinde — yüksek oracle
+skoru seçimin uygulanabilir olduğu anlamına gelir — ve determinizme,
+denetlenebilirliğe ya da belge başına yaklaşık sıfır maliyete ihtiyacınız
+olduğunda. Bu derlemde lead-2, 3.397 haber için 0,2 saniye sürüyor; LLM ise 20
+dakika.
+:::
+
+## Mülakat soruları {#sec-ozetleme-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynaklar üzerine — @sec-metin-veri bölümündeki uyarının aynısı.**
+Aşağıdaki sorular, bu kitabın baştan sona kullandığı iki güvenilir açık
+kaynakta tekrar ediyor; ayrıca bu bölümün kendi ölçümlerinin cevaplanabilir
+kıldığı sorular da var.
+:::
+
+### Görevi anlayıp anlamadığınızı sınayanlar
+
+**S: Bir özetleme sistemini nasıl değerlendirirsiniz?**
+
+Soruyu bitiren cevap: karşılaştırılabilirlik için ROUGE, ROUGE gerçeği
+göremediği için bir sadakat ölçümü ve iki otomatik ölçüm de size mutlak bir
+oran vermediği için aralığıyla birlikte elle denetlenmiş rastgele bir örneklem.
+Sonra önce neyi kontrol edeceğinizi söyleyin: tokenizer, oracle tavanı ve
+referansların kendilerinin sadık olup olmadığı. "ROUGE" deyip duran adaylar
+hiç sistem göndermemiştir.
+
+**S: Bu kadar kusurluysa ROUGE neden hâlâ kullanılıyor?**
+
+Çünkü ucuz, deterministik, yeniden üretilebilir ve makaleler arasında
+karşılaştırılabilir; ayrıca alternatifleri pahalı, deterministik olmayan ya da
+modele bağımlı. Apaçık kötü sistemleri apaçık iyi olanların altına sıralıyor,
+ki bir lider tablosunun ihtiyaç duyduğunun çoğu bu. Dürüst tutum onu
+raporlamak ve ondan asla sonuç çıkarmamak — ve neyi göremediğini tam olarak
+söyleyebilmek: sadakati ve farklı kelimeler kullanan her yeniden ifadeyi.
+
+**S: Çıkarımsal mı, soyutlayıcı mı?**
+
+Önce oracle'ın ne dediğini sorun, sonra özet yanlış olursa ne olduğunu. Yüksek
+oracle artı pahalı hatalar, çıkarımsal bir problemdir. Düşük oracle artı
+hoşgörülü okurlar, soyutlayıcı bir problemdir. Bu iki soru yerine tercihinden
+cevap veren aday tahmin yürütüyordur.
+
+### Bir tane gönderip göndermediğinizi sınayanlar
+
+**S: Özetleyiciniz demoda çalışıyor, kullanıcılar halüsinasyon gördüğünü
+söylüyor. Hata ayıklayın.**
+
+Maliyet sırasına göre; ilk ikisi model değil. (1) Gerçekten halüsinasyon mu
+görüyor, yoksa kullanıcının beklemediği doğru bir şeyi mi yüzeye çıkarıyor?
+Bir cümleyi işaret etmelerini isteyin. (2) Parçalama — bir map-reduce sınırı,
+tıpkı halüsinasyon gibi okunan, yerel olarak doğru ama birlikte yanlış çıktı
+üretir. (3) Prompt: açık bir dayandırma talimatı var mı? Böyle bir talimat
+eklemek, buradaki ölçülen oranı hiç sorulmamış bir modelden %2–7'lik bir
+modele getirdi. (4) Ancak ondan sonra model ve çözümleme parametreleri.
+
+**S: Bunu otomatik olarak nasıl yakalarsınız?**
+
+Varlık-ve-sayı vekil ölçüsü bir öğleden sonralık iş ve dışsal hataları
+yakalıyor; onu kopyalanmış metin üzerinde doğrulayın, sıfır çıkmak zorunda. Bir
+entailment modeli ya da bir LLM hakemi içsel hataları da yakalıyor; bu bölümün
+kurulumunda yargı başına kabaca 68 saniye. Sıralamada anlaşsalar bile madde
+düzeyinde uyuşmadıklarını söyleyin — burada ölçüldü: her biri 5 ve 11 madde
+işaretledi, örtüşme bir madde — dolayısıyla hiçbiri örneklenmiş bir insan
+okumasının yerini almıyor.
+
+**S: 10 milyon belge, bir bütçe ve bir teslim tarihi. Ne kurarsınız?**
+
+Önce maliyetler: 300 kelimelik haber başına 890 prompt token'ı ve girdi hâkim,
+dolayısıyla en büyük kaldıraç model seçimi değil kalıp metin temizliği. Sonra
+önbellekleme — bir özet (belge, prompt, model, parametreler) dörtlüsünün saf
+bir fonksiyonu, o yüzden dördüne birden anahtarlayın ve prompt'u anahtara
+sürümleyin. Sonra okurun bilgilendirici mi belirtici mi bir özete ihtiyacı
+olduğunu sorun; çünkü kaynağı özetin yanında göstermek birini diğerine
+dönüştürüyor ve her model iyileştirmesinden ucuz.
+
+## 2026 alet çantası {#sec-ozetleme-araclar}
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `rouge-score` | 0.1.2 | referans ROUGE; bu bölümün uygulamasını doğrulamak ve kendi tokenizer'ını göstermek için |
+| `snowballstemmer` | 3.1.1 | Türkçe gövdeleme; @sec-ozetleme-rouge bölümündeki normalleştirici karşılaştırması için |
+| `numpy` | 2.5.2 | TextRank'in arkasındaki graf aritmetiği ve bölümdeki her ortalama |
+| `ollama` | 0.24.0 | üretim için `qwen3.5:9b`, yargılama için `gemma3:27b` servis etme |
+
+: Bu sayıların çıktığı yığın. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[26,16,58]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `bert-score` | 0.3.13 | embedding tabanlı örtüşme [@zhang2020bertscore] — ROUGE'un aksine yeniden ifadeden sağ çıkıyor, sadakate hâlâ kör |
+| `summac` / `AlignScore` | 0.0.4 / yalnızca GitHub | entailment tabanlı sadakat puanlaması: kaynak, her özet cümlesini gerektiriyor mu? Bu bölümdeki kaba vekil ölçünün ilkeli sürümü |
+| `factscore` | 0.2.0 | bir özeti atomik iddialara ayırıp her birini kontrol ediyor; özet uzun olduğunda istediğiniz şey bu |
+| `evaluate` | 0.4.6 | HuggingFace'in metrik sarmalayıcısı — `rouge` metriğinin, tokenizer'ı dâhil, `rouge-score`'u sarmaladığına dikkat |
+| `lexrank` / `sumy` | 0.1.0 / 0.13.0 | klasik çıkarımsal özetleyiciler paketlenmiş hâlde; LexRank ve LSA baseline'larını yazmadan istediğinizde |
+| `Trafilatura` | 2.2.0 | belgeleri göndermenin bedelini ödemeden önce kalıp metni ayıklamak; @sec-ozetleme-uretim bunun asıl maliyet kaldıracı olduğunu söylüyor |
+| `langchain-text-splitters` | 1.1.2 | @sec-ozetleme-uzun bölümündeki map-reduce hatları için yapı farkındalıklı parçalama |
+
+: Daha geniş ekosistem, yazım anındaki sürümlerle {tbl-colwidths="[22,14,64]"}
+
+## Lab: bir derlemi özetleyin ve ona güvenilip güvenilemeyeceğini bulun {#sec-ozetleme-lab}
+
+Kendi alanınızdan 200+ belgelik bir derlem seçin. Referans özetler isteğe
+bağlı — bu labın amacı zaten onlarsız değerlendirebilmeniz.
+
+### 1. adım — ne tür bir özet olduğuna yazılı olarak karar verin
+
+@sec-ozetleme-gorevler bölümündeki dört ekseni ve çıktıyı kimin okuduğunu
+adlandıran bir paragraf. Bunu yazamıyorsanız labın geri kalanı erken.
+
+### 2. adım — modellemeden önce derlemi betimleyin
+
+Kapsam, yoğunluk ve oracle-cümle ROUGE'unu hesaplayın. Oracle yüksekse
+çıkarımsal sistemi kurun ve durun. Düşükse üretken bir modeli az önce
+gerekçelendirdiniz — üstelik bir sayıyla, hem de nedenini soran birine.
+
+Referans özetiniz yoksa oracle'ı belgenin kendi başlığına ya da ilk cümlesine
+karşı koşturun. Daha zayıf bir sinyal ve yine de size cevabın belgenin
+*içinde* mi olduğunu yoksa kurulması mı gerektiğini söylüyor.
+
+### 3. adım — lead-k ve TextRank'i kurun
+
+Her zaman. Bir saat alıyorlar ve sonraki her iddianın karşısında ölçüldüğü
+sayılar onlar.
+
+### 4. adım — uzunluk sınırı ve dayandırma talimatıyla üretin
+
+İkisi de önemli ve ikisi de @sec-ozetleme-soyutlayici bölümündeki prompt'ta,
+bu bölümün ölçtüğü sebeplerle var.
+
+### 5. adım — sadakat vekil ölçüsünü kurun, sonra bilerek kırın
+
+Kaynakta bulunmayan sayılar ve özel isimler. Sonra bunu **kopyalanmış metin**
+üzerinde — lead-2 — koşturun ve sıfır döndüğünü doğrulayın. İlk seferde
+dönmeyecek. Dönene kadar düzeltin ve bozuk sürümün çıktısını saklayın; ikisi
+arasındaki fark, yayımlamış olacağınız şeydir.
+
+### 6. adım — rastgele bir örneklemi elle denetleyin
+
+Otuz belge, düzgünce okunmuş, her özet destekleniyor ya da desteklenmiyor diye
+işaretlenmiş. Oranı bir hüküm olarak değil, **Wilson aralığıyla** raporlayın:
+3/30 %10'dur ve %95 aralığı %3,5 ile %25,6 arasıdır; gönderme kararları bu
+aralık boyunca farklılaşır. Örnekleme disiplini @sec-veri-etiketleme
+bölümünde.
+
+### 7. adım — elle denetiminizi vekil ölçü ve hakemle karşılaştırın
+
+Aynı özelliğin üç ölçümü. Uyuşmadıkları yerde belgeyi okuyun. Uyuşmazlıklar
+işe yarayan kısım — ucuz metriklerinizden hangisine gözetimsiz güvenmenize izin
+verildiğini onlar söylüyor.
+
+### Teslim edilecekler
+
+Sistemleri ROUGE, sadakat vekil ölçüsü ve elle denetiminize karşı gösteren tek
+bir tablo; 2. adımdaki derlem betimlemesi; ve hangi sistemi kime
+göndereceğinizi ve yanlış olduğunda ne olacağını söyleyen bir paragraf.
+
+## Alıştırmalar {#sec-ozetleme-alistirmalar}
+
+1. **Önce oracle.** Ulaşabildiğiniz herhangi bir özetleme derleminde, hiçbir
+   şey kurmadan önce oracle-cümle ROUGE-1'ini hesaplayın. Bunun çıkarım
+   hakkında ne ima ettiğini söyleyin, sonra lead-3'ü kurun ve imanın tutup
+   tutmadığına bakın.
+
+2. **ROUGE'u bilerek kırın.** Aynı haberin iki özetini yazın: biri doğru ve
+   hantal, biri yanlış ve akıcı; öyle ki yanlış olan doğru bir özetten tek bir
+   kelimeyle ayrılsın (bir olumsuzluk ya da yer değiştirmiş bir özne). İkisi
+   için de ROUGE-1, -2 ve -L hesaplayın. Sıralamayı raporlayın.
+
+3. **Tokenizer, kendi dilinizde.** `rouge_score.tokenize.tokenize`'ı,
+   bildiğiniz ve İngilizce olmayan bir dilde 100 cümle üzerinde koşturun. Kaç
+   kelimenin sağlam kaldığını sayın. Türkçe çalışıyorsanız, koşturmadan önce
+   cevabı @sec-ozetleme-rouge bölümünden öngörün.
+
+4. **Normalleştirici duyarlılığı.** Bir sistemin çıktısını alın ve üç
+   normalleştirici altında puanlayın — yüzey, gövdelenmiş ve elinizde varsa
+   sözlük biçimine indirgenmiş. Yayılımı raporlayın ve bunu okuduğunuz en son
+   özetleme makalesinin iddia ettiği iyileşmeyle karşılaştırın.
+
+5. **Parça sınırı kaybı.** Map-reduce gerektirecek kadar uzun bir belge alın.
+   Önce bütün hâlde özetleyin, sonra kilit bir argümanı bilerek ikiye bölen
+   parçalarla map-reduce altında özetleyin. Birinci özette bulunup ikincisinde
+   bulunmayan bir olgu bulun ve mekanizmayı açıklayın.
+
+6. **Referansları denetleyin.** @sec-ozetleme-sadakat bölümündeki sadakat vekil
+   ölçüsünü, üzerinde fine-tuning yapmayı planladığınız herhangi bir derlemin
+   *referans* özetlerine karşı koşturun. Önce onu kopyalanmış metin üzerinde
+   doğrulayın. Sonra o derlem üzerinde hâlâ fine-tuning yapmak isteyip
+   istemediğinize karar verin.
+
+7. **Maliyet, dürüstçe.** Fiilen elinizde olan bir derlem için, tamamını
+   özetlemenin maliyetini hesaplayın: prompt token'ları, çıktı token'ları,
+   duvar saati ve bekleyeceğiniz önbellek isabet oranı. Bunu, yaklaşık sıfır
+   olan çıkarımsal baseline'ın maliyetiyle ve özetlerin değeriyle
+   karşılaştırın.
+
+## Daha derine inmek için {#sec-ozetleme-derine}
+
+Tek bir makale okumadan önce şunu yapın: bir referans özeti kendi metriğinizle
+kendisine karşı puanlayın. Sonuç kusursuz gelmiyorsa durun ve düzeneği
+düzeltin — bu bölüm iki ayrı hatayı böyle buldu.
+
+| kaynak | nedir |
+|:--|:--|
+| [Google'ın `rouge-score`'u](https://github.com/google-research/google-research/tree/master/rouge) | `tokenize.py`'ı okuyun. Dokuz satır ve bu bölümün %44,4'ünü açıklıyor |
+| [`evaluate`](https://github.com/huggingface/evaluate) | çoğu makalenin kullandığı metrik sarmalayıcıları — hangi uygulamayı fiilen çağırdığınızı bilmekte fayda var |
+| [Eugene Yan, LLM kalıpları üzerine](https://eugeneyan.com/writing/llm-patterns/) | üretim sistemlerinde özetleme ve değerlendirme üzerine pratik, iyi kaynaklandırılmış yazılar |
+| [XL-Sum](https://github.com/csebuetnlp/xl-sum) | burada kullanılan çok dilli derlem; toplama yöntemi belgelenmiş hâlde |
+| [Stanford CS224N](https://web.stanford.edu/class/cs224n/) | üretimi ve değerlendirmesini kapsayan dersler ve slaytlar |
+
+: Makalelerin ötesinde {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| metrik, ilk önerildiği hâliyle | @lin2004rouge |
+| neyi kaçırdığı, insanlara karşı ölçülmüş | @fabbri2021summeval |
+| n-gram yerine embedding | @zhang2020bertscore |
+| puanlayıcı olarak bir LLM | @liu2023geval; @zheng2023judging |
+| sadakat ve ne sıklıkta başarısız olduğu | @maynez2020faithfulness; @kryscinski2019neural |
+| modelsiz çıkarımsal özetleme | @mihalcea2004textrank |
+| derlemler ve her birinin ne kadar çıkarımsal olduğu | @grusky2018newsroom; @narayan2018xsum; @hasan2021xlsum |
+| pointer-generator, LLM öncesi standart | @see2017get |
+| LLM'lerden sonra haber özetleme | @goyal2022news |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Ne hatırlamalı {#sec-ozetleme-ozet}
+
+- **Bir özet kurmadan önce hangisi olduğuna karar verin.** Belirtici mi
+  bilgilendirici mi, genel mi sorguya odaklı mı, tek belge mi çok belge mi,
+  çıkarımsal mı soyutlayıcı mı. Zorlayıcı soru şu: *bunu kim okuyor ve yanlış
+  olursa ne oluyor* — %80 doğru belirtici bir özet gayet iyidir, %80 doğru
+  bilgilendirici bir özet bir yükümlülüktür.
+
+- **Mimariyi seçmeden önce oracle'ı hesaplayın.** Kusursuz tek cümle seçimi bu
+  derlemde **24,89**, CNN / DailyMail'de **40,58** ROUGE-1 alıyor. İki satır
+  kodluk o tek sayı, cevabın belgenin *içinde* mi olduğunu yoksa kurulması mı
+  gerektiğini — dolayısıyla çıkarımın hiç çalışıp çalışamayacağını — söylüyor.
+
+- **Lead-3'ün ününü devralmayın.** Literatürde CNN / DailyMail üzerinde 40,34
+  alıyor, burada **14,03** ve burada lead-*2* onu geçiyor. Lead baseline'ını
+  her zaman raporlayın; güçlü olduğunu asla varsaymayın.
+
+- **`rouge-score`, Türkçe kelimelerin %44,4'ünü sakatlıyor.** Tokenizer'ı
+  `ç ğ ı ö ş ü İ` harflerini noktalama sayıyor, dolayısıyla `görüştü`,
+  `['g','r','t']` oluyor. Enkaz rastgele eşleşip ROUGE-1'i kabaca %60
+  şişiriyor — üstelik düzensiz biçimde, oracle için +%22'den rastgele bir
+  baseline için +%80'e. Sıralamalar sağ kalıyor, karşılaştırılabilirlik
+  kalmıyor. Bizim kendi uygulamamız da aynı hata sınıfı için bir Türkçe küçük
+  harfe çevirici gerektirdi ve o aracın token'layabildiği metinlerde
+  `rouge-score` ile on ondalık basamağa kadar uyuşuyor.
+
+- **Tokenizer'ı ve normalleştiricisi olmayan bir ROUGE sayısı, sayı
+  değildir.** Aynı tahminler üzerinde "yüzey biçimi" ile "5 karakterlik önek"
+  arasında beş ROUGE-1 puanı var — makalelerin çoğunun kendi baseline'larına
+  karşı iddia ettiğinden fazla.
+
+- **ROUGE, özetin doğru olup olmadığını göremez** ve bu derlemde etkin biçimde
+  yanlışlığı ödüllendiriyor: insan referansları vakaların **%33–57'sinde**
+  desteklenmemiş içerik iddia ediyor; metinde kalması söylenen bir model için
+  bu oran **%2–7**. Böyle bir derlem üzerinde fine-tuning, modele halüsinasyon
+  görmeyi öğretir ve metrik bunu bir iyileşme olarak raporlar.
+
+- **Bir sadakat metriğini kopyalanmış metin üzerinde doğrulayın.** Lead-2
+  birebir alıntı, dolayısıyla sadakatsiz olamaz ve sıfır almak zorunda. Bu
+  kontrol burada ardışık iki hatayı yakaladı; ikisi de aynı hata:
+  karşılaştırmanın iki tarafı farklı tokenizer'lardan geçmişti. İlk sürüm BBC
+  gazetecilerini %56 sadakatsiz raporlamıştı.
+
+- **İki sadakat ölçümü sıralamada anlaşıp neredeyse başka hiçbir şeyde
+  anlaşmayabilir.** Vekil ölçü ile hakem, modelin özetlerinin 5 ve 11 tanesini
+  işaretledi ve **bir** tanesinde örtüştü; çünkü biri yalnızca dışsal
+  hataları, öteki ikisini birden görüyor. Sıraya güvenin, orana güvenmeyin ve
+  mutlak sayıları aralığıyla birlikte örneklenmiş bir insan okumasından alın.
+
+- **Yargılamak üretmekten pahalı.** Yargı başına 68,3 saniyeye karşılık özet
+  başına 2,4 saniye. Örnekleyin, her şeyi yargılamayın ve bir modelin kendi
+  çıktısını yargılamasına asla izin vermeyin.
+
+- **Maliyete girdi hâkim.** Haber başına 890 prompt token'ına karşılık 53
+  üretilen token. Kalıp metni ayıklamak her model değişikliğini geçiyor ve
+  (belge, prompt, model, parametreler) dörtlüsüne anahtarlanmış bir önbellek
+  bedava paraya yakın; çünkü belgeler yazıldığından çok daha sık okunuyor.
+
+- **Kaynağı özetin yanında göstermek, çoğu özetleme ürününde en yüksek
+  getirili özelliktir** ve bir model iyileştirmesi değildir. Doğru olmak
+  zorunda olan bilgilendirici bir özeti, yalnızca yararlı olması yeten
+  belirtici bir özete dönüştürür.
