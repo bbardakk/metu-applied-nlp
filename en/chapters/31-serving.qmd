@@ -1,37 +1,802 @@
 # Serving and Inference Infrastructure {#sec-serving}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** The measurements here are small on purpose —
+about forty short requests against a 3B model on a laptop, a few minutes in
+total. They are enough because the quantities that matter are ratios, and the
+ratios hold across hardware. Everything that needs a GPU fleet to observe is
+cited rather than claimed. Software: `ollama` 0.24.0 serving `llama3.2:3b`
+(Q4_K_M, 28 layers, 24 attention heads, 8 KV heads, head dimension 128), an
+explicit `num_ctx`, `temperature` 0, on Python 3.14.5 and Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- reason about latency and throughput (streaming, batching, caching, KV-cache);
-- estimate and control cost per request; know the levers (model choice, distillation, quantization, prompt caching);
-- design the safety layer: input/output filtering, grounding checks, human-in-the-loop;
-- describe deployment surfaces (API, gateway, self-hosted) and their governance trade-offs.
+- split a request into prefill and decode, and say which half your latency is
+  actually made of;
+- read the KV cache as the thing that makes generation fast and long context
+  expensive, and size it in gigabytes before you rent the hardware;
+- explain what batching buys the operator and what it costs the individual
+  user;
+- use prompt caching as the first lever, and recognise the prompt layouts that
+  make it do nothing;
+- build a cost-per-request worksheet from token counts you can measure today;
+- order the remaining levers — smaller model, quantization, speculative
+  decoding — by what each one actually trades away.
 
-## The request path
+## One request, two very different halves {#sec-serving-halves}
 
-<!-- TODO(draft): anatomy of a production LLM request; where time and
-     money go; a cost worksheet the reader can copy. -->
+Everything downstream of this chapter — the gateway of @sec-gateway, the
+traces of @sec-observability, the bill in @sec-governance — is easier to reason
+about once you can see that a single request is not one operation but two,
+with different costs and different bottlenecks.
 
-In production the interesting question changes from *"can the model do it?"*
-to [*"can we afford, trust, and monitor it at scale?"*]{.hl}
+::: {#gloss-prefill-decode .column-margin .term-gloss}
+**prefill / decode** — the two halves of a request: the prompt is read in one
+parallel pass, then output tokens are produced one at a time, each depending
+on the last. [↩](#term-prefill-decode){.term-back}
+:::
 
-## Cost engineering
+[**Prefill / decode**](#gloss-prefill-decode){#term-prefill-decode .term-ref}
+is the split. **Prefill** reads the prompt. Every token is available at once,
+so the whole prompt goes through the network as one batched matrix
+multiplication — the hardware is busy and the work is compute-bound.
+**Decode** writes the answer. Token *n+1* cannot be computed until token *n*
+exists, so each one is a separate pass over the whole model, and the machine
+spends most of its time moving weights from memory rather than multiplying
+them.
 
-<!-- TODO(draft): tokens as the unit of cost; caching; routing small vs
-     large models; quantization overview. -->
+That asymmetry is the chapter's foundation, and it is easy to measure. Six
+prompt lengths, each with its own text so nothing is cached, generating 32
+tokens:
 
-## The safety layer
+```text
+prompt tokens   prefill   prefill tok/s      decode tok/s
+          100    0.063s            1,577            189.3
+          298    0.145s            2,057            190.3
+          562    0.267s            2,102            190.4
+        1,090    0.523s            2,085            181.9
+        2,146    1.058s            2,028            176.3
+        4,258    2.307s            1,846            105.3
+```
 
-<!-- TODO(draft): threat model (prompt injection, data leakage,
-     hallucination in high-stakes flows); layered mitigations; audit
-     logging; regulatory notes (KVKK/GDPR/EU AI Act pointers). -->
+Prefill runs at roughly **2,000 tokens per second**; decode at roughly **185**.
+[Reading a token is about eleven times cheaper than writing one]{.hl} — 0.5
+milliseconds against 5.4 — and the ratio, not the absolute numbers, is what
+transfers to your hardware.
 
-## Exercises
+::: {.column-margin}
+The 1,577 tok/s on the first row is not a slower prefill; it is a fixed
+per-request overhead that a 100-token prompt cannot amortise. The last row's
+105 decode tok/s is a single noisy measurement, corrected below by a proper
+one — it is left in the table because deleting an inconvenient number is how
+you end up believing your own harness.
+:::
 
-1. Take the RAG design from @sec-rag's exercise and add a cost and safety
-   budget: expected tokens per request, cache strategy, and the single control
-   you would implement first.
+So a first, crude latency model, good enough to argue with:
+
+$$
+\text{latency} \;\approx\; \underbrace{\frac{\text{prompt tokens}}{\approx 2{,}000/\mathrm{s}}}_{\text{prefill}}
+\;+\; \underbrace{\frac{\text{output tokens}}{\approx 185/\mathrm{s}}}_{\text{decode}}
+$$
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">One request: one parallel pass, then a serial loop</div>
+<svg viewBox="0 0 760 250" role="img" aria-label="Diagram of a request split into a prefill pass and a decode loop">
+  <defs>
+    <marker id="sv-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+    <marker id="sv-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="8" y="20" class="t-xs t-muted t-b">PREFILL &#183; THE WHOLE PROMPT, ONE PASS</text>
+  <rect x="8" y="30" width="286" height="66" rx="9" class="box"/>
+  <text x="151" y="56" class="t-sm t-mono t-mid">4,258 tokens</text>
+  <text x="151" y="76" class="t-sm t-mono t-mid t-accent">2.307 s</text>
+  <text x="151" y="112" class="t-xs t-muted t-mid">parallel &#183; compute-bound</text>
+
+  <path d="M294,63 H330" class="ln" marker-end="url(#sv-a)"/>
+
+  <text x="346" y="20" class="t-xs t-accent t-b">DECODE &#183; ONE PASS PER TOKEN</text>
+  <rect x="346" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="432" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="518" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="604" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <text x="384" y="68" class="t-sm t-mono t-mid">t&#8321;</text>
+  <text x="470" y="68" class="t-sm t-mono t-mid">t&#8322;</text>
+  <text x="556" y="68" class="t-sm t-mono t-mid">t&#8323;</text>
+  <text x="642" y="68" class="t-sm t-mono t-mid">&#8230;</text>
+  <path d="M422,63 H428" class="ln-accent" marker-end="url(#sv-b)"/>
+  <path d="M508,63 H514" class="ln-accent" marker-end="url(#sv-b)"/>
+  <path d="M594,63 H600" class="ln-accent" marker-end="url(#sv-b)"/>
+  <text x="513" y="112" class="t-xs t-muted t-mid">serial &#183; 5.4 ms/token &#183; memory-bound</text>
+
+  <path d="M8,142 H752" class="ln-thin"/>
+  <text x="8" y="136" class="t-xs t-muted t-b">A DIFFERENT REQUEST &#183; 7,455 TOKENS IN, 64 OUT</text>
+
+  <rect x="8" y="156" width="672" height="26" rx="4" class="box-accent"/>
+  <rect x="680" y="156" width="64"  height="26" rx="4" class="box"/>
+  <text x="344" y="174" class="t-xs t-mid">prefill &#8212; 4.668 s &#183; 90.7%</text>
+  <text x="712" y="174" class="t-xs t-mid">decode</text>
+  <text x="8" y="204" class="t-sm">Nine tenths of the wait happens before the first character appears.</text>
+  <text x="8" y="226" class="t-sm t-muted">Streaming does not shorten that bar. It only makes the rest visible.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The two halves at the same scale. Prefill is one pass over 4,258 tokens;
+decode is 32 separate passes over the model, one per output token. The bar
+underneath is a different request — 7,455 tokens of context, 64 tokens out —
+measured with streaming on, and it is the shape most production requests
+have: almost all of the wall clock is spent before the first character
+appears.
+:::
+::::
+
+## Where the wall clock actually goes {#sec-serving-ttft}
+
+::: {#gloss-time-to-first-token-ttft .column-margin .term-gloss}
+**time to first token (TTFT)** — how long the reader waits before anything
+appears. Dominated by prefill, and the number streaming is meant to improve.
+[↩](#term-time-to-first-token-ttft){.term-back}
+:::
+
+Users do not experience total latency. They experience
+[**time to first token (TTFT)**](#gloss-time-to-first-token-ttft){#term-time-to-first-token-ttft .term-ref}
+and then a stream. Measuring it with streaming on, at three context lengths,
+each generating 64 tokens:
+
+```text
+context tokens    TTFT     total    TTFT share
+           89   0.162s   0.523s        31.0%
+        1,887   1.017s   1.397s        72.8%
+        7,455   4.668s   5.145s        90.7%
+```
+
+[At 7,455 tokens of context, 91% of the request is over before the first
+character appears.]{.hl} The model is not "slow"; the prompt is long, and the
+user is waiting on prefill.
+
+Two consequences that get missed.
+
+**Streaming does not fix TTFT.** It fixes everything *after* it. Streaming
+converts a 5.1-second wait into a 4.7-second wait followed by text arriving at
+reading speed, which is a large perceived improvement — but the 4.7 seconds is
+untouched, and no amount of front-end work will touch it. The lever for TTFT
+is the prompt, and @sec-serving-cache is the cheapest version of that lever.
+
+**A long context makes decode slower too, not just prefill.** Every generated
+token attends over everything before it, so the per-token cost grows with what
+is already in the window. Measured properly this time — two repetitions,
+64 output tokens each, so the rate is stable:
+
+```text
+context tokens   decode tok/s   ms per token
+            89          185.5           5.39
+           959          185.3           5.40
+         3,743          157.4           6.35
+         7,455          138.8           7.21
+```
+
+A 25% slowdown between an empty window and a 7,500-token one. Worth knowing
+because it compounds: a long prompt costs you once in prefill and then again,
+quietly, on every token you generate. It is also the correction promised
+above — the single-run 105 tok/s in the first table was noise, and the real
+figure is 139.
+
+## The KV cache, and why context has a price in gigabytes {#sec-serving-kv}
+
+Decode would be far worse than 5.4 ms per token if each step recomputed the
+whole prompt. It does not, because of the
+[**KV cache**](#gloss-kv-cache){#term-kv-cache .term-ref}: the keys and values
+computed for every previous token are kept, so step *n+1* computes one new
+column and reads the rest.
+
+::: {#gloss-kv-cache .column-margin .term-gloss}
+**KV cache** — the stored keys and values from earlier tokens, so generation
+does not recompute the whole prompt at every step. Fast, and the reason long
+context costs memory. [↩](#term-kv-cache){.term-back}
+:::
+
+That is a straight time-for-memory trade, and the memory is computable before
+you rent anything. Per token the cache holds a key and a value, for every
+layer, for every KV head:
+
+$$
+\text{bytes per token} \;=\; 2 \times L \times H_{kv} \times d_{\text{head}} \times \text{bytes per element}
+$$
+
+For the model measured here — 28 layers, 8 KV heads, head dimension 128, fp16
+— that is $2 \times 28 \times 8 \times 128 \times 2 = 114{,}688$ bytes, or
+**112 KiB per token**. Multiply by the window:
+
+| context | KV cache | against a 2.0 GB model file |
+|--:|--:|:--|
+| 8,192 | 0.88 GiB | under half the weights |
+| 32,768 | 3.50 GiB | [1.8× the weights]{.con} |
+| 131,072 | **14.00 GiB** | [**7× the weights**]{.con} |
+
+: What the window costs in memory, llama3.2:3b at fp16
+{tbl-colwidths="[18,20,62]"}
+
+[A 2 GB model with its context window full needs 14 GB of cache — the cache is
+seven times the model.]{.hl} This is why "can I run a 3B model?" is the wrong
+question and "at what context length?" is the right one, and why the default
+`num_ctx` in a local server matters so much: ask for the full 131k window and
+you have committed 14 GB before the first request.
+
+The 8 KV heads against 24 attention heads in that arithmetic are
+**grouped-query attention**, and they are the reason the number is 14 GiB
+rather than 42 — three heads share each key-value pair. It is a
+memory-bandwidth optimisation that shows up as a serving cost, which is a
+recurring shape: architecture choices from @sec-transformers reappear here as
+line items.
+
+At fleet scale the same pressure produced **PagedAttention**, which manages the
+cache in fixed-size blocks like virtual memory instead of one contiguous
+reservation per request [@kwon2023pagedattention]. The waste it removes is
+internal fragmentation — a request that reserved room for 2,000 tokens and
+generated 200 — and removing it is what lets a server hold many more concurrent
+sequences on the same card.
+
+## Batching: throughput the individual user cannot feel {#sec-serving-batching}
+
+Decode is memory-bound: the hardware spends its time moving weights, not
+multiplying them. That means a second request costs *almost nothing extra*,
+because the weights being moved for one sequence can serve several at once.
+Batching converts that slack into throughput.
+
+::: {#gloss-continuous-batching .column-margin .term-gloss}
+**continuous batching** — new requests join a running batch as slots free,
+instead of waiting for the whole batch to finish. The throughput lever in
+every modern server. [↩](#term-continuous-batching){.term-back}
+:::
+
+Naive batching waits for a full batch and then runs it to completion, so one
+long generation holds the whole batch hostage.
+[**Continuous batching**](#gloss-continuous-batching){#term-continuous-batching .term-ref}
+— iteration-level scheduling, introduced by Orca [@yu2022orca] and standard
+since — lets a finished sequence leave and a queued one take its slot at the
+next step.
+
+I did not measure this, and should say so plainly: a single-stream local server
+is the wrong instrument, and inventing a number here would be worse than
+citing one. What the literature reports is large: Orca's authors measure order-
+of-magnitude throughput gains over naive batching at the same latency budget
+[@yu2022orca], and vLLM reports 2–4× over the serving systems that preceded it
+by combining continuous batching with paged cache management
+[@kwon2023pagedattention].
+
+The part worth internalising is the trade, not the multiple:
+
+| | throughput | single-request latency |
+|:--|:--|:--|
+| No batching | [worst]{.con} | [best]{.pro} |
+| Static batching | better | [worst — waits for the slowest sequence]{.con} |
+| Continuous batching | [best]{.pro} | slightly worse than none, far better than static |
+
+: What batching does to each number {tbl-colwidths="[28,24,48]"}
+
+[Batching is a throughput optimisation that individual users pay for in
+latency.]{.hl} Every request shares the machine with its batch-mates, so a
+busy server is a slower server per request even when it is a cheaper server per
+request. If your product has a latency SLO, it is a constraint on batch size,
+and somebody has to own that number.
+
+## Prompt caching: the lever to reach for first {#sec-serving-cache}
+
+If prefill dominates latency and the prompt begins with the same thousands of
+tokens every time — a system prompt, a tool schema, a few-shot block, a
+retrieved document being asked about repeatedly — then that prefix's KV cache
+can be computed once and reused.
+
+::: {#gloss-prompt-caching .column-margin .term-gloss}
+**prompt caching** — reusing the KV cache of a prompt prefix across requests,
+so a repeated system prompt is not recomputed.
+[↩](#term-prompt-caching){.term-back}
+:::
+
+[**Prompt caching**](#gloss-prompt-caching){#term-prompt-caching .term-ref} is
+not a subtle optimisation. The same six prompts as the first table, each sent
+twice:
+
+```text
+prompt tokens   cold prefill   warm prefill   speedup   cold total   warm total
+          100         0.063s         0.013s        5x       0.338s       0.289s
+          298         0.145s         0.014s       11x       0.421s       0.288s
+          562         0.267s         0.016s       17x       0.540s       0.292s
+        1,090         0.523s         0.014s       36x       0.804s       0.291s
+        2,146         1.058s         0.013s       79x       1.347s       0.297s
+        4,258         2.307s         0.018s      126x       2.720s       0.330s
+```
+
+Warm prefill is **flat at 13–18 milliseconds regardless of prompt length**,
+because nothing is being recomputed. At 4,258 tokens that is 126× on the
+prefill and **8.2× on the whole request**. The longer the prefix, the larger
+the win — which is the opposite of how most optimisations scale, and it is why
+this is the first thing to try.
+
+Three conditions, and all three are design decisions rather than
+configuration:
+
+**The prefix must be byte-identical.** A timestamp, a user name, or a session
+id near the top of the prompt invalidates everything after it. Cached prefixes
+match by prefix, so one changing token at position 12 discards the other 4,000.
+
+**Order the prompt by stability.** System instructions, then tool schemas, then
+few-shot examples, then retrieved context, then the user's turn. Most teams
+write prompts in the order they thought of them, which puts the volatile part
+first and turns the cache off without anybody noticing.
+
+**Measure the hit rate or you do not have one.** A cache you have not
+instrumented is a belief. @sec-observability is where that instrumentation
+belongs, and the metric is share of prompt tokens served from cache, per route.
+
+::: {.column-margin}
+Hosted APIs expose this differently — some cache automatically above a minimum
+prefix length, some require an explicit marker, and the discount on cached
+input tokens varies by provider. The mechanism is the same one measured above;
+what differs is who decides when it applies. Read your provider's rule before
+designing the prompt around it, because the minimum prefix length in particular
+determines whether short system prompts benefit at all.
+:::
+
+## The cost worksheet {#sec-serving-cost}
+
+Cost is denominated in tokens, and the first thing to establish is which
+tokens. From @sec-summarization, summarizing a 300-word news article measured
+**890 prompt tokens against 53 generated** — a ratio of nearly 17 to 1. That
+shape is typical of anything with a system prompt, a schema and retrieved
+context, which is to say most production LLM features.
+
+[What you pay for is reading, not writing]{.hl}, and that inverts the usual
+intuition about where to optimise. Asking for shorter answers saves very
+little. Sending less saves a lot.
+
+The worksheet has four lines and one multiplication:
+
+| line | where it comes from | example |
+|:--|:--|--:|
+| prompt tokens | count them; do not estimate | 890 |
+| of which cached | measure the hit rate | 60% |
+| output tokens | count them | 53 |
+| requests per month | product, not engineering | 2,000,000 |
+
+: Everything a cost estimate needs {tbl-colwidths="[26,44,30]"}
+
+Multiply out with your provider's three prices — uncached input, cached input,
+output — and you have a monthly bill with a cache-hit-rate term you can move.
+The widget below is that arithmetic, wired to the latency model from
+@sec-serving-halves so both move together.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Latency and cost, on the numbers measured above — move the prompt, watch what happens</div>
+```
+
+```{ojs}
+//| echo: false
+viewof srvPrompt = Inputs.range([100, 32000], {
+  value: 4000, step: 100, label: "prompt tokens"})
+```
+
+```{ojs}
+//| echo: false
+viewof srvOutput = Inputs.range([16, 2000], {
+  value: 200, step: 16, label: "output tokens"})
+```
+
+```{ojs}
+//| echo: false
+viewof srvHit = Inputs.range([0, 1], {
+  value: 0.6, step: 0.05, label: "prompt-cache hit rate"})
+```
+
+```{ojs}
+//| echo: false
+srvRates = ({prefill: 2000, decode: 185, warm: 0.015})
+```
+
+```{ojs}
+//| echo: false
+srvCalc = {
+  const uncached = srvPrompt * (1 - srvHit);
+  const prefill  = uncached / srvRates.prefill + srvRates.warm;
+  const decode   = srvOutput / srvRates.decode;
+  return ({
+    uncached,
+    prefill,
+    decode,
+    total: prefill + decode,
+    share: prefill / (prefill + decode),
+    coldPrefill: srvPrompt / srvRates.prefill
+  });
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 680, height: 132, marginLeft: 96, marginBottom: 34,
+  x: {label: "seconds", grid: true, domain: [0, Math.max(srvCalc.coldPrefill + srvCalc.decode, 0.5)]},
+  y: {domain: ["no cache", "with cache"], label: null},
+  color: {domain: ["prefill", "decode"], range: ["#1F4E79", "#B3453E"], legend: true},
+  marks: [
+    Plot.barX([
+      {row: "no cache",   part: "prefill", t: srvCalc.coldPrefill},
+      {row: "no cache",   part: "decode",  t: srvCalc.decode},
+      {row: "with cache", part: "prefill", t: srvCalc.prefill},
+      {row: "with cache", part: "decode",  t: srvCalc.decode}
+    ], {x: "t", y: "row", fill: "part", inset: 2.5}),
+    Plot.ruleX([0])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.88rem; color:var(--fig-muted); margin-top:0.5rem;">
+  <b style="color:var(--fig-ink);">${srvCalc.total.toFixed(2)} s</b> per request
+  — ${(srvCalc.share * 100).toFixed(0)}% of it prefill, and that share is what
+  the reader waits through before the first character.
+  ${srvHit > 0 ? html`Caching saves
+  <b style="color:var(--fig-ink);">${(srvCalc.coldPrefill - srvCalc.prefill).toFixed(2)} s</b>
+  by skipping ${(srvPrompt * srvHit).toLocaleString("en-US")} prompt tokens.`
+  : html`With no cache the whole prompt is recomputed every time.`}
+  At 2 million requests a month that is
+  <b style="color:var(--fig-ink);">${((srvCalc.total * 2e6) / 3600).toLocaleString("en-US",
+  {maximumFractionDigits: 0})} machine-hours</b> of serving.
+</p>`
+```
+:::
+
+## The levers, in the order to reach for them {#sec-serving-levers}
+
+The order matters more than the list, because the cheap levers are also the
+ones with no quality cost, and teams routinely start at the bottom.
+
+| lever | what it buys | what it costs | reach for it |
+|:--|:--|:--|:--|
+| **Send fewer tokens** | linear on prefill and on the bill | engineering time on prompts and retrieval | [first, always]{.pro} |
+| **Prompt caching** | up to 126× prefill, measured above | a prompt ordered by stability | [first, always]{.pro} |
+| **Smaller model** | 3–10× on everything | quality, measurably | when the eval says it holds |
+| **Quantization** | memory and bandwidth | some quality, task-dependent | when memory is the binding constraint |
+| **Speculative decoding** | latency only, not cost | a draft model to host | when TTFT is the complaint and cost is not |
+| **Continuous batching** | throughput | per-user latency | when the server is busy, not before |
+
+: Six levers and what each one trades away {tbl-colwidths="[22,26,28,24]"}
+
+Two deserve a sentence each, because both are widely misunderstood.
+
+**Quantization** stores weights at reduced precision — the model measured in
+this chapter is Q4_K_M, four bits and change. Modern post-training methods
+choose *which* weights to keep precise rather than rounding uniformly: GPTQ
+solves a layer-wise reconstruction problem [@frantar2023gptq], AWQ protects the
+small fraction of weights that the activation distribution says matter most
+[@lin2024awq]. Both report far less degradation than naive rounding, and both
+are still degradation. It is a memory optimisation with a quality cost, and the
+cost is task-dependent — which means it belongs in your eval suite, not in a
+blog post's benchmark table.
+
+**Speculative decoding** attacks the serial part directly. A small draft model
+proposes several tokens; the large model verifies them in a single parallel
+pass and accepts the longest correct prefix [@leviathan2023speculative]. The
+output distribution is provably unchanged — this is not an approximation — and
+the win is in wall-clock, typically 2–3× when the draft model agrees often.
+Note what it does *not* do: the large model still processes every token, so
+FLOPs and therefore cost do not fall. It buys latency, not money.
+
+For the arithmetic underneath all of this at scale — how model size, batch
+size and chip memory bandwidth combine to set what is achievable — Pope et al.
+work it through properly [@pope2023efficiently], and @sec-pretraining's $6ND$
+gives the training-side counterpart.
+
+## Lab: measure your own two halves {#sec-serving-lab}
+
+Any local server that reports timings will do; the point is to produce your
+numbers rather than to reuse mine.
+
+### Step 1 — get the prefill and decode rates for your model
+
+Six prompt lengths, each with distinct text so nothing caches, a fixed short
+output. Record prompt tokens, prefill seconds, output tokens, decode seconds.
+Two rates fall out, and their ratio is the number to remember.
+
+### Step 2 — find your TTFT curve
+
+Turn streaming on and record time to the first token at three context lengths.
+Plot TTFT as a share of total. If it does not rise steeply, your prompts are
+shorter than most production prompts and you should retest with a realistic
+one.
+
+### Step 3 — measure your cache, then break it
+
+Send the same long prompt twice and record both. Then insert a timestamp at
+the *top* of the prompt and send it twice more. The second pair should lose the
+speedup entirely. Keep both numbers; the difference is what prompt ordering is
+worth.
+
+### Step 4 — size the KV cache in gigabytes
+
+Get layers, KV heads and head dimension from your model's metadata and compute
+bytes per token. Multiply by the context length you were about to configure.
+If the answer surprises you, that is the point of the step.
+
+### Step 5 — build the worksheet
+
+Prompt tokens, cached share, output tokens, requests per month, three prices.
+Produce a monthly figure, then compute what a 50% prompt reduction and a 60%
+cache hit rate each save. Rank them.
+
+### Step 6 — argue for one change
+
+One paragraph naming the single lever you would pull first, with the number
+from step 5 that justifies it and the quality risk you are accepting.
+
+### What to hand in
+
+Your two rates and their ratio; the TTFT share at your realistic context
+length; the cached and uncached prefill for the same prompt; the KV cache size
+for your configured window; and the paragraph from step 6.
+
+## Intuition checks {#sec-serving-intuition}
+
+::: {.callout-note collapse="true"}
+## 1. Your feature is "too slow". Where do you look first?
+
+At the ratio of prompt tokens to output tokens, before you look at the model.
+
+Prefill and decode run at very different rates — measured here, about 2,000
+against 185 tokens per second — so a request with a long prompt and a short
+answer spends nearly all its time reading. At 7,455 tokens of context, 91% of
+the wall clock was over before the first character appeared.
+
+If that is your shape, no decoding parameter and no faster model will help
+much, and the levers are prompt length and prompt caching. If instead you are
+generating thousands of tokens, the answer is the opposite one, which is why
+the ratio is the first thing to measure rather than the last.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Does streaming reduce latency?
+
+No. It reduces *perceived* latency after the first token, and changes nothing
+before it.
+
+Streaming cannot start until prefill finishes, so TTFT is identical with it and
+without it. What streaming buys is that the remaining seconds are spent reading
+rather than waiting — a real and large product improvement, and not a
+performance one.
+
+The give-away that a team has confused the two is a latency dashboard that
+improved when streaming shipped. It should not have; only the total-time metric
+moves, and only because the client now stops the clock at a different moment.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Why does a 2 GB model need 14 GB of memory?
+
+Because the weights are not the whole footprint. The KV cache holds a key and a
+value for every token in the window, for every layer and every KV head.
+
+For the model measured here — 28 layers, 8 KV heads, head dimension 128, fp16 —
+that is 112 KiB per token, so a 131,072-token window is 14 GiB of cache against
+a 2.0 GB model file. Seven times the model.
+
+This is why the honest answer to "will it fit?" is a question about context
+length, and why a local server's default window is a memory decision disguised
+as a convenience setting.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Your prompt cache hit rate is near zero and you cannot see why.
+
+Something volatile is near the top of the prompt.
+
+Prefix caches match by prefix: one differing token at position 12 invalidates
+everything after it. A timestamp, a user id, a session identifier or a
+freshly-shuffled few-shot block will all do it, and none of them look like a
+performance bug.
+
+The fix is to order the prompt by stability — instructions, then schemas, then
+examples, then retrieved context, then the user's turn — and the check is to
+send the same request twice and compare prefill times. Cold and warm should
+differ by an order of magnitude or more; measured here, 2.307s against 0.018s.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Continuous batching raised throughput 3×. Did latency improve?
+
+Almost certainly not, and it probably got slightly worse per request.
+
+Batching exploits the fact that decode is memory-bound: several sequences can
+share the weight movement that one sequence needs. That raises tokens per
+second across the server while each individual sequence advances no faster —
+and it now shares the machine.
+
+So the two numbers move in opposite directions, and reporting only the one that
+improved is a common way to mislead a review. If you have a latency SLO, it is
+a ceiling on batch size, and somebody must own it.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. When is quantization the wrong answer?
+
+When memory is not your binding constraint, or when nobody has evaluated it on
+your task.
+
+Quantization trades quality for memory and bandwidth. Modern methods lose much
+less than naive rounding — GPTQ and AWQ both choose which weights to protect
+rather than scaling everything uniformly — but "much less" is not "none", and
+the loss is task-dependent in ways a general benchmark will not tell you.
+
+If your constraint is prompt length, quantization does nothing for it: the KV
+cache is a separate allocation from the weights. Reach for it when the model
+does not fit, and put it through the same eval you would use for a model swap.
+:::
+
+## Exercises {#sec-serving-exercises}
+
+1. **Your two rates.** Measure prefill and decode tokens per second for a model
+   you can run. Report the ratio and predict, before measuring, the total
+   latency for a 4,000-token prompt with a 100-token answer. Then measure it.
+
+2. **Break the cache on purpose.** Take a prompt with a long stable prefix and
+   measure cold and warm prefill. Move a timestamp from the bottom of the prompt
+   to the top and repeat. Report both numbers and the design rule you would
+   write for your team.
+
+3. **Size a window.** For three models you might deploy, compute KV cache bytes
+   per token from their metadata and produce a table of memory against context
+   length. Say which model you would run at 32k context on a 24 GB card.
+
+4. **The worksheet, honestly.** Take a feature you have actually shipped or
+   specified. Count real prompt and output tokens — count, do not estimate —
+   and compute the monthly bill at your traffic. Then compute it again with the
+   prompt 40% shorter, and say which parts of the prompt you would cut.
+
+5. **TTFT against context.** Plot time to first token against prompt length for
+   your setup, over at least five lengths. Fit a line. Use the slope to predict
+   TTFT at a context length you have not tested, then test it.
+
+6. **The output-length myth.** Find a place where someone proposed saving money
+   by asking the model for shorter answers. Using the input/output ratio you
+   measured, compute what that change would actually have saved.
+
+## Interview questions {#sec-serving-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurements make answerable.
+:::
+
+### Testing whether you understand the machine
+
+**Q: Walk me through what happens when a request hits an LLM server.**
+
+Two phases with different characteristics. Prefill reads the whole prompt in
+one parallel, compute-bound pass. Decode produces output tokens one at a time,
+each a separate memory-bound pass over the model, reusing the KV cache so
+earlier tokens are not recomputed. Name the rate difference — about eleven to
+one per token in this chapter's measurements — and say which half dominates for
+the request shape you are being asked about. Candidates who describe one
+undifferentiated "inference" have not looked.
+
+**Q: Why is the KV cache the thing that limits concurrency?**
+
+Because it scales with tokens times sequences, not with model size. Weights are
+loaded once and shared by every request on the card; the cache is per-sequence
+and grows with each token generated. Give the arithmetic —
+$2 \times L \times H_{kv} \times d_{\text{head}}$ per token — and note that
+grouped-query attention exists largely to shrink it. PagedAttention is the
+systems answer: manage it in blocks so a sequence that reserved 2,000 tokens
+and used 200 does not waste the rest.
+
+**Q: Where does batching help and where does it hurt?**
+
+It helps throughput because decode is memory-bound and the weight movement is
+shared. It hurts per-request latency because each sequence now shares the
+machine. Continuous batching removes the worst version of the trade — the
+head-of-line blocking in static batching — but does not remove the trade
+itself. A candidate who says batching is free has not run a latency SLO.
+
+### Testing whether you have shipped one
+
+**Q: The bill doubled last month and traffic did not. Debug it.**
+
+Input tokens first, because they dominate: 890 against 53 in this book's
+summarization measurement. Look for a prompt that grew — a retrieval step
+returning more chunks, a system prompt that gained a section, a conversation
+history that stopped being truncated. Then the cache hit rate, because a
+volatile token moved to the top of the prompt turns caching off silently and
+looks exactly like a price change. Only then model or provider changes.
+
+**Q: How would you cut latency in half without changing the model?**
+
+Establish the split first — if it is 90% prefill, output-side changes cannot
+get you there. Then: prompt caching for the stable prefix, which measured 126×
+on prefill here; shortening the prompt itself, which is linear; and streaming
+to convert the remaining wait into reading time. Say what you would measure
+after each one, and say that speculative decoding is on the list only if you
+can host a draft model and cost is not the constraint.
+
+**Q: We want a 99th-percentile latency SLO. What do you need?**
+
+A batch-size ceiling, an admission policy for what happens when the queue is
+long, a separate route for long-context requests so they cannot sit in front of
+short ones, and per-route TTFT instrumentation rather than a single global
+number. Then say the uncomfortable part: a p99 SLO and maximum throughput are
+in direct conflict, and somebody has to be told which one they are buying.
+
+## The 2026 toolbox {#sec-serving-tools}
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | the local server; its `/api/generate` reports the prefill and decode split per request, which is what made these measurements cheap |
+| `llama3.2:3b` | Q4_K_M | the model under test; small enough to measure on a laptop without thermal throttling |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| project | current version | when you would reach for it |
+|:--|:--|:--|
+| `vllm` | 0.28.0 | the reference open-source server: continuous batching, paged KV cache, prefix caching [@kwon2023pagedattention] |
+| `sglang` | 0.5.18 | a serving runtime built around structured programs and aggressive prefix reuse |
+| `text-generation-inference` | 3.3.7 | HuggingFace's server, closest to their ecosystem |
+| `llama.cpp` | b10690 (rolling) | CPU and Apple Silicon inference; the engine underneath `ollama`. Tagged per build, so pin one |
+| `tensorrt-llm` | 1.2.1 | NVIDIA's compiler-based runtime when the last 20% of throughput matters |
+| `llmcompressor` | 0.13.0 | applying GPTQ and AWQ quantization [@frantar2023gptq; @lin2024awq] to a model you intend to serve |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,18,58]"}
+
+## What to remember {#sec-serving-summary}
+
+- **A request is two operations, not one.** Prefill reads the prompt in one
+  parallel pass; decode writes the answer one serial token at a time. Measured
+  here at roughly **2,000 against 185 tokens per second** — writing a token
+  costs about **eleven times** what reading one does. Every serving decision
+  follows from which half your requests are made of.
+
+- **Latency is usually the prompt.** At 7,455 tokens of context, **90.7% of the
+  wall clock was over before the first character appeared**. Streaming does not
+  change that number; it only makes the rest of the request visible. The lever
+  for time-to-first-token is prompt length, and after that, caching.
+
+- **Long context is charged twice.** It costs prefill once, and then slows every
+  generated token: decode fell from **185 to 139 tokens per second** between an
+  empty window and a 7,500-token one.
+
+- **The KV cache can dwarf the model.** At 112 KiB per token, a 131k window on a
+  2.0 GB model is **14 GiB of cache — seven times the weights**. "Will it fit?"
+  is a question about context length. Grouped-query attention is why that number
+  is 14 and not 42.
+
+- **Prompt caching is the first lever and it is not subtle.** Warm prefill was
+  **flat at 13–18 ms regardless of prompt length**: 126× on prefill and 8.2× on
+  the whole request at 4,258 tokens. It requires a byte-identical prefix, so
+  order the prompt by stability and put nothing volatile near the top.
+
+- **Batching buys throughput and spends latency.** Decode is memory-bound, so
+  sequences can share weight movement; continuous batching keeps the slots full
+  instead of waiting for the slowest sequence [@yu2022orca;
+  @kwon2023pagedattention]. Reporting the throughput gain without the latency
+  cost is how a review gets misled.
+
+- **You pay for reading, not writing.** 890 prompt tokens against 53 generated
+  in this book's own summarization measurement. Asking for shorter answers saves
+  almost nothing; sending less saves almost everything. Boilerplate removal
+  beats model selection.
+
+- **Order the levers by what they cost you.** Fewer tokens and prompt caching
+  are free of quality risk and go first. A smaller model, quantization
+  [@frantar2023gptq; @lin2024awq] and speculative decoding
+  [@leviathan2023speculative] each trade something specific — quality, quality,
+  and money-for-latency respectively — and belong in an eval, not in a
+  benchmark table someone else ran.
