@@ -1,4 +1,4 @@
-# Applied NLP — From Tokens to Agents
+# Applied Natural Language Processing — From Tokens to Agents
 
 ODTÜ'de bilgisayar mühendisi olmayan mühendisler ve İstatistik öğrencilerine
 verilen Applied NLP dersinin herkese açık, etkileşimli, canlı kitabı.
@@ -9,11 +9,27 @@ hazır ve aynı pipeline'dan yayınlanıyor.
 GitHub Pages. İnteraktifler Observable JS (tarayıcıda çalışır, sunucu yok);
 kod bölümleri Python + Jupyter engine + `freeze`.
 
+## Atıf
+
+Kitaba atıf verecekseniz sürümü ve erişim tarihini belirtin — bu yaşayan bir
+kitap. Hazır künyeler (BibTeX + APA), lisans ayrımı ve baskı bilgisi:
+
+- İngilizce: <https://bbardakk.github.io/metu-applied-nlp/en/cite.html>
+- Türkçe: <https://bbardakk.github.io/metu-applied-nlp/tr/cite.html>
+
+Depo kökündeki `CITATION.cff`, GitHub'ın **Cite this repository** düğmesini
+besler ve Zenodo sürüm meta verisinin kaynağıdır.
+
+**Lisans:** metin [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/),
+kod [MIT](https://opensource.org/licenses/MIT). Ayrıntı: `LICENSE`.
+
 ```
 .
 ├── en/                      # İngilizce kitap (tam Quarto projesi)
 │   ├── _quarto.yml          # bölüm listesi, tema, footer — ana kontrol dosyası
-│   ├── index.qmd            # landing page (BPE-chip hero)
+│   ├── index.qmd            # landing page / kapak (BPE-chip hero)
+│   ├── cite.qmd             # künye: atıf, lisans, sürüm, yazar, colophon
+│   ├── preface.qmd          # önsöz
 │   ├── chapters/            # 39 bölüm / 7 part (01-10 dolu, kalanı iskelet)
 │   ├── appendices/          # setup, math refresher, EN↔TR sözlük
 │   │                        #   glossary.csv = sözlüğün tek doğruluk kaynağı
