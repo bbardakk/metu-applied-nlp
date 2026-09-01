@@ -20,17 +20,19 @@ explorers are interactive.
 ## The problem, in one sentence
 
 @sec-text-as-data ended in an uncomfortable place. We built document vectors
-that work, and we built word vectors that do not. Every word was a one-hot
-column: `pump` and `pumps` and `impeller` were three mutually orthogonal
-directions, each as unrelated to the others as `pump` is to `Wednesday`.
-Cosine similarity between any two distinct words was exactly zero, by
-construction, always.
+that work. We also built word vectors that do not.
 
-That is not a small flaw. It means the model cannot generalise across
-words at all. If your training data contains *the pump failed* and your test
-data contains *the pumps failed*, a bag-of-words model has learned nothing
-transferable. Everything it knows about the first sentence is filed under a
-coordinate that the second sentence never touches.
+Every word was a one-hot column, so `pump`, `pumps` and `impeller` were three
+mutually orthogonal directions — each as unrelated to the others as `pump` is
+to `Wednesday`. Cosine similarity between any two distinct words was exactly
+zero. By construction. Always.
+
+How bad is that, really? Bad enough that the model cannot generalise across
+words at all. Suppose your training data contains *the pump failed* and your
+test data contains *the pumps failed*. A bag-of-words model has learned
+nothing it can carry from one to the other: everything it knows about the
+first sentence is filed under a coordinate the second sentence never
+touches.
 
 ::: {#gloss-embedding .column-margin .term-gloss}
 **embedding** — a short list of numbers standing in for a word, arranged
@@ -38,11 +40,20 @@ so that words used in similar ways sit close together. Think of it as
 giving every word a set of map coordinates. [↩](#term-embedding){.term-back}
 :::
 
-This chapter fixes exactly that, and the fix is one idea:
-[replace the identity matrix with a learned one]{.hl}. Instead of giving each
-word its own axis, give each word a short list of numbers — 100, or 300 —
-positioned so that words used in similar ways end up near each other. That
-list is an [embedding]{.hl}.
+This chapter fixes exactly that, and the whole fix is one idea:
+[replace the identity matrix with a learned one]{.hl}.
+
+Instead of giving each word its own axis, give it a short list of numbers —
+100 of them, or 300 — positioned so that words used in similar ways end up
+near each other. That list is an [embedding]{.hl}.
+
+**What we will look at.** We will build the space twice. First by counting,
+because that version can be checked by hand and every number is small enough
+to print. Then by predicting, which is word2vec — and we will write it from
+scratch, gradients included, before showing that the two routes were the same
+route all along. After that: what the space is good at, the three defects it
+hides, and the one thing it cannot do at all, which is exactly what
+@sec-transformers exists to fix.
 
 ::: {.column-margin}
 The statistician's framing: one-hot encoding is a saturated model with one
@@ -59,15 +70,18 @@ generalisation.
 
 Firth was making a point about linguistic method; Zellig Harris had already
 made the operational version of it [@harris1954distributional]. The claim is
-that the meaning of a word can be recovered from the distribution of
-contexts it appears in. If two words appear in the same slots — *the ___
-failed*, *replaced the ___*, *___ pressure* — then whatever they mean, they
-mean something similar.
+that you can recover the meaning of a word from the distribution of contexts
+it appears in.
 
-This is a bet, and it is worth being clear that it is a bet. It works
-extraordinarily well for topical and functional similarity. It fails for
-antonyms, because *hot* and *cold* keep almost identical company, and we will
-watch it fail later in this chapter with real numbers.
+Put concretely: if two words appear in the same slots — *the ___ failed*,
+*replaced the ___*, *___ pressure* — then whatever they mean, they mean
+something similar.
+
+Is that true? Not quite, and it is worth being clear that it is a bet rather
+than a theorem. It works extraordinarily well for topical and functional
+similarity. It fails for antonyms, because *hot* and *cold* keep almost
+identical company — and later in this chapter we will watch it fail, with
+real numbers.
 
 But it has one property that made the entire field possible: it needs no
 labels. Raw text is the supervision. That is why embeddings were the first
@@ -75,10 +89,13 @@ place in NLP where more data reliably beat more cleverness.
 
 ## Count first: co-occurrence, PPMI, SVD
 
-Before word2vec, the recipe was: count what appears near what, reweight the
-counts so common words stop dominating, then factorize. It is worth doing
-this by hand, because it makes the later methods much less mysterious — and
-because @levy2014neural showed that word2vec is quietly doing the same thing.
+Before word2vec there was a recipe, and it had three steps: count what
+appears near what, reweight the counts so common words stop dominating, then
+factorize.
+
+We are going to do all three by hand. Partly because it makes everything
+later much less mysterious, and partly because @levy2014neural showed that
+word2vec is quietly doing the same thing anyway.
 
 Here is a corpus of ten sentences, small enough to check every number.
 
@@ -339,13 +356,15 @@ $$
 \text{embedding} = U_d \Sigma_d
 $$
 
-If that notation is unfamiliar, here is the picture behind it. Think of the
-PPMI matrix as a stack of transparencies laid on top of each other. Each
-transparency shows one recurring pattern — *these words tend to sit near
-those words* — and each is printed at a different darkness. Stack all 19 and
-you reproduce the original matrix exactly. The singular values in $\Sigma$
-are the darknesses, sorted from boldest to faintest; $U$ says how much each
-word participates in each pattern.
+Is that notation unfamiliar? Then here is the picture behind it.
+
+Think of the PPMI matrix as a stack of transparencies. Each one shows a single
+recurring pattern — *these words tend to sit near those words* — and each is
+printed at a different darkness. Stack all 19 and you reproduce the original
+matrix exactly.
+
+The singular values in $\Sigma$ are those darknesses, sorted from boldest to
+faintest. $U$ says how much each word participates in each pattern.
 
 Truncating to $d$ means keeping only the boldest few transparencies. The
 faint ones are where a coincidence lives: a pattern that a single sentence
@@ -399,13 +418,15 @@ before and after factorization:
 
 : The same counts, compressed into five dimensions {tbl-colwidths="[24,20,16,40]"}
 
-Look at the third row, because this step is often described wrongly. SVD does
-**not** delete the `apple`–`man` accident; that cosine *rises*, from 0.79 to
-0.85. What changes is the ranking. Before, `apple`'s nearest neighbour was
-`man`, with `banana` in third place; now `banana` is first and `man` third.
-The compression does not break the wrong link — it strengthens the right link
-enough to overtake it. That is what preferring signal over noise actually
-looks like in practice: the ordering improves, not the absolute values.
+Look at the third row, because this step is usually described wrongly.
+
+SVD does **not** delete the `apple`–`man` accident. That cosine *rises*, from
+0.79 to 0.85. What changes is the ranking: before, `apple`'s nearest neighbour
+was `man` with `banana` third; now `banana` is first and `man` third.
+
+So the compression does not break the wrong link. It strengthens the right one
+enough to overtake it — and that is what "preferring signal over noise"
+actually looks like. The ordering improves; the absolute values do not.
 
 The number to watch is the first row. `apple` and `banana` never once occur
 in the same sentence in this corpus, so no amount of counting could ever link
@@ -488,6 +509,15 @@ on top of each other because in this corpus they are used identically.</p>`
 :::
 
 ## From counting to predicting: word2vec
+
+So counting works. We built a space by hand, and royalty landed on one side
+and food on the other. Why did the field abandon it?
+
+One reason, and it is not accuracy: the co-occurrence matrix is
+vocabulary-by-vocabulary. At 100,000 words that is ten billion cells you have
+to hold before you can factorize anything. The alternative is to never build
+the matrix at all — and instead learn the vectors by asking the model to
+*predict*.
 
 ::: {#gloss-word2vec .column-margin .term-gloss}
 **word2vec** — the 2013 method that learns embeddings by training a model
@@ -716,6 +746,14 @@ html`<div style="font-size:0.9rem;">
 
 ### Negative sampling is a logistic regression
 
+There is one problem left, and it is a bad one. To turn a score into a
+probability you normalise over the whole vocabulary — which means every
+single training pair costs you a sum over 100,000 words. Sixty billion pairs,
+each costing 100,000 operations, is not a training run anybody finishes.
+
+The fix is almost embarrassingly simple, and it is the reason word2vec was
+practical.
+
 ::: {#gloss-negative-sampling .column-margin .term-gloss}
 **negative sampling** — instead of scoring every word in the vocabulary,
 score the true neighbour against a handful of randomly drawn fake ones.
@@ -788,14 +826,16 @@ you have ever fitted. For `pump` that is $0.639 - 1 = -0.361$ (negative, so
 the dot product goes up); for `opera` it is $0.416 - 0 = 0.416$ (positive, so
 the dot product goes down).
 
-Both vectors in a pair move — the collapsed derivation below shows the two
-gradients, and each vector is dragged along the direction of the other. To
-keep the arithmetic followable, hold the context vectors $\mathbf{u}$ fixed
-and update only the centre vector $\mathbf{v}$. With a learning rate of 0.05,
-one step then moves `failed`·`pump` from 0.570 to 0.583, and `failed`·`opera`
-from $-0.340$ to $-0.354$. Update both vectors, as a real implementation
-does, and the same step lands on 0.596 and $-0.368$: the same directions,
-moved about twice as far.
+Both vectors in a pair move. The collapsed derivation below shows the two
+gradients, and each vector is dragged along the direction of the other.
+
+To keep the arithmetic followable, let us hold the context vectors
+$\mathbf{u}$ fixed and update only the centre vector $\mathbf{v}$. With a
+learning rate of 0.05, one step moves `failed`·`pump` from 0.570 to 0.583, and
+`failed`·`opera` from $-0.340$ to $-0.354$.
+
+Update both vectors, as a real implementation does, and the same step lands on
+0.596 and $-0.368$ — the same directions, moved about twice as far.
 
 Those are tiny movements. Multiply them by tens of billions of pairs and you
 get the geometry that made these models famous, which is the honest summary
@@ -940,15 +980,17 @@ is roughly 65,000 times cheaper.
 :::
 ::::
 
-Notice how the two descriptions meet here. The network does have a hidden
-layer — the row pulled out of $\mathbf{W}$ is exactly that — but it carries
-no activation function, and the only non-linearity in the model is the
-sigmoid at the very end. A single linear layer with no activation, followed
-by a sigmoid and a log loss, is by definition a logistic regression. So
-"shallow neural network" and "logistic regression" are not competing
-explanations here; they are two names for the same object. The first is what
-you reach for to describe the architecture, the second to compute the
-gradient.
+Notice how the two descriptions meet here.
+
+The network *does* have a hidden layer — the row pulled out of $\mathbf{W}$ is
+exactly that. But it carries no activation function, and the only
+non-linearity in the whole model is the sigmoid at the very end. A single
+linear layer with no activation, followed by a sigmoid and a log loss, is by
+definition a logistic regression.
+
+So "shallow neural network" and "logistic regression" are not competing
+explanations. They are two names for the same object: reach for the first to
+describe the architecture, the second to compute the gradient.
 
 If you have ever fitted a logistic regression, you have fitted 99% of
 word2vec. The
@@ -1083,12 +1125,18 @@ corpus comes out with $p_{\text{keep}} \geq 1$ and is simply always kept.
 
 : What subsampling actually throws away {tbl-colwidths="[22,30,24,24]"}
 
-So it is not a gentle reweighting — it deletes five out of every six
-occurrences of `the` and does not touch the tail at all. It leaves rare
-words untouched and aggressively thins the top of the Zipf curve you plotted
-in @sec-text-as-data. In the run below it discards 26.6% of the
-in-vocabulary tokens — 6,397,826 become 4,698,743 — and almost all of what
-it throws away is `the`, `of`, `and` and their friends. The 6,397,826 is what is left of the run's `tokens read: 6794527` once everything below `min_count=20` is dropped; the subsampling rate applies to that.
+So this is not a gentle reweighting. It deletes five out of every six
+occurrences of `the`, and it does not touch the tail at all — rare words are
+left alone while the top of the Zipf curve you plotted in @sec-text-as-data
+is aggressively thinned.
+
+In the run below it discards 26.6% of the in-vocabulary tokens: 6,397,826
+become 4,698,743. Almost all of what it throws away is `the`, `of`, `and` and
+their friends.
+
+(Where does 6,397,826 come from? It is what is left of the run's
+`tokens read: 6794527` once everything below `min_count=20` is dropped. The
+subsampling rate applies to that.)
 
 ::: {.column-margin}
 There is a second, less obvious benefit. Deleting a token also *widens* the
@@ -1107,13 +1155,16 @@ then after the exponent it is only $5000^{0.75} \approx 595$ times more
 likely to be drawn as a negative. The gap narrows by a factor of about eight,
 and it narrows in the rare word's favour.
 
-That matters because a word only learns from being *contrasted*. A word that
-is never drawn as a negative is never explicitly pushed away from anything,
-and its vector drifts. The exponent buys the tail of the vocabulary a share
-of the training signal that its raw frequency would never earn it. It was
-chosen empirically — 0.75 has no derivation behind it — and it matters: it
-is one of the hyperparameters @levy2015improving identified as doing much of
-the work people credited to the model.
+Why does that matter? Because a word only learns from being *contrasted*. A
+word never drawn as a negative is never explicitly pushed away from anything,
+and its vector simply drifts.
+
+So the exponent buys the tail of the vocabulary a share of the training signal
+its raw frequency would never earn it.
+
+And it was chosen empirically — 0.75 has no derivation behind it. It is also
+one of the hyperparameters @levy2015improving identified as doing much of the
+work people were crediting to the model.
 
 ### Writing it from scratch
 
@@ -1405,7 +1456,11 @@ survives contact with a corpus that does not fit in RAM.
 
 ## GloVe: counting, with a loss function
 
-GloVe [@pennington2014glove] took the synthesis seriously. Build the global
+If counting and predicting are the same thing underneath, an obvious question
+follows: could you do the counting *explicitly* and still get the benefits of
+gradient descent?
+
+GloVe [@pennington2014glove] took that synthesis seriously. Build the global
 co-occurrence matrix, then fit vectors so that dot products reproduce log
 co-occurrence counts, weighting rare pairs down:
 
@@ -1519,6 +1574,9 @@ this is the single biggest motivation for the contextual models in
 @sec-transformers.
 
 ## The famous analogy, and what it hides
+
+You have almost certainly seen this one, and it is worth knowing what it
+really shows — and what it quietly does not.
 
 The result that made embeddings famous outside NLP:
 
@@ -1682,6 +1740,11 @@ computed in 100 dimensions, never from a projection like this one.</p>`
 :::
 
 ## fastText: words made of pieces
+
+Everything so far shares one assumption we have not questioned: that a word
+is an indivisible unit with its own row in a table. Which raises a question
+you already know the answer to if you read @sec-text-as-data — what happens
+when a word is not in the table?
 
 ::: {#gloss-out-of-vocabulary-oov .column-margin .term-gloss}
 **out-of-vocabulary (OOV)** — a word the model has no entry for, because
@@ -2440,14 +2503,18 @@ was actually scored.
 
 
 The per-category breakdown is where the analogy score stops being one number
-and starts being informative. `capital-common-countries` is 0.939 and
-`capital-world` 0.890 — text states which city is the capital of which
-country constantly, so the relation is densely attested. But `currency` is
-**0.152** and `gram2-opposite` **0.202**. The model is not reasoning about
-relations; it reproduces the ones its corpus repeats often. The headline
-0.633 is an average over categories ranging from nearly solved to nearly
-chance, which is why a single analogy number should never be used to rank two
-embeddings.
+and starts being informative.
+
+`capital-common-countries` is 0.939 and `capital-world` 0.890. That makes
+sense: text states which city is the capital of which country constantly, so
+the relation is densely attested.
+
+Now look at `currency` — **0.152** — and `gram2-opposite`, **0.202**.
+
+[The model is not reasoning about relations. It reproduces the ones its corpus
+repeats often.]{.hl} The headline 0.633 averages over categories ranging from
+nearly solved to nearly chance, which is why a single analogy number should
+never be used to rank two embeddings.
 
 ::: {.callout-warning appearance="simple"}
 **A comparison that looks better than it is.** The from-scratch vectors score
