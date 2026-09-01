@@ -75,6 +75,9 @@ because that is where the real defects are.
 
 ### The corpus
 
+Everything in this chapter is measured on one dataset, so it is worth two
+minutes of your attention before any of the numbers arrive.
+
 ```python
 from datasets import load_dataset
 
@@ -111,6 +114,16 @@ entity.]{.hl} The gap between those two numbers is not a curiosity; it is the
 reason @sec-sequence-labeling-metrics exists. Any paper, model card or
 colleague reporting "94% accuracy" on a tagging task is reporting a number
 whose floor is 61.
+
+**What we will look at.** First the corpus, audited before anything is
+measured on it, because what that audit turns up changes how every later score
+reads. Then the format that turns per-token labels into spans, and the
+sequences a model emits that the format forbids. Then the alignment step
+between words and subwords, where the silent bugs live. Then three ways of
+building the thing — a dictionary, a CRF, a fine-tuned encoder — at six label
+budgets, because the question is not which one wins but *when*. Then why the
+metric everyone reports is the wrong one. And finally what happens if you skip
+all of it and describe the schema to an LLM instead.
 
 ## What is actually in the corpus {#sec-sequence-labeling-audit}
 
@@ -165,6 +178,11 @@ federation, not the landmass — and some is annotation noise. Either way,
 
 ### The part that changes how you read every score
 
+Everything so far has been a nuisance: fragments instead of sentences, a
+handful of bad labels, some ambiguity the model has to guess through. Annoying,
+survivable, and roughly what you expect from an automatically built corpus.
+This next one is a different kind of problem.
+
 ::: {.callout-warning appearance="simple"}
 **13.06% of the test set is in the training set.**
 
@@ -203,11 +221,13 @@ it is a lookup table that has seen the answer.
 Read that gap column downwards, because it is the most useful thing in this
 section. The three systems are ordered by how much they memorise — a
 dictionary, a feature-based linear model, a pre-trained encoder — and the
-leakage bonus falls monotonically with them: **+26.50, +16.25, +7.65**.
-[The size of a system's leakage gap is a measurement of how much of its score
-is recall of the training set.]{.hl} A benchmark with 13% leakage does not
-just inflate scores, it inflates them *unevenly*, in favour of exactly the
-models that will disappoint you in production.
+leakage bonus falls with them in the same order: **+26.50, +16.25, +7.65**.
+
+That ordering is not a coincidence, and it turns the gap into a measurement.
+[The size of a system's leakage gap tells you how much of its score is recall
+of the training set.]{.hl} So a benchmark with 13% leakage does not just
+inflate scores. It inflates them *unevenly*, in favour of exactly the models
+that will disappoint you in production.
 
 Every headline number in this chapter is computed on the full test set,
 because that is what the literature reports and comparisons have to be
@@ -438,17 +458,113 @@ concrete cost.
 The mBERT row is worth reading carefully, because it is easy to over-read. It
 fragments *everything* in Turkish at 2.00 subwords per word, which is
 @sec-pretraining's argument for language-specific tokenizers: more tokens for
-the same text means more cost and less effective context, permanently. What
-it is **not** is evidence that mBERT will score worse on this task —
-tokenization is measured here, accuracy is not. @sec-turkish-nlp fine-tunes
-both models on this exact dataset and finds the multilingual one slightly
-*ahead*, which is a useful reminder that a tokenizer tax is a tax on tokens
+the same text means more cost and less effective context, permanently.
+
+What it is **not** is evidence that mBERT will score worse on this task.
+Tokenization is what was measured here; accuracy is not. @sec-turkish-nlp
+fine-tunes both models on this exact dataset and finds the multilingual one
+slightly *ahead* — a useful reminder that a tokenizer tax is a tax on tokens
 rather than a prediction about F1.
 
 ### The alignment itself
 
 The convention is to label the **first** subword of each word and mask the
-rest with `-100`, the index PyTorch's cross-entropy ignores:
+rest with `-100`, the index PyTorch's cross-entropy ignores. Here is that
+convention on three of the entity words above — and, underneath it, what
+happens when you skip the alignment and zip the labels on by position.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">One label per word, many subwords per word — and the off-by-a-word that still trains</div>
+<svg viewBox="0 0 764 288" style="max-width:744px" role="img"
+     aria-label="A diagram of subword label alignment. The top row holds three Turkish entity words with one gold label each: İstanbul labelled B-LOC, Erdemir labelled B-ORG, and Mississippi'de labelled B-LOC. The middle row shows what BERTurk's tokenizer produces for the same three words, eleven positions in total: an opening CLS token, then İstanbul as a single subword, then Erdem and ##ir for Erdemir, then Miss, ##iss, ##ip, ##pi, an apostrophe and de for Mississippi'de, and a closing SEP token. Each word sits directly above the subwords it was split into. The third row shows the correct alignment: the first subword of each word carries the word's label and every other position carries minus one hundred, the index the loss ignores, so B-LOC sits on İstanbul, B-ORG sits on Erdem, B-LOC sits on Miss, and the other eight positions are masked. The bottom row shows the bug: zipping the three labels onto the first three token positions instead. B-LOC lands on the CLS token, B-ORG lands on İstanbul, B-LOC lands on Erdem, and the remaining eight positions including all of Mississippi'de get no label at all. A note says the loss still falls and the run still finishes.">
+
+  <text x="10" y="14" class="t-xs t-b t-muted">WHAT YOU HAVE — ONE GOLD LABEL PER WORD</text>
+
+  <text x="125" y="34" class="t-xs t-mid t-b t-accent">B-LOC</text>
+  <text x="239" y="34" class="t-xs t-mid t-b t-accent">B-ORG</text>
+  <text x="483" y="34" class="t-xs t-mid t-b t-accent">B-LOC</text>
+
+  <rect x="84"  y="42" width="82"  height="26" rx="5" class="box"/>
+  <text x="125" y="59" class="t-xs t-mid t-b t-mono">İstanbul</text>
+  <rect x="178" y="42" width="122" height="26" rx="5" class="box"/>
+  <text x="239" y="59" class="t-xs t-mid t-b t-mono">Erdemir</text>
+  <rect x="312" y="42" width="342" height="26" rx="5" class="box"/>
+  <text x="483" y="59" class="t-xs t-mid t-b t-mono">Mississippi'de</text>
+
+  <text x="10" y="90" class="t-xs t-b t-muted">WHAT THE MODEL GETS — THE SAME THREE WORDS, IN THE SAME COLUMNS</text>
+
+  <rect x="14"  y="98" width="58" height="26" rx="5" class="chip"/>
+  <text x="43"  y="115" class="t-xs t-mid t-mono t-muted">[CLS]</text>
+  <rect x="84"  y="98" width="82" height="26" rx="5" class="box-accent"/>
+  <text x="125" y="115" class="t-xs t-mid t-b t-mono t-accent">İstanbul</text>
+  <rect x="178" y="98" width="60" height="26" rx="5" class="box-accent"/>
+  <text x="208" y="115" class="t-xs t-mid t-b t-mono t-accent">Erdem</text>
+  <rect x="250" y="98" width="50" height="26" rx="5" class="box"/>
+  <text x="275" y="115" class="t-xs t-mid t-mono">##ir</text>
+  <rect x="312" y="98" width="54" height="26" rx="5" class="box-accent"/>
+  <text x="339" y="115" class="t-xs t-mid t-b t-mono t-accent">Miss</text>
+  <rect x="378" y="98" width="58" height="26" rx="5" class="box"/>
+  <text x="407" y="115" class="t-xs t-mid t-mono">##iss</text>
+  <rect x="448" y="98" width="50" height="26" rx="5" class="box"/>
+  <text x="473" y="115" class="t-xs t-mid t-mono">##ip</text>
+  <rect x="510" y="98" width="50" height="26" rx="5" class="box"/>
+  <text x="535" y="115" class="t-xs t-mid t-mono">##pi</text>
+  <rect x="572" y="98" width="32" height="26" rx="5" class="box"/>
+  <text x="588" y="115" class="t-xs t-mid t-mono">'</text>
+  <rect x="616" y="98" width="38" height="26" rx="5" class="box"/>
+  <text x="635" y="115" class="t-xs t-mid t-mono">de</text>
+  <rect x="666" y="98" width="58" height="26" rx="5" class="chip"/>
+  <text x="695" y="115" class="t-xs t-mid t-mono t-muted">[SEP]</text>
+
+  <text x="10" y="146" class="t-xs t-b t-muted">CORRECT — LABEL EACH WORD'S FIRST SUBWORD, MASK EVERY OTHER POSITION</text>
+
+  <text x="43"  y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="125" y="169" class="t-xs t-mid t-b t-mono t-accent">B-LOC</text>
+  <text x="208" y="169" class="t-xs t-mid t-b t-mono t-accent">B-ORG</text>
+  <text x="275" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="339" y="169" class="t-xs t-mid t-b t-mono t-accent">B-LOC</text>
+  <text x="407" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="473" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="535" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="588" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="635" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+  <text x="695" y="169" class="t-xs t-mid t-mono t-muted">-100</text>
+
+  <path d="M10 192 L 754 192" class="ln-thin ln-dash"/>
+
+  <text x="10" y="212" class="t-xs t-b t-rose">THE BUG THAT STILL TRAINS — THE THREE LABELS ZIPPED ON BY POSITION</text>
+
+  <rect x="14"  y="220" width="58" height="24" rx="5" class="box-rose"/>
+  <text x="43"  y="236" class="t-xs t-mid t-b t-mono t-rose">B-LOC</text>
+  <rect x="84"  y="220" width="82" height="24" rx="5" class="box-rose"/>
+  <text x="125" y="236" class="t-xs t-mid t-b t-mono t-rose">B-ORG</text>
+  <rect x="178" y="220" width="60" height="24" rx="5" class="box-rose"/>
+  <text x="208" y="236" class="t-xs t-mid t-b t-mono t-rose">B-LOC</text>
+  <text x="275" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="339" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="407" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="473" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="535" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="588" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="635" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+  <text x="695" y="236" class="t-xs t-mid t-mono t-muted">—</text>
+
+  <text x="10" y="264" class="t-xs t-rose">Every label lands one word early. B-LOC trains on [CLS], and Mississippi'de is never labelled at all.</text>
+  <text x="10" y="278" class="t-xs t-muted">Nothing raises an error. The loss falls, the run finishes, and the score is merely worse than it should be.</text>
+
+</svg>
+```
+
+::: {.fig-cap}
+The three tokenizations are BERTurk's, printed verbatim above. Nothing
+connects the rows except the columns: each word sits over exactly the subwords
+it was split into, which is what `word_ids()` gives you and what a positional
+zip throws away.
+:::
+::::
+
+In code:
 
 ```python
 enc = tok(batch["tokens"], is_split_into_words=True, truncation=True)
@@ -524,7 +640,10 @@ only approximate it.
 
 ### A CRF
 
-Hand-built features, a linear-chain CRF, twenty thousand sentences:
+The gazetteer cannot recognise a name it has never seen, because it has no
+notion of what a name *looks like*. So give a model that notion by hand.
+Capitalisation, suffixes, the shape of the word, what its neighbours look
+like — a linear-chain CRF over twenty thousand sentences:
 
 ```python
 def features(tokens, i):
@@ -606,10 +725,12 @@ scores 3.14 span F1 — while a dictionary of memorised strings scores
 That is not a bug, and it is the most useful thing in this chapter. At 200
 sentences the model has seen roughly 265 entities spread over six label
 classes; the classification head is randomly initialised; three epochs is
-600 gradient steps. Token accuracy is 63.43% — barely above the
-everything-is-`O` floor of 61.36% — which tells you precisely what it
-learned: it learned to say `O`. It picks up almost no entities at all
-(recall 1.90), and the few it does are mostly wrong.
+600 gradient steps.
+
+Token accuracy is 63.43% — barely above the everything-is-`O` floor of
+61.36% — which tells you precisely what it learned. It learned to say `O`. It
+picks up almost no entities at all (recall 1.90), and the few it does are
+mostly wrong.
 
 The crossover against the CRF sits between **2,000 and 5,000** labelled
 sentences: at 2,000 the encoder is still a point behind (84.23 against
@@ -623,10 +744,11 @@ classical pipeline is not a fallback; it is the better model.
 The `illegal` column is worth a second look, because it says something the F1
 column does not. Well-formedness is *learned* here, not guaranteed: illegal
 BIO transitions peak at 3,739 once the model starts emitting entity tags at
-all, then fall steadily as it picks up the grammar from data — and never
-reach zero. Even at 20,000 sentences and 91.92 F1, the tagger emits 139
-sequences that BIO forbids. The CRF emits none at any budget, because for it
-those sequences are not improbable but unreachable.
+all, then fall steadily as it picks up the grammar from data.
+
+And they never reach zero. Even at 20,000 sentences and 91.92 F1, the tagger
+emits 139 sequences that BIO forbids. The CRF emits none at any budget,
+because for it those sequences are not improbable but unreachable.
 
 ::: {.column-margin}
 Notice which way the errors run. The CRF is precision-leaning (86.27 P
@@ -771,6 +893,9 @@ partial credit is not beating a paper reporting 88 under exact match.
 
 ### Where the errors are
 
+A single F1 number tells you how much is wrong and nothing about what. Split
+it by entity type and the same two systems look rather different:
+
 ```text
                 CRF                       BERTurk @ 20,000
         precision  recall      F1     precision  recall      F1   support
@@ -781,9 +906,11 @@ partial credit is not beating a paper reporting 88 under exact match.
 
 `ORG` is last in both columns, and its recall is the outlier — 78.70 for the
 CRF, and still the lowest of the three at 88.73 for the encoder six points
-further up. Organisation names are long — mean gold span **2.68 tokens for
-`ORG` against 2.26 for `PER` and 1.61 for `LOC`** — compositional, and
-frequently built out of ordinary words
+further up. Six points of extra model did not move `ORG` off the bottom.
+
+The reason is in the spans themselves. Organisation names are long — mean
+gold span **2.68 tokens for `ORG` against 2.26 for `PER` and 1.61 for
+`LOC`** — compositional, and frequently built out of ordinary words
 (*Türk Silahlı Kuvvetleri*, *Eurovision Şarkı Yarışması*). A model with a
 five-token window structurally cannot see all of one, and a model that can
 still has to decide where it stops.
@@ -976,6 +1103,10 @@ finds people eagerly and over-commits, tagging descriptions and titles that
 the guidelines exclude.
 
 ### What it costs
+
+So far the LLM has been judged on accuracy alone, where it lost by 31 points.
+The second axis is worse for it, and by a margin that is easy to
+underestimate until you see it written down:
 
 ```text
                               LLM (qwen3.5:9b)     BERTurk fine-tuned
