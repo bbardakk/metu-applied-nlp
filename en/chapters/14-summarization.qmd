@@ -62,6 +62,16 @@ and @sec-summarization-faithfulness is the section that matters, not the
 leaderboard.
 :::
 
+**What we will look at.** First the corpus, characterised before anything is
+modelled on it, because one number computed in two seconds decides whether
+selecting sentences can work here at all. Then the extractive baselines, and
+the ceiling sitting just above them. Then the metric everyone reports — which
+in Turkish is broken in a way nobody notices, and which in any language cannot
+see whether the summary is true. Then a model writing the summaries instead,
+and documents too long to hand it in one piece. And finally two ways of
+measuring truth, one crude and one expensive, that agree about the ranking and
+about almost nothing else.
+
 ## Characterising the corpus before modelling it {#sec-summarization-corpus}
 
 @sec-sequence-labeling made auditing the corpus a habit rather than an
@@ -190,6 +200,10 @@ surface strings. Hold on to that: it is a corpus statistic here, and in
 @sec-summarization-rouge it becomes a defect in the field's standard metric.
 
 ## Extractive baselines, and their ceiling {#sec-summarization-extractive}
+
+The audit says these summaries are composed rather than copied, which is a
+prediction about how well *selecting* sentences can do. Worth checking against
+the numbers rather than trusting the inference.
 
 The extractive family selects sentences from the source. It cannot
 hallucinate — every word was in the document — and it cannot compress below
@@ -369,11 +383,13 @@ oracle sentence                   24.89                  30.28        +21.7%
 
 Be precise about the damage, because overstating it would be its own error:
 **the ranking is unchanged.** lead-2 > lead-3 > TextRank > lead-1 under both
-tokenizers. What is destroyed is *comparability* — every published Turkish
-ROUGE number is roughly 60% larger than the quantity its readers think it is,
-by an amount that varies with how much a system copies. A random baseline
-gains 80%; the oracle gains 22%. [The inflation is a function of the system,
-so the gaps between systems are wrong even though the order survives.]{.hl}
+tokenizers.
+
+What is destroyed is *comparability*. Every published Turkish ROUGE number is
+roughly 60% larger than the quantity its readers think it is, by an amount
+that varies with how much a system copies — a random baseline gains 80%, the
+oracle gains 22%. [The inflation is a function of the system, so the gaps
+between systems are wrong even though the order survives.]{.hl}
 
 ::: {.column-margin}
 Our own tokenizer needed a fix in the same family, and it is the bug
@@ -546,6 +562,128 @@ sequential — no parallelism — with the running summary drifting as it is
 repeatedly rewritten. Late chunks get more influence than early ones, which
 is the opposite failure to truncation.
 
+The three differ in one thing only, and it is not the model. It is **what the
+pipeline can possibly know at the moment it writes**. Take a document whose
+§1 states a clause and whose §5 is the exception to it — the shape every long
+document has and no chunk boundary respects:
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">Three pipelines over the same document, and where each one loses the exception</div>
+<svg viewBox="0 0 764 472" style="max-width:744px" role="img"
+     aria-label="The same six-section document under truncate, map-reduce and refine pipelines.">
+
+  <text x="16" y="13" class="t-xs t-muted">THE DOCUMENT — SIX SECTIONS, AND ONE FACT THAT LIVES IN TWO OF THEM</text>
+  <path d="M76 47 C 220 20, 430 20, 568 47" class="ln-accent ln-dash"/>
+  <text x="322" y="41" class="t-xs t-accent t-mid">the same clause, forty pages apart</text>
+  <rect x="16"  y="47" width="119" height="28" rx="4" class="box-accent"/>
+  <rect x="139" y="47" width="119" height="28" rx="4" class="box"/>
+  <rect x="262" y="47" width="119" height="28" rx="4" class="box"/>
+  <rect x="385" y="47" width="119" height="28" rx="4" class="box"/>
+  <rect x="508" y="47" width="119" height="28" rx="4" class="box-accent"/>
+  <rect x="631" y="47" width="119" height="28" rx="4" class="box"/>
+  <text x="75"  y="65" class="t-sm t-mid t-accent">§1 clause 4.1</text>
+  <text x="198" y="65" class="t-sm t-mid t-muted">§2</text>
+  <text x="321" y="65" class="t-sm t-mid t-muted">§3</text>
+  <text x="444" y="65" class="t-sm t-mid t-muted">§4</text>
+  <text x="567" y="65" class="t-sm t-mid t-accent">§5 the exception</text>
+  <text x="690" y="65" class="t-sm t-mid t-muted">§6</text>
+
+  <path d="M14 92 L 750 92" class="ln-thin"/>
+
+  <text x="16" y="112" class="t-xs t-muted">TRUNCATE — READ THE FIRST n TOKENS, IGNORE THE REST</text>
+  <rect x="16"  y="120" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="139" y="120" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="262" y="120" width="119" height="24" rx="4" class="box"/>
+  <rect x="385" y="120" width="119" height="24" rx="4" class="box"/>
+  <rect x="508" y="120" width="119" height="24" rx="4" class="box"/>
+  <rect x="631" y="120" width="119" height="24" rx="4" class="box"/>
+  <text x="75"  y="136" class="t-sm t-mid t-accent">§1</text>
+  <text x="198" y="136" class="t-sm t-mid t-accent">§2</text>
+  <text x="321" y="136" class="t-sm t-mid t-muted">dropped</text>
+  <text x="444" y="136" class="t-sm t-mid t-muted">dropped</text>
+  <text x="567" y="136" class="t-sm t-mid t-muted">dropped</text>
+  <text x="690" y="136" class="t-sm t-mid t-muted">dropped</text>
+  <text x="16" y="160" class="t-xs">§5 is never read, so the summary states clause 4.1 as unconditional — and nothing anywhere in the pipeline can notice.</text>
+
+  <path d="M14 176 L 750 176" class="ln-thin"/>
+
+  <text x="16" y="196" class="t-xs t-muted">MAP-REDUCE — SUMMARIZE EACH SECTION, THEN SUMMARIZE THE SUMMARIES</text>
+  <rect x="16"  y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="139" y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="262" y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="385" y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="508" y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="631" y="204" width="119" height="24" rx="4" class="box-accent"/>
+  <text x="75"  y="220" class="t-sm t-mid">§1</text>
+  <text x="198" y="220" class="t-sm t-mid">§2</text>
+  <text x="321" y="220" class="t-sm t-mid">§3</text>
+  <text x="444" y="220" class="t-sm t-mid">§4</text>
+  <text x="567" y="220" class="t-sm t-mid">§5</text>
+  <text x="690" y="220" class="t-sm t-mid">§6</text>
+  <path d="M75 228 L 75 240 M198 228 L 198 240 M321 228 L 321 240 M444 228 L 444 240 M567 228 L 567 240 M690 228 L 690 240" class="ln-thin"/>
+  <rect x="49"  y="240" width="52" height="20" rx="4" class="chip"/>
+  <rect x="172" y="240" width="52" height="20" rx="4" class="chip"/>
+  <rect x="295" y="240" width="52" height="20" rx="4" class="chip"/>
+  <rect x="418" y="240" width="52" height="20" rx="4" class="chip"/>
+  <rect x="541" y="240" width="52" height="20" rx="4" class="chip"/>
+  <rect x="664" y="240" width="52" height="20" rx="4" class="chip"/>
+  <text x="75"  y="254" class="t-xs t-mono t-mid">s1</text>
+  <text x="198" y="254" class="t-xs t-mono t-mid">s2</text>
+  <text x="321" y="254" class="t-xs t-mono t-mid">s3</text>
+  <text x="444" y="254" class="t-xs t-mono t-mid">s4</text>
+  <text x="567" y="254" class="t-xs t-mono t-mid">s5</text>
+  <text x="690" y="254" class="t-xs t-mono t-mid">s6</text>
+  <path d="M75 260 L 75 270 M198 260 L 198 270 M321 260 L 321 270 M444 260 L 444 270 M567 260 L 567 270 M690 260 L 690 270 M75 270 L 690 270 M383 270 L 383 280" class="ln-thin"/>
+  <rect x="283" y="280" width="200" height="22" rx="4" class="box-warm"/>
+  <text x="383" y="295" class="t-sm t-mid">one final summary</text>
+  <text x="16" y="320" class="t-xs">Nothing is dropped, and the loss is still total: s1 and s5 were written independently, neither knows the other exists,</text>
+  <text x="16" y="333" class="t-xs">and the reduce step joins two locally correct sentences into one that is jointly wrong.</text>
+
+  <path d="M14 349 L 750 349" class="ln-thin"/>
+
+  <text x="16" y="369" class="t-xs t-muted">REFINE — CARRY ONE RUNNING SUMMARY FORWARD, REWRITING IT AT EVERY SECTION</text>
+  <rect x="16"  y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="139" y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="262" y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="385" y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="508" y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <rect x="631" y="377" width="119" height="24" rx="4" class="box-accent"/>
+  <text x="75"  y="393" class="t-sm t-mid">§1</text>
+  <text x="198" y="393" class="t-sm t-mid">§2</text>
+  <text x="321" y="393" class="t-sm t-mid">§3</text>
+  <text x="444" y="393" class="t-sm t-mid">§4</text>
+  <text x="567" y="393" class="t-sm t-mid">§5</text>
+  <text x="690" y="393" class="t-sm t-mid">§6</text>
+  <path d="M75 401 L 75 413 M198 401 L 198 413 M321 401 L 321 413 M444 401 L 444 413 M567 401 L 567 413 M690 401 L 690 413" class="ln-thin"/>
+  <rect x="49"  y="413" width="52" height="20" rx="4" class="chip"/>
+  <rect x="172" y="413" width="52" height="20" rx="4" class="chip"/>
+  <rect x="295" y="413" width="52" height="20" rx="4" class="chip"/>
+  <rect x="418" y="413" width="52" height="20" rx="4" class="chip"/>
+  <rect x="541" y="413" width="52" height="20" rx="4" class="chip"/>
+  <rect x="664" y="413" width="52" height="20" rx="4" class="chip"/>
+  <text x="75"  y="427" class="t-xs t-mono t-mid">r1</text>
+  <text x="198" y="427" class="t-xs t-mono t-mid">r2</text>
+  <text x="321" y="427" class="t-xs t-mono t-mid">r3</text>
+  <text x="444" y="427" class="t-xs t-mono t-mid">r4</text>
+  <text x="567" y="427" class="t-xs t-mono t-mid">r5</text>
+  <text x="690" y="427" class="t-xs t-mono t-mid">r6</text>
+  <path d="M101 423 L 166 423 M224 423 L 289 423 M347 423 L 412 423 M470 423 L 535 423 M593 423 L 658 423" class="ln-accent"/>
+  <path d="M160 419 L 166 423 L 160 427 M283 419 L 289 423 L 283 427 M406 419 L 412 423 L 406 427 M529 419 L 535 423 L 529 427 M652 419 L 658 423 L 652 427" class="ln-accent"/>
+  <text x="16" y="450" class="t-xs">r5 still carries clause 4.1, so the exception lands. But §1's wording has been rewritten four times by the time it arrives,</text>
+  <text x="16" y="463" class="t-xs">no two of these steps can run in parallel, and §6 always gets the last word.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The pipelines differ only in what is on screen when the summary is written.
+Truncation loses §5 outright; map-reduce reads it and still cannot connect it
+to §1; refine connects them and pays for it in drift and in serial time.
+:::
+
+::::
+
 ::: {.column-margin}
 The arithmetic that decides this is @sec-transformers'. Attention is
 quadratic in sequence length, so one pass over 100k tokens is not ten times a
@@ -641,6 +779,10 @@ cheapest way to check is a control whose answer you already know.
 
 ### What the proxy found
 
+With both controls at zero, a flag now means something. Here is the same proxy
+on the model's summaries and on the human references, over the same 150
+articles:
+
 ::: {.callout-warning appearance="simple"}
 The most surprising number in this chapter is not about a model.
 
@@ -657,8 +799,9 @@ reference (human)       74           33       644          173      86    (57.3%
 rate the model does.]{.hl}
 
 This is not a measurement error — the controls are clean — and it is not BBC
-journalists inventing news. It is how the corpus was built. XL-Sum's
-"summary" is the bolded intro line that accompanies the article, written to
+journalists inventing news. It is how the corpus was built.
+
+XL-Sum's "summary" is the bolded intro line that accompanies the article, written to
 orient a reader arriving cold, so it supplies background the body then takes
 for granted: the minister's first name, the date of the referendum, the
 figure from a report the article only alludes to.
@@ -733,7 +876,9 @@ about the ordering.
 
 ### The part worth more than either number
 
-Agreement between the two methods, item by item:
+Two methods agreeing on the ordering is a comfortable result, and it is the
+easy half. The uncomfortable half is whether they agree about the same
+summaries:
 
 ```text
                        proxy flags   judge flags   both   verdicts agreeing
@@ -763,6 +908,9 @@ That number comes from reading a random sample, which is @sec-data-annotation's
 discipline and @sec-summarization-lab's step 6.
 
 ### What the judge costs
+
+So the judge earns its place, and the only remaining question is how much of
+it you can afford. That answer is on the clock:
 
 ```text
 300 judgements with gemma3:27b     20,482s     68.3s each
@@ -810,8 +958,9 @@ output forever.
 summarized here: **890 prompt tokens per article against 53 generated**, a
 ratio of nearly 17 to 1 — and these are 300-word articles, the short end of
 anything you would want summarized. For long documents under map-reduce the
-ratio gets worse, because the intermediate summaries are read again. The
-arithmetic is @sec-serving's: what you pay for is *reading*, so the lever is
+ratio gets worse, because the intermediate summaries are read again.
+
+The arithmetic is @sec-serving's: what you pay for is *reading*, so the lever is
 how much you send, not how much you ask for. Truncating boilerplate —
 headers, navigation, disclaimers, signature blocks — is usually a larger
 saving than any model change.
@@ -834,6 +983,9 @@ converts an informative summary — which must be right — into an indicative
 one, which only has to be useful.
 
 ## Intuition checks {#sec-summarization-intuition}
+
+Answer each one before you open it. All six are questions this chapter settled
+with a measurement rather than an argument.
 
 ::: {.callout-note collapse="true"}
 ## 1. A vendor reports ROUGE-1 of 41 on Turkish news. Are you impressed?
@@ -996,6 +1148,8 @@ next to the summary converts one into the other and is cheaper than any model
 improvement.
 
 ## The 2026 toolbox {#sec-summarization-tools}
+
+Everything in this chapter ran on one laptop with the versions below.
 
 | library | version used | what it is for here |
 |:--|:--|:--|
