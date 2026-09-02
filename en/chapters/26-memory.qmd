@@ -31,9 +31,12 @@ lifetime, a different storage answer, and a different failure mode.
 
 The distinction that matters most in practice is the last column. Working
 memory fails loudly — you hit the window. Episodic memory fails slowly — the
-system gets more expensive and less relevant. [Semantic memory fails
-silently]{.hl}: a fact recorded in March is still returned confidently in
-July, and nothing in the system knows it has expired.
+system gets more expensive and less relevant.
+
+[Semantic memory fails silently]{.hl}: a fact recorded in March is still
+returned confidently in July, and nothing in the system knows it has expired.
+That asymmetry is why most of this chapter is about semantic memory even
+though it is the smallest of the three by volume.
 
 ::: {.column-margin}
 The human analogy is where the vocabulary comes from and it is worth not
@@ -43,10 +46,25 @@ the fact that people's memory blurs the two is not a reason for your system
 to.
 :::
 
+**What we will look at.** First where each kind of memory should live, where
+the popular answer — embed everything — turns out to be the wrong default for
+exactly one of the three. Then what gets written and who decides, which is a
+policy you have already chosen by not choosing it. Then a measurement of what
+happens when the store holds two facts that disagree, which is the question
+this chapter can answer cheaply and the one most designs assume away. Then
+forgetting, which has to be built at the start. And finally what a system
+owes the people it remembers, all of which turns out to be schema decisions
+rather than policy documents.
+
 ## Storage: stop reaching for a vector database first {#sec-memory-storage}
 
-The default instinct is to embed everything and retrieve by similarity. It is
-the wrong default for semantic memory, and the reason is the same one
+Three kinds of memory means three storage questions, and only one of them is
+hard. Working memory lives in the context window because that is what a
+context window is. Episodic memory is a log, and a log is a solved problem.
+The interesting one is semantic memory, where the default instinct is to embed
+everything and retrieve by similarity.
+
+It is the wrong default, and the reason is the same one
 @sec-context-engineering gave for structured data: **similarity search cannot
 express the operations memory actually needs.**
 
@@ -71,13 +89,17 @@ The architecture that works for most systems is unglamorous and hybrid:
                        to the full record
 ```
 
-[Facts go in rows; episodes go in vectors.]{.hl} The single most common
-production mistake in this area is putting facts in vectors, because it makes
-*update* and *delete* impossible to do properly — and both of those turn out
-to be requirements rather than nice-to-haves, one for correctness and one for
-law.
+[Facts go in rows; episodes go in vectors.]{.hl}
+
+The single most common production mistake in this area is putting facts in
+vectors, because it makes *update* and *delete* impossible to do properly —
+and both of those turn out to be requirements rather than nice-to-haves, one
+for correctness and one for law.
 
 ## Write policies: the decision nobody makes on purpose {#sec-memory-write}
+
+The previous section was about where a fact goes once you have decided to keep
+it. This one is about that decision, which is the one nobody writes down.
 
 What gets remembered is a policy, and if you do not choose one you have chosen
 "whatever the model decides", which is a policy with known failure modes.
@@ -147,9 +169,11 @@ out", this is the measurement that says it will not.
 **An explicit rule does most of the work, and not all of it.** Adding one
 sentence — *when facts conflict, use the most recently recorded one* — took it
 to 83.3%. That is a large, cheap improvement and it is still one answer in six
-going the other way. [Conflict resolution belongs in your retrieval code, not
-in your prompt.]{.hl} Resolve before you inject: return one fact, the one your
-policy chose, and the model has nothing to be inconsistent about.
+going the other way.
+
+[Conflict resolution belongs in your retrieval code, not in your prompt.]{.hl}
+Resolve before you inject: return one fact, the one your policy chose, and the
+model has nothing to be inconsistent about.
 
 **The default behaviour is hedging, not lying.** In the bare condition the
 model picked the *older* fact 16.7% of the time and gave both or neither
@@ -157,6 +181,65 @@ model picked the *older* fact 16.7% of the time and gave both or neither
 system that answers "your preference is email, or possibly phone" has failed
 the user just as thoroughly, and it fails in a form that is harder to detect
 than a wrong answer.
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">The model does not resolve contradictions; a rule gets most of the way</div>
+<svg viewBox="0 0 764 294" style="max-width:744px" role="img" aria-label="Three prompt conditions as stacked bars. Bare: 0 percent chose the newer fact, 83.3 percent hedged, 16.7 percent chose the older. Dated: 33.3 percent newer, 66.7 percent hedged. Dated plus an explicit recency rule: 83.3 percent newer, 16.7 percent hedged.">
+  <text x="26" y="26" class="t-xs t-b t-muted">CONDITION</text>
+  <text x="250" y="26" class="t-xs t-b t-muted">SHARE OF 30 ANSWERS</text>
+  <text x="738" y="26" class="t-xs t-b t-accent t-end">CHOSE NEWER</text>
+  <line x1="26" y1="36" x2="738" y2="36" class="ln-thin"/>
+
+  <text x="26" y="64" class="t-sm t-b">bare</text>
+  <text x="26" y="79" class="t-xs t-muted">both facts, no dates</text>
+  <rect x="250" y="52" width="366.5" height="30" class="chip"/>
+  <rect x="616.5" y="52" width="73.5" height="30" class="box-rose"/>
+  <text x="433" y="71" class="t-xs t-muted t-mid">83.3% hedged</text>
+  <text x="653" y="71" class="t-xs t-rose t-mid">16.7%</text>
+  <text x="738" y="71" class="t-sm t-b t-accent t-end">0.0%</text>
+
+  <text x="26" y="116" class="t-sm t-b">dated</text>
+  <text x="26" y="131" class="t-xs t-muted">each fact carries its date</text>
+  <rect x="250" y="104" width="146.5" height="30" class="box-accent"/>
+  <rect x="396.5" y="104" width="293.5" height="30" class="chip"/>
+  <text x="323" y="123" class="t-xs t-accent t-mid">33.3%</text>
+  <text x="543" y="123" class="t-xs t-muted t-mid">66.7% hedged</text>
+  <text x="738" y="123" class="t-sm t-b t-accent t-end">33.3%</text>
+
+  <text x="26" y="168" class="t-sm t-b">dated + rule</text>
+  <text x="26" y="183" class="t-xs t-muted">plus one recency sentence</text>
+  <rect x="250" y="156" width="366.5" height="30" class="box-accent"/>
+  <rect x="616.5" y="156" width="73.5" height="30" class="chip"/>
+  <text x="433" y="175" class="t-xs t-accent t-mid">83.3%</text>
+  <text x="653" y="175" class="t-xs t-muted t-mid">16.7%</text>
+  <text x="738" y="175" class="t-sm t-b t-accent t-end">83.3%</text>
+
+  <line x1="26" y1="196" x2="738" y2="196" class="ln-thin"/>
+
+  <rect x="26" y="206" width="10" height="10" class="box-accent"/>
+  <text x="42" y="215" class="t-xs t-muted">chose the newer fact</text>
+  <rect x="200" y="206" width="10" height="10" class="chip"/>
+  <text x="216" y="215" class="t-xs t-muted">hedged &#8212; both or neither</text>
+  <rect x="402" y="206" width="10" height="10" class="box-rose"/>
+  <text x="418" y="215" class="t-xs t-muted">chose the older fact</text>
+
+  <rect x="26" y="236" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="254" class="t-xs t-b t-mid">THE RULE HELPS MOST, AND IT NEVER CLOSES THE GAP</text>
+  <text x="382" y="269" class="t-xs t-muted t-mid">one answer in six still goes the other way — resolve in retrieval and inject one fact</text>
+</svg>
+```
+
+::: {.fig-cap}
+The grey band is the failure people do not plan for. It is not a wrong answer;
+it is no answer, and it shrinks rather than disappears as you add machinery to
+the prompt. Note also that the older fact is chosen only in the bare
+condition — dates stop the model getting it backwards long before they get it
+right.
+:::
+
+::::
 
 ::: {.column-margin}
 Small measurement, narrow claim: one model, thirty items, intervals around ±17
@@ -199,12 +282,12 @@ awkward to retrofit:
   to filter on. This is @sec-governance's requirement and it is a good reason
   on its own to keep facts in a store where `DELETE` means what it says.
 
-
-
 ## A tool the agent calls, or infrastructure it never sees? {#sec-memory-interface}
 
-There are two ways to wire memory into an agent, and they trade the same thing
-@sec-agent-anatomy's autonomy ladder traded: capability against predictability.
+Everything so far has been about the store. This section is about the wire
+between the store and the agent, and there are only two ways to run it — they
+trade the same thing @sec-agent-anatomy's autonomy ladder traded: capability
+against predictability.
 
 **Memory as a tool.** The agent gets `remember(fact)` and `recall(query)` and
 decides when to use them. It is visible in the transcript, so you can audit
@@ -278,46 +361,11 @@ provenance, source, expiry, deletability — which means it is cheap on day one
 and expensive on day two hundred.
 :::
 
-## Lab: build a memory that can be wrong safely {#sec-memory-lab}
-
-### Step 1 — write the policy before the code
-
-Three things your system must remember, three it must never store, and for
-each of the three it stores: who decides, and when does it expire.
-
-### Step 2 — a table, not an index
-
-`user_id, key, value, source, written_at, expires_at`. Upsert on
-`(user_id, key)` so two values for one key cannot exist.
-
-### Step 3 — plant a contradiction
-
-Write a preference, then write a different one. Query it. If your retrieval
-returns both, fix the retrieval — this chapter measured what happens when the
-model is left to resolve it.
-
-### Step 4 — measure staleness
-
-Age the timestamps on a copy of your store by six months and ask ten questions.
-Count how many answers are now wrong. That number is what a TTL is worth.
-
-### Step 5 — delete a user, then look
-
-Run your deletion path, then search the raw store, the index, the logs, and
-any cache for the person's data. Report where it survived.
-
-### Step 6 — answer "why do you think that?"
-
-For three memories, produce the event that caused each write. If you cannot,
-add the provenance column now.
-
-### What to hand in
-
-The policy from step 1, the staleness count from step 4, the list of places
-data survived deletion in step 5, and one sentence naming the memory your
-system should stop writing.
-
 ## Intuition checks {#sec-memory-intuition}
+
+Answer each one before you open it. One is settled by the measurement this
+chapter runs; the other five are design decisions it argues for, and every one
+of them is a schema choice that costs nothing on day one.
 
 ::: {.callout-note collapse="true"}
 ## 1. Should memory go in a vector database?
@@ -389,32 +437,12 @@ path as start, because a separate resume path is a second implementation that
 will not get tested.
 :::
 
-## Exercises {#sec-memory-exercises}
-
-1. **The write policy.** For a support agent: three things it must remember,
-   three it must never store, and for each stored item who decides and when it
-   expires. One page, before any code.
-2. **Plant a contradiction.** Put two conflicting facts in your store, then
-   decide the resolution rule and defend it against the case where recency is
-   the wrong answer.
-3. **Age your store.** Move every timestamp back six months and re-ask ten
-   questions. Count the answers that are now wrong; that is what you are
-   buying with a TTL.
-4. **Delete and hunt.** Run your deletion path for one user, then search every
-   store, index, log and cache. Write down where the data survived.
-5. **Provenance audit.** Pick five memories and produce the event that caused
-   each. If you cannot for any of them, that is the finding.
-6. **Facts versus episodes.** Take your current memory store and classify every
-   entry as one or the other. If facts are in the vector index, estimate what
-   moving them costs now against what it costs in a year.
-7. **Tool or infrastructure.** Implement recall both ways on the same task and
-   compare: how often does the agent forget to call the tool, and what does
-   automatic injection cost you in tokens?
-
 ## Interview questions {#sec-memory-interview}
 
 ::: {.callout-warning appearance="simple"}
-**On sourcing — the same caveat as @sec-text-as-data.**
+**On sourcing — the same caveat as @sec-text-as-data.** These recur in the two
+credible open sources this book uses, plus the ones this chapter's own
+measurement makes answerable.
 :::
 
 ### Testing whether you understand the design
@@ -456,6 +484,95 @@ writes upsert or append, and whether retrieval returns one fact per key or
 several. Most "stale memory" bugs are really "two values for one key" bugs, and
 the fix is a unique constraint rather than a smarter prompt.
 
+## The 2026 toolbox {#sec-memory-tools}
+
+The contradiction probe in this chapter ran on one laptop with the versions
+below. It is short prompts and thirty items, which is why it fits there at all.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen3.5:9b` for the contradiction probe |
+| `numpy` | 2.5.2 | task construction and scoring |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `letta` | 0.16.8 | self-managed memory paging, the MemGPT lineage |
+| `mem0ai` | 2.0.19 | extraction, update and conflict policies as a library |
+| `zep-python` | 2.0.2 | temporal knowledge-graph memory, when *when* matters as much as *what* |
+| `langmem` | 0.0.30 | memory primitives for LangGraph agents |
+| `pgvector` | 0.5.0 | episodes in the database that already holds your facts — usually the right answer |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## Lab: build a memory that can be wrong safely {#sec-memory-lab}
+
+Six steps, and the first one has no code in it on purpose — a memory system
+you cannot describe in a paragraph is one whose write policy you have not
+chosen.
+
+### Step 1 — write the policy before the code
+
+Three things your system must remember, three it must never store, and for
+each of the three it stores: who decides, and when does it expire.
+
+### Step 2 — a table, not an index
+
+`user_id, key, value, source, written_at, expires_at`. Upsert on
+`(user_id, key)` so two values for one key cannot exist.
+
+### Step 3 — plant a contradiction
+
+Write a preference, then write a different one. Query it. If your retrieval
+returns both, fix the retrieval — this chapter measured what happens when the
+model is left to resolve it.
+
+### Step 4 — measure staleness
+
+Age the timestamps on a copy of your store by six months and ask ten questions.
+Count how many answers are now wrong. That number is what a TTL is worth.
+
+### Step 5 — delete a user, then look
+
+Run your deletion path, then search the raw store, the index, the logs, and
+any cache for the person's data. Report where it survived.
+
+### Step 6 — answer "why do you think that?"
+
+For three memories, produce the event that caused each write. If you cannot,
+add the provenance column now.
+
+### What to hand in
+
+The policy from step 1, the staleness count from step 4, the list of places
+data survived deletion in step 5, and one sentence naming the memory your
+system should stop writing.
+
+## Exercises {#sec-memory-exercises}
+
+1. **The write policy.** For a support agent: three things it must remember,
+   three it must never store, and for each stored item who decides and when it
+   expires. One page, before any code.
+2. **Plant a contradiction.** Put two conflicting facts in your store, then
+   decide the resolution rule and defend it against the case where recency is
+   the wrong answer.
+3. **Age your store.** Move every timestamp back six months and re-ask ten
+   questions. Count the answers that are now wrong; that is what you are
+   buying with a TTL.
+4. **Delete and hunt.** Run your deletion path for one user, then search every
+   store, index, log and cache. Write down where the data survived.
+5. **Provenance audit.** Pick five memories and produce the event that caused
+   each. If you cannot for any of them, that is the finding.
+6. **Facts versus episodes.** Take your current memory store and classify every
+   entry as one or the other. If facts are in the vector index, estimate what
+   moving them costs now against what it costs in a year.
+7. **Tool or infrastructure.** Implement recall both ways on the same task and
+   compare: how often does the agent forget to call the tool, and what does
+   automatic injection cost you in tokens?
+
 ## Where to go deeper {#sec-memory-deeper}
 
 Before reading: take your memory store and classify ten entries as fact or
@@ -479,27 +596,6 @@ episode. If facts are living in a vector index, you have found your first task.
 | the loop this all hangs from | @yao2023react |
 
 : The primary sources {tbl-colwidths="[46,54]"}
-
-## The 2026 toolbox {#sec-memory-tools}
-
-| library | version used | what it is for here |
-|:--|:--|:--|
-| `ollama` | 0.24.0 | serving `qwen3.5:9b` for the contradiction probe |
-| `numpy` | 2.5.2 | task construction and scoring |
-
-: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
-
-Worth knowing about, not used above:
-
-| library | current version | when you would reach for it |
-|:--|:--|:--|
-| `letta` | 0.16.8 | self-managed memory paging, the MemGPT lineage |
-| `mem0ai` | 2.0.19 | extraction, update and conflict policies as a library |
-| `zep-python` | 2.0.2 | temporal knowledge-graph memory, when *when* matters as much as *what* |
-| `langmem` | 0.0.30 | memory primitives for LangGraph agents |
-| `pgvector` | 0.5.0 | episodes in the database that already holds your facts — usually the right answer |
-
-: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
 
 ## What to remember {#sec-memory-summary}
 
