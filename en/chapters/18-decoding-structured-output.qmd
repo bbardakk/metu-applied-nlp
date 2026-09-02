@@ -17,7 +17,7 @@ Python 3.14.5. The sampling explorer below is fully functional.
 - use logprobs for confidence, routing, and abstention;
 - diagnose repetition and degeneration instead of tuning parameters at random.
 
-## Greedy, beam, temperature, top-k / top-p / min-p
+## Greedy, beam, temperature, top-k / top-p / min-p {#sec-decoding-sampling}
 
 A language model's forward pass ends in a vector of **logits** — one raw
 score per vocabulary token. Everything in @sec-transformers was about
@@ -147,11 +147,12 @@ and it is the right default whenever there is one correct answer.
 
 **Beam search** keeps the *k* best partial sequences and extends all of them,
 so it optimises the whole sequence rather than each token.
-@sec-machine-translation measures it properly on translation and finds two things worth carrying here:
-the gains die quickly — beam 1 to 2 bought +0.61 BLEU and beam 2 to 64 bought
-+0.57 more for seven times the compute — and the folkloric "curse of beam
-search" did not appear at all on a model that normalises by length during the
-search.
+
+@sec-machine-translation measures it properly on translation, and two of its
+findings are worth carrying here. The gains die quickly — beam 1 to 2 bought
++0.61 BLEU, and beam 2 to 64 bought +0.57 more for seven times the compute.
+And the folkloric "curse of beam search" did not appear at all on a model that
+normalises by length during the search.
 
 **Min-p** [@nguyen2024minp] is the newer cutoff. Where top-p keeps a fixed
 *mass* and top-k a fixed *count*, min-p keeps every token whose probability is
@@ -162,10 +163,12 @@ $$
 $$
 
 That makes the cutoff adapt to the shape of the distribution rather than to a
-constant. When the model is confident — one token at 0.9 — min-p keeps almost
-nothing, which is what you want. When it is genuinely uncertain across twenty
-plausible continuations, min-p keeps them all, where top-p 0.9 would have kept
-an arbitrary prefix of the list.
+constant.
+
+When the model is confident — one token at 0.9 — min-p keeps almost nothing,
+which is what you want. When it is genuinely uncertain across twenty plausible
+continuations, min-p keeps them all, where top-p 0.9 would have kept an
+arbitrary prefix of the list.
 
 ::: {.column-margin}
 The general rule underneath all five: [the policy should depend on how many
@@ -176,6 +179,16 @@ this backwards — a chat-default temperature of 1.0 took a translation model
 from 30.17 BLEU to 14.34.
 :::
 
+**What we will look at.** First why greedy decoding walks into repetition
+loops, and why the usual penalties are the wrong tool once you are generating
+structure. Then constrained decoding, where a grammar makes invalid output
+unreachable rather than unlikely — measured on two models, because it buys
+almost nothing on one and seventeen accuracy points on the other. Then tool
+calls, the case where the strong-model result does not let you off. Then
+logprobs, which discriminate well, calibrate badly, and still buy you accuracy
+for the price of one threshold. And finally streaming, which wants the
+opposite of everything structured output wants.
+
 ## Repetition and degeneration {#sec-decoding-repetition}
 
 Greedy and low-temperature decoding have a characteristic failure: the model
@@ -184,10 +197,12 @@ falls into a loop and repeats a phrase until it hits the token limit.
 The mechanism is not mysterious. Having produced a phrase once, the model has
 made that phrase part of its own context, and a language model trained on real
 text has learned that repeated phrases are more likely after the first
-repetition. @holtzman2020curious named this and showed the surprising part:
-the loop is not a low-probability accident. **The repeated continuation is
-often the single highest-probability sequence available**, which is why greedy
-decoding walks into it and sampling does not.
+repetition.
+
+@holtzman2020curious named this and showed the surprising part: the loop is
+not a low-probability accident. **The repeated continuation is often the
+single highest-probability sequence available**, which is why greedy decoding
+walks into it and sampling does not.
 
 The usual controls, and what each costs:
 
@@ -338,6 +353,7 @@ formatting failure from being counted as a reasoning failure.
 **The cost is latency, and it is not where you would guess.** Overhead ranged
 from 1.2× to **17×** (0.53 s to 9.26 s on the weak model at L4), and it was
 not monotone in schema complexity — L1 and L3 were cheap, L2 and L4 expensive.
+
 The two expensive ones share a property: the schema demands something the
 model does not want to produce, an unnatural enum in one case and a nullable
 field in the other. That is consistent with the grammar having to fight the
@@ -378,7 +394,7 @@ Two corollaries worth stating plainly:
    something else instead. Add `null` to the type, and — as
    @sec-sequence-labeling found — check that the model actually uses it.
 
-## Making tool arguments reliable {#sec-decoding-tools}
+## Making tool arguments reliable {#sec-decoding-tool-args}
 
 The highest-leverage use of everything above is not extraction; it is tool
 calls. A tool call *is* a structured output — a function name and a typed
@@ -429,6 +445,10 @@ mean logprob mostly measures how ordinary the phrasing was.
 
 ### It discriminates
 
+The first question about any confidence signal is whether it orders items
+correctly — whether the ones it is sure about really are the ones it gets
+right. Two AUCs answer that:
+
 ```text
 accuracy                                              86.75%
 AUC of P(positive) against the true label             0.9492
@@ -466,9 +486,11 @@ ECE = 7.04%
 ```
 
 Two things to read here. The model is **overconfident in the middle** — items
-it calls 92.6% likely are right 68.0% of the time. And the bottom bin is worse
-than useless: when the model is genuinely torn between `A` and `B`, it is
-right **33.3%** of the time, which is below chance on a balanced binary task.
+it calls 92.6% likely are right 68.0% of the time.
+
+And the bottom bin is worse than useless: when the model is genuinely torn
+between `A` and `B`, it is right **33.3%** of the time, which is below chance
+on a balanced binary task.
 
 That last row is the one to remember. [A near-0.5 logprob does not mean "coin
 flip"; on this task it meant "actively wrong".]{.hl} Do not read the number as
@@ -501,6 +523,90 @@ threshold is a *fitted quantity* and belongs on a held-out slice — the same
 discipline @sec-classification applied to its decision threshold. Choosing it
 on the data you report is the same mistake in new clothes.
 :::
+
+Those last two tables describe the same 400 reviews. Side by side, they show
+why a broken calibration does not stop you from using the signal:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Badly calibrated, correctly ordered — and useful because of the second part</div>
+<svg viewBox="0 0 764 310" style="max-width:744px" role="img"
+     aria-label="Left panel: a reliability diagram of ten confidence bins over 400 reviews. A perfectly calibrated model would lie on the dashed diagonal; these bins scatter around it, with the 52.4 percent bin landing at 33.3 percent accuracy and the 92.6 percent bin at 68.0 percent. Right panel: accuracy against items kept as the least-confident reviews are abstained on, rising monotonically from 86.75 percent on all 400 to 97.50 percent on the most-confident 200.">
+
+  <text x="56" y="20" class="t-xs t-muted">STATED CONFIDENCE AGAINST ACTUAL ACCURACY — TEN BINS</text>
+  <text x="372" y="36" class="t-xs t-muted t-end">PERFECT CALIBRATION</text>
+
+  <line x1="56" y1="44" x2="56" y2="260" class="ln-thin"/>
+  <line x1="56" y1="260" x2="372" y2="260" class="ln-thin"/>
+  <line x1="56" y1="198.3" x2="372" y2="44" class="ln ln-dash"/>
+
+  <text x="52" y="264" class="t-xs t-muted t-end">30%</text>
+  <text x="52" y="233.1" class="t-xs t-muted t-end">40%</text>
+  <text x="52" y="171.4" class="t-xs t-muted t-end">60%</text>
+  <text x="52" y="109.7" class="t-xs t-muted t-end">80%</text>
+  <text x="52" y="48" class="t-xs t-muted t-end">100%</text>
+  <text x="56" y="278" class="t-xs t-muted t-mid">50%</text>
+  <text x="182.4" y="278" class="t-xs t-muted t-mid">70%</text>
+  <text x="308.8" y="278" class="t-xs t-muted t-mid">90%</text>
+
+  <circle cx="71.2" cy="249.8" r="4" class="head-rose"/>
+  <circle cx="103.4" cy="198.3" r="4" class="head-accent"/>
+  <circle cx="135.0" cy="136.6" r="4" class="head-accent"/>
+  <circle cx="159.6" cy="159.7" r="4" class="head-accent"/>
+  <circle cx="199.5" cy="88.1" r="4" class="head-accent"/>
+  <circle cx="230.4" cy="82.6" r="4" class="head-accent"/>
+  <circle cx="262.6" cy="162.9" r="4" class="head-accent"/>
+  <circle cx="293.6" cy="90.3" r="4" class="head-accent"/>
+  <circle cx="325.2" cy="142.7" r="4" class="head-rose"/>
+  <circle cx="368.2" cy="59.1" r="4" class="head-accent"/>
+
+  <text x="80" y="253" class="t-xs t-rose">33.3% — below chance</text>
+  <text x="319" y="146" class="t-xs t-rose t-end">68.0%</text>
+  <text x="214" y="296" class="t-sm t-muted t-mid">the model's stated confidence</text>
+
+  <line x1="421" y1="12" x2="421" y2="280" class="ln-thin"/>
+
+  <text x="470" y="20" class="t-xs t-muted">ACCURACY AFTER ABSTAINING ON THE LEAST CONFIDENT</text>
+
+  <line x1="470" y1="44" x2="470" y2="260" class="ln-thin"/>
+  <line x1="470" y1="260" x2="740" y2="260" class="ln-thin"/>
+
+  <text x="466" y="264" class="t-xs t-muted t-end">85%</text>
+  <text x="466" y="192" class="t-xs t-muted t-end">90%</text>
+  <text x="466" y="120" class="t-xs t-muted t-end">95%</text>
+  <text x="466" y="48" class="t-xs t-muted t-end">100%</text>
+  <text x="470" y="278" class="t-xs t-muted t-mid">200</text>
+  <text x="605" y="278" class="t-xs t-muted t-mid">300</text>
+  <text x="740" y="278" class="t-xs t-muted t-mid">400</text>
+
+  <polyline points="470,80 578,116 632,152 686,176.1 713,195.6 740,234.8"
+            fill="none" class="ln-accent"/>
+
+  <circle cx="470" cy="80" r="3.5" class="head-accent"/>
+  <circle cx="578" cy="116" r="3.5" class="head-accent"/>
+  <circle cx="632" cy="152" r="3.5" class="head-accent"/>
+  <circle cx="686" cy="176.1" r="3.5" class="head-accent"/>
+  <circle cx="713" cy="195.6" r="3.5" class="head-accent"/>
+  <circle cx="740" cy="234.8" r="3.5" class="head-accent"/>
+
+  <text x="478" y="76" class="t-xs t-accent">97.50% on the best half</text>
+  <text x="640" y="146" class="t-xs t-accent">92.50%</text>
+  <text x="734" y="248" class="t-xs t-muted t-end">86.75% on all 400</text>
+  <text x="605" y="296" class="t-sm t-muted t-mid">items kept out of 400</text>
+</svg>
+```
+
+::: {.fig-cap}
+Left: each dot is one confidence bin, placed at the confidence the model
+stated and the accuracy it actually reached. A calibrated model would put every
+dot on the dashed diagonal; this one scatters, and the two rose dots are the
+failures worth remembering — the bin the model called a coin flip came in
+*below* chance at 33.3%, and the bin it called 92.6% came in at 68.0%. Right:
+the same 400 reviews sorted by that same miscalibrated confidence, then
+truncated from the least-confident end. Accuracy climbs at every step, which
+is the whole point — the ordering is right even where the numbers are wrong.
+:::
+::::
 
 ### The caveat that limits all of it
 
@@ -547,63 +653,18 @@ represent *not yet known* will either crash or render garbage. Model it
 explicitly — a field is missing, pending, or present — rather than letting
 `None` mean two things.
 
-One practical note that follows from @sec-decoding-constrained: a grammar and
-an incremental parser are the same automaton looked at from two ends. If you
-are already constraining generation, the state machine that decides which
-tokens are legal is also the one that can tell a consumer which fields are
-final. Most stacks do not connect the two, and it is a reasonable thing to
+One practical note follows from @sec-decoding-constrained: a grammar and an
+incremental parser are the same automaton looked at from two ends.
+
+If you are already constraining generation, the state machine that decides
+which tokens are legal is also the one that can tell a consumer which fields
+are final. Most stacks do not connect the two, and it is a reasonable thing to
 build when the interface warrants it.
 
-## Lab: an extractor that cannot emit invalid output {#sec-decoding-lab}
-
-Build the pipeline, then measure what the guarantee did and did not cover.
-
-### Step 1 — write the schema before the prompt
-
-Fields, types, enums wherever the values are enumerable, and an explicit
-nullable for *not present in the source*. The schema is the specification;
-the prompt is how you ask for it.
-
-### Step 2 — measure the unenforced baseline
-
-Ask for the schema in the prompt, no enforcement, on 150 items. Record parse
-rate, schema-validity, and accuracy. On a strong model expect 98%-ish, which
-is the point: **you need this number to know what enforcement is buying.**
-
-### Step 3 — turn the grammar on, and verify it is actually on
-
-Enforce the schema. Then confirm the constraint is live by sending one request
-whose schema the model would otherwise violate — @sec-summarization found a
-server silently ignoring `format` on one endpoint while honouring it on
-another, and the failure is invisible without this check.
-
-### Step 4 — measure the latency cost, per schema
-
-Time both modes. The overhead here ranged from 1.2× to 17× and was not
-monotone in schema complexity, so your schema's cost is an empirical question.
-If it is large, find out which part of the schema is expensive by removing
-fields one at a time.
-
-### Step 5 — count how often valid output is wrong
-
-This is the step the guarantee tempts you to skip. Take the schema-valid
-outputs and check the *values* against your labels. Report validity and
-accuracy as two separate numbers, because a pipeline can be 100% on the first
-and poor on the second, and only one of those is visible in your logs.
-
-### Step 6 — add abstention
-
-Constrain the answer field to a single token, read its logprob, and plot
-accuracy against coverage. Pick a threshold on a held-out slice — not on the
-data you report — and state the coverage you are shipping at.
-
-### What to hand in
-
-A table with validity, accuracy and latency for enforced and unenforced; the
-verification from step 3; the accuracy-versus-coverage curve; and one
-paragraph on which failures your guarantee does not cover.
-
 ## Intuition checks {#sec-decoding-intuition}
+
+Answer each one before you open it. All six are questions this chapter settled
+with a measurement rather than an argument.
 
 ::: {.callout-note collapse="true"}
 ## 1. Does lowering temperature make the model more accurate?
@@ -683,22 +744,12 @@ answer was one token from a two-token alphabet; that property is something you
 design in, not something you find.
 :::
 
-## Exercises
-
-1. Show algebraically that temperature scaling never changes the argmax
-   token. What does this imply about greedy decoding?
-2. In the explorer, set $\tau = 1$ and top-k $= 12$. Find the smallest top-p
-   that still keeps at least four tokens, and explain the cumulative-mass
-   logic behind your answer.
-3. Set temperature to 0 and run the same prompt 20 times against a hosted
-   API. Are the outputs identical? Explain what you find.
-4. Take an extraction task with a 40% JSON failure rate. Add constrained
-   decoding and report the new failure rate — and the new error modes.
-
 ## Interview questions {#sec-decoding-interview}
 
 ::: {.callout-warning appearance="simple"}
-**On sourcing — the same caveat as @sec-text-as-data.**
+**On sourcing — the same caveat as @sec-text-as-data.** These recur in the two
+credible open sources this book uses, plus the ones this chapter's own
+measurements make answerable.
 :::
 
 ### Testing whether you understand the mechanism
@@ -761,6 +812,8 @@ route and calibrate on held-out data if you need the number itself.
 
 ## The 2026 toolbox {#sec-decoding-tools}
 
+Everything in this chapter ran on one laptop with the versions below.
+
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | serving `qwen3.5:9b` and `llama3.2:3b`, and the `format` parameter that enforces a schema |
@@ -779,6 +832,67 @@ Worth knowing about, not used above:
 | `pydantic` / `jsonschema` | 2.13.4 / 4.26.0 | validating the values after the grammar has guaranteed the shape — the step @sec-decoding-constrained argues you still owe |
 
 : The wider ecosystem, versions as of writing {tbl-colwidths="[22,16,62]"}
+
+## Lab: an extractor that cannot emit invalid output {#sec-decoding-lab}
+
+Build the pipeline, then measure what the guarantee did and did not cover.
+
+### Step 1 — write the schema before the prompt
+
+Fields, types, enums wherever the values are enumerable, and an explicit
+nullable for *not present in the source*. The schema is the specification;
+the prompt is how you ask for it.
+
+### Step 2 — measure the unenforced baseline
+
+Ask for the schema in the prompt, no enforcement, on 150 items. Record parse
+rate, schema-validity, and accuracy. On a strong model expect 98%-ish, which
+is the point: **you need this number to know what enforcement is buying.**
+
+### Step 3 — turn the grammar on, and verify it is actually on
+
+Enforce the schema. Then confirm the constraint is live by sending one request
+whose schema the model would otherwise violate — @sec-summarization found a
+server silently ignoring `format` on one endpoint while honouring it on
+another, and the failure is invisible without this check.
+
+### Step 4 — measure the latency cost, per schema
+
+Time both modes. The overhead here ranged from 1.2× to 17× and was not
+monotone in schema complexity, so your schema's cost is an empirical question.
+If it is large, find out which part of the schema is expensive by removing
+fields one at a time.
+
+### Step 5 — count how often valid output is wrong
+
+This is the step the guarantee tempts you to skip. Take the schema-valid
+outputs and check the *values* against your labels. Report validity and
+accuracy as two separate numbers, because a pipeline can be 100% on the first
+and poor on the second, and only one of those is visible in your logs.
+
+### Step 6 — add abstention
+
+Constrain the answer field to a single token, read its logprob, and plot
+accuracy against coverage. Pick a threshold on a held-out slice — not on the
+data you report — and state the coverage you are shipping at.
+
+### What to hand in
+
+A table with validity, accuracy and latency for enforced and unenforced; the
+verification from step 3; the accuracy-versus-coverage curve; and one
+paragraph on which failures your guarantee does not cover.
+
+## Exercises {#sec-decoding-exercises}
+
+1. Show algebraically that temperature scaling never changes the argmax
+   token. What does this imply about greedy decoding?
+2. In the explorer, set $\tau = 1$ and top-k $= 12$. Find the smallest top-p
+   that still keeps at least four tokens, and explain the cumulative-mass
+   logic behind your answer.
+3. Set temperature to 0 and run the same prompt 20 times against a hosted
+   API. Are the outputs identical? Explain what you find.
+4. Take an extraction task with a 40% JSON failure rate. Add constrained
+   decoding and report the new failure rate — and the new error modes.
 
 ## Where to go deeper {#sec-decoding-deeper}
 
