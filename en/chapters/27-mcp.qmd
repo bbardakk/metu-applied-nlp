@@ -40,15 +40,83 @@ Three roles carry that:
 
 The split matters for a reason that is easy to miss: **the server never talks
 to the model.** It exposes capabilities to the host, and the host decides what
-reaches the model and what the model is allowed to invoke. That is
-@sec-agent-anatomy's security boundary, preserved across a process boundary —
-and it is the whole reason the protocol can be safe at all.
+reaches the model and what the model is allowed to invoke.
+
+That is @sec-agent-anatomy's security boundary, preserved across a process
+boundary — and it is the whole reason the protocol can be safe at all.
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">The server never talks to the model — the host stands between them</div>
+<svg viewBox="0 0 764 290" role="img" style="max-width:744px" aria-label="Model, host, client and server in a row, with arrows running left to right through a process boundary between client and server, and a crossed-out dashed link showing there is no direct connection between the model and the server.">
+  <text x="572" y="38" class="t-xs t-muted t-mid">process boundary</text>
+  <line x1="572" y1="44" x2="572" y2="140" class="ln-dash"/>
+
+  <rect x="26" y="60" width="140" height="64" rx="4" class="box-accent"/>
+  <text x="96" y="86" class="t-sm t-b t-accent t-mid">MODEL</text>
+  <text x="96" y="102" class="t-xs t-muted t-mid">emits tool calls</text>
+  <text x="96" y="117" class="t-xs t-muted t-mid">never actions</text>
+
+  <rect x="206" y="60" width="160" height="64" rx="4" class="box"/>
+  <text x="286" y="86" class="t-sm t-b t-mid">HOST</text>
+  <text x="286" y="102" class="t-xs t-muted t-mid">owns the conversation</text>
+  <text x="286" y="117" class="t-xs t-muted t-mid">and the consent prompt</text>
+
+  <rect x="406" y="60" width="140" height="64" rx="4" class="box"/>
+  <text x="476" y="86" class="t-sm t-b t-mid">CLIENT</text>
+  <text x="476" y="102" class="t-xs t-muted t-mid">one per server</text>
+  <text x="476" y="117" class="t-xs t-muted t-mid">speaks JSON-RPC</text>
+
+  <rect x="598" y="60" width="140" height="64" rx="4" class="box-navy"/>
+  <text x="668" y="86" class="t-sm t-b t-navy t-mid">SERVER</text>
+  <text x="668" y="102" class="t-xs t-muted t-mid">exposes tools</text>
+  <text x="668" y="117" class="t-xs t-muted t-mid">another process</text>
+
+  <path d="M170 92 L 198 92" class="ln"/>
+  <path d="M198 88 l 8 4 l -8 4 z" class="head"/>
+  <path d="M370 92 L 398 92" class="ln"/>
+  <path d="M398 88 l 8 4 l -8 4 z" class="head"/>
+  <path d="M550 92 L 586 92" class="ln"/>
+  <path d="M586 88 l 8 4 l -8 4 z" class="head"/>
+
+  <polyline points="96,132 96,172 366,172" class="ln-dash"/>
+  <polyline points="398,172 668,172 668,132" class="ln-dash"/>
+  <line x1="374" y1="164" x2="390" y2="180" class="ln-rose"/>
+  <line x1="390" y1="164" x2="374" y2="180" class="ln-rose"/>
+  <text x="382" y="200" class="t-xs t-b t-rose t-mid">NO DIRECT LINK, IN EITHER DIRECTION</text>
+  <text x="382" y="215" class="t-xs t-muted t-mid">the server never sees the conversation; every invocation goes through the host</text>
+
+  <rect x="26" y="232" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="250" class="t-xs t-b t-mid">THIS IS WHY THE PROTOCOL CAN BE SECURED AT ALL</text>
+  <text x="382" y="265" class="t-xs t-muted t-mid">revision 2026-07-28 deprecated Sampling and Roots — both let a server reach back across it</text>
+</svg>
+```
+
+::: {.fig-cap}
+Read the diagram right to left as well. A server publishes capabilities, and
+what the model gets to see is whatever the host chose to forward. Everything in
+@sec-mcp-security follows from the fact that the host is the only party in a
+position to check.
+:::
+
+::::
+
+**What we will look at.** First what actually crosses those arrows — three
+features a server offers and one a client offers back, a list that got shorter
+in the current revision and for a reason worth understanding. Then the wire
+itself, which stopped being a stateful connection and became stateless
+requests. Then how to build a server that fails well, since it now fails in
+someone else's process. Then the security problem, which is unusual and follows
+entirely from tool descriptions being prompt text. Then what all of it costs,
+measured. And finally the protocol MCP is most often confused with.
 
 ## What a server offers, and what a client offers back {#sec-mcp-primitives}
 
-As of revision **2026-07-28**, servers offer three features and clients offer
-one. If you have read a 2025 account of MCP, this list is shorter than the one
-you remember, and the difference is not cosmetic.
+Those arrows carry a small, fixed vocabulary, and it is worth knowing exactly
+how small. As of revision **2026-07-28**, servers offer three features and
+clients offer one. If you have read a 2025 account of MCP, this list is shorter
+than the one you remember, and the difference is not cosmetic.
 
 **Servers offer:**
 
@@ -85,6 +153,10 @@ narrower, and narrower is easier to secure.
 
 ## The wire: stateless requests, and why that changed {#sec-mcp-transport}
 
+Two of the three deprecations above were about a server reaching backwards. The
+change in this section is larger than any of them, and it is about how a
+connection works at all.
+
 The base protocol is JSON-RPC 2.0 over one of two transports:
 
 - **stdio** — the host launches the server as a subprocess and talks over pipes.
@@ -106,9 +178,11 @@ The reason is operational, and it is the same reason stateless HTTP won
 generally: **a stateless server scales horizontally**. Any replica can serve
 any request, so a remote MCP server becomes an ordinary web service behind a
 load balancer rather than a thing that has to keep a session pinned to a
-process. Backward compatibility with the handshake-based revisions
-(`2025-11-25` and earlier) is specified rather than assumed, which is what you
-would want from a protocol people have already deployed.
+process.
+
+Backward compatibility with the handshake-based revisions (`2025-11-25` and
+earlier) is specified rather than assumed, which is what you would want from a
+protocol people have already deployed.
 
 Beyond the core, the specification defines opt-in **extensions**, negotiated by
 both sides: **Tasks** for long-running work with polling and durable handles,
@@ -215,11 +289,14 @@ definitions alone**, before anybody says anything.
 Two honest caveats before that number is used as an argument. Prompt caching
 makes a stable prefix much cheaper than the raw count suggests, and definitions
 are the most cacheable thing in the context. And 89 tokens is small next to
-what a good tool *saves*. The point is not that the overhead is ruinous; it is
-that it is **invisible and multiplicative**, and that nobody installing an
-eighth server is doing this sum.
+what a good tool *saves*.
+
+The point is not that the overhead is ruinous; it is that it is **invisible and
+multiplicative**, and that nobody installing an eighth server is doing this sum.
 
 ### When something else is better
+
+Three situations where the honest answer is not another server:
 
 | use this instead | when |
 |:--|:--|
@@ -255,47 +332,12 @@ They compose naturally: an agent reached over A2A uses MCP internally to talk
 to its own tools. If you are choosing between them you have probably
 misidentified the problem, because they answer different questions.
 
-## Lab: build a server, then attack it {#sec-mcp-lab}
-
-### Step 1 — one tool, over stdio
-
-Pick something you already have a function for. Expose it with the SDK. You are
-done when a host lists it.
-
-### Step 2 — make it fail properly
-
-Add validation, a timeout, and a structured error that names what would have
-worked. Then call it wrongly on purpose and read what the model does with your
-error string.
-
-### Step 3 — count your own overhead
-
-Serialise your tool definitions and tokenise them. Multiply by the number of
-steps in a typical session. Compare that to what the tools return.
-
-### Step 4 — poison your own description
-
-Add a sentence to one tool's description instructing the model to do something
-you did not intend — read a file, call another tool first. Install it. Watch
-whether anything in your host's approval flow shows you that sentence.
-
-### Step 5 — pull the rug
-
-Change a description *after* approving the server. Does your host notice? If
-not, you have found the mitigation worth building: hash the tool list and
-re-prompt on change.
-
-### Step 6 — decide honestly
-
-Write one paragraph: would a direct API call have been better here? Answer for
-your actual situation — one host or several, who maintains it, who installs it.
-
-### What to hand in
-
-The server, the token count from step 3, what your host displayed in step 4,
-and the paragraph from step 6.
-
 ## Intuition checks {#sec-mcp-intuition}
+
+Answer each one before you open it. One is settled by the arithmetic in this
+chapter; the rest are read straight off revision 2026-07-28 of the
+specification, which is worth checking yourself because the answers changed
+recently.
 
 ::: {.callout-note collapse="true"}
 ## 1. What problem does MCP actually solve?
@@ -362,33 +404,12 @@ own tools — and treating a delegated task like a function call is how
 multi-agent systems become unmaintainable.
 :::
 
-## Exercises {#sec-mcp-exercises}
-
-1. **Your own overhead.** Measure the token cost of your installed tool
-   definitions across a 20-step session. Compare it to what those tools
-   returned. Is the abstraction paying for itself?
-2. **Review as an approver.** Take a third-party server and review it as if you
-   had to approve it for your company. Read every description. Write the
-   approval or the rejection, with reasons.
-3. **Poison and observe.** Add an instruction to one of your own tool
-   descriptions and see whether your host surfaces it before invocation. Report
-   what the approval UI actually showed.
-4. **Version pin.** Implement tool-list hashing in a host you control, and
-   re-prompt on change. Time how long it takes; it is usually an afternoon.
-5. **The alternative.** For one server you use, write the direct API
-   integration instead. Compare lines of code, tokens per call, and who would
-   maintain each.
-6. **Read a deprecation.** Take one of the features deprecated in 2026-07-28 —
-   Sampling, Roots, Logging — read its migration path, and explain in a
-   paragraph why the protocol is narrowing there.
-7. **Stateless by design.** Take a server you have written and identify
-   everything it keeps between requests. What would break if two replicas
-   served alternate calls?
-
 ## Interview questions {#sec-mcp-interview}
 
 ::: {.callout-warning appearance="simple"}
-**On sourcing — the same caveat as @sec-text-as-data.**
+**On sourcing — the same caveat as @sec-text-as-data.** These recur in the two
+credible open sources this book uses, plus the ones this chapter's own
+measurement makes answerable.
 :::
 
 ### Testing whether you understand the protocol
@@ -432,6 +453,96 @@ different team, or something users install themselves: that is exactly what the
 protocol is for. The mistake is treating it as the default wrapper for every
 integration.
 
+## The 2026 toolbox {#sec-mcp-tools}
+
+The only thing measured in this chapter is arithmetic over a published tool
+list, so the stack is one line. The protocol details came from the
+specification rather than from any of these.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | tokenising the definitions for @sec-mcp-cost |
+
+: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
+
+Worth knowing about, not used above:
+
+| library | current version | when you would reach for it |
+|:--|:--|:--|
+| `mcp` | 2.1.1 | the official Python SDK — client and server |
+| `fastmcp` | 3.4.7 | decorator-style server building; the fastest route from a function to a server |
+| `@modelcontextprotocol/sdk` | 1.30.0 (npm) | the TypeScript SDK, which most reference servers are written against |
+| `pydantic-ai` | 2.35.3 | typed tools that map cleanly onto MCP schemas |
+| `langgraph` | 1.2.11 | an agent runtime that consumes MCP servers as tool sources |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
+
+## Lab: build a server, then attack it {#sec-mcp-lab}
+
+The second half of this lab is the part people skip: you cannot judge a
+third-party server's security until you have written the attack yourself.
+
+### Step 1 — one tool, over stdio
+
+Pick something you already have a function for. Expose it with the SDK. You are
+done when a host lists it.
+
+### Step 2 — make it fail properly
+
+Add validation, a timeout, and a structured error that names what would have
+worked. Then call it wrongly on purpose and read what the model does with your
+error string.
+
+### Step 3 — count your own overhead
+
+Serialise your tool definitions and tokenise them. Multiply by the number of
+steps in a typical session. Compare that to what the tools return.
+
+### Step 4 — poison your own description
+
+Add a sentence to one tool's description instructing the model to do something
+you did not intend — read a file, call another tool first. Install it. Watch
+whether anything in your host's approval flow shows you that sentence.
+
+### Step 5 — pull the rug
+
+Change a description *after* approving the server. Does your host notice? If
+not, you have found the mitigation worth building: hash the tool list and
+re-prompt on change.
+
+### Step 6 — decide honestly
+
+Write one paragraph: would a direct API call have been better here? Answer for
+your actual situation — one host or several, who maintains it, who installs it.
+
+### What to hand in
+
+The server, the token count from step 3, what your host displayed in step 4,
+and the paragraph from step 6.
+
+## Exercises {#sec-mcp-exercises}
+
+1. **Your own overhead.** Measure the token cost of your installed tool
+   definitions across a 20-step session. Compare it to what those tools
+   returned. Is the abstraction paying for itself?
+2. **Review as an approver.** Take a third-party server and review it as if you
+   had to approve it for your company. Read every description. Write the
+   approval or the rejection, with reasons.
+3. **Poison and observe.** Add an instruction to one of your own tool
+   descriptions and see whether your host surfaces it before invocation. Report
+   what the approval UI actually showed.
+4. **Version pin.** Implement tool-list hashing in a host you control, and
+   re-prompt on change. Time how long it takes; it is usually an afternoon.
+5. **The alternative.** For one server you use, write the direct API
+   integration instead. Compare lines of code, tokens per call, and who would
+   maintain each.
+6. **Read a deprecation.** Take one of the features deprecated in 2026-07-28 —
+   Sampling, Roots, Logging — read its migration path, and explain in a
+   paragraph why the protocol is narrowing there.
+7. **Stateless by design.** Take a server you have written and identify
+   everything it keeps between requests. What would break if two replicas
+   served alternate calls?
+
 ## Where to go deeper {#sec-mcp-deeper}
 
 Read the specification before any tutorial — it is short, it is versioned, and
@@ -457,26 +568,6 @@ anything you read.
 | why constraints beat prose in a schema | @willard2023efficient |
 
 : The primary sources {tbl-colwidths="[46,54]"}
-
-## The 2026 toolbox {#sec-mcp-tools}
-
-| library | version used | what it is for here |
-|:--|:--|:--|
-| `ollama` | 0.24.0 | tokenising the definitions for @sec-mcp-cost |
-
-: The stack these numbers came from {tbl-colwidths="[26,14,60]"}
-
-Worth knowing about, not used above:
-
-| library | current version | when you would reach for it |
-|:--|:--|:--|
-| `mcp` | 2.1.1 | the official Python SDK — client and server |
-| `fastmcp` | 3.4.7 | decorator-style server building; the fastest route from a function to a server |
-| `@modelcontextprotocol/sdk` | 1.30.0 (npm) | the TypeScript SDK, which most reference servers are written against |
-| `pydantic-ai` | 2.35.3 | typed tools that map cleanly onto MCP schemas |
-| `langgraph` | 1.2.11 | an agent runtime that consumes MCP servers as tool sources |
-
-: The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
 
 ## What to remember {#sec-mcp-summary}
 
