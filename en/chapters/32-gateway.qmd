@@ -60,6 +60,10 @@ problems you do not have.
 
 ## Budgets, quotas, and the half you cannot price in advance {#sec-gateway-budgets}
 
+Attribution is the first thing the choke point buys, and the moment you can
+attribute spend somebody will ask you to limit it. That is where the
+architecture stops being free.
+
 The usual gateway control is a **virtual key**: a per-team, per-service or
 per-feature credential that maps to the real provider key and carries limits of
 its own. Three limits, routinely confused, failing differently:
@@ -182,9 +186,10 @@ This book has already measured the most tempting signal and found it wanting.
 tested that confidence as a detector of its own errors: **AUROC 0.667, against
 0.843 for a proper probability**. It is better than nothing — the mean
 confidence really is higher on correct answers — and it is a long way from the
-instrument a routing policy needs. A cascade built on it escalates many easy
-requests and misses many hard ones, and both mistakes are invisible in an
-aggregate accuracy number.
+instrument a routing policy needs.
+
+A cascade built on it escalates many easy requests and misses many hard ones,
+and both mistakes are invisible in an aggregate accuracy number.
 
 Which produces the rule that matters more than any routing framework:
 
@@ -268,9 +273,10 @@ bottom on 0.609.
 
 The consequence is arithmetic rather than opinion. The lowest true pair is
 0.609 and the highest false pair is 0.982, so **the two classes overlap
-completely and no single threshold separates them**. The best cut available
-still gets five of fifteen wrong, and every one of those five errors is served
-to a user as a confident answer with nothing logged.
+completely and no single threshold separates them**.
+
+The best cut available still gets five of fifteen wrong, and every one of those
+five errors is served to a user as a confident answer with nothing logged.
 
 This is @sec-embeddings' point about negation arriving with a bill attached: a
 model trained to place related sentences near each other places *is covered* and
@@ -390,65 +396,14 @@ everyone's availability and its latency is added to everyone's latency. That is
 a real trade, and it is why the answer to "should we build one?" is "not yet"
 until the problems in @sec-gateway-why actually exist.
 
-## Lab: a gateway that stops a runaway loop {#sec-gateway-lab}
-
-The point of this lab is to watch a control actually fire. A budget nobody has
-seen trigger is a configuration, not a control.
-
-### Step 1 — put one proxy in front of one provider
-
-Any gateway will do, including forty lines of your own. It needs three things:
-it forwards requests, it records `(virtual key, model, input tokens, output
-tokens)` per call, and it can refuse.
-
-### Step 2 — give two callers separate virtual keys
-
-Two keys, two notional teams, one real provider key behind them. Send traffic
-through both and produce a per-key spend table. If you cannot produce that
-table, nothing later in this lab is enforceable.
-
-### Step 3 — set a budget you will actually hit
-
-Small enough to trigger within a few minutes of ordinary traffic. Then run an
-agent loop with no step cap — @sec-agent-anatomy's failure mode — against one of
-the keys and watch the budget stop it. Record how much it spent *after* crossing
-the limit, because that overshoot is what the asymmetry in @sec-gateway-budgets
-costs you.
-
-### Step 4 — cap output on one key, not the other
-
-Set `max_tokens` on one virtual key and repeat step 3. The overshoot should
-shrink to something predictable. Report both numbers; the difference is the
-argument for capping output.
-
-### Step 5 — add exact-match caching and measure the hit rate
-
-Key on `(model, prompt, parameters)`. Replay a realistic hour of traffic — real
-if you have it, synthetic with repeated questions if you do not — and report the
-hit rate and the saving. Then say, honestly, what share of your real traffic you
-expect to repeat exactly.
-
-### Step 6 — check the embedder before you trust a semantic cache
-
-Before measuring any similarity threshold, embed two inputs that *must* differ
-and confirm the model can tell them apart. This chapter's embedder could not:
-every capitalised word collapsed to one vector. Five minutes, and it is the
-difference between a cache and a random-answer generator.
-
-### Step 7 — break failover on purpose
-
-Point a fallback at a *different* model. Send twenty requests whose output you
-parse — structured output from @sec-decoding is ideal — then force the primary to
-fail and send the same twenty. Count how many the parser rejects.
-
-### What to hand in
-
-The per-key spend table; the overshoot with and without an output cap; the cache
-hit rate; your embedder sanity check; the parser failure count on the fallback
-path; and one paragraph on whether your fallback should fail open or closed,
-with the number that justifies it.
-
 ## Intuition checks {#sec-gateway-intuition}
+
+Answer each one before you open it. The first two ask whether to build this
+layer at all and what it can honestly promise once you have; the middle two are
+the places a gateway most easily makes things worse, by amplifying an outage or
+by dressing a coin flip up as a router; and the last two are the silent
+failures — an answer served from a question nobody asked, and a model that
+changed without a deploy.
 
 ::: {.callout-note collapse="true"}
 ## 1. One team, one provider, one service. Do you need a gateway?
@@ -546,44 +501,6 @@ side benefit is reproducibility — a score against a floating alias is a score
 for a model you can no longer name.
 :::
 
-## Exercises {#sec-gateway-exercises}
-
-1. **The attribution question.** For a system you work on, answer without
-   guessing: which team spent the most on LLM calls last month? Write down how
-   long it took to find out, and what you would need for it to take a minute.
-
-2. **Budget overshoot.** Compute, for a workload you know, how far a budget can
-   be exceeded under optimistic admission: concurrent callers times the cost of
-   `max_tokens` of output. Decide whether that number is tolerable, and cap
-   output if it is not.
-
-3. **The retry storm, on paper.** Take a service with a known request rate and a
-   three-attempt retry policy. Compute the load a provider sees when half of all
-   requests start failing. Recompute with a 10% retry budget and compare.
-
-4. **Fallback equivalence.** Run one prompt you rely on against your primary and
-   your fallback model. Diff the outputs — format, length, refusals, tool-call
-   syntax — and decide whether your parser survives. Write the answer down before
-   you need it at 3am.
-
-5. **Cache hit rate, measured.** Instrument exact-match caching on real traffic
-   for a day. Report the hit rate, the saving, and the share of misses that were
-   *near*-misses. That last number is what a semantic cache would be tempted by.
-
-6. **Audit your embedder.** Take whatever embedding model you would use for
-   retrieval or caching and test it on pairs that must differ: a sentence and its
-   negation, two dates, two order numbers, two proper nouns. Report the
-   similarities. If any pair returns 1.000, stop and find out why.
-
-7. **Routing, with a control.** Build a cascade on your own task: a small model,
-   a large one, and an escalation signal. Report accuracy and cost at several
-   escalation rates, and always report the random-escalation baseline alongside.
-   If your signal does not beat random, say so.
-
-8. **Pin audit.** List every model identifier your code sends. Mark which are
-   dated pins and which are floating aliases. For each floating one, say what
-   would happen — and how you would find out — if the provider moved it tonight.
-
 ## Interview questions {#sec-gateway-interview}
 
 ::: {.callout-warning appearance="simple"}
@@ -654,6 +571,12 @@ every historical score unreproducible, which is why the pin comes first.
 
 ## The 2026 toolbox {#sec-gateway-tools}
 
+The first table has one row, because the only thing measured here was an
+embedder. The second table is where the chapter's actual subject lives, and it
+is worth reading as a build-versus-buy menu rather than a list: the hosted
+services remove a component you would otherwise operate, and that component sits
+on the critical path of every call.
+
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | serving `nomic-embed-text` for the cache-threshold measurement and the embedder defect that followed it |
@@ -674,6 +597,130 @@ Worth knowing about, not used above:
 | OpenRouter | service | routing across many hosted models behind one key, useful for capability routing without contracts |
 
 : The wider ecosystem, versions as of writing {tbl-colwidths="[24,14,62]"}
+
+## Lab: a gateway that stops a runaway loop {#sec-gateway-lab}
+
+The point of this lab is to watch a control actually fire. A budget nobody has
+seen trigger is a configuration, not a control.
+
+### Step 1 — put one proxy in front of one provider
+
+Any gateway will do, including forty lines of your own. It needs three things:
+it forwards requests, it records `(virtual key, model, input tokens, output
+tokens)` per call, and it can refuse.
+
+### Step 2 — give two callers separate virtual keys
+
+Two keys, two notional teams, one real provider key behind them. Send traffic
+through both and produce a per-key spend table. If you cannot produce that
+table, nothing later in this lab is enforceable.
+
+### Step 3 — set a budget you will actually hit
+
+Small enough to trigger within a few minutes of ordinary traffic. Then run an
+agent loop with no step cap — @sec-agent-anatomy's failure mode — against one of
+the keys and watch the budget stop it. Record how much it spent *after* crossing
+the limit, because that overshoot is what the asymmetry in @sec-gateway-budgets
+costs you.
+
+### Step 4 — cap output on one key, not the other
+
+Set `max_tokens` on one virtual key and repeat step 3. The overshoot should
+shrink to something predictable. Report both numbers; the difference is the
+argument for capping output.
+
+### Step 5 — add exact-match caching and measure the hit rate
+
+Key on `(model, prompt, parameters)`. Replay a realistic hour of traffic — real
+if you have it, synthetic with repeated questions if you do not — and report the
+hit rate and the saving. Then say, honestly, what share of your real traffic you
+expect to repeat exactly.
+
+### Step 6 — check the embedder before you trust a semantic cache
+
+Before measuring any similarity threshold, embed two inputs that *must* differ
+and confirm the model can tell them apart. This chapter's embedder could not:
+every capitalised word collapsed to one vector. Five minutes, and it is the
+difference between a cache and a random-answer generator.
+
+### Step 7 — break failover on purpose
+
+Point a fallback at a *different* model. Send twenty requests whose output you
+parse — structured output from @sec-decoding is ideal — then force the primary to
+fail and send the same twenty. Count how many the parser rejects.
+
+### What to hand in
+
+The per-key spend table; the overshoot with and without an output cap; the cache
+hit rate; your embedder sanity check; the parser failure count on the fallback
+path; and one paragraph on whether your fallback should fail open or closed,
+with the number that justifies it.
+
+## Exercises {#sec-gateway-exercises}
+
+1. **The attribution question.** For a system you work on, answer without
+   guessing: which team spent the most on LLM calls last month? Write down how
+   long it took to find out, and what you would need for it to take a minute.
+
+2. **Budget overshoot.** Compute, for a workload you know, how far a budget can
+   be exceeded under optimistic admission: concurrent callers times the cost of
+   `max_tokens` of output. Decide whether that number is tolerable, and cap
+   output if it is not.
+
+3. **The retry storm, on paper.** Take a service with a known request rate and a
+   three-attempt retry policy. Compute the load a provider sees when half of all
+   requests start failing. Recompute with a 10% retry budget and compare.
+
+4. **Fallback equivalence.** Run one prompt you rely on against your primary and
+   your fallback model. Diff the outputs — format, length, refusals, tool-call
+   syntax — and decide whether your parser survives. Write the answer down before
+   you need it at 3am.
+
+5. **Cache hit rate, measured.** Instrument exact-match caching on real traffic
+   for a day. Report the hit rate, the saving, and the share of misses that were
+   *near*-misses. That last number is what a semantic cache would be tempted by.
+
+6. **Audit your embedder.** Take whatever embedding model you would use for
+   retrieval or caching and test it on pairs that must differ: a sentence and its
+   negation, two dates, two order numbers, two proper nouns. Report the
+   similarities. If any pair returns 1.000, stop and find out why.
+
+7. **Routing, with a control.** Build a cascade on your own task: a small model,
+   a large one, and an escalation signal. Report accuracy and cost at several
+   escalation rates, and always report the random-escalation baseline alongside.
+   If your signal does not beat random, say so.
+
+8. **Pin audit.** List every model identifier your code sends. Mark which are
+   dated pins and which are floating aliases. For each floating one, say what
+   would happen — and how you would find out — if the provider moved it tonight.
+
+## Where to go deeper {#sec-gateway-deeper}
+
+Before reading: list every model identifier your code sends, and mark which are
+dated pins and which are floating aliases. It takes ten minutes and it decides
+how urgent the rest of this is.
+
+| resource | what it is |
+|:--|:--|
+| [Addressing Cascading Failures](https://sre.google/sre-book/addressing-cascading-failures/) | the retry-storm mechanism in full, from the book this chapter cites [@beyer2016sre] |
+| [Handling Overload](https://sre.google/sre-book/handling-overload/) | the companion chapter: shedding, throttling and the client-side retry budget |
+| [Exponential backoff and jitter](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) | why the jitter is the part that matters, with the simulation that shows it |
+| [`litellm`](https://github.com/BerriAI/litellm) | the reference open-source gateway; read its proxy config to see virtual keys, budgets and fallbacks as concrete objects |
+| [`portkey-ai/gateway`](https://github.com/Portkey-AI/gateway) | a second implementation with different opinions on routing and retries — useful as a contrast |
+| [`helicone`](https://github.com/Helicone/helicone) | the attribution and logging half on its own, if that is the only problem you have |
+| [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) | what the layer looks like when you operate none of it |
+| [`GPTCache`](https://github.com/zilliztech/GPTCache) | semantic caching as a working system; read it alongside this chapter's threshold table rather than instead of it |
+| [`RouteLLM`](https://github.com/lm-sys/RouteLLM) | the router from @ong2024routellm, with the evaluation harness — which is the part worth copying |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| cascading failure, retry budgets, circuit breakers | @beyer2016sre |
+| cost cascades over a set of model APIs | @chen2023frugalgpt |
+| a router learned from preference data | @ong2024routellm |
+
+: The primary sources {tbl-colwidths="[46,54]"}
 
 ## What to remember {#sec-gateway-summary}
 
