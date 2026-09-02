@@ -23,11 +23,13 @@ prior. Software: `ollama` 0.24.0 serving `qwen3.5:9b`, Python 3.14.5.
 ## Why prompting works at all {#sec-prompting-why}
 
 A pretrained model predicts the next token. Nothing in that objective says it
-should follow an instruction, and the first large models mostly did not —
-you had to trick them, by writing a prefix whose natural continuation happened
-to be the answer you wanted. @reynolds2021prompt is the historical document
-for that era, and reading it now is a good reminder of how much of "prompt
-engineering" was working around a missing capability.
+should follow an instruction, and the first large models mostly did not — you
+had to trick them, by writing a prefix whose natural continuation happened to
+be the answer you wanted.
+
+@reynolds2021prompt is the historical document for that era, and reading it
+now is a good reminder of how much of "prompt engineering" was working around
+a missing capability.
 
 Two things changed. **Scale** made models able to infer a task from examples
 in the context [@brown2020language], and **instruction tuning**
@@ -46,16 +48,19 @@ misleading word for it.
 [In-context learning](#gloss-in-context-learning){#term-in-context-learning .term-ref}
 is the first of those: you put input-output pairs in the prompt, and the model
 does better on the next input, **with no weight updated and nothing retained
-after the call**. It is not learning in the sense @sec-post-training uses the
-word. A better description is *task inference*: the examples narrow down which
-of the many tasks the model already knows how to do you are asking for.
+after the call**.
+
+So it is not learning in the sense @sec-post-training uses the word. A better
+description is *task inference*: the examples narrow down which of the many
+tasks the model already knows how to do you are asking for.
 
 That framing predicts something odd, and the prediction holds.
 @min2022rethinking replaced the labels in the demonstrations with **random**
 ones and found performance mostly survived. What the examples were mainly
 conveying was the *shape* of the task — the label space, the format, the
-distribution of inputs — not the input-to-label mapping. That is worth
-knowing before you spend a week curating perfect examples.
+distribution of inputs — not the input-to-label mapping.
+
+That is worth knowing before you spend a week curating perfect examples.
 
 ::: {.column-margin}
 It also predicts the failure mode. If demonstrations mostly convey format,
@@ -76,10 +81,21 @@ swapping the checkpoint would.
 The rest of the chapter is what follows from taking that seriously, and
 @sec-prompting-brittle is the measurement that makes it hard to avoid.
 
+**What we will look at.** First the pattern library — five things that work,
+and what job each one is actually doing, so you can tell when a pattern will
+not help. Then the shift from writing requests to writing specifications,
+which is what makes a prompt checkable at all. Then the measurement this
+chapter turns on: twelve prompts that mean the same thing, spanning almost
+fifteen points of accuracy on one model and one task, with the role prefix
+finishing eleventh of twelve. And finally the machinery that follows once you
+accept the number — reproducibility, a frozen set, paired tests, and a version
+string.
+
 ## A pattern library {#sec-prompting-patterns}
 
-Five patterns cover most of what works. They are not magic words; each one is
-doing an identifiable job.
+If the prompt is a component, these are its parts. Five patterns cover most of
+what works, and none of them is a magic word — each is doing an identifiable
+job, and naming the job is what tells you when the pattern will not help.
 
 **Role.** *You are an experienced customer-feedback analyst.* The job is to
 select a region of the model's distribution — vocabulary, register, what
@@ -175,10 +191,11 @@ number you have.
 
 Twelve prompts were written for the same task — decide whether a Turkish
 product review is positive or negative. **A competent reader would call them
-the same instruction.** They differ in formatting, in the surface form of the
-labels, in where the review sits relative to the instruction, in delimiters,
-and in politeness. None changes the task, the criteria, or the meaning of
-either label.
+the same instruction.**
+
+They differ in formatting, in the surface form of the labels, in where the
+review sits relative to the instruction, in delimiters, and in politeness.
+None changes the task, the criteria, or the meaning of either label.
 
 All twelve ran on the same 150 balanced reviews, same model, temperature 0,
 fixed seed. Every response parsed; nothing was dropped.
@@ -293,6 +310,64 @@ formatting rather than by the review.** The model has an opinion on 69.3% of
 this corpus; on the rest, what you get depends on whether you wrote a bulleted
 list or a paragraph.
 
+Both of those readouts describe the same 150 reviews, cut two different ways:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">The same 150 reviews, cut two ways — and the 42 that decide the question</div>
+<svg viewBox="0 0 764 308" style="max-width:744px" role="img"
+     aria-label="Of 150 balanced reviews, all twelve prompt variants agree on 104 (69.3%) and disagree on 46 (30.7%). Comparing only the best and worst variant, 108 reviews get the same answer from both and 42 differ; of those 42, the best prompt is right on 32 and the worst on 10, which McNemar separates at p = 0.0009.">
+
+  <text x="16" y="20" class="t-xs t-muted">ALL TWELVE VARIANTS ON THE SAME 150 REVIEWS — WHERE THEY AGREE, AND WHERE THE PROMPT DECIDES</text>
+
+  <rect x="16" y="32" width="507.52" height="42" rx="5" class="box"/>
+  <text x="269.76" y="49" class="t-b t-mid">104 reviews — all twelve variants give the same answer</text>
+  <text x="269.76" y="66" class="t-sm t-muted t-mid">69.3% — the model has an opinion</text>
+
+  <rect x="523.52" y="32" width="224.48" height="42" rx="5" class="box-accent"/>
+  <text x="635.76" y="49" class="t-b t-accent t-mid">46 reviews</text>
+  <text x="635.76" y="66" class="t-sm t-accent t-mid">30.7% — the prompt decides</text>
+
+  <line x1="16" y1="100" x2="748" y2="100" class="ln-thin"/>
+
+  <text x="16" y="122" class="t-xs t-muted">THE SAME 150 REVIEWS, BEST VARIANT AGAINST WORST — AND THE 42 A PAIRED TEST ACTUALLY USES</text>
+
+  <rect x="16" y="134" width="527.04" height="42" rx="5" class="box"/>
+  <text x="279.52" y="151" class="t-b t-muted t-mid">108 reviews — both prompts give the same answer</text>
+  <text x="279.52" y="168" class="t-sm t-muted t-mid">these carry no information about the difference</text>
+
+  <rect x="543.04" y="134" width="204.96" height="42" rx="5" class="box-accent"/>
+  <text x="645.52" y="159" class="t-b t-accent t-mid">42 disagree</text>
+
+  <line x1="543.04" y1="176" x2="543.04" y2="192" class="ln-thin"/>
+  <line x1="748" y1="176" x2="748" y2="192" class="ln-thin"/>
+
+  <rect x="543.04" y="192" width="156.16" height="32" rx="5" class="box-accent"/>
+  <text x="621.12" y="212" class="t-sm t-b t-accent t-mid">32 best right</text>
+  <rect x="699.2" y="192" width="48.8" height="32" rx="5" class="box"/>
+  <text x="723.6" y="212" class="t-sm t-b t-muted t-mid">10</text>
+  <text x="748" y="242" class="t-sm t-muted t-end">of the 42: 32 to the best prompt, 10 to the worst</text>
+
+  <rect x="16" y="192" width="404" height="96" rx="9" class="box"/>
+  <text x="32" y="216" class="t-sm t-b">Why the pairing matters</text>
+  <g class="t-sm">
+    <text x="32" y="240">Throwing away the 108 grey reviews is</text>
+    <text x="32" y="258">what turns two overlapping confidence</text>
+    <text x="32" y="276">intervals into McNemar p = 0.0009.</text>
+  </g>
+</svg>
+```
+
+::: {.fig-cap}
+Every block is drawn at the same scale, so a review is the same width in both
+bands. The top band is the chapter's headline number in a different form: the
+model settles 104 of the 150 on its own, and the remaining 46 are settled by
+formatting. The bottom band is why the statistics work — a paired test looks
+only at the 42 reviews where the two prompts differ, which is how it separates
+scores whose confidence intervals overlap.
+:::
+::::
+
 ### What that means for everything else you measure
 
 Put this next to @sec-classification's result on the same model family. There,
@@ -383,15 +458,18 @@ and an interval rather than a single number.
 
 ### 2. Build a small evaluation set, and freeze it
 
-Fifty to two hundred items, labelled by you, covering the failure modes you
-have already seen. It does not need to be large — it needs to be *fixed*, so
-that two prompt versions are comparable.
+Once you know the setup answers the same way twice, you need something to
+answer *about*. Fifty to two hundred items, labelled by you, covering the
+failure modes you have already seen. It does not need to be large — it needs
+to be *fixed*, so that two prompt versions are comparable.
 
 The discipline from @sec-classification applies unchanged: hold it out, look at
 it as rarely as possible, and never tune a prompt against the same items you
-report on. A prompt tuned on its evaluation set is exactly as overfitted as a
-model tuned on its test set, and far easier to do by accident because iterating
-on a prompt feels like writing rather than fitting.
+report on.
+
+A prompt tuned on its evaluation set is exactly as overfitted as a model tuned
+on its test set, and far easier to do by accident — because iterating on a
+prompt feels like writing rather than fitting.
 
 ### 3. Compare paired, not independently
 
@@ -430,6 +508,9 @@ should not be edited by hand, and a prompt change ships with its evaluation
 delta the way a code change ships with tests.
 
 ## Intuition checks {#sec-prompting-intuition}
+
+Answer each one before you open it. All six are questions this chapter settled
+with a measurement rather than an argument.
 
 ::: {.callout-note collapse="true"}
 ## 1. Model A beat model B by 5 points on your eval. Which is better?
@@ -578,6 +659,8 @@ floating-point reduction order — so the answer may be that nothing happened
 and your eval never had an interval on it.
 
 ## The 2026 toolbox {#sec-prompting-tools}
+
+Everything in this chapter ran on one laptop with the versions below.
 
 | library | version used | what it is for here |
 |:--|:--|:--|
