@@ -28,17 +28,20 @@ Retrieval has two families and they fail in opposite directions.
 [@robertson2009probabilistic] — is @sec-text-as-data's TF-IDF with two
 corrections that matter: term frequency **saturates**, so the tenth occurrence
 of a word adds far less than the second, and document length is normalised, so
-a long document does not win by containing more of everything. It is fast,
-exact, interpretable, needs no training, and it cannot match a word it has
-never seen.
+a long document does not win by containing more of everything.
+
+It is fast, exact, interpretable, needs no training, and it cannot match a word
+it has never seen.
 
 **Dense retrieval** matches meaning. A
 [bi-encoder](#gloss-bi-encoder){#term-bi-encoder .term-ref}
 [@karpukhin2020dense] embeds queries and documents separately into the same
 space, so documents can be encoded once and searched by vector similarity. It
 handles paraphrase, synonymy and — as this chapter will show — different
-languages. It needs a trained model, it cannot guarantee an exact match on a
-part number, and its failures are hard to explain.
+languages.
+
+It needs a trained model, it cannot guarantee an exact match on a part number,
+and its failures are hard to explain.
 
 ::: {#gloss-bi-encoder .column-margin .term-gloss}
 **bi-encoder** — query and document encoded independently, so every document
@@ -50,6 +53,16 @@ cross-encoder. [↩](#term-bi-encoder){.term-back}
 The received framing is that dense is the modern one and lexical is the
 baseline you report out of politeness. The measurements below say something
 less convenient.
+
+**What we will look at.** First the experiment, which needs two query
+conditions rather than one, because a single condition would have measured the
+query format and blamed the model. Then the results, where the same two
+systems swap places by sixty points and hybrid fusion — the thing everyone
+recommends — costs more than either parent alone. Then how a dense retriever
+is trained, where the hard negatives are the whole game. Then reranking, the
+approximate index, and the four metrics, one of which is a ceiling on
+everything downstream. And finally where to put the vectors, which is a
+smaller question than it is usually made to be.
 
 ## The experiment, and why it has two conditions {#sec-retrieval-conditions}
 
@@ -87,10 +100,14 @@ running only it would have understated dense retrieval.
 
 ## What the measurements say {#sec-retrieval-results}
 
-800 queries per condition, 7,165 documents, single relevant document per
-query.
+Both conditions run against the same corpus, so the two tables below are
+directly comparable — and the point is how little they have in common. 800
+queries per condition, 7,165 documents, a single relevant document per query.
 
 ### Condition A — keyword queries, inflected
+
+This is the condition lexical matching should win, provided it can handle
+Turkish morphology:
 
 ```text
 system                                        R@1    R@10   MRR@10  nDCG@10
@@ -111,6 +128,9 @@ on a slightly different query sample, which is the continuity check that lets
 the rest of the table be read against it.
 
 ### Condition B — cross-lingual queries
+
+Now the same documents, queried in English. There is no shared vocabulary for
+a lexical matcher to work with:
 
 ```text
 system                                        R@1    R@10   MRR@10  nDCG@10
@@ -154,9 +174,11 @@ parents [@cormack2009reciprocal], and the reason is visible in the mechanism.
 [RRF assumes the systems it is fusing are comparably good.]{.hl} It scores
 each document by $\sum 1/(k + \text{rank})$ across the lists, which treats a
 rank-1 hit from a useless system exactly like a rank-1 hit from an excellent
-one. When one parent is at 96% and the other at 36%, the weak parent's
-confident garbage arrives with full weight and displaces the strong parent's
-correct answer.
+one.
+
+When one parent is at 96% and the other at 36%, the weak parent's confident
+garbage arrives with full weight and displaces the strong parent's correct
+answer.
 
 ::: {.anlp-widget}
 ```{=html}
@@ -238,6 +260,89 @@ document — it pushed it down the list. So if your consumer reads the top ten,
 the fusion cost you almost nothing; if it reads the top one, fusion cost you
 half your accuracy.
 
+All three findings fit in one picture — the swap, the fusion loss, and the
+metric that hides it:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Recall@1 on one corpus: the winner swaps, and fusion loses to both</div>
+<svg viewBox="0 0 764 322" style="max-width:744px" role="img"
+     aria-label="Two panels of recall@1 bars drawn at the same scale. In condition A, keyword queries inflected differently from the document, stemmed BM25 reaches 96.0 percent, the dense multilingual-e5 retriever 35.9 percent, and their reciprocal-rank fusion 63.2 percent, which is 32.8 points below the better parent. In condition B, cross-lingual queries, the ordering reverses: stemmed BM25 falls to 23.8 percent, dense reaches 96.2 percent, and fusion reaches 49.4 percent, 46.8 points below the better parent. A bottom band shows the same condition-B fusion measured at recall@10, where dense alone scores 99.9 percent and the fusion 99.6 percent, so the damage is invisible at that depth.">
+
+  <text x="16" y="16" class="t-xs t-b t-muted">CONDITION A — KEYWORD QUERIES, INFLECTED</text>
+  <text x="392" y="16" class="t-xs t-b t-muted">CONDITION B — CROSS-LINGUAL QUERIES</text>
+
+  <text x="16" y="40" class="t-sm t-b t-navy">BM25, stemmed</text>
+  <rect x="16" y="46" width="341.76" height="18" rx="4" class="box-navy"/>
+  <text x="349.76" y="59" class="t-sm t-b t-end">96.0%</text>
+
+  <text x="16" y="88" class="t-sm t-b t-accent">dense: multilingual-e5-base</text>
+  <rect x="16" y="94" width="127.80" height="18" rx="4" class="box-accent"/>
+  <text x="135.80" y="107" class="t-sm t-b t-end">35.9%</text>
+
+  <text x="16" y="136" class="t-sm t-b t-rose">hybrid RRF, stemmed + e5</text>
+  <rect x="16" y="142" width="224.99" height="18" rx="4" class="box-rose"/>
+  <text x="232.99" y="155" class="t-sm t-b t-end">63.2%</text>
+
+  <line x1="357.76" y1="46" x2="357.76" y2="178" class="ln-thin ln-dash"/>
+  <line x1="240.99" y1="174" x2="357.76" y2="174" class="ln-rose"/>
+  <line x1="240.99" y1="170" x2="240.99" y2="178" class="ln-rose"/>
+  <text x="299.4" y="192" class="t-xs t-rose t-b t-mid">−32.8 points</text>
+
+  <text x="392" y="40" class="t-sm t-b t-navy">BM25, stemmed</text>
+  <rect x="392" y="46" width="84.73" height="18" rx="4" class="box-navy"/>
+  <text x="468.73" y="59" class="t-sm t-b t-end">23.8%</text>
+
+  <text x="392" y="88" class="t-sm t-b t-accent">dense: multilingual-e5-base</text>
+  <rect x="392" y="94" width="342.47" height="18" rx="4" class="box-accent"/>
+  <text x="726.47" y="107" class="t-sm t-b t-end">96.2%</text>
+
+  <text x="392" y="136" class="t-sm t-b t-rose">hybrid RRF, surface + e5</text>
+  <rect x="392" y="142" width="175.86" height="18" rx="4" class="box-rose"/>
+  <text x="559.86" y="155" class="t-sm t-b t-end">49.4%</text>
+
+  <line x1="734.47" y1="46" x2="734.47" y2="178" class="ln-thin ln-dash"/>
+  <line x1="567.86" y1="174" x2="734.47" y2="174" class="ln-rose"/>
+  <line x1="567.86" y1="170" x2="567.86" y2="178" class="ln-rose"/>
+  <text x="651.2" y="192" class="t-xs t-rose t-b t-mid">−46.8 points</text>
+
+  <line x1="16" y1="204" x2="372" y2="204" class="ln-thin"/>
+  <line x1="392" y1="204" x2="748" y2="204" class="ln-thin"/>
+  <text x="16" y="216" class="t-xs t-muted">0%</text>
+  <text x="194" y="216" class="t-xs t-muted t-mid">50%</text>
+  <text x="372" y="216" class="t-xs t-muted t-end">100%</text>
+  <text x="392" y="216" class="t-xs t-muted">0%</text>
+  <text x="570" y="216" class="t-xs t-muted t-mid">50%</text>
+  <text x="748" y="216" class="t-xs t-muted t-end">100%</text>
+
+  <line x1="16" y1="238" x2="748" y2="238" class="ln-thin ln-dash"/>
+  <text x="16" y="258" class="t-xs t-b t-muted">CONDITION B AGAIN, MEASURED AT RECALL@10 — WHERE THE SAME DAMAGE IS INVISIBLE</text>
+
+  <rect x="16" y="268" width="355.64" height="20" rx="4" class="box-accent"/>
+  <text x="26" y="282" class="t-sm">dense alone</text>
+  <text x="363.64" y="282" class="t-sm t-b t-end">99.9%</text>
+
+  <rect x="16" y="294" width="354.58" height="20" rx="4" class="box-rose"/>
+  <text x="26" y="308" class="t-sm">hybrid RRF</text>
+  <text x="362.58" y="308" class="t-sm t-b t-end">99.6%</text>
+
+  <text x="392" y="282" class="t-sm t-b">Recall@10 says nothing happened.</text>
+  <text x="392" y="306" class="t-sm t-muted">At recall@1 the same fusion went 96.2% to 49.4%.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Both panels are drawn at the same scale, so a bar of the same length means the
+same recall@1. The two families change places completely between the
+conditions, on one corpus with one set of documents. In each panel the dashed
+line marks the better parent and the rose bracket is what fusing cost against
+it. The bottom band is the same condition-B fusion seen at depth ten, where
+the two bars are indistinguishable — the right document was never lost, only
+pushed down, which is why a system can regress badly while the number you are
+watching does not move.
+:::
+::::
+
 ### So when should you fuse?
 
 The rule the measurement supports, which is narrower than the folklore:
@@ -261,6 +366,9 @@ is a model you can evaluate rather than a constant you tuned once.
 
 ### And the choice of dense model matters exactly where the task is hard
 
+One more comparison the two conditions make possible. Put the similarity model
+and the retrieval model next to each other in both:
+
 ```text
                               condition A   condition B
 paraphrase-MiniLM (similarity)      10.6%         93.8%
@@ -271,10 +379,12 @@ multilingual-e5-base (retrieval)    35.9%         96.2%
 
 On the easy condition the two are within two points, so a casual benchmark
 would conclude the model choice does not matter. On the hard condition the
-retrieval-trained model is **three and a half times better**. [The gap between
-a good and a mediocre component only appears on the inputs that are hard for
-it]{.hl}, which is an argument for building the difficult condition into your
-evaluation rather than reporting the average of an easy one.
+retrieval-trained model is **three and a half times better**.
+
+[The gap between a good and a mediocre component only appears on the inputs
+that are hard for it]{.hl}, which is an argument for building the difficult
+condition into your evaluation rather than reporting the average of an easy
+one.
 
 ## Training a dense retriever {#sec-retrieval-training}
 
@@ -295,6 +405,7 @@ there.
 
 **Hard negatives** are documents that look right and are not. Mine them by
 retrieving with your current model and taking the top-ranked wrong answers.
+
 [This is the whole game.]{.hl} A retriever trained only on random negatives
 learns topical similarity; a retriever trained on hard negatives learns the
 distinction your users actually need, which is between two documents that are
@@ -317,6 +428,10 @@ the same asymmetry that makes back-translation work in
 @sec-machine-translation.
 
 ## Reranking {#sec-retrieval-reranking}
+
+Every architecture above compares a query vector to a document vector that was
+computed without ever seeing the query. There is a more accurate thing to do,
+and a reason nobody does it at corpus scale.
 
 A [cross-encoder](#gloss-cross-encoder){#term-cross-encoder .term-ref}
 [@nogueira2019passage] reads the query and the document **together**, in one
@@ -385,16 +500,16 @@ a million forward passes. Hence the standard two-stage pattern:
   <path d="M142 221 L 172 221" class="ln"/><path d="M172 217 l 8 4 l -8 4 z" class="head"/>
 
   <rect x="184" y="198" width="180" height="46" rx="6" class="box-accent"/>
-  <text x="274" y="217" class="t-xs t-mid t-b t-accent">STAGE 1 — RETRIEVE</text>
-  <text x="274" y="231" class="t-xs t-mid t-muted">cheap, recall-oriented</text>
-  <text x="274" y="241" class="t-xs t-mid t-muted">BM25 / dense / both</text>
+  <text x="274" y="213" class="t-xs t-mid t-b t-accent">STAGE 1 — RETRIEVE</text>
+  <text x="274" y="227" class="t-xs t-mid t-muted">cheap, recall-oriented</text>
+  <text x="274" y="239" class="t-xs t-mid t-muted">BM25 / dense / both</text>
   <path d="M368 221 L 398 221" class="ln"/><path d="M398 217 l 8 4 l -8 4 z" class="head"/>
   <text x="383" y="210" class="t-xs t-mid t-muted">50–100</text>
 
   <rect x="410" y="198" width="180" height="46" rx="6" class="box-rose"/>
-  <text x="500" y="217" class="t-xs t-mid t-b t-rose">STAGE 2 — RERANK</text>
-  <text x="500" y="231" class="t-xs t-mid t-muted">expensive, precision-oriented</text>
-  <text x="500" y="241" class="t-xs t-mid t-muted">cross-encoder</text>
+  <text x="500" y="213" class="t-xs t-mid t-b t-rose">STAGE 2 — RERANK</text>
+  <text x="500" y="227" class="t-xs t-mid t-muted">expensive, precision-oriented</text>
+  <text x="500" y="239" class="t-xs t-mid t-muted">cross-encoder</text>
   <path d="M594 221 L 624 221" class="ln"/><path d="M624 217 l 8 4 l -8 4 z" class="head"/>
 
   <rect x="636" y="198" width="118" height="46" rx="6" class="chip"/>
@@ -451,10 +566,11 @@ corpus.
 
 The discipline is the same one @sec-classification applied to a decision
 threshold: sweep it, plot recall against p95 latency, state your latency SLO,
-and pick the point that meets it. And measure recall against **exhaustive
-search on your own data**, not against the library's published curve — the
-loss depends on how your vectors are distributed, which is a property of your
-corpus and your embedding model.
+and pick the point that meets it.
+
+And measure recall against **exhaustive search on your own data**, not against
+the library's published curve — the loss depends on how your vectors are
+distributed, which is a property of your corpus and your embedding model.
 
 ::: {.column-margin}
 There is a trap in evaluating an ANN index against the *labels* rather than
@@ -466,7 +582,9 @@ separates the two, and it is cheap to run once on a sample.
 
 ## Measuring retrieval {#sec-retrieval-metrics}
 
-Four metrics, and they answer different questions.
+Everything above was reported in four numbers without saying what they mean.
+They answer different questions, and picking the wrong one is how a retrieval
+regression stays invisible.
 
 | metric | asks | use it when |
 |:--|:--|:--|
@@ -511,7 +629,8 @@ Two practical notes on measurement itself:
 
 ## Vector database, or not {#sec-retrieval-storage}
 
-The honest decision guide, by scale:
+The last decision is where the vectors live, and it is usually made too early
+and too expensively. The honest guide is by scale:
 
 | documents | what to use | why |
 |:--|:--|:--|
@@ -522,11 +641,12 @@ The honest decision guide, by scale:
 : Where to put the vectors {tbl-colwidths="[18,38,44]"}
 
 [The default answer for most projects is the boring one]{.hl}: keep the
-vectors next to the data they belong to. The operational cost of a second
-datastore — consistency between it and your source of truth, its own backup
-story, its own access-control model — is usually larger than the query
-latency you were trying to save, and it arrives on a different team's
-schedule.
+vectors next to the data they belong to.
+
+The operational cost of a second datastore — consistency between it and your
+source of truth, its own backup story, its own access-control model — is
+usually larger than the query latency you were trying to save, and it arrives
+on a different team's schedule.
 
 The question that actually forces a dedicated store is rarely raw scale. It is
 **filtered search at scale**: "the top 10 documents this user is allowed to
@@ -535,6 +655,9 @@ and the vector search to cooperate, and that is a genuine engineering
 capability rather than a matter of size.
 
 ## Intuition checks {#sec-retrieval-intuition}
+
+Answer each one before you open it. All six are questions this chapter settled
+with a measurement rather than an argument.
 
 ::: {.callout-note collapse="true"}
 ## 1. Should you replace BM25 with a dense retriever?
@@ -619,7 +742,94 @@ cooperate. Weigh that against operating a second datastore with its own
 consistency and backup story.
 :::
 
+## Interview questions {#sec-retrieval-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** These recur in the two
+credible open sources this book uses, plus the ones this chapter's own
+measurements make answerable.
+:::
+
+### Testing whether you understand the mechanism
+
+**Q: Write down BM25 and explain what `k1` and `b` are doing.**
+
+The scoring function is IDF times a saturating term frequency, with a length
+correction:
+
+$$
+\text{BM25}(q,d) = \sum_{t \in q} \text{IDF}(t) \cdot
+\frac{f_{t,d}\,(k_1+1)}{f_{t,d} + k_1\left(1 - b + b\,\frac{|d|}{\text{avgdl}}\right)}
+$$
+
+The part worth saying out loud is *why* it saturates. In @sec-text-as-data's
+TF-IDF the tenth occurrence of a term counts exactly as much as the first;
+here $k_1$ bounds the contribution, so a document that repeats a word twenty
+times cannot outrank one that uses it three times in a better context. And $b$
+interpolates length normalization: $b=0$ ignores document length, $b=1$
+divides it out fully. If you add that `sublinear_tf` in `scikit-learn` is the
+crude version of the same idea, you have connected the two chapters.
+
+**Q: Bi-encoder or cross-encoder? Why not use the better one everywhere?**
+
+A bi-encoder embeds query and document *independently*, so documents can be
+encoded once, offline, and search is a vector operation. A cross-encoder reads
+the pair jointly and scores it, which is strictly more informative and cannot
+be precomputed — the cost is one forward pass per candidate at query time.
+That is why the architecture is always both: retrieve a shortlist cheaply,
+rerank it expensively. The follow-up to volunteer is where the shortlist
+saturates, because reranking 1,000 candidates rarely buys more than reranking
+100 and costs ten times as much.
+
+**Q: What is the quality dial in an approximate index, and what is it set to
+right now?**
+
+`efSearch` in HNSW, `nprobe` in IVF — how much of the graph or how many
+clusters get visited. The point of the question is the second half: it has a
+default, the default was chosen by the library author and not by you, and it
+is a *recall* setting wearing a performance costume. An ANN index that silently
+returns 92% of the true neighbours has capped your system at 92% before the
+model sees anything. Measure approximate against exhaustive on a sample and
+you will know the number instead of assuming it.
+
+### Testing whether you have shipped one
+
+**Q: You are handed a corpus and no queries. How do you build an evaluation
+set?**
+
+Collect a hundred *real* queries — from logs, from support tickets, from the
+people who will use it — because invented queries are systematically cleaner
+than real ones and will flatter every system you test. Then pool: run two or
+three different retrievers, label the union of their top-10, and you have
+relevance judgements without reading the whole corpus. Say explicitly that a
+hundred labelled queries beats a thousand unlabelled ones, and that the set is
+worth more than any model choice you will make afterwards.
+
+**Q: A stakeholder wants semantic search to replace keyword search. What do
+you tell them?**
+
+That the answer is an empirical question about their queries, and then show
+them the two conditions from this chapter: on inflected keyword queries
+stemmed BM25 scored **96.0%** recall@1 against a dense retriever's **35.9%**;
+on cross-lingual queries the same dense model scored **96.2%** against BM25's
+**23.8%**. Same corpus, opposite verdicts. So the real deliverable is a census
+of their query mix, and if it is genuinely mixed, routing by query type beats
+fusing — this chapter measured RRF *costing* 32.8 and 46.8 recall@1 points
+against the better single retriever.
+
+**Q: Retrieval looks good but the answers are bad. Whose problem is it?**
+
+Do not guess — attribute. Check whether the supporting document was in the
+top-k at all: if it was not, this is a retrieval problem and no prompting fixes
+it; if it was, the model had what it needed and did not use it, which is a
+grounding problem. @sec-rag builds that decomposition properly. The
+one-sentence version, and the reason this chapter exists before that one:
+recall@k is a *ceiling* on the whole system, so it is the first thing to
+measure and the last thing you can fix by tuning a prompt.
+
 ## The 2026 toolbox {#sec-retrieval-tools}
+
+Everything in this chapter ran on one laptop with the versions below.
 
 | library | version used | what it is for here |
 |:--|:--|:--|
@@ -642,6 +852,9 @@ Worth knowing about, not used above:
 : The wider ecosystem, versions as of writing {tbl-colwidths="[24,16,60]"}
 
 ## Lab: build and tune a hybrid retriever {#sec-retrieval-lab}
+
+Build both families on your own queries, then check the fusion before you
+ship it rather than after.
 
 ### Step 1 — collect a hundred real queries
 
@@ -723,89 +936,6 @@ everything downstream.
 7. **Query-type census.** Sample 100 production queries and classify them.
    Predict, from this chapter's tables, which retriever should win your mix.
    Then measure and see whether you were right.
-
-## Interview questions {#sec-retrieval-interview}
-
-::: {.callout-warning appearance="simple"}
-**On sourcing — the same caveat as @sec-text-as-data.**
-:::
-
-### Testing whether you understand the mechanism
-
-**Q: Write down BM25 and explain what `k1` and `b` are doing.**
-
-The scoring function is IDF times a saturating term frequency, with a length
-correction:
-
-$$
-\text{BM25}(q,d) = \sum_{t \in q} \text{IDF}(t) \cdot
-\frac{f_{t,d}\,(k_1+1)}{f_{t,d} + k_1\left(1 - b + b\,\frac{|d|}{\text{avgdl}}\right)}
-$$
-
-The part worth saying out loud is *why* it saturates. In @sec-text-as-data's
-TF-IDF the tenth occurrence of a term counts exactly as much as the first;
-here $k_1$ bounds the contribution, so a document that repeats a word twenty
-times cannot outrank one that uses it three times in a better context. And $b$
-interpolates length normalization: $b=0$ ignores document length, $b=1$
-divides it out fully. If you add that `sublinear_tf` in `scikit-learn` is the
-crude version of the same idea, you have connected the two chapters.
-
-**Q: Bi-encoder or cross-encoder? Why not use the better one everywhere?**
-
-A bi-encoder embeds query and document *independently*, so documents can be
-encoded once, offline, and search is a vector operation. A cross-encoder reads
-the pair jointly and scores it, which is strictly more informative and cannot
-be precomputed — the cost is one forward pass per candidate at query time.
-That is why the architecture is always both: retrieve a shortlist cheaply,
-rerank it expensively. The follow-up to volunteer is where the shortlist
-saturates, because reranking 1,000 candidates rarely buys more than reranking
-100 and costs ten times as much.
-
-**Q: What is the quality dial in an approximate index, and what is it set to
-right now?**
-
-`efSearch` in HNSW, `nprobe` in IVF — how much of the graph or how many
-clusters get visited. The point of the question is the second half: it has a
-default, the default was chosen by the library author and not by you, and it
-is a *recall* setting wearing a performance costume. An ANN index that silently
-returns 92% of the true neighbours has capped your system at 92% before the
-model sees anything. Measure approximate against exhaustive on a sample and
-you will know the number instead of assuming it.
-
-### Testing whether you have shipped one
-
-**Q: You are handed a corpus and no queries. How do you build an evaluation
-set?**
-
-Collect a hundred *real* queries — from logs, from support tickets, from the
-people who will use it — because invented queries are systematically cleaner
-than real ones and will flatter every system you test. Then pool: run two or
-three different retrievers, label the union of their top-10, and you have
-relevance judgements without reading the whole corpus. Say explicitly that a
-hundred labelled queries beats a thousand unlabelled ones, and that the set is
-worth more than any model choice you will make afterwards.
-
-**Q: A stakeholder wants semantic search to replace keyword search. What do
-you tell them?**
-
-That the answer is an empirical question about their queries, and then show
-them the two conditions from this chapter: on inflected keyword queries
-stemmed BM25 scored **96.0%** recall@1 against a dense retriever's **35.9%**;
-on cross-lingual queries the same dense model scored **96.2%** against BM25's
-**23.8%**. Same corpus, opposite verdicts. So the real deliverable is a census
-of their query mix, and if it is genuinely mixed, routing by query type beats
-fusing — this chapter measured RRF *costing* 32.8 and 46.8 recall@1 points
-against the better single retriever.
-
-**Q: Retrieval looks good but the answers are bad. Whose problem is it?**
-
-Do not guess — attribute. Check whether the supporting document was in the
-top-k at all: if it was not, this is a retrieval problem and no prompting fixes
-it; if it was, the model had what it needed and did not use it, which is a
-grounding problem. @sec-rag builds that decomposition properly. The
-one-sentence version, and the reason this chapter exists before that one:
-recall@k is a *ceiling* on the whole system, so it is the first thing to
-measure and the last thing you can fix by tuning a prompt.
 
 ## Where to go deeper {#sec-retrieval-deeper}
 
