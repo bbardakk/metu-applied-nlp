@@ -41,6 +41,7 @@ on the last. [↩](#term-prefill-decode){.term-back}
 is the split. **Prefill** reads the prompt. Every token is available at once,
 so the whole prompt goes through the network as one batched matrix
 multiplication — the hardware is busy and the work is compute-bound.
+
 **Decode** writes the answer. Token *n+1* cannot be computed until token *n*
 exists, so each one is a separate pass over the whole model, and the machine
 spends most of its time moving weights from memory rather than multiplying
@@ -136,6 +137,16 @@ have: almost all of the wall clock is spent before the first character
 appears.
 :::
 ::::
+
+**What we will look at.** First where the wall clock actually goes, which at
+production prompt lengths is almost entirely prefill — and why streaming cannot
+touch that. Then the KV cache, which is what makes decode fast and what makes a
+long context expensive, in gigabytes you can compute before renting anything.
+Then batching, which buys the operator throughput and charges the individual
+user for it. Then prompt caching, the one lever with no quality cost and the
+largest measured win in this chapter. Then the cost worksheet, which is four
+numbers and a multiplication. And finally the remaining levers, in the order to
+reach for them rather than the order they get proposed in.
 
 ## Where the wall clock actually goes {#sec-serving-ttft}
 
@@ -316,9 +327,10 @@ prompt tokens   cold prefill   warm prefill   speedup   cold total   warm total
 
 Warm prefill is **flat at 13–18 milliseconds regardless of prompt length**,
 because nothing is being recomputed. At 4,258 tokens that is 126× on the
-prefill and **8.2× on the whole request**. The longer the prefix, the larger
-the win — which is the opposite of how most optimisations scale, and it is why
-this is the first thing to try.
+prefill and **8.2× on the whole request**.
+
+The longer the prefix, the larger the win — which is the opposite of how most
+optimisations scale, and it is why this is the first thing to try.
 
 Three conditions, and all three are design decisions rather than
 configuration:
@@ -347,8 +359,11 @@ determines whether short system prompts benefit at all.
 
 ## The cost worksheet {#sec-serving-cost}
 
-Cost is denominated in tokens, and the first thing to establish is which
-tokens. From @sec-summarization, summarizing a 300-word news article measured
+Latency was the first half of the argument. The bill is the other half, and
+both are made of the same tokens — which is why the first thing to establish is
+*which* tokens.
+
+From @sec-summarization, summarizing a 300-word news article measured
 **890 prompt tokens against 53 generated** — a ratio of nearly 17 to 1. That
 shape is typical of anything with a system prompt, a schema and retrieved
 context, which is to say most production LLM features.
@@ -495,55 +510,14 @@ size and chip memory bandwidth combine to set what is achievable — Pope et al.
 work it through properly [@pope2023efficiently], and @sec-pretraining's $6ND$
 gives the training-side counterpart.
 
-## Lab: measure your own two halves {#sec-serving-lab}
-
-Any local server that reports timings will do; the point is to produce your
-numbers rather than to reuse mine.
-
-### Step 1 — get the prefill and decode rates for your model
-
-Six prompt lengths, each with distinct text so nothing caches, a fixed short
-output. Record prompt tokens, prefill seconds, output tokens, decode seconds.
-Two rates fall out, and their ratio is the number to remember.
-
-### Step 2 — find your TTFT curve
-
-Turn streaming on and record time to the first token at three context lengths.
-Plot TTFT as a share of total. If it does not rise steeply, your prompts are
-shorter than most production prompts and you should retest with a realistic
-one.
-
-### Step 3 — measure your cache, then break it
-
-Send the same long prompt twice and record both. Then insert a timestamp at
-the *top* of the prompt and send it twice more. The second pair should lose the
-speedup entirely. Keep both numbers; the difference is what prompt ordering is
-worth.
-
-### Step 4 — size the KV cache in gigabytes
-
-Get layers, KV heads and head dimension from your model's metadata and compute
-bytes per token. Multiply by the context length you were about to configure.
-If the answer surprises you, that is the point of the step.
-
-### Step 5 — build the worksheet
-
-Prompt tokens, cached share, output tokens, requests per month, three prices.
-Produce a monthly figure, then compute what a 50% prompt reduction and a 60%
-cache hit rate each save. Rank them.
-
-### Step 6 — argue for one change
-
-One paragraph naming the single lever you would pull first, with the number
-from step 5 that justifies it and the quality risk you are accepting.
-
-### What to hand in
-
-Your two rates and their ratio; the TTFT share at your realistic context
-length; the cached and uncached prefill for the same prompt; the KV cache size
-for your configured window; and the paragraph from step 6.
-
 ## Intuition checks {#sec-serving-intuition}
+
+Answer each one before you open it. Four are settled by measurements in this
+chapter — the two rates, the TTFT share, the KV cache arithmetic, and what a
+cold prefill costs against a warm one — and the last two are the ones this
+chapter deliberately did not measure, because a single-stream laptop is the
+wrong instrument for batching and a general benchmark is the wrong instrument
+for quantization.
 
 ::: {.callout-note collapse="true"}
 ## 1. Your feature is "too slow". Where do you look first?
@@ -639,34 +613,6 @@ cache is a separate allocation from the weights. Reach for it when the model
 does not fit, and put it through the same eval you would use for a model swap.
 :::
 
-## Exercises {#sec-serving-exercises}
-
-1. **Your two rates.** Measure prefill and decode tokens per second for a model
-   you can run. Report the ratio and predict, before measuring, the total
-   latency for a 4,000-token prompt with a 100-token answer. Then measure it.
-
-2. **Break the cache on purpose.** Take a prompt with a long stable prefix and
-   measure cold and warm prefill. Move a timestamp from the bottom of the prompt
-   to the top and repeat. Report both numbers and the design rule you would
-   write for your team.
-
-3. **Size a window.** For three models you might deploy, compute KV cache bytes
-   per token from their metadata and produce a table of memory against context
-   length. Say which model you would run at 32k context on a 24 GB card.
-
-4. **The worksheet, honestly.** Take a feature you have actually shipped or
-   specified. Count real prompt and output tokens — count, do not estimate —
-   and compute the monthly bill at your traffic. Then compute it again with the
-   prompt 40% shorter, and say which parts of the prompt you would cut.
-
-5. **TTFT against context.** Plot time to first token against prompt length for
-   your setup, over at least five lengths. Fit a line. Use the slope to predict
-   TTFT at a context length you have not tested, then test it.
-
-6. **The output-length myth.** Find a place where someone proposed saving money
-   by asking the model for shorter answers. Using the input/output ratio you
-   measured, compute what that change would actually have saved.
-
 ## Interview questions {#sec-serving-interview}
 
 ::: {.callout-warning appearance="simple"}
@@ -735,6 +681,11 @@ in direct conflict, and somebody has to be told which one they are buying.
 
 ## The 2026 toolbox {#sec-serving-tools}
 
+Forty short requests against a 3B model on a laptop needs exactly two things,
+which is the first table. The second is what you would actually serve on, and
+none of it was used here — the numbers in this chapter are ratios, and ratios
+are the part that survives the move to a real card.
+
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | the local server; its `/api/generate` reports the prefill and decode split per request, which is what made these measurements cheap |
@@ -755,6 +706,112 @@ Worth knowing about, not used above:
 | `llmcompressor` | 0.13.0 | applying GPTQ and AWQ quantization [@frantar2023gptq; @lin2024awq] to a model you intend to serve |
 
 : The wider ecosystem, versions as of writing {tbl-colwidths="[24,18,58]"}
+
+## Lab: measure your own two halves {#sec-serving-lab}
+
+Any local server that reports timings will do; the point is to produce your
+numbers rather than to reuse mine.
+
+### Step 1 — get the prefill and decode rates for your model
+
+Six prompt lengths, each with distinct text so nothing caches, a fixed short
+output. Record prompt tokens, prefill seconds, output tokens, decode seconds.
+Two rates fall out, and their ratio is the number to remember.
+
+### Step 2 — find your TTFT curve
+
+Turn streaming on and record time to the first token at three context lengths.
+Plot TTFT as a share of total. If it does not rise steeply, your prompts are
+shorter than most production prompts and you should retest with a realistic
+one.
+
+### Step 3 — measure your cache, then break it
+
+Send the same long prompt twice and record both. Then insert a timestamp at
+the *top* of the prompt and send it twice more. The second pair should lose the
+speedup entirely. Keep both numbers; the difference is what prompt ordering is
+worth.
+
+### Step 4 — size the KV cache in gigabytes
+
+Get layers, KV heads and head dimension from your model's metadata and compute
+bytes per token. Multiply by the context length you were about to configure.
+If the answer surprises you, that is the point of the step.
+
+### Step 5 — build the worksheet
+
+Prompt tokens, cached share, output tokens, requests per month, three prices.
+Produce a monthly figure, then compute what a 50% prompt reduction and a 60%
+cache hit rate each save. Rank them.
+
+### Step 6 — argue for one change
+
+One paragraph naming the single lever you would pull first, with the number
+from step 5 that justifies it and the quality risk you are accepting.
+
+### What to hand in
+
+Your two rates and their ratio; the TTFT share at your realistic context
+length; the cached and uncached prefill for the same prompt; the KV cache size
+for your configured window; and the paragraph from step 6.
+
+## Exercises {#sec-serving-exercises}
+
+1. **Your two rates.** Measure prefill and decode tokens per second for a model
+   you can run. Report the ratio and predict, before measuring, the total
+   latency for a 4,000-token prompt with a 100-token answer. Then measure it.
+
+2. **Break the cache on purpose.** Take a prompt with a long stable prefix and
+   measure cold and warm prefill. Move a timestamp from the bottom of the prompt
+   to the top and repeat. Report both numbers and the design rule you would
+   write for your team.
+
+3. **Size a window.** For three models you might deploy, compute KV cache bytes
+   per token from their metadata and produce a table of memory against context
+   length. Say which model you would run at 32k context on a 24 GB card.
+
+4. **The worksheet, honestly.** Take a feature you have actually shipped or
+   specified. Count real prompt and output tokens — count, do not estimate —
+   and compute the monthly bill at your traffic. Then compute it again with the
+   prompt 40% shorter, and say which parts of the prompt you would cut.
+
+5. **TTFT against context.** Plot time to first token against prompt length for
+   your setup, over at least five lengths. Fit a line. Use the slope to predict
+   TTFT at a context length you have not tested, then test it.
+
+6. **The output-length myth.** Find a place where someone proposed saving money
+   by asking the model for shorter answers. Using the input/output ratio you
+   measured, compute what that change would actually have saved.
+
+## Where to go deeper {#sec-serving-deeper}
+
+Before reading: take one real request from your own product and write down its
+prompt-token and output-token counts. Almost everything below is easier to judge
+once you know your own ratio.
+
+| resource | what it is |
+|:--|:--|
+| [`vllm`](https://github.com/vllm-project/vllm) | the reference open-source server; the code is readable and the scheduler is where continuous batching becomes concrete |
+| [vLLM's paged-attention design note](https://docs.vllm.ai/en/latest/design/paged_attention.html) | the KV cache as pages, explained by the people who implemented it [@kwon2023pagedattention] |
+| [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/) | where the prefill/decode asymmetry comes from, derived rather than asserted |
+| [How To Scale Your Model](https://jax-ml.github.io/scaling-book/) | memory bandwidth and arithmetic intensity worked through carefully; the book-length version of @pope2023efficiently |
+| [Databricks on inference performance](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices) | batching, TTFT and throughput measured on real hardware, which a laptop cannot show you |
+| [`llama.cpp`](https://github.com/ggml-org/llama.cpp) | the engine underneath the numbers in this chapter; read its KV cache handling if you serve on CPU or Apple Silicon |
+| [`tensorrt-llm`](https://github.com/NVIDIA/TensorRT-LLM) | what the last 20% of throughput costs in build complexity, so you can decide whether you want it |
+| [`llm-compressor`](https://github.com/vllm-project/llm-compressor) | applying quantization to a model you intend to serve, with the evaluation loop attached |
+
+: Beyond the papers {tbl-colwidths="[42,58]"}
+
+| topic | source |
+|:--|:--|
+| the KV cache as paged memory | @kwon2023pagedattention |
+| continuous batching, and why static batching wastes a card | @yu2022orca |
+| post-training quantization to 4 bits | @frantar2023gptq |
+| activation-aware weight quantization | @lin2024awq |
+| speculative decoding | @leviathan2023speculative |
+| inference arithmetic for large models | @pope2023efficiently |
+
+: The primary sources {tbl-colwidths="[46,54]"}
 
 ## What to remember {#sec-serving-summary}
 
