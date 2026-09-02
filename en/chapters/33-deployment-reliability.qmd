@@ -279,56 +279,12 @@ in the response, in the trace, and in your evaluation as a distinct outcome —
 looks 85% accurate while hitting its cap on a third of runs is not an 85%
 accurate agent.
 
-## Lab: make a step safe to retry {#sec-deployment-lab}
-
-Take an agent with at least one side-effecting tool. If you do not have one, a
-`send_email` that appends to a file is enough — the point is to *see* the
-duplicate.
-
-### Step 1 — reproduce the duplicate
-
-Run the agent, kill the worker after the tool executes but before the result is
-recorded, and restart. Count the effects. You should get two. If you cannot make
-it happen on purpose, you cannot claim it will not happen by accident.
-
-### Step 2 — measure your own retry determinism
-
-Ask your model for the same tool call ten times at your production temperature.
-Count distinct argument sets. Then repeat with one deliberately under-specified
-task. The gap between those two numbers is how much your prompt is protecting
-you.
-
-### Step 3 — add an idempotency key from the right place
-
-Key on `(session id, step index)`, not on the arguments. Repeat step 1. The
-second execution must return the first result without acting.
-
-### Step 4 — put the key and the effect in one transaction
-
-Then re-run step 1, killing the worker *between* the effect and the record.
-If the duplicate comes back, the write was not atomic — which is the bug this
-step exists to expose.
-
-### Step 5 — write the compensation table
-
-Every side-effecting tool, its compensating action, and an honest note on
-whether the compensation is real. Circulate it. The rows with no compensation
-are the ones that need an approval gate, and that is a conversation with
-somebody outside engineering.
-
-### Step 6 — set the three ceilings and trip each one
-
-Steps, tokens, wall clock. Write a task that trips each ceiling separately —
-a loop, an expensive run, a hanging tool — and confirm the agent stops, reports
-which ceiling it hit, and that the outcome is distinguishable from success.
-
-### What to hand in
-
-The duplicate count before and after the key; your distinct-argument counts for
-a clear and a vague task; the compensation table with its honest column; and
-evidence that each of the three ceilings fires and is reported.
-
 ## Intuition checks {#sec-deployment-intuition}
+
+Answer each one before you open it. Two of them turn on the retry measurement in
+this chapter — what temperature 0 does and does not buy you, and why the
+idempotency key cannot come from the model — and the rest are the questions
+that decide whether a working prototype survives being deployed at all.
 
 ::: {.callout-note collapse="true"}
 ## 1. Your agent runs fine locally and gets killed in production after 30 seconds.
@@ -423,39 +379,6 @@ rate is that number, and an agent reported as 85% accurate while capping out on
 a third of runs has not been measured honestly.
 :::
 
-## Exercises {#sec-deployment-exercises}
-
-1. **Force the duplicate.** Kill a worker between a tool executing and its
-   result being recorded. Count the effects. Then add an idempotency key and
-   show the count returns to one.
-
-2. **Your determinism number.** Ask your production model for the same tool call
-   ten times at your production temperature, and count distinct argument sets.
-   Repeat with a deliberately vague instruction. Report both.
-
-3. **The compensation table.** One row per side-effecting tool in a system you
-   work on: the tool, its compensation, and whether the compensation is honest.
-   Identify the rows that need an approval gate instead.
-
-4. **Atomicity.** Find out whether your idempotency record is written in the
-   same transaction as the effect it guards. If it is not, construct the
-   interleaving that produces a duplicate, and say how likely it is at your
-   traffic.
-
-5. **Trip all three ceilings.** Write three tasks that exhaust steps, tokens and
-   wall clock respectively. Confirm each stops the agent, and that the three are
-   distinguishable in your logs.
-
-6. **The state decision, priced.** For a twenty-turn conversation, compute the
-   prompt tokens under client-held history versus a session store. Use
-   @sec-serving's arithmetic to turn that into latency and cost, then say which
-   you would choose and why.
-
-7. **Cancellation, honestly.** Send a cancel to a running agent and measure how
-   long until work actually stops, and whether the in-flight tool call
-   completed. If nothing checks the flag between steps, you do not have
-   cancellation.
-
 ## Interview questions {#sec-deployment-interview}
 
 ::: {.callout-warning appearance="simple"}
@@ -521,6 +444,12 @@ whether the run hit a ceiling and was reported as a success.
 
 ## The 2026 toolbox {#sec-deployment-tools}
 
+Almost nothing in this chapter needed a library — the measurement was 48 calls
+to a local model, and everything else is a property of your own loop. The second
+table is the one that matters, and it splits cleanly in two: durable execution
+engines that impose the determinism contract described above, and plain task
+queues that do not.
+
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | serving `llama3.2:3b` for the retry-determinism measurement |
@@ -541,6 +470,111 @@ Worth knowing about, not used above:
 | `ray` | 2.58.0 | distributed execution when the agent fans out across machines |
 
 : The wider ecosystem, versions as of writing {tbl-colwidths="[22,14,64]"}
+
+## Lab: make a step safe to retry {#sec-deployment-lab}
+
+Take an agent with at least one side-effecting tool. If you do not have one, a
+`send_email` that appends to a file is enough — the point is to *see* the
+duplicate.
+
+### Step 1 — reproduce the duplicate
+
+Run the agent, kill the worker after the tool executes but before the result is
+recorded, and restart. Count the effects. You should get two. If you cannot make
+it happen on purpose, you cannot claim it will not happen by accident.
+
+### Step 2 — measure your own retry determinism
+
+Ask your model for the same tool call ten times at your production temperature.
+Count distinct argument sets. Then repeat with one deliberately under-specified
+task. The gap between those two numbers is how much your prompt is protecting
+you.
+
+### Step 3 — add an idempotency key from the right place
+
+Key on `(session id, step index)`, not on the arguments. Repeat step 1. The
+second execution must return the first result without acting.
+
+### Step 4 — put the key and the effect in one transaction
+
+Then re-run step 1, killing the worker *between* the effect and the record.
+If the duplicate comes back, the write was not atomic — which is the bug this
+step exists to expose.
+
+### Step 5 — write the compensation table
+
+Every side-effecting tool, its compensating action, and an honest note on
+whether the compensation is real. Circulate it. The rows with no compensation
+are the ones that need an approval gate, and that is a conversation with
+somebody outside engineering.
+
+### Step 6 — set the three ceilings and trip each one
+
+Steps, tokens, wall clock. Write a task that trips each ceiling separately —
+a loop, an expensive run, a hanging tool — and confirm the agent stops, reports
+which ceiling it hit, and that the outcome is distinguishable from success.
+
+### What to hand in
+
+The duplicate count before and after the key; your distinct-argument counts for
+a clear and a vague task; the compensation table with its honest column; and
+evidence that each of the three ceilings fires and is reported.
+
+## Exercises {#sec-deployment-exercises}
+
+1. **Force the duplicate.** Kill a worker between a tool executing and its
+   result being recorded. Count the effects. Then add an idempotency key and
+   show the count returns to one.
+
+2. **Your determinism number.** Ask your production model for the same tool call
+   ten times at your production temperature, and count distinct argument sets.
+   Repeat with a deliberately vague instruction. Report both.
+
+3. **The compensation table.** One row per side-effecting tool in a system you
+   work on: the tool, its compensation, and whether the compensation is honest.
+   Identify the rows that need an approval gate instead.
+
+4. **Atomicity.** Find out whether your idempotency record is written in the
+   same transaction as the effect it guards. If it is not, construct the
+   interleaving that produces a duplicate, and say how likely it is at your
+   traffic.
+
+5. **Trip all three ceilings.** Write three tasks that exhaust steps, tokens and
+   wall clock respectively. Confirm each stops the agent, and that the three are
+   distinguishable in your logs.
+
+6. **The state decision, priced.** For a twenty-turn conversation, compute the
+   prompt tokens under client-held history versus a session store. Use
+   @sec-serving's arithmetic to turn that into latency and cost, then say which
+   you would choose and why.
+
+7. **Cancellation, honestly.** Send a cancel to a running agent and measure how
+   long until work actually stops, and whether the in-flight tool call
+   completed. If nothing checks the flag between steps, you do not have
+   cancellation.
+
+## Where to go deeper {#sec-deployment-deeper}
+
+Before reading: pick the one tool in your system whose effect you would least
+like to see happen twice, and find out today whether anything stops it. That
+answer decides which of these you need first.
+
+This chapter cites no papers, so there is one table rather than the usual two.
+Nothing below is a research result; it is the operational literature and the
+engines that implement it.
+
+| resource | what it is |
+|:--|:--|
+| [Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/) | the clearest write-up of the key, the record and the transaction boundary this chapter argues for |
+| [Stripe's idempotent requests](https://docs.stripe.com/api/idempotent_requests) | the same design as a shipped public API, including the retention window most people set too short |
+| [Handling Overload](https://sre.google/sre-book/handling-overload/) | the client-side retry budget, which is what keeps a dead-letter path from becoming an outage |
+| [Temporal's workflow determinism rules](https://docs.temporal.io/workflow-definition) | the replay contract stated precisely; read this before adopting any durable engine, not after |
+| [`temporalio/sdk-python`](https://github.com/temporalio/sdk-python) | the workflow/activity split in code, which is where the LLM call has to land |
+| [`restate`](https://github.com/restatedev/restate) / [`dbos-transact-py`](https://github.com/dbos-inc/dbos-transact-py) | two lighter takes on durability, useful for seeing which parts of Temporal's contract are essential |
+| [The saga pattern](https://microservices.io/patterns/data/saga.html) | compensation as a named pattern, with the failure modes the compensation table above only gestures at |
+| [`celery`](https://github.com/celery/celery) / [`ray`](https://github.com/ray-project/ray) | the queue-backed shape without durability, when steps are already idempotent |
+
+: Beyond this chapter {tbl-colwidths="[42,58]"}
 
 ## What to remember {#sec-deployment-summary}
 
