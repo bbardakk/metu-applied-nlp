@@ -1,53 +1,793 @@
 # Evaluation in Production {#sec-production-eval}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One measurement, designed to answer a question the
+book has not yet asked: how far does an eval score move when *nothing* changed?
+A 100-item Turkish extraction suite with ground truth known by construction, run
+five times each under three prompts — the one that shipped, one with a rule
+deleted, and one with the same rules merely reordered. @sec-llm-eval sized an
+eval set; this chapter measures the noise floor of the gate that reads it.
+Software: `ollama` 0.24.0 serving `qwen2.5:7b`, Python 3.14.5, Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- build the ladder from offline eval to A/B test and know what each stage catches;
-- gate a merge on an eval suite the way you gate on unit tests;
-- detect drift at the prompt, model, and use-case level;
-- curate a golden set from real traffic without leaking user data.
+- place a change on the ladder from offline eval to A/B test, and say what each
+  rung catches and what it cannot;
+- measure your own gate's noise floor before trusting any score it reports;
+- design a gate threshold that blocks regressions without blocking noise;
+- recognise that a cosmetically identical prompt edit is not a cosmetically
+  identical change;
+- curate a golden set from real traffic, and know when it has aged out;
+- score a sample of live traffic without scoring all of it;
+- separate the three kinds of drift that look the same on a dashboard.
 
-## The ladder: offline eval, CI gate, shadow, canary, A/B
+## The ladder, and what each rung can catch {#sec-production-eval-ladder}
 
-<!-- TODO(draft): each rung with the class of failure it catches and the
-    one it misses. -->
+Everything up to now evaluated systems in a room by themselves. Production adds
+a constraint that changes the whole design: [the thing you are evaluating is
+already serving users while you evaluate it]{.hl}. That turns evaluation from an
+event into a ladder, where each rung is cheaper and blinder than the one above.
 
-## Evals as unit tests: regression suites for prompts and models
+| rung | what it costs | what it catches | what it cannot see |
+|:--|:--|:--|:--|
+| **Offline eval** | seconds, no users | regressions on cases you thought of | anything your suite does not contain |
+| **CI gate** | one build | a bad change *before* merge | whether the change helps real users |
+| **Shadow** | double inference, no user impact | crashes, latency, malformed output on live inputs | quality — nobody sees the output |
+| **Canary** | a slice of real users | quality failures, on a small blast radius (@sec-deployment) | small effects — the slice is too small to resolve them |
+| **A/B test** | days, and real exposure | whether it actually helps | fast-moving regressions; you are committed for the duration |
 
-<!-- TODO(draft): the discipline that makes prompt changes reviewable. -->
+: Five rungs, in the order a change should climb them {tbl-colwidths="[14,20,33,33]"}
 
-## Golden dataset lifecycle and curation
+The mistake is not skipping a rung. It is *believing* a rung about something it
+cannot see. A shadow deployment that runs clean tells you the new prompt does
+not crash; it tells you nothing about whether its answers are worse, because no
+human read one. A green CI gate tells you the change did not regress the cases
+in your suite, which is a claim about your suite.
 
-<!-- TODO(draft): how a golden set is born, ages, and must be refreshed. -->
+This chapter is mostly about the second rung, because it is the one teams get
+wrong in a specific and measurable way.
 
-## Online evaluators and sampling live traffic
+## A prompt change is a code change {#sec-production-eval-ci}
 
-<!-- TODO(draft): scoring a sample of production; cost control. -->
+A prompt is the single highest-leverage, least-reviewed artefact in an LLM
+system. It is a text file; it changes behaviour more than most refactors; and it
+is routinely edited on a branch, skimmed in review, and merged on the strength
+of "reads fine to me".
 
-## Drift detection at prompt, model, and use-case level
+The discipline that fixes this is borrowed wholesale from testing:
 
-<!-- TODO(draft): the provider changed the model; the users changed the
-    task; both look the same on a dashboard. -->
+1. **The suite lives in the repository**, next to the prompt it exercises, and
+   moves with it.
+2. **The gate runs on every change to the prompt**, not on a schedule and not
+   when someone remembers.
+3. **The gate blocks the merge**, or it is not a gate — it is a dashboard, and
+   dashboards do not stop anything.
+4. **A production failure becomes a case in the suite** before the fix is
+   merged, which is @sec-agent-eval's regression discipline applied to prompts.
 
-## Human-in-the-loop labeling pipelines
+All of that is standard practice imported from software engineering, and none of
+it is the hard part. [The hard part is that an eval score is a random variable
+and a unit test is not.]{.hl} `assert add(2, 2) == 4` returns the same answer
+every time. A suite score does not, and a gate built as though it does will
+either block changes at random or wave regressions through. Which of those you
+get depends on a number almost nobody measures: how much the score moves when
+nothing changed.
 
-<!-- TODO(draft): routing uncertain cases to people — connect to
-    @sec-data-annotation. -->
+## What the gate can actually see {#sec-production-eval-noise}
 
-## The trace-to-test-to-fix loop
+So measure it. The suite is 100 Turkish customer messages generated from five
+templates with randomised slots — order code, day, month, city, amount — which
+means the ground truth is known by construction rather than by hand labelling,
+and there is no annotation error to argue about. The task is extraction to JSON:
+five fields per message, 500 field decisions per run. Scoring is exact string
+match per field, plus a stricter all-five-correct **exact match** per item.
 
-<!-- TODO(draft): the operating rhythm this whole part builds toward. -->
+Three prompts, all extracting the same five fields:
 
-## Lab: an eval gate that blocks a bad prompt merge
+- **A — the one that shipped.** Six rules: one on output format, then one per
+  field, in the order the fields are listed.
+- **B — a rule deleted.** Identical to A with the `city` rule removed. This is
+  the regression a reviewer waves through, and it is here as a control that the
+  measurement can detect *something*.
+- **C — the same rules reordered.** Byte-for-byte the same six rules as A,
+  listed in reverse. No rule added, none removed, no wording changed. This is
+  the edit that gets approved without comment.
 
-<!-- TODO(draft): wire an eval suite into CI and watch it reject a
-    regression. -->
+Each prompt ran the full 100-item suite five times at temperature 0.7, and A ran
+twice more at temperature 0.
 
-## Exercises
+### The noise floor is smaller than folklore claims
 
-1. Add an eval gate to a repository. Submit a deliberately worse prompt and confirm CI blocks it.
-2. Sample 100 production sessions and score them. What did you learn that offline evaluation could not have told you?
+Prompt A, five identical runs of the same suite against the same model:
+
+```text
+prompt A, temp 0.7, five runs
+  field accuracy   95.4  95.4  95.6  95.8  96.0     mean 95.64   sd 0.26
+  exact match      80    81    81    82    82       mean 81.20   sd 0.84
+```
+
+[The worst pair of identical runs differs by 0.60 points of field accuracy.]{.hl}
+That is the noise floor: the largest difference the gate can report between two
+runs when the only thing that changed is the sampler's luck. It is small — small
+enough that the common objection to eval gates, that LLM scores are too noisy to
+gate on, is simply not true for a suite of this size and a task of this shape.
+It is worth measuring rather than assuming, in both directions: folklore
+overstates it here, and will understate it on a harder task with a judge in the
+loop (@sec-llm-eval measured a judge flipping its verdict on 38% of items).
+
+### The deleted rule is trivially visible
+
+Prompt B, the missing `city` rule, against A:
+
+```text
+                    A       B      delta
+  field accuracy   95.64   79.80   -15.84 pt   = 26x the noise floor
+  exact match      81.20   21.40   -59.80 pt   = 30x the noise floor
+
+  per field (of 100)      A      B
+    order_id             100    100
+    day                   91     86
+    month                 99     98
+    city                 100     29     <-- the deleted rule
+    amount                88     86
+```
+
+No subtlety here, and that is the point of including it: a change that removes a
+rule is 26 times the noise floor and is caught by any gate at all. If this were
+the only kind of regression, gate design would not be interesting.
+
+### The cosmetic edit is not cosmetic
+
+Prompt C reorders the same six rules and changes nothing else.
+
+```text
+                    A       C      delta
+  field accuracy   95.64   92.24   -3.40 pt   = 5.7x the noise floor
+  exact match      81.20   72.00   -9.20 pt   = 4.6x the noise floor
+
+  per field (of 100)      A      C
+    order_id             100    100
+    day                   91     74     <-- the entire regression
+    month                 99     99
+    city                 100     99
+    amount                88     89
+```
+
+[Reordering six rules that were not otherwise touched cost 3.4 points of field
+accuracy and 9.2 points of exact match, concentrated almost entirely in one
+field.]{.hl} Nothing in the diff would draw a comment in review. The rules are
+the same rules.
+
+::: {.column-margin}
+This is why "prompt engineering" resists being called engineering: the artefact
+has no interface, so no edit can be proven local. Ordering is load-bearing and
+invisible.
+:::
+
+The failure mode is specific enough to name. Inspecting every wrong `day` value
+across 40 items under each prompt:
+
+```text
+  prompt A:  day wrong on  4/40 — 4 of 4  are the leading digits of the amount
+  prompt C:  day wrong on 13/40 — 13 of 13 are the leading digits of the amount
+
+    want day 18   got  6   amount   6.842,50
+    want day 12   got  1   amount   1.289,50
+    want day 26   got  5   amount   5.669,99
+    want day  8   got 29   amount     290,50
+```
+
+**In that probe every single wrong `day`, under both prompts, is the leading
+digits of the amount.** The model bleeds one field into another, and moving the `amount` rule
+above the `day` rule roughly triples how often it does. The bug was always
+there — prompt A has it at 10% — and the reorder amplified it.
+
+That is a much more useful finding than "reordering is risky". It says the
+regression had a mechanism, the mechanism was visible in the per-field
+breakdown, and a suite that reported only an aggregate score would have shown a
+3.4-point wobble with no way to tell whether it mattered. Report per-field
+or per-category numbers or you will not be able to act on the aggregate.
+
+### Temperature 0 buys reproducibility, not correctness
+
+Prompt A, twice at temperature 0:
+
+```text
+  field accuracy   95.20   95.20      per-item results byte-identical
+  exact match      80      80
+```
+
+Perfectly reproducible: not merely the same score, but the same result on every
+one of the 100 items. That is worth having in a gate, because it removes the
+noise floor entirely and makes a failing run reproducible on a laptop.
+
+Two caveats, both worth stating. Temperature 0 scored **95.20**, which sits
+*below* the entire temperature-0.7 range of 95.40–96.00 — greedy decoding is one
+particular sample, not the best one. And it does not fix anything: the
+leading-digit bug survives greedy decoding, which scored `day` 90/100 with 8 of
+its 10 misses being the same amount-bleed. Determinism
+makes a gate reproducible; it does not make it right. Your users are
+probably not served at temperature 0 either, so a temperature-0 gate measures a
+configuration you do not ship.
+
+## Designing the gate so it fires on the right things {#sec-production-eval-gate}
+
+Given a noise floor, a gate is a threshold decision, and the obvious threshold is
+wrong in an instructive way. Resampling the measured per-item results 2,000
+times per cell — comparing one baseline run against one new run, as a real gate
+does:
+
+| suite size | naive gate: A vs A **(false block)** | A vs B (caught) | A vs C (caught) |
+|--:|--:|--:|--:|
+| 20 | 22.9% | 100% | 93.0% |
+| 50 | 35.6% | 100% | 99.6% |
+| 100 | 42.5% | 100% | 100% |
+
+: A gate that blocks whenever the new score is lower {tbl-colwidths="[16,30,27,27]"}
+
+The naive gate — block if the new run scores lower than the baseline — catches
+everything, and [blocks 42.5% of changes that changed nothing]{.hl}. Worse, it
+gets *worse as the suite grows*: at 20 items the two runs often tie exactly, and
+ties pass; at 100 items exact ties are rare, so the comparison converges on a
+coin flip. A team that responds to a flaky gate by adding more test cases makes
+it flakier.
+
+Adding a threshold of one point fixes it:
+
+| suite size | 1-point threshold: A vs A **(false block)** | A vs B (caught) | A vs C (caught) |
+|--:|--:|--:|--:|
+| 20 | 20.5% | 100% | 90.8% |
+| 50 | 6.6% | 100% | 96.2% |
+| 100 | 4.3% | 100% | 99.4% |
+
+: Block only if the new score is more than one point lower
+{tbl-colwidths="[16,30,27,27]"}
+
+At 100 items the gate blocks 4.3% of no-op changes and still catches the
+reordered prompt 99.4% of the time. Now the suite size helps, as it should. The
+rule that generalises:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Signal against the noise floor, field accuracy</div>
+<svg viewBox="0 0 760 250" role="img" aria-label="Bar chart comparing the eval gate noise floor of 0.6 points against a 3.4 point regression from reordering prompt rules and a 15.84 point regression from deleting a rule">
+  <text x="8" y="16" class="t-xs t-muted t-b">MEASURED ON 100 ITEMS, FIVE RUNS PER PROMPT</text>
+
+  <text x="8" y="48" class="t-xs t-b">noise floor</text>
+  <text x="8" y="64" class="t-xs t-muted">same prompt, two runs</text>
+  <rect x="200" y="36" width="18" height="26" rx="3" class="box"/>
+  <text x="228" y="55" class="t-sm t-mono">0.60 pt</text>
+
+  <text x="8" y="106" class="t-xs t-b t-accent">rules reordered</text>
+  <text x="8" y="122" class="t-xs t-muted">nothing added or removed</text>
+  <rect x="200" y="94" width="102" height="26" rx="3" class="box-accent"/>
+  <text x="312" y="113" class="t-sm t-mono">3.40 pt &#183; 5.7x noise</text>
+
+  <text x="8" y="164" class="t-xs t-b">one rule deleted</text>
+  <text x="8" y="180" class="t-xs t-muted">the obvious regression</text>
+  <rect x="200" y="152" width="475" height="26" rx="3" class="box"/>
+  <text x="200" y="200" class="t-sm t-mono">15.84 pt &#183; 26x noise</text>
+
+  <path d="M8,216 H752" class="ln-thin"/>
+  <text x="8" y="238" class="t-xs t-muted">A gate with a 1-point threshold sees both regressions and blocks 4.3% of no-op changes. A gate with no threshold blocks 42.5% of them.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The deleted rule is not the interesting case. The reordered prompt is: a diff
+that no reviewer would question, nearly six times the noise floor, and entirely
+inside one field.
+:::
+::::
+
+**Set the threshold from your measured noise floor, not from a round number.**
+Run your suite against an unchanged system five times, take the widest gap, and
+put the threshold above it. That is a twenty-minute experiment that turns a gate
+people learn to ignore into one they trust. A gate that is overridden by habit
+is worse than no gate, because it launders the override into a green check.
+
+## The golden set has a lifecycle {#sec-production-eval-golden}
+
+The suite above was generated, which is honest for measuring a noise floor and
+useless for measuring quality: it contains exactly the phenomena its templates
+contain. A real golden set comes from real traffic, and it is not a static
+artefact.
+
+**It is born from failures.** The first entries should be things that actually
+broke. @sec-observability's traces are the raw material: the run someone
+complained about is a scenario with its inputs already recorded.
+
+**It must be sampled deliberately, not conveniently.** Traffic is
+heavy-tailed, so uniform sampling gives you a hundred variations of the most
+common request. Stratify — by intent, by length, by language, by customer
+segment — and deliberately oversample the rare and the hard, or the set will be
+easy in exactly the way production is not.
+
+**It carries personal data, and that is a decision.** Real traffic contains real
+customers. @sec-observability's redaction argument applies, and pseudonymising
+before the set enters the repository is the only place it can be done once;
+@sec-governance covers the obligations. A golden set is a copy of production
+data with a long retention period, which is precisely the thing your policy is
+about.
+
+**It ages, and the failure is silent.** Two mechanisms. The set gets *easier* as
+you fix the things in it, so a stable score means less each quarter — the same
+saturation @sec-llm-eval described for public benchmarks, arriving in your own
+repository. And the traffic moves out from under it: users find new phrasings,
+the product ships new features, and the set describes last year's product.
+[A golden set that has not changed in six months is not stable, it is
+stale.]{.hl} Budget refresh as routine work: retire items nothing fails, add
+items from recent failures, and record when each item entered.
+
+**Its size is set by @sec-llm-eval's arithmetic, not by taste.** That chapter
+measured it: at 80% power on a system that is right 80% of the time, 30 items
+detect nothing at all, 100 items detect 13.4 points, and 1,000 detect 4.8. Note
+what that means next to this chapter's numbers — the reordered prompt's 3.4-point
+drop is *below* what 1,000 items can resolve as a difference in the population,
+even though a paired comparison on the same 100 items catches it 99.4% of the
+time. Pairing is doing the work, which is why a gate compares runs on identical
+items rather than on fresh samples.
+
+## Scoring live traffic without scoring all of it {#sec-production-eval-online}
+
+Offline evaluation asks whether the system handles cases you collected. Online
+evaluation asks whether it is handling the cases arriving right now. You cannot
+score all of them — judging every request roughly doubles inference cost — so the
+question is what to sample.
+
+The cheap signals first, because they need no judge and cover all traffic:
+schema validity and parse rate (@sec-decoding), refusal rate, latency and token
+counts (@sec-observability), tool error rate, retry rate, and truncation at the
+step ceiling (@sec-deployment). None of these tell you whether an answer was
+good, and all of them move sharply when something has broken.
+
+Then a judge, on a sample, with three things sampled together:
+
+- **a small uniform slice** — a fixed percentage, so the baseline is comparable
+  over time;
+- **everything that already looks wrong** — errors, retries, ceiling hits,
+  thumbs-down, escalations;
+- **a stratified slice of the rare cases** you would otherwise never see.
+
+Two disciplines make the number usable. **Audit the online judge exactly as
+@sec-llm-eval audits an offline one** — it is the same instrument with less
+supervision, and a judge that flips on 38% of items when you swap the order will
+do so in production too. And **record the judge's version and prompt alongside
+the score**, because a judge upgrade shifts the whole series; @sec-gateway's
+pinning argument applies to the evaluator as much as to the model.
+
+## Three kinds of drift that look identical on a dashboard {#sec-production-eval-drift}
+
+A quality metric declines. The dashboard shows one line going down, and there
+are three unrelated causes with three unrelated fixes.
+
+| what moved | what it looks like | how to tell | what to do |
+|:--|:--|:--|:--|
+| **The model** | a step change on a specific day, across all traffic | `gen_ai.response.model` changed while `request.model` did not (@sec-observability) | pin versions (@sec-gateway); re-run the golden set against both |
+| **The inputs** | a gradual slide, concentrated in some segments | input distribution moved: new phrasings, lengths, languages, a new customer | refresh the golden set; the system did not change, the job did |
+| **The system** | a step change you can attribute to a deploy | it lines up with a release (@sec-deployment) | the gate should have caught it; add the case that escaped |
+
+: Same line, three causes {tbl-colwidths="[14,28,32,26]"}
+
+[Recording the responded model and the input distribution is what separates
+these; without them, all three are "quality is down" and the response is a
+guess.]{.hl} The distinguishing evidence is cheap and must be collected in
+advance — you cannot reconstruct last month's input distribution after the fact.
+
+A fourth case deserves naming because it is the most common of all: nothing
+drifted, and your metric is noisy. That is what the noise floor is for. A weekly
+score that moves 0.5 points is not a signal on a suite whose measured floor is
+0.6.
+
+## Routing the uncertain cases to people {#sec-production-eval-humans}
+
+Automated scoring runs out where it matters most: the cases where the system is
+unsure, the judge is unreliable, or the cost of being wrong is high. Those go to
+people, and the pipeline is @sec-data-annotation's, pointed at production.
+
+What makes it work is that routing is a *policy*, written down and measured, not
+a queue somebody watches. Three inputs decide it: model uncertainty where you
+have it, disagreement between judges or between a judge and a rule, and
+stakes — a refund, a medical claim and a shipping query do not deserve the same
+scrutiny. @sec-guardrails is where the enforcement side of that policy lives.
+
+The output of human review is not one artefact but three, and teams routinely
+capture only the first: the immediate decision on that case; a labelled item for
+the golden set; and, when the same failure appears a third time, a change to the
+system rather than a third correction. [If human review produces only decisions,
+you have bought a manual process, not a feedback loop.]{.hl}
+
+The cost model that follows is worth stating plainly, because it is what makes
+the case to a budget-holder: review capacity is fixed, so the question is never
+"should humans check this" but "which slice of traffic do the humans we have
+look at". That makes routing a resource-allocation problem with an obvious
+objective — send them the cases where their judgement changes an outcome.
+
+## The loop this part builds toward {#sec-production-eval-loop}
+
+Every chapter in this part has been one arc of the same loop, and it is worth
+seeing assembled:
+
+1. **Serve it** (@sec-serving) and **route it** (@sec-gateway).
+2. **Deploy it so failure is survivable** (@sec-deployment).
+3. **Instrument it** (@sec-observability), so a complaint reaches a span.
+4. **Turn that span into a test** — this chapter, and @sec-agent-eval's
+   discipline.
+5. **Gate the next change on the test**, with a threshold set from a measured
+   noise floor.
+6. **Sample live traffic** to find the failures nobody reported.
+7. **Route the uncertain ones to people**, and feed their labels back to step 4.
+
+The loop is not exotic. It is the operational rhythm of any mature software
+system, with two adjustments for this setting: the tests are statistical rather
+than deterministic, and the artefact under test is a text file that nobody
+thinks of as code.
+
+## Intuition checks {#sec-production-eval-intuition}
+
+Answer each one before you open it. The first three carry the chapter's
+measurements — the noise floor, the cosmetic edit that was not cosmetic, and the
+gate that gets worse as it grows. The last three are about what a green gate
+does and does not license you to believe.
+
+::: {.callout-note collapse="true"}
+## 1. Are LLM eval scores too noisy to gate a merge on?
+
+Measure it before believing either answer. Here they were not.
+
+The same prompt, run five times over the same 100-item suite, spanned **0.60
+points** of field accuracy — the widest gap between any two identical runs. That
+is the noise floor, and it is small enough to gate on.
+
+The number is task-specific and will be larger with a judge in the loop
+(@sec-llm-eval measured a judge flipping on 38% of items) or a smaller suite. The
+transferable part is not 0.60; it is that a twenty-minute experiment — run the
+unchanged system five times, take the widest gap — replaces an argument with a
+threshold.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. A colleague reorders the rules in a prompt. Same rules, same words. Safe?
+
+No, and this is the chapter's central measurement.
+
+Reordering six rules — none added, none removed, no wording changed — cost
+**3.40 points of field accuracy and 9.20 points of exact match**, roughly six
+times the noise floor. The whole regression sat in one field: `day` fell from 91
+to 74 out of 100.
+
+The mechanism is nameable. Across a 40-item probe, every wrong `day` under both
+prompts was the leading digits of the *amount* — the model bleeds one field into another, and
+moving the `amount` rule above the `day` rule tripled how often it did. The bug
+existed in the shipped prompt at 10%; the reorder amplified it.
+
+A prompt has no interface, so no edit to it is provably local. That is the
+argument for gating prompt changes at all.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your eval gate is flaky. Should you add more test cases?
+
+Not on its own — with a naive gate, more cases make it flakier.
+
+Measured: a gate that blocks whenever the new score is lower falsely blocks
+**22.9%** of no-op changes at 20 items, **35.6%** at 50, and **42.5%** at 100. At
+small sizes the two runs often tie exactly and ties pass; as the suite grows,
+exact ties disappear and the comparison converges on a coin flip.
+
+Add a threshold first. At one point and 100 items, false blocks fall to **4.3%**
+while the reordered prompt is still caught **99.4%** of the time — and now the
+extra cases help, as you expected them to. Set the threshold from your measured
+noise floor rather than from a round number.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Should the gate run at temperature 0?
+
+It is a real benefit with two real limits.
+
+At temperature 0 the two runs here were byte-identical per item — not just the
+same score, the same result on all 100. That removes the noise floor and makes a
+failing gate reproducible on a laptop, which is worth a lot.
+
+But greedy decoding scored **95.20**, *below* the entire temperature-0.7 range of
+95.40–96.00: it is one particular sample, not the best one. And it fixed nothing
+— the leading-digit bug was still there. You also probably do not serve users at
+temperature 0, so the gate measures a configuration you do not ship.
+
+Reasonable resolution: gate at temperature 0 for reproducibility, and separately
+track the sampled configuration you actually serve.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your golden set's score has been flat for six months. Good news?
+
+Almost certainly not — it is the most common way an eval program dies quietly.
+
+Two things happen at once. The set gets easier as you fix what is in it, so a
+flat score reflects a solved set rather than a healthy system: @sec-llm-eval's
+benchmark saturation, arriving in your own repository. And traffic moves out from
+under it — new phrasings, new features, new customers — so the set describes last
+year's product.
+
+A stale set is worse than no set, because it produces a green check. Retire items
+nothing fails, add items from recent failures, record when each entered, and
+treat refresh as routine work rather than a project.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Quality is down 4 points this month. What broke?
+
+Four candidates, and you cannot distinguish them after the fact without evidence
+collected in advance.
+
+**The model moved** — a step change on one day, visible as
+`gen_ai.response.model` changing while `request.model` did not
+(@sec-observability). **The inputs moved** — a gradual slide in some segments;
+the system is unchanged and the job is not. **The system moved** — a step change
+that lines up with a deploy, and a case your gate did not contain. **Or nothing
+moved** and the metric is noisy.
+
+Rule out the fourth first, using the noise floor. Then the responded model and
+the input distribution separate the other three — both cheap, and both impossible
+to reconstruct retrospectively.
+:::
+
+## Interview questions {#sec-production-eval-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurement makes answerable.
+:::
+
+### Testing whether you understand the problem
+
+**Q: How is evaluating an LLM system in CI different from running unit tests?**
+
+The assertion is statistical rather than deterministic. A unit test returns the
+same answer every run; a suite score is a random variable, so a gate needs a
+threshold and the threshold needs a measured noise floor. Say how you would get
+one: run the unchanged system five times over the same suite and take the widest
+gap. Measured here that was 0.60 points on 100 items — small enough to gate on,
+which is the opposite of the usual assumption.
+
+**Q: A change to a prompt only reorders existing instructions. Does it need an
+eval run?**
+
+Yes, and this is the case that convinces people. Reordering six rules with no
+other edit cost 3.4 points of field accuracy and 9.2 of exact match here — about
+six times the noise floor — with the entire regression inside one field. A prompt
+has no interface, so no edit is provably local, and a reviewer has no way to
+tell a cosmetic prompt change from a behavioural one by reading it.
+
+**Q: How would you size a golden set?**
+
+From the difference you need to detect, using @sec-llm-eval's arithmetic: at 80%
+power on an 80%-accurate system, 100 items resolves 13.4 points and 1,000
+resolves 4.8. Then note the distinction that matters for gating — those are
+unpaired numbers, and a gate compares two runs on the *same* items. Pairing is
+why a 3.4-point regression is caught 99.4% of the time on 100 items even though
+it is below what 1,000 items resolves unpaired.
+
+### Testing whether you have run one
+
+**Q: Your eval gate blocks good changes and people started overriding it. Fix
+it.**
+
+First diagnose rather than loosen it: the usual cause is a gate with no
+threshold, which measured here falsely blocks 42.5% of no-op changes at 100
+items — and gets worse as the suite grows, because exact ties become rare. Set a
+threshold from the measured noise floor; at one point that fell to 4.3% while
+still catching a real regression 99.4% of the time. Then say why urgency matters:
+a habitually overridden gate is worse than none, because the override is recorded
+as a green check.
+
+**Q: Offline evals are green and users are complaining. What do you do?**
+
+Accept that the suite is the hypothesis being falsified. Go to traces
+(@sec-observability), find the complained-about runs, and check whether the
+failure class exists in the suite at all — usually it does not, which is a
+curation problem rather than a scoring one. Add those cases, then ask why they
+were absent: convenience sampling from a heavy-tailed distribution, or a set that
+has aged out. Also check the fourth possibility — that the offline metric is
+measuring something users do not care about.
+
+**Q: How much production traffic would you score with an LLM judge, and which?**
+
+Not all of it: judging every request roughly doubles inference cost. Take the
+free signals on 100% — parse rate, refusals, latency, tool errors, ceiling hits —
+then judge three overlapping samples: a fixed uniform slice for a comparable
+baseline, everything that already looks wrong, and a stratified slice of rare
+cases. Then the two disciplines: audit the online judge the way you would an
+offline one, and pin and record its version, because a judge upgrade shifts the
+entire series.
+
+## The 2026 toolbox {#sec-production-eval-tools}
+
+The measurement needed a model, a scoring loop and the standard library, so the
+first table is short. Read the second as two layers: harnesses that run and score
+a suite, and platforms that additionally store the runs so you can compare them
+over time — the second group is what a golden set's lifecycle actually needs.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving `qwen2.5:7b` for all 1,700 suite items |
+| `pytest` | 9.1.1 | the gate this chapter's discipline borrows from; the suite runs as ordinary tests |
+
+: The stack these numbers came from. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `promptfoo` | 0.122.2 | declarative prompt test suites with assertions and a CI runner; the shortest path from this chapter to a working gate |
+| `inspect-ai` | 0.3.261 | the UK AI Safety Institute's eval framework; solvers and scorers as composable pieces, strong on reproducibility |
+| `deepeval` | 4.2.0 | eval metrics packaged as pytest assertions, which fits the gate-as-test framing directly |
+| `ragas` | 0.4.3 | retrieval-specific metrics when the thing under test is a RAG pipeline (@sec-rag) |
+| `langfuse` | 4.15.1 | traces, datasets and eval runs in one place, so a golden set and the traces it came from stay linked |
+| `arize-phoenix` | 20.5.0 | open-source tracing plus evaluation you can run locally; useful for the trace-to-test step |
+| `braintrust` | 0.36.0 | hosted eval platform built around comparing runs across versions over time |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[26,12,62]"}
+
+## Lab: measure your gate before you trust it {#sec-production-eval-lab}
+
+### Step 1 — build a suite with ground truth you did not label
+
+Fifty to a hundred items, generated from templates with randomised slots, on a
+task you care about. The point of generating rather than labelling is that
+annotation error cannot contaminate the noise-floor measurement. Keep it in the
+repository next to the prompt.
+
+### Step 2 — measure your noise floor
+
+Run the unchanged system over the suite five times and record the widest gap
+between any two runs. Do this before writing any gate logic. Write the number
+down where the gate's threshold is defined, with the date and the model version.
+
+### Step 3 — make a regression you would approve in review
+
+Not a deleted rule — that is too easy. Reorder the instructions, or reword one
+sentence without changing its meaning. Run it five times. Report the delta as a
+multiple of your noise floor, and report per-field or per-category numbers, not
+only the aggregate.
+
+### Step 4 — find the mechanism
+
+If the change moved the score, find out *how*. Print the wrong predictions and
+look for a pattern; in this chapter every wrong `day` turned out to be the
+leading digits of the amount. A regression with a named mechanism becomes a test
+case; a regression that is only a number becomes an argument.
+
+### Step 5 — build the gate and measure its false-block rate
+
+Wire the suite into CI so it blocks a merge. Then submit five changes that change
+nothing at all and record how often it blocks them. If that rate is above a few
+percent, your threshold is too tight — go back to step 2 rather than to the
+override button.
+
+### Step 6 — run it at temperature 0 as well
+
+Compare reproducibility and score. Confirm whether your per-item results are
+identical across runs, and whether the greedy score sits inside or below your
+sampled range. Decide deliberately which configuration the gate uses, and write
+down why.
+
+### What to hand in
+
+Your measured noise floor with the five run scores behind it; the delta from a
+review-invisible edit, as a multiple of that floor, with per-field breakdown; the
+mechanism you found for it; your gate's threshold with the reasoning; and its
+measured false-block rate on five no-op changes.
+
+## Exercises {#sec-production-eval-exercises}
+
+1. **Your own noise floor.** Run an unchanged system five times over your real
+   eval set. Report the widest gap, and compare it to the size of the last
+   improvement your team claimed. If the claim is smaller than the floor, say
+   what that means.
+
+2. **The invisible edit.** Take a prompt in production and reorder its
+   instructions without changing any of them. Run both versions five times.
+   Report the delta with per-field numbers, and whether a reviewer could have
+   predicted the direction.
+
+3. **Threshold sweep.** Using resampled runs, plot false-block rate and
+   catch-rate against threshold for suite sizes 20, 50 and 100. Pick your
+   operating point and justify it in one paragraph.
+
+4. **Pairing versus power.** Compute the unpaired sample size needed to resolve
+   your measured regression at 80% power (@sec-llm-eval), then compare it to the
+   suite size at which your paired gate catches it 95% of the time. Explain the
+   gap.
+
+5. **Golden set age.** For each item in your eval set, record when it was added
+   and whether anything has failed it in the last quarter. Retire the items
+   nothing fails and report how many are left.
+
+6. **Trace to test.** Take three real production complaints, find their traces
+   (@sec-observability), and convert each into a suite case. Then check whether
+   the original suite contained anything in that failure class.
+
+7. **The three drifts.** Instrument enough to distinguish a model change, an
+   input-distribution change and a system change. Then simulate one of each and
+   confirm your dashboard tells them apart. Note which evidence you had to
+   collect in advance.
+
+## Where to go deeper {#sec-production-eval-deeper}
+
+Before reading: run your existing eval suite twice, unchanged, and look at the
+two numbers. Whether you can say which differences are real is the whole subject
+of this chapter.
+
+This chapter cites no papers, so there is one table rather than the usual two.
+The statistical foundations it stands on are in @sec-llm-eval; what follows is
+the tooling that turns them into a gate.
+
+| resource | what it is |
+|:--|:--|
+| [`promptfoo`](https://github.com/promptfoo/promptfoo) | declarative prompt evals with a CI runner; the shortest path from this chapter to a gate that blocks a merge |
+| [`inspect_ai`](https://github.com/UKGovernmentBEIS/inspect_ai) | the UK AI Safety Institute's framework; read it for how it separates solvers from scorers, which is the abstraction most homegrown harnesses are missing |
+| [`deepeval`](https://github.com/confident-ai/deepeval) | eval metrics as pytest assertions — the gate-as-test framing in library form |
+| [`ragas`](https://github.com/explodinggradients/ragas) | retrieval-specific metrics for when the system under test is a RAG pipeline (@sec-rag) |
+| [`langfuse`](https://github.com/langfuse/langfuse) | traces, datasets and eval runs in one system, which is what keeps a golden set linked to the traces it came from |
+| [`phoenix`](https://github.com/Arize-ai/phoenix) | open-source tracing and evaluation you can run locally; the cheapest way to practise the trace-to-test step |
+| [`braintrust-sdk`](https://github.com/braintrustdata/braintrust-sdk) | a hosted platform organised around comparing eval runs across versions over time |
+| [`openai/evals`](https://github.com/openai/evals) | an early, widely-copied eval registry; useful mostly for reading how other people specified their suites |
+
+: Beyond this chapter {tbl-colwidths="[30,70]"}
+
+## What to remember {#sec-production-eval-summary}
+
+- **A prompt change is a code change, and an eval score is not a unit test.**
+  The suite lives in the repository, runs on every prompt change, and blocks the
+  merge — but the assertion is statistical, so the gate needs a threshold, and
+  the threshold needs a number almost nobody measures.
+
+- **Measure your noise floor; it is a twenty-minute experiment.** Five identical
+  runs of the same 100-item suite spanned **0.60 points** of field accuracy. That
+  is small enough to gate on, which contradicts the folklore — and it is the only
+  number that makes any later delta interpretable.
+
+- **A cosmetic prompt edit is not a cosmetic change.** Reordering six rules with
+  nothing added, removed or reworded cost **3.40 points of field accuracy and
+  9.20 points of exact match** — about six times the noise floor — and the entire
+  regression sat in one field, `day` falling from 91 to 74. [A prompt has no
+  interface, so no edit to it is provably local.]{.hl}
+
+- **Report per-field numbers, not only an aggregate.** Across a 40-item probe,
+  every wrong `day` under both prompts was the leading digits of the *amount*: the model bleeds one
+  field into another, and moving the `amount` rule above the `day` rule tripled
+  how often it did. The aggregate showed a wobble; the breakdown showed a
+  mechanism, and only a mechanism becomes a test.
+
+- **A gate with no threshold gets worse as your suite grows.** Blocking whenever
+  the new score is lower falsely blocked **22.9%** of no-op changes at 20 items
+  and **42.5%** at 100, because exact ties vanish and the comparison converges on
+  a coin flip. A 1-point threshold at 100 items gives **4.3%** false blocks and
+  still catches the reordered prompt **99.4%** of the time.
+
+- **Temperature 0 buys reproducibility, not correctness.** Two runs were
+  byte-identical per item — but greedy decoding scored **95.20**, below the whole
+  sampled range of 95.40–96.00, and the leading-digit bug was still there. It is
+  also a configuration you probably do not serve.
+
+- **The golden set has a lifecycle, and staleness is silent.** It is born from
+  real failures, stratified rather than conveniently sampled, and it carries
+  personal data. It gets easier as you fix what is in it and the traffic moves
+  out from under it, so a set that has not changed in six months is not stable,
+  it is stale — and it still produces a green check.
+
+- **Score live traffic in layers.** Free signals on everything — parse rate,
+  refusals, latency, tool errors, ceiling hits — then a judge on three
+  overlapping samples: a fixed uniform slice, everything that already looks
+  wrong, and a stratified slice of the rare. Audit that judge, and pin and record
+  its version, because a judge upgrade shifts the whole series.
+
+- **Three drifts look identical on a dashboard.** The model moved, the inputs
+  moved, or the system moved — distinguishable only with the responded model and
+  the input distribution, both of which must be recorded in advance. Rule out the
+  fourth possibility first: that nothing moved and the metric is noisy.
