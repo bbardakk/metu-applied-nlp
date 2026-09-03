@@ -2,8 +2,8 @@
 
 ODTÜ'de bilgisayar mühendisi olmayan mühendisler ve İstatistik öğrencilerine
 verilen Applied NLP dersinin herkese açık, etkileşimli, canlı kitabı.
-İngilizce sürüm (`en/`) aktif; Türkçe sürüm (`tr/`) çeviri iskeleti olarak
-hazır ve aynı pipeline'dan yayınlanıyor.
+Her iki sürüm de tamamlandı: 39 bölüm ve 6 ek, hem İngilizce (`en/`) hem
+Türkçe (`tr/`), aynı pipeline'dan yayınlanıyor.
 
 **Stack:** [Quarto](https://quarto.org) book × 2 (EN + TR) → GitHub Actions →
 GitHub Pages. İnteraktifler Observable JS (tarayıcıda çalışır, sunucu yok);
@@ -30,16 +30,19 @@ kod [MIT](https://opensource.org/licenses/MIT). Ayrıntı: `LICENSE`.
 │   ├── index.qmd            # landing page / kapak (BPE-chip hero)
 │   ├── cite.qmd             # künye: atıf, lisans, sürüm, yazar, colophon
 │   ├── preface.qmd          # önsöz
-│   ├── chapters/            # 39 bölüm / 7 part (01-10 dolu, kalanı iskelet)
-│   ├── appendices/          # setup, math refresher, EN↔TR sözlük
+│   ├── chapters/            # 39 bölüm / 7 part
+│   ├── appendices/          # kurulum, matematik, sözlük, bitirme projesi,
+│   │                        #   ders planı, Türkçe kaynaklar
 │   │                        #   glossary.csv = sözlüğün tek doğruluk kaynağı
 │   ├── theme/               # custom-light.scss / custom-dark.scss
 │   └── _templates/          # chapter-template.qmd — yeni bölüm için kopyala
-├── tr/                      # Türkçe kitap (aynı yapı, çeviri iskeleti)
+├── tr/                      # Türkçe kitap (aynı yapı, tam çeviri)
 ├── .github/workflows/
 │   ├── publish.yml          # main push → render en + tr → Pages deploy
 │   └── pr-check.yml         # PR → render kontrolü (deploy yok)
-├── scripts/                 # build-glossary.py — CSV'den sözlük tablosu üretir
+├── scripts/                 # build-glossary.py — CSV'den iki sürümün de
+│                            #   sözlük tablolarını üretir; check-* betikleri
+│                            #   `make check` tarafından koşulur
 ├── index.html               # kök yönlendirme → /en/
 └── Makefile                 # preview / render / serve / glossary kısayolları
 ```
@@ -77,7 +80,8 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
   sıra uyuşmazsa build'i düşürür.
 - **Sözlüğe terim ekleme:** `en/appendices/glossary.csv`'yi düzenle (grup
   sırası korunur, grup içinde alfabetik), sonra `make glossary`.
-  `c-glossary.qmd`'deki tablolar üretilmiştir — elle düzenleme.
+  `en/appendices/c-glossary.qmd` ve `tr/appendices/c-sozluk.qmd` içindeki
+  tablolar üretilmiştir — elle düzenleme.
 - **İmza stiller:** vurgu için `[önemli ifade]{.hl}` (fosforlu kalem
   efekti); interaktifleri `::: {.anlp-widget}` bloğu içine al.
 - **Çapraz referans:** başlık çapasıyla `@sec-transformers`; kaynakça için
@@ -139,11 +143,16 @@ değerleri yapıştır. TR için aynısını `tr/_quarto.yml`'a kopyala.
 ## 7) Türkçe sürümü büyütme
 
 1. Terim önce `en/appendices/glossary.csv`'de sabitlenir (tek doğruluk
-   kaynağı) ve `make glossary` ile tablolar üretilir, sonra çeviri yapılır.
-2. `en/chapters/NN-xxx.qmd` → `tr/chapters/NN-xxx.qmd` olarak çevir,
-   `tr/_quarto.yml` `chapters:` listesine ekle.
-3. `tr/index.qmd`'deki çeviri durumu tablosunu güncelle.
-4. Sidebar'daki dil değiştirici (🌐) iki yönü de bağlıyor; kök `/`
+   kaynağı) ve `make glossary` ile iki sürümün tabloları da üretilir, sonra
+   çeviri yapılır. `scripts/tr-terms.sh en/chapters/NN-xxx.qmd`, o bölümde
+   glossary'ye bağlı her terimin onaylı Türkçe karşılığını yazdırır.
+2. `en/chapters/NN-xxx.qmd` → `tr/chapters/NN-yyy.qmd` olarak çevir ve
+   `tr/_quarto.yml` `chapters:` listesine ekle. Dosya adı iki sürümde
+   **farklı** olmalı; `renumber-chapters.py` çakışmayı reddeder.
+3. `tr/index.qmd`'deki kısım kartlarına ve `tr/_quarto.yml`'a ekle.
+4. `make check` — bağlantılar, çapalar, sözlük kullanımı, OJS hücreleri ve
+   tema eşitliği tek komutta doğrulanır.
+5. Sidebar'daki dil değiştirici (🌐) iki yönü de bağlıyor; kök `/`
    yönlendirmesi `index.html`'de.
 
 ## 8) Viral dağıtım disiplini (her bölüm yayını)
