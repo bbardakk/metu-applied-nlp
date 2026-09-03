@@ -1,0 +1,799 @@
+# Korkuluklar ve İnsan Gözetimi {#sec-korkuluklar}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 37. bölüm](../../en/chapters/37-guardrails-oversight.html). Tümüyle
+belirlenimci ve içinde hiç model olmayan tek bir ölçüm: yerleştirilmiş
+tanımlayıcıları kuruluş gereği bilinen 480 mesajlık bir derlem üzerinde dört
+Türkçe kişisel veri dedektörü, kesinlik ve duyarlılıkla puanlanmış. Tek bir
+argümanı somutlaştırmak için var — bir korkuluğun arıza kipi "bir şeyi kaçırdı"
+değil, "bir şeyi kaçırdı *ve* bunu anlayamıyorsunuz". Yazılım: yalnızca
+Python 3.14.5 standart kütüphanesi, hiçbir üçüncü taraf bağımlılığı yok.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- bir korkuluğun ne işe yaradığını ve neden bir güvenlik sınırı olmadığını
+  söyleyebilirsiniz;
+- doğrulama yapan bir kişisel veri dedektörü kurabilir ve doğrulamanın size neye
+  mal olduğunu bilirsiniz;
+- geri döndürülebilir biçimde maskeleyebilir, böylece maskelenmiş bir konuşma
+  hâlâ yararlı iş yapabilir;
+- bir sistemin yapabileceği her eylemi geri alınıp alınamayacağına göre
+  sınıflandırabilirsiniz;
+- kesen, inceleyen ve devam ettiren bir onay kapısı tasarlayabilirsiniz;
+- gece üçte yanlış davranan bir ajan için el kitabını yazabilirsiniz;
+- bir olayı kimsenin okumadığı bir belgeye değil, bir regresyon testine
+  çevirebilirsiniz.
+
+## Korkuluklar risk azaltmadır, güvenlik sınırı değil {#sec-korkuluklar-sinir}
+
+Diğer her şeyin dayandığı ayrımla başlayın, çünkü bunu yanlış anlamak takımların
+yanlış bir güvenlik hissiyle sonuçlanma biçimi.
+
+Bir **korkuluk**, normal davranan bir sistemden çıkan kötü sonuçların oranını ve
+şiddetini azaltır: bir kullanıcı bir sohbete kimlik numarası yapıştırır, bir
+model vermemesi gereken bir tavsiyeye kayar, bir ajan kimsenin niyet etmediği
+kadar büyük bir iade yapmaya çalışır. Buradaki hasım entropidir — alışılmadık
+şeyler yapan kullanıcılar, yanılan modeller, kimsenin saymadığı uç durumlar.
+
+Bir **güvenlik sınırı**, onu kırmaya aktif olarak çalışan birine karşı dayanır. O,
+@sec-ajan-guvenligi'nin konusu ve çoğu korkuluğu alt eden teknik utandıracak
+kadar basit: biraz farklı biçimde yeniden dene.
+
+[Korkuluklar olasılıksal filtrelerdir, dolayısıyla bir saldırgan çoğu zaman doğru
+olan bir bileşene karşı sınırsız yeniden deneme hakkı elde eder.]{.hl} "Çoğu
+zaman", kazara zararı azaltmak için iyi bir özellik ve kasıtlı zararı durdurmak
+için işe yaramaz bir özelliktir. Pratik sonuç mimari: bir korkuluğun yeri bir
+izin sisteminin *önüdür*, asla *yerine* değil. Bir ajanın 50.000 avroluk bir iade
+yapmasını engelleyen tek şey genellikle fark eden bir sınıflandırıcıysa, iade
+sınırı zorunlu kılınmıyordur.
+
+| | korkuluk | sınır |
+|:--|:--|:--|
+| **neyi durdurur** | kazaları, kaymayı, alışılmadık girdileri | kasıtlı denemeleri |
+| **neyden kurulur** | sınıflandırıcılar, düzenli ifadeler, prompt'lar, hakemler | izinler, izin listeleri, yetenek sınırları |
+| **nasıl arızalanır** | olasılıksal olarak ve sessizce | gürültülü ya da hiç |
+| **yeniden denemeler saldırgana yarar mı** | evet — problemin tamamı bu | hayır |
+| **işe yaradığının kanıtı** | ölçülmüş yanlış pozitif ve yanlış negatif oranları | neye ulaşılabildiğine dair bir argüman |
+
+: Rutin olarak birbirine karıştırılan iki farklı iş {tbl-colwidths="[22,40,38]"}
+
+Bu bölümün geri kalanı korkulukları iyi kurmakla ilgili; iyi kurmanın onları
+sınıra çevirmediği anlaşılmış olarak.
+
+## Bir kişisel veri dedektörünün gerçekte yapması gereken {#sec-korkuluklar-kisisel-veri}
+
+En yaygın korkuluk aynı zamanda en sık bozuk sevk edileni, çünkü bitmesinden çok
+önce bitmiş görünüyor. Türkçe destek trafiğinde kişisel veri saptamak iyi bir
+işlenmiş örnek: tanımlayıcıların yayımlanmış kontrol basamakları var, dolayısıyla
+doğruluk bir zevk meselesi değil doğrulanabilir bir şey.
+
+Derlem, yuvaları rastgeleleştirilmiş sekiz şablondan kurulmuş 480 sentetik Türkçe
+destek mesajı. Doğru cevap kuruluş gereği biliniyor: **360 TC kimlik numarası
+(TCKN)** ve **120 IBAN** yerleştirilmiş; bunların %15'i tek basamaklı bir yazım
+hatası taşıyor — kullanıcının kendi tanımlayıcısını yanlış yazması. Yanlarında
+**TC kimlik numarası olmayan 540 tane on bir haneli dizge** duruyor: boşluksuz
+yazılmış cep telefonu numaraları, sipariş referansları, kargo takip kodları,
+fatura numaraları, sayaç okumaları. Problemin tamamı bu çakışma. `05xxxxxxxxx`
+biçiminde yazılmış bir Türk cep telefonu numarası tam olarak on bir hane, bir
+TCKN de öyle.
+
+Dört dedektör, her biri örüntünün bir üst kümesi ya da filtresi:
+
+```text
+TCKN, 480 messages, 360 planted, 540 eleven-digit decoys
+
+  detector                      hits   correct   precision   recall
+  pattern only                   900       360       40.0%   100.0%
+  pattern + checksum             308       305       99.0%    84.7%
+  pattern + context word         180       180      100.0%    50.0%
+  pattern + (checksum OR word)   340       337       99.1%    93.6%
+```
+
+### Naif dedektör onda altı kez yanılıyor
+
+On bir haneli bir düzenli ifade yerleştirilmiş her TCKN'yi buluyor — duyarlılık
+%100, yani insanların raporladığı sayı — ve **döndürdüğünün %60'ı TC kimlik
+numarası değil**. O dedektör maskelemeyi sürüyorsa sipariş numaralarını ve
+telefon numaralarını maskeliyor ve maskelenmiş bileti okuyan destek çalışanı
+işini yapamıyor. Bir uyarıyı sürüyorsa uyarı bir hafta içinde görmezden geliniyor.
+
+[Bir korkuluğun onu kullanmak zorunda olan insanlarla temastan sağ çıkıp
+çıkmayacağını belirleyen şey duyarlılık değil kesinliktir.]{.hl}
+
+::: {.column-margin}
+%40 rakamı derlemin kaç tuzak içerdiğine bağlı — burada yerleştirilmiş
+tanımlayıcı başına 1,5, ki bu benim seçtiğim bir sayı. Yön sağlam, büyüklük
+değil; kendi trafiğinizde ölçün.
+:::
+
+### Doğrulama kesinlik satın alır ve gerçek bir şey alır
+
+TCKN'nin yayımlanmış iki basamaklı bir sağlama toplamı var. Onu uygulamak
+kesinliği %40'tan **%99,0'a** çıkarıyor, ki herkesin beklediği sonuç bu ve
+**15,3 puan duyarlılığa** mal oluyor, ki kimsenin planlamadığı sonuç da bu.
+
+Neyi düşürdüğüne bakın. Dedektör 360 yerleştirilmiş tanımlayıcının 305'ini buldu
+ve 305, yanlış yazılmamış yerleştirilmiş tanımlayıcıların tam olarak sayısı.
+Duyarlılık kaybı yazım hatası oranına yaklaşık değil; mekanik olarak *o*.
+Ve düşürülen maddeler düşürülebilecek en kötü şeyler:
+
+[Yanlış yazılmış bir TC kimlik numarası hâlâ kütüklerinizde duran bir TC kimlik
+numarasıdır.]{.hl} Hâlâ kişisel veridir, bağlam içinde okuyabilen herkes için hâlâ
+bir kişiyi tanımlar ve kullanıcının doğru numarayı da içeren bir düzeltme gönderme
+olasılığının en yüksek olduğu durumdur. Filtre olarak yapılandırılmış bir
+doğrulayıcı, tam olarak bir uyum incelemecisinin en çok umursayacağı kayıtları
+siliyor.
+
+Sağlama toplamının ne kadar iş yaptığına dair bir ayar: rastgele on bir haneli bir
+dizge onu **1.000.000'de 9.960 kez**, yani kabaca **100'de 1** geçiyor. Bu güçlü
+ama belirleyici değil — çok sayıda sayısal dizge içeren bir derlemde tek başına
+sağlama toplamı yine de yüz aday başına kabaca bir yanlış pozitif bırakıyor.
+
+### Bağlam, doğrulamanın yitirdiğini geri kazandırıyor
+
+Üçüncü dedektör sağlama toplamını yok sayıyor ve farklı bir soru soruyor: sayının
+hemen öncesinde, otuz karakter içinde bir etiket var mı — `TC kimlik no`, `TCKN`,
+`kimlik numarası`?
+
+Kesinlik **%100**, duyarlılık **%50,0**. Duyarlılık rakamı bir keşif değil: bu
+derlemdeki TCKN taşıyan şablonların yarısı tanımlayıcıyı etiketliyor ve yarısı
+çıplak bırakıyor, dolayısıyla %50 geri çıkan tasarım parametresi. Önemli olan iki
+dedektörün *farklı* maddelerde arızalanması. Sağlama toplamı yanlış yazılmış
+tanımlayıcıları kaçırıyor; bağlam etiketsiz olanları kaçırıyor; hiçbiri diğerini
+gerektirmiyor.
+
+Öyleyse birleşimini alın. **Kesinlik %99,1, duyarlılık %93,6** — sağlama
+toplamının kesinliğinin neredeyse tamamı, duyarlılık kaybının üçte ikisi geri
+kazanılmış olarak.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Dört Türkçe kişisel veri dedektörü, kesinliğe karşı duyarlılık</div>
+<svg viewBox="0 0 760 300" role="img" aria-label="Dört kişisel veri dedektörünü karşılaştıran grafik: yalnızca örüntü yüzde 40 kesinlik ve yüzde 100 duyarlılık, örüntü artı sağlama toplamı yüzde 99 kesinlik ve yüzde 84,7 duyarlılık, örüntü artı bağlam kelimesi yüzde 100 kesinlik ve yüzde 50 duyarlılık, birleşim ise yüzde 99,1 kesinlik ve yüzde 93,6 duyarlılık">
+  <text x="8" y="16" class="t-xs t-muted t-b">480 MESAJ &#183; 360 YERLEŞTİRİLMİŞ TCKN &#183; 540 ON BİR HANELİ TUZAK</text>
+
+  <text x="8" y="52" class="t-xs t-b">yalnızca &#246;r&#252;nt&#252;</text>
+  <rect x="210" y="40" width="128" height="18" rx="3" class="box"/>
+  <text x="346" y="54" class="t-xs t-mono">kesinlik %40,0</text>
+  <rect x="520" y="40" width="160" height="18" rx="3" class="box"/>
+  <text x="688" y="54" class="t-xs t-mono">duyarlılık %100</text>
+
+  <text x="8" y="98" class="t-xs t-b">+ sağlama toplamı</text>
+  <rect x="210" y="86" width="317" height="18" rx="3" class="box"/>
+  <text x="535" y="100" class="t-xs t-mono">%99,0</text>
+  <rect x="520" y="86" width="136" height="18" rx="3" class="box"/>
+  <text x="664" y="100" class="t-xs t-mono">%84,7</text>
+
+  <text x="8" y="144" class="t-xs t-b">+ bağlam kelimesi</text>
+  <rect x="210" y="132" width="320" height="18" rx="3" class="box"/>
+  <text x="538" y="146" class="t-xs t-mono">%100</text>
+  <rect x="520" y="132" width="80" height="18" rx="3" class="box"/>
+  <text x="608" y="146" class="t-xs t-mono">%50,0</text>
+
+  <text x="8" y="190" class="t-xs t-b t-accent">ikisinin birleşimi</text>
+  <rect x="210" y="178" width="317" height="18" rx="3" class="box-accent"/>
+  <text x="535" y="192" class="t-xs t-mono">%99,1</text>
+  <rect x="520" y="178" width="150" height="18" rx="3" class="box-accent"/>
+  <text x="678" y="192" class="t-xs t-mono">%93,6</text>
+
+  <path d="M8,216 H752" class="ln-thin"/>
+  <text x="8" y="238" class="t-xs t-muted t-b">BİRLEŞİM NEDEN İŞE YARIYOR</text>
+  <text x="8" y="256" class="t-xs t-muted">Sağlama toplamı yanlış yazılmışları ka&#231;ırıyor &#183; bağlam etiketsizleri ka&#231;ırıyor &#183; iki arıza &#246;rt&#252;şm&#252;yor.</text>
+  <text x="8" y="278" class="t-xs t-muted">IBAN tersi durum: &#246;r&#252;nt&#252; zaten %100 kesin, dolayısıyla sağlama toplamı yalnızca ger&#231;eklerin %12,5'ini atıyor.</text>
+</svg>
+```
+
+::: {.fig-cap}
+İzlenecek eksen duyarlılık ekseni. Kesinliği yükselten her filtre gerçek kişisel
+veriyi atıyor ve tek soru başka bir şeyin onu yakalayıp yakalamadığı.
+:::
+::::
+
+### Örüntünün zaten belirsiz olmadığı yerde doğrulamayın
+
+IBAN sonuçları tam tersini söylüyor ve karşıtlık, üzerine iş yapılabilecek kısım.
+
+```text
+IBAN, 120 planted
+
+  detector             hits   correct   precision   recall
+  pattern only          120       120      100.0%   100.0%
+  pattern + checksum    105       105      100.0%    87.5%
+```
+
+`TR`nin ardından 24 hane, bu trafikteki başka hiçbir şeyle çakışmıyor,
+dolayısıyla örüntü zaten kusursuz. ISO 7064 mod-97 kontrolünü eklemek **sıfır**
+kesinlik satın alıyor ve gerçek IBAN'ların **%12,5'ini** atıyor — yine tam olarak
+yanlış yazılmış olanları.
+
+[Örüntünün belirsiz olduğu yerde doğrulayın; olmadığı yerde doğrulamayın.]{.hl}
+Bu, titiz hissettirdiği için tekdüze uygulanan türden bir şey ve buradaki tekdüze
+titizlik saf kayıp. Ölçümün desteklediği genel kural: **sağlama toplamını
+filtrelemek için değil, güveni sıralamak için kullanın.** Doğrulanmış bir isabet
+yüksek güvenlidir ve otomatik maskelenebilir; doğrulanmamış bir örüntü isabeti
+daha düşük güvenlidir ve o da maskelenmeli, farklı işaretlenmeli ve incelenmeli —
+sessizce düşürülmemeli.
+
+### Bu ölçümün göstermedikleri
+
+Sayılar fazla okunmasın diye dile getirilmiş üç sınır. Derlem sentetik ve tuzak
+yoğunluğu bir seçim, dolayısıyla %40 aktarılabilir değil örnekleyici. Yazım hatası
+modeli tek bir rastgele hane, ki bu gerçek yanlış yazmadan daha müşfik — insanlar
+harf yer değiştiriyor, kırpıyor ve boşluk ekliyor. Ve adlar, adresler ve serbest
+metin ifşaları hiç kapsanmıyor: onlar @sec-dizi-etiketleme'nin varlık tanımasını
+gerektiriyor, kontrol basamakları yok ve gerçek bir Türkçe dedektörün zorluğunun
+çoğunu harcayacağı yer orası.
+
+## Geri alabileceğiniz maskeleme {#sec-korkuluklar-maskeleme}
+
+Saptama işin yarısı. Bir isabetle ne yaptığınız, ürünün hâlâ çalışıp
+çalışmadığını belirliyor.
+
+Yıkıcı maskeleme — `12345678901`i `[REDACTED]` ile değiştirmek — güvenli ve
+sıklıkla işe yaramaz: ajan artık siparişi bulamıyor, devralan insan da bulamıyor.
+**Geri döndürülebilir token'laştırma** değeri kararlı bir tutamakla,
+`[TCKN_1]` ile değiştiriyor ve eşlemeyi modelin hiç görmediği ayrı bir depoda
+tutuyor. Ajan token'lar üzerinde akıl yürütüyor, araçlar token'ları güvenilir
+sınırın içinde değerlere çözüyor ve cevap çıkarken token'lardan arındırılıyor.
+
+Bunu işe yaratan dört özellik var ve her biri uygulamaların yanlış yaptığı bir yer:
+
+**Bir konuşma içinde kararlılık.** Aynı değer aynı token'ı almalı, yoksa model iki
+anmanın aynı kişi olup olmadığını anlayamaz. Farklı konuşmalar farklı token'lar
+almalı, yoksa token'ın kendisi bir tanımlayıcı hâline gelir.
+
+**Aşağı akıştaki kodun umursadığı yerde biçim korunması.** On bir hane bekleyen
+bir araç `[TCKN_1]`i reddeder. Ya araç token'ları çözer ya da token biçimi korur —
+ve biçimi korumak, token'ın gerçek veri sanılabileceği anlamına gelir, ki bu da
+kasıtlı olarak ele alınmalı.
+
+**Artık hassas varlık eşlemedir.** Kişisel veriyi kaldırmadınız; onu bir birleştirme
+anahtarıyla tek bir depoda yoğunlaştırdınız. O deponun, yönetişim bölümünün
+anlattığı saklama, erişim denetimi ve ikametgâh muamelesine ihtiyacı var ve
+transkriptlerle birlikte sızarsa özgününden kesinlikle daha kötü bir ihlaldir.
+
+**Maskeleme tek bir sınırda olur.** @sec-gozlemlenebilirlik bu argümanı telemetri
+için yaptı ve genelleşiyor: bir kez, veri onu kalıcılaştıran hiçbir şeye —
+modele, iz dışa aktarıcısına, kütük satırına, değerlendirme kümesine —
+ulaşmadan önce maskeleyin. Beş yerde maskelemek beş uygulama demek ve içlerinden
+biri yanlış.
+
+## Konusal korkuluklar ve yanılmanın maliyeti {#sec-korkuluklar-politika}
+
+Kişisel verinin ötesinde, çoğu ürünün sistemi bir konunun içinde tutması
+gerekiyor: ürünümüzle ilgili soruları cevapla, tıbbi tavsiyeyi reddet, bir
+rakibin hukuki sorunları hakkında asla spekülasyon yapma.
+
+Mekanizmalar tanıdık ve katmanlı — bir sistem prompt'u (en ucuz, en zayıf),
+girdide bir sınıflandırıcı, çıktıda bir sınıflandırıcı ve tam olarak
+belirtebildiğiniz bir avuç durumu sert biçimde engelleyen bir kural. Katmanlamaya
+değer; dile getirilmesi gereken kısım aritmetik.
+
+[Bir korkuluğun yanlış pozitif oranı tüm trafiğinizle, yanlış negatif oranı ise
+yalnızca seyrek kötü durumla çarpılır.]{.hl} %1 yanlış pozitif ve ayda bir milyon
+istekte, bir avuç kötü çıktı durdurulsun diye on bin meşru kullanıcı reddediliyor.
+Bunun doğru takas olup olmadığı tümüyle şiddete bağlı ve birinin seçtiği bir eşik
+değil, iki sayı da önünüzdeyken verilmiş açık bir karar olmalı.
+
+Bundan iki sonuç çıkıyor. **Güvene göre farklı reddedin** — yüksek güvenli bir
+politika isabeti engeller, marjinal olanı bir insana yönlendirir ya da
+açıklayıcı bir soru sorar; ikisine aynı davranmak sınıflandırıcının bilgisini
+harcar. Ve **korkuluğu bir sınıflandırıcı olarak ölçün**,
+@sec-llm-degerlendirme'nin hakemlere uyguladığı disiplinin aynısıyla: etiketli bir
+zor vaka kümesi, raporlanmış kesinlik ve duyarlılık ve her prompt ya da model
+değişikliğinden sonra yeniden ölçüm — çünkü @sec-uretim-degerlendirme davranışı
+kımıldatmanın ne kadar az şey gerektirdiğini gösterdi.
+
+## Her eylemi geri alınıp alınamayacağına göre sınıflandırın {#sec-korkuluklar-geri-alinabilirlik}
+
+Metin üzerindeki korkuluklar kolay yarı. Bir ajanın araçları olduğunda
+(@sec-arac-tasarimi) soru ne söylediği olmaktan çıkıp ne yaptığı hâline geliyor —
+ve düzenleyici ilke geri alınabilirlik.
+
+| sınıf | örnekler | varsayılan | ne istenmeli |
+|:--|:--|:--|:--|
+| **Geri alınabilir** | bir kayıt oku, bir sorgu koş, bir mesaj taslağı yaz, henüz kimsenin görmediği bir belge oluştur | izin ver | yalnızca kütükleme |
+| **Emekle geri alınabilir** | bir kaydı güncelle, bir siparişi iptal et, bir dosyayı taşı | izin ver | bir denetim izi ve belgelenmiş bir geri alma yolu |
+| **Geri alınamaz, sınırlı** | e-posta gönder, bir mesaj paylaş, küçük bir iade yap | onayla | bir eşiğin üstünde onay; hız sınırları |
+| **Geri alınamaz, sınırsız** | ödeme, silme, herhangi bir dış yayın, başka bir kişiye dokunan her şey | varsayılan olarak reddet | eylem başına açık onay ve modelin dışında zorunlu kılınmış bir sınır |
+
+: "Dikkatli ol"u yapılandırmaya çeviren bir sınıflandırma
+{tbl-colwidths="[18,34,14,34]"}
+
+Bunu bir tablodan fazlası yapan üç şey. **Sınıflandırma prompt'a değil araca
+aittir** — araç tanımında yaşar, dolayısıyla ikna edici bir girdiyle tartışılıp
+kaldırılamaz. **Önemli çizgi sınırlı ile sınırsız arasındadır** ve modelin
+dışında bir sınırla zorunlu kılınır: 50 avronun altında iade yapabilen bir ajan,
+iade yapabilen bir ajandan farklı bir risktir ve fark kodda kontrol edilen bir
+sayıdır. Ve **tasarımın tamamı varsayılanlardır**: yeni araçlar en katı sınıfa
+inmeli ve kasıtlı olarak gevşetilmeli, çünkü alternatif, risk profiline en son
+aracı ekleyen kişinin karar verdiği bir sistemdir.
+
+## Onay kapıları: kes, incele, devam et {#sec-korkuluklar-onay}
+
+Bir onay kapısını anlatmak kolay, kurmak zahmetlidir, çünkü ajan döngüsünün bir
+saat duraklatılmaktan sağ çıkmasını gerektirir.
+
+Önemli olan mekanikler:
+
+1. **Konuşmayı değil, bekleyen eylemi serileştirin.** Onay bekleyen şey belirli
+   argümanlarla belirli bir çağrıdır — `refund(order=14822, amount=780.50)` — ve
+   bir insanın görmesi gereken şey odur. Onlara transkripti gösterip "bu doğru
+   görünüyor mu?" diye sormak bir onay değildir.
+2. **Devam etmeye yetecek kadar durum kalıcılaştırın.** Döngünün durumu süreçten
+   uzun yaşamalı (@sec-dagitim), yoksa bir dağıtımdan sonra gelen onaylar
+   yitirilir.
+3. **Açıkça zaman aşımına uğratın ve hangi yöne olduğuna karar verin.** Kimsenin
+   cevaplamadığı bir onay, tanımlı bir sonuca doğru sona ermeli. Sessizce
+   "reddedildi"ye sona ermek kullanıcıları ortada bırakır; "onaylandı"ya sona
+   ermek bir kapı değildir.
+4. **İncelemeciye sonucu değil kanıtı gösterin.** İz
+   (@sec-gozlemlenebilirlik) — ajanın ne okuduğu, hangi araçların ne döndürdüğü —
+   bir kararı mümkün kılan şeydir. Eylemi öneren modelin yazdığı bir özet bağımsız
+   kanıt değildir.
+5. **Kararı veri olarak kaydedin.** Kim onayladı, ne zaman, ne gördü. Bu hem
+   yönetişimin ihtiyaç duyduğu denetim izi hem de hangi onayların otomatik
+   olarak damgalandığını söyleyen etiketli kümedir.
+
+Çürüyen nokta o sonuncusu. [Maddelerinin %99'unun onaylandığı bir onay kuyruğu
+gözetim değil, bir gecikmedir.]{.hl} Reddetme oranını ölçün ve çöktüğünde ya kapı
+yanlış eylemlerin üzerindedir ya da incelemecilerin reddedecek bir şeyi yoktur —
+ikisi de düzeltilebilir, ikisi de o sayı olmadan görünmez.
+
+## Acil durdurma düğmeleri ve olanı geri almak {#sec-korkuluklar-acil-durdurma}
+
+Yukarıdaki her şey önleyici. Bu bölüm önlemenin işe yaramadığı durum için ve
+birbirine karıştırılan iki yarısı var.
+
+**Durdurmak.** Bir acil durdurma düğmesi, sistemi yazmamış biri tarafından, gece
+üçte, bir dağıtım olmadan işletilebilmeli. Bu, bir kod değişikliği değil bir
+çalışma zamanı bayrağı demek ve tanecikliğe ihtiyacı var: bir aracı, bir ajanı,
+bir kiracıyı ya da her şeyi durdurmak. Tek bir küresel düğme, insanların çekmekte
+tereddüt ettiği bir düğmedir ve gece üçte tereddüt arızanın kendisidir. Onu bir
+takvimle sınayın — sınanmamış bir acil durdurma düğmesi bir inançtır.
+
+**Geri almak.** Durdurmak, zaten yapılmış kırk eylemi tersine çevirmiyor ve
+@sec-dagitim'in telafi işlemleri de mekanizma: geri alınamaz her araç için
+belgelenmiş bir tersi ya da tersinin olmadığına dair açık bir ifade. O listeyi
+yazmak yararlı biçimde rahatsız edici, çünkü "tersi yok" yazan satırlar tam olarak
+en katı kapıya ihtiyaç duyan araçlar.
+
+Sonra ajanların daha acil kıldığı sıradan işletme hijyeni: uyarmak yerine durduran,
+koşu başına ve kiracı başına bir bütçe tavanı; bir döngü sonlansın diye bir adım
+tavanı (@sec-dagitim); ve araç başına hız sınırları, çünkü "ajan 4.000 e-posta
+gönderdi" bir karar değil bir döngüdür.
+
+## Ajanlar için nöbet {#sec-korkuluklar-nobet}
+
+Ajanlar sıradan servislerin arızalanmadığı biçimlerde arızalanıyor ve uyarı
+kümesinin bunu yansıtması gerekiyor. Klasik sinyaller — hata oranı, gecikme,
+doygunluk — kalıyor ve bir ajan kendinden emin biçimde yanlış şeyi yaparken
+hiçbiri ateşlenmiyor.
+
+@sec-gozlemlenebilirlik'in görünür kıldıklarından, birini uyandırmaya değenler:
+
+- bir tavanın üstünde, kiracı ve koşu başına **harcama hızı** — en hızlı
+  ilerleyen arıza ve saptanması en kolay olanı;
+- yükselen **adım tavanına çarpmalar**, ki bu döngü demek;
+- tek bir araçta **araç hata oranı**, ki bu genellikle altınızdan bir bağımlılığın
+  değiştiği anlamına geliyor;
+- **onay kuyruğu derinliği**, çünkü durmuş bir kuyruk durmuş bir üründür;
+- iki yönde de kımıldayan **korkuluk tetiklenme oranı** — bir sıçrama bir saldırı
+  ya da kötü bir dağıtım, bir çöküş korkuluğun bozulduğu anlamına geliyor;
+- **reddetme oranı**, ki bu aynı sinyalin kullanıcı tarafından hâli.
+
+Bir el kitabı, nöbetçi bir mühendisin ihtiyaç duyduğu sırayla dört soruyu
+cevaplamalı: nasıl durdururum, ne kadar kötü olduğunu nasıl anlarım, yaptığını
+nasıl geri alırım ve kime söylerim. Sonuncusu idari bir şey değil — kişisel veri
+olayları için bildirim son tarihleri var ve saat, kimse teşhisi bitirmeden
+başlıyor.
+
+## Test üreten postmortemler {#sec-korkuluklar-postmortem}
+
+Ajan postmortemlerinin arıza kipi belirli ve sıkıcı bir tanesi: her bulgu
+"prompt'u iyileştir" olarak çıkıyor, belge dosyalanıyor ve aynı arıza sınıfı bir
+ay sonra geri geliyor.
+
+Çare, her bulgunun belgeden uzun yaşayan bir ürün üretmesini şart koşmak ve
+bulundurmaya değen yalnızca birkaç tür var:
+
+- düzeltmeden önce kalan ve sonra geçen bir **değerlendirme süiti vakası**
+  (@sec-uretim-degerlendirme, @sec-ajan-degerlendirme);
+- daha katı bir geri alınabilirlik sınıfına **yeniden sınıflandırılmış bir araç**;
+- bir prompt'ta rica edilen değil, **kodda zorunlu kılınmış bir sınır**;
+- yeni bir yönerge değil, **ölçülmüş eşiği olan bir korkuluk**;
+- onu daha erken yakalayacak sinyal için bir **uyarı**.
+
+"Prompt'u iyileştir" listede yok. Yanlışlanamaz, pratikte sürümlenmemiş ve
+@sec-uretim-degerlendirme kapısız düzenlenen prompt'lara ne olduğunu ölçtü:
+kimsenin sorgulamayacağı bir yeniden sıralama doğruluğu gürültü tabanının
+neredeyse altı katı kımıldattı.
+
+Suçlamasız kısım burada sıradan yazılımdakinden daha önemli ve apaçık olmayan bir
+nedenle. Bir sistemin davranışı olasılıksal olduğunda dürüst bulgu genellikle
+"sistem olası olmayan bir şey yaptı ve tasarımımız yapmayacağını varsaydı"dır — ve
+bu bir *tasarım* bulgusudur. Prompt'u onaylayan kişiyi arayan bir kültür o
+biçimde bulgular elde eder ve tasarımı sevk etmeyi sürdürür.
+
+## Sezgi kontrolleri {#sec-korkuluklar-sezgi}
+
+Her birini açmadan önce cevaplayın. Birincisi tüm bölümün dayandığı çerçeve;
+sonraki üçü ölçümü taşıyor; son ikisi ise tüm panolar yeşil kalırken sessizce
+çürüyen gözetimle ilgili.
+
+::: {.callout-note collapse="true"}
+## 1. Korkuluğunuz politika ihlallerinin %99'unu yakalıyor. Politika zorunlu kılınıyor mu?
+
+Hayır. Bir hasma karşı %99 bir yeniden deneme bütçesidir.
+
+Korkuluk olasılıksal bir filtredir ve kasıtlı olarak geçmeye çalışan biri, çoğu
+zaman doğru olan bir bileşene karşı sınırsız deneme hakkı elde eder. Bu, kazara
+zararı azaltmak için iyidir — kullanıcıların yapıştırmaması gereken şeyler,
+modelin konudan sapması — ve bir sınır olarak işe yaramaz (@sec-ajan-guvenligi).
+
+Mimari sonuç: bir korkuluğun yeri bir izin sisteminin önüdür, asla yerine değil.
+Büyük bir iadeyi durduran tek şey genellikle fark eden bir sınıflandırıcıysa,
+sınır zorunlu kılınmıyordur. Onu kodda, modelin dışında zorunlu kılın.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Kişisel veri düzenli ifadenizin test kümesinde %100 duyarlılığı var. Sevk edelim mi?
+
+Bitmiş görünen sayı duyarlılık; kimsenin onu kullanıp kullanamayacağına karar
+veren sayı kesinlik.
+
+On bir haneli bir düzenli ifade burada yerleştirilmiş 360 TC kimlik numarasının
+tamamını buldu — ve **isabetlerinin %60'ı TC kimlik numarası değildi**. Boşluksuz
+yazılmış Türk cep telefonu numaraları tam olarak on bir hane; sipariş
+referansları, takip kodları ve sayaç okumaları da öyle. O dedektörden maskeleme
+sürmek, destek çalışanının ihtiyaç duyduğu sipariş numarasını maskeliyor; ondan
+uyarı sürmek ise insanların bir hafta içinde görmezden geldiği bir uyarı üretiyor.
+
+%40'lık kesinlik rakamı tuzak yoğunluğuna bağlı, ki bu da trafiğinizin bir
+özelliği. Sevk etmeden önce kendinizinkinde ölçün.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Sağlama toplamını eklemek kesinliği %99'a çıkardı. Neye mal oldu?
+
+**15,3 puan duyarlılığa — ve tam olarak en az yitirmek isteyeceğiniz kayıtlara.**
+
+Sağlama toplamı 360 yerleştirilmiş tanımlayıcının 305'ini buldu ve 305, yanlış
+yazılmamış olanların tam olarak sayısı. Duyarlılık kaybı yazım hatası oranına
+yaklaşık değil; mekanik olarak o. Yanlış yazılmış bir TC kimlik numarası hâlâ
+kütüklerinizde bir TC kimlik numarasıdır: hâlâ kişisel veri, hâlâ tanımlayıcı ve
+sıklıkla doğru numarayı içeren bir düzeltmeyle birlikte geliyor.
+
+Öyleyse doğrulamayı **filtrelemek için değil, güveni sıralamak için** kullanın.
+Doğrulanmış isabetler otomatik maskelenir; doğrulanmamış örüntü isabetleri yine
+maskelenir, daha düşük güvenli işaretlenir ve düşürülmek yerine incelenir. Bir
+bağlam kontrolü eklemek — sayıdan kısa süre önce `TCKN` gibi bir etiket — kaybın
+çoğunu geri kazandırıyor, çünkü farklı maddelerde arızalanıyor: birleşimde
+kesinlik %99,1, duyarlılık %93,6.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Aynı doğrulamayı her tanımlayıcı türüne uygulamalı mısınız?
+
+Hayır — ve kuralı somutlaştıran karşı örnek IBAN.
+
+`TR` artı 24 hane bu trafikte başka hiçbir şeyle çakışmıyor, dolayısıyla tek
+başına örüntü **%100 duyarlılıkta %100 kesindi**. ISO 7064 mod-97 kontrolünü
+eklemek **sıfır** kesinlik satın aldı ve gerçek IBAN'ların **%12,5'ini**, hepsi
+yanlış yazılmış olanları, attı.
+
+Örüntünün belirsiz olduğu yerde doğrulayın; olmadığı yerde doğrulamayın. Tekdüze
+titizlik ilkeli hissettiriyor ve burada saf kayıp. TCKN sağlama toplamının ne
+kadar iş yaptığına dair bir ayar: rastgele on bir haneli bir dizge onu kabaca
+**100'de 1 kez** geçiyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Onay kuyruğunuz kendisine ulaşanın %99'unu onaylıyor. Amaçlandığı gibi mi çalışıyor?
+
+Neredeyse kesinlikle değil — bu, gözetimin kılığına girmiş bir gecikme.
+
+Ya kapı yanlış eylemlerin üzerinde (hiç incelemeye ihtiyaç duymayan şeyleri
+onaylıyor, ki bu incelemecilere tıklayıp geçmeyi öğretiyor) ya da incelemecilerin
+bir şeyi reddetmek için ihtiyaç duydukları şey yok. İkincisi yaygın ve
+düzeltilebilir: onlara, ajanın gerçekte ne okuduğunun ve ne çağırdığının izi
+yerine, eylemi öneren modelin yazdığı bir özet gösteriliyor
+(@sec-gozlemlenebilirlik).
+
+Reddetme oranını birinci sınıf bir metrik olarak ölçün. Kapının kapsamını
+düzeltin, sonuç yerine kanıt gösterin ve önlerine bekleyen o belirli çağrıyı
+koyun — transkripti değil, `refund(order=14822, amount=780.50)`.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Her postmortem bulgusu "prompt'u iyileştir" diyor. Sorun ne?
+
+Belgeden hiçbir şey uzun yaşamıyor, dolayısıyla aynı arıza sınıfı geri geliyor.
+
+Her bulgunun bir ürün üretmesini şart koşun: düzeltmeden önce kalan ve sonra
+geçen bir değerlendirme vakası, daha katı bir geri alınabilirlik sınıfına taşınmış
+bir araç, bir prompt'ta rica edilen değil kodda zorunlu kılınmış bir sınır,
+ölçülmüş eşiği olan bir korkuluk ya da onu daha erken yakalayacak sinyal için bir
+uyarı.
+
+"Prompt'u iyileştir" yanlışlanamaz ve @sec-uretim-degerlendirme neden aynı zamanda
+güvensiz olduğunu da ölçtü: bir prompt'un kurallarını hiçbir şey ekleyip
+çıkarmadan yeniden sıralamak doğruluğu gürültü tabanının neredeyse altı katı
+kımıldattı. Prompt düzenlemelerinin bir belgede bir karara değil, bir kapıya
+ihtiyacı var.
+:::
+
+## Mülakat soruları {#sec-korkuluklar-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Aşağıdaki sorular
+bu kitabın baştan sona kullandığı iki güvenilir açık kaynakta ve bu bölümün
+kendi ölçümünün cevaplanabilir kıldığı yerlerde tekrar ediyor.
+:::
+
+### Katmanı anlayıp anlamadığınızı sınayanlar
+
+**S: Bir korkuluk ile bir güvenlik denetimi arasındaki fark nedir?**
+
+Hasım. Korkuluk, normal davranan bir sistemden çıkan zararı azaltır —
+alışılmadık girdiler, kayma, uç durumlar — ve olasılıksal bir filtredir;
+dolayısıyla onu kasıtlı olarak aşmaya çalışan biri, çoğu zaman doğru olan bir
+şeye karşı sınırsız yeniden deneme hakkı elde eder. Bir güvenlik denetimi buna
+karşı dayanır. Pratik ifade: korkuluklar izin sistemlerinin önüne gider, asla
+yerine değil ve önemli olan her sınır modelin dışında, kodda zorunlu kılınır.
+
+**S: Türkçe destek mesajlarında TC kimlik numaralarını nasıl saptardınız?**
+
+Çakışmayla başlayın: boşluksuz yazılmış bir Türk cep numarası on bir hane, bir
+TCKN de öyle; dolayısıyla burada yalnızca örüntüyle kesinlik %100 duyarlılıkta
+%40'tı. Yayımlanmış sağlama toplamını ekleyin, kesinlik %99'a çıkıyor — ama
+duyarlılık 15 puan düşüyor ve düşürdüğü şey, hâlâ kişisel veri olan yanlış
+yazılmış tanımlayıcılar. Öyleyse sağlama toplamını filtrelemek yerine sıralamak
+için kullanın ve yakındaki bir etiket için bir bağlam kontrolü ekleyin, ki farklı
+maddelerde arızalanıyor: birleşim %93,6 duyarlılıkta %99,1 kesinliğe ulaştı. Sonra
+hiçbirinin kapsamadığını belirtin — adların ve adreslerin kontrol basamağı yok ve
+varlık tanıma gerektiriyorlar.
+
+**S: Hangi ajan eylemlerinin insan onayı gerektirdiğine nasıl karar verirsiniz?**
+
+Geri alınabilirliğe göre; prompt'ta değil araç tanımında sınıflandırarak, ki
+girdiyle tartışılıp kaldırılamasın. Geri alınabilir eylemler kütüklenir; emekle
+geri alınabilir eylemler belgelenmiş bir geri alma yolu gerektirir; geri
+alınamaz ama sınırlı eylemler bir eşiğin üstünde onaylanır; geri alınamaz ve
+sınırsız eylemler varsayılan olarak reddedilir. İşi yapan çizgi sınırlıya karşı
+sınırsız ve kodda kontrol edilen bir sayı — 50 avronun altında iade yapabilen bir
+ajan, iade yapabilen bir ajandan farklı bir sistem.
+
+### Bir tane işletip işletmediğinizi sınayanlar
+
+**S: Maskelemeniz ürünü bozdu — ajanlar artık siparişleri bulamıyor. Düzeltin.**
+
+İki problem ve ayrılmaları gerekiyor. Kesinlik: maskelediğinizin ne kadarının
+kişisel veri olmadığını ölçün, ki bu on bir haneli bir düzenli ifade için
+%60'tı. Ve yıkıcılık: maskelemenin yerine geri döndürülebilir token'laştırma
+koyun; böylece model `[TCKN_1]` görürken araçlar token'ları güvenilir sınırın
+içinde değerlere çözsün. Sonra insanların kaçırdığı şeyi söyleyin — token
+eşlemesi artık hassas varlık, eşleşen saklama ve erişim denetimleriyle ve
+transkriptlerle birlikte sızarsa özgününden daha kötü bir ihlal.
+
+**S: Saat gece üç ve bir ajan döngüye girip bütçe yakıyor. Ne olur?**
+
+Bir el kitabı sırayla dört soruyu cevaplar: nasıl durdurulur, ne kadar kötü,
+nasıl geri alınır ve kime söylenir. Durdurmak bir dağıtım değil bir çalışma
+zamanı bayrağıdır ve taneciklik ister — bir araç, bir kiracı, her şey — çünkü tek
+bir küresel düğme insanların çekmekte tereddüt ettiği bir düğmedir. Geri almak,
+önceden yazılmış telafi işlemi listesidir; tersi olmadığını söyleyen satırlar
+dâhil. Söylemek önemlidir, çünkü kişisel veri olaylarının teşhis bitmeden başlayan
+bildirim son tarihleri vardır.
+
+**S: Bir model yükseltmesinden sonra korkuluklarınızın hâlâ çalıştığını nasıl bilirsiniz?**
+
+Her birini, zor vakalardan oluşan etiketli bir kümesi olan bir sınıflandırıcı
+olarak ele alın ve tam bir hakemi denetlediğiniz gibi her model ya da prompt
+değişikliğinde kesinlik ve duyarlılığı yeniden ölçün. Sonra iki üretim sinyalini
+izleyin: korkuluk tetiklenme oranı ve reddetme oranı, iki yönde de — bir sıçrama
+bir saldırı ya da kötü bir dağıtım ve bir çöküş, korkuluğun sessizce ateşlenmeyi
+bıraktığı anlamına gelir, ki bunu hiçbir hata oranı size göstermez.
+
+## 2026 alet çantası {#sec-korkuluklar-araclar}
+
+Ölçüm hiç kütüphane kullanmadı — mesele, zor kısımların sağlama toplamı
+aritmetiği ve derlem tasarımı olması ve ikisinin de standart kütüphaneye
+sığmasıydı. İkinci tablo saptama ve maskeleme (ilk üçü) ile politika zorunlu
+kılma (geri kalanı) diye ikiye ayrılıyor.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| Python standart kütüphanesi | 3.14.5 | `re`, `random` ve tam sayı aritmetiği; kişisel veri ölçümünün tamamı |
+
+: Bu sayıların geldiği yığın. Hiçbir üçüncü taraf bağımlılığı yok
+{tbl-colwidths="[30,16,54]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| proje | sürüm | ne zaman başvurursunuz |
+|:--|:--|:--|
+| `presidio-analyzer` | 2.2.364 | Microsoft'un tanıyıcılar, bağlam güçlendirme ve sağlama toplamı doğrulayıcılarıyla kişisel veri saptaması — bu bölümdeki ölçümün üretim sürümü |
+| `presidio-anonymizer` | 2.2.364 | maskeleme yarısı, saptanan varlıkların geri döndürülebilir şifrelenmesi dâhil |
+| `llm-guard` | 0.3.16 | bir girdi ve çıktı tarayıcıları paketi — kişisel veri, prompt enjeksiyonu, toksisite, sırlar — bir çerçeve yerine bir başlangıç kümesi istediğinizde |
+| `nemoguardrails` | 0.24.0 | NVIDIA'nın programlanabilir rayları; prompt metni yerine akışlar olarak ifade edilmiş diyalog düzeyinde politika |
+| `guardrails-ai` | 0.11.0 | arıza hâlinde otomatik yeniden sormayla yapılandırılmış çıktı üzerinde doğrulayıcılar, ki @sec-cozumleme ile eşleşiyor |
+| `detoxify` | 0.5.2 | küçük bir toksisite sınıflandırıcısı; model çağrısı gerektirmeyen ucuz bir çıktı tarayıcısı olarak yararlı |
+| `pyrit` | 1.0.1 | Microsoft'un kırmızı takım aletleri; korkuluklarınızın neyi kaçırdığını başkasından önce böyle öğrenirsiniz (@sec-ajan-guvenligi) |
+
+: Daha geniş ekosistem, yazım anındaki sürümler {tbl-colwidths="[24,12,64]"}
+
+## Lab: bir korkuluk kurun, sonra neye mal olduğunu ölçün {#sec-korkuluklar-lab}
+
+### Adım 1 — yerleştirilmiş doğru cevabı olan bir derlem kurun
+
+Kendi alanınızda iki yüz mesaj; tanımlayıcılar kuruluş gereği yerleştirilmiş
+olsun ki hiç elle etiketleme yapmayasınız. Trafiğinizde gerçekten görülen
+tuzakları ekleyin — Türkçe destek için bu, telefon numaraları, sipariş
+referansları ve takip kodları demek — ve gerçek tanımlayıcıların dile getirilmiş
+bir kesrini yanlış yazın.
+
+### Adım 2 — naif dedektörü ölçün
+
+Yalnızca örüntü. Yalnızca duyarlılığı değil, kesinliği *de* raporlayın. Sonra
+yanlış pozitiflerin onunu okuyun ve her biri maskelenseydi bir destek çalışanının
+ne yitireceğini yazın.
+
+### Adım 3 — doğrulama ekleyin ve neyi sildiğini ölçün
+
+Sağlama toplamını uygulayın. Kesinlik kazancını ve duyarlılık kaybını raporlayın
+ve duyarlılık kaybının yazım hatası oranınıza eşit olup olmadığını doğrulayın —
+eşitse, filtrenin hangi kayıtları kaldırdığını ve hepsinin gerçek kişisel veri
+olduğunu artık tam olarak biliyorsunuz.
+
+### Adım 4 — ikinci, bağımsız bir sinyal ekleyin
+
+Bir bağlam kontrolü ya da bir varlık tanıma modeli (@sec-dizi-etiketleme). Onu
+tek başına, sonra sağlama toplamıyla birleşim olarak ölçün. Birleşim ikisini de
+yenmeli; yenmiyorsa iki sinyal aynı maddelerde arızalanıyordur ve farklı bir
+ikinci sinyale ihtiyacınız var.
+
+### Adım 5 — maskelemeyi geri döndürülebilir kılın
+
+Maskelemenin yerine konuşma başına kararlı token'lar ve modelin hiç görmediği bir
+eşleme koyun. Ajanın bir arama görevini uçtan uca tamamlayabildiğini doğrulayın.
+Sonra eşlemenin nerede yaşadığını, kimin okuyabildiğini ve ne kadar tutulduğunu
+yazın.
+
+### Adım 6 — araçlarınızı sınıflandırın ve bir sınırı kodda zorunlu kılın
+
+Her aracı dört sınıflı sınıflandırmaya koyun. En riskli olanı alın, modelin
+dışında zorunlu kılınan sayısal bir sınır ekleyin ve kibarca rica eden bir
+prompt'un onu aşamadığını bir testle doğrulayın.
+
+### Adım 7 — kendi acil durdurma düğmenizi çekin
+
+Hazırlık ortamında, bir aracı çalışma zamanında ve dağıtım olmadan durdurun ve
+süreyi ölçün. Sonra uçuşta olan geri alınamaz eylemleri ve her birinin nasıl geri
+alınacağını listeleyin. Tersi olmayan satırlar sizin bulgularınız.
+
+### Teslim edilecekler
+
+Kendi derleminizde dört dedektör yapılandırmasının tamamı için kesinlik ve
+duyarlılık; her birinin neye mal olacağıyla birlikte on yanlış pozitif; geri
+döndürülebilir maskelemenin görev tamamlamayı koruduğuna dair kanıt; kodda
+zorunlu kılınmış bir sınır ve onu kanıtlayan bir testle birlikte araç
+sınıflandırmanız; ve telafi eylemi listenizle birlikte süresi ölçülmüş acil
+durdurma sonucu.
+
+## Alıştırmalar {#sec-korkuluklar-alistirmalar}
+
+1. **Gerçek trafikte kesinlik.** Kendi kütüklerinizin bir haftası üzerinde on bir
+   haneli bir dedektör koşun ve elli isabeti elle kontrol edin. Kesinliği
+   raporlayın ve burada sentetik tuzak yoğunluğunda ölçülen %40 ile
+   karşılaştırın.
+
+2. **Yazım hatası sorusu.** Test derleminizdeki tanımlayıcıların %15'ini yanlış
+   yazın, sonra doğrulayıcınızın duyarlılık kaybının o orana eşit olduğunu
+   doğrulayın. Sisteminizin doğrulanmamış bir örüntü isabetiyle ne yapması
+   gerektiğine karar verin ve yazın.
+
+3. **Doğrulamanın anlamsız olduğu yer.** Alanınızda örüntüsü zaten belirsiz
+   olmayan bir tanımlayıcı türü bulun. Sağlama toplamının herhangi bir kesinlik
+   satın alıp almadığını ölçün. Almıyorsa kaldırın ve geri aldığınız duyarlılığı
+   raporlayın.
+
+4. **Geri döndürülebilir maskeleme, uçtan uca.** Token'laştırmayı uygulayın ve bir
+   ajanın, bir aracın içinden bir token çözmeyi gerektiren bir görevi
+   tamamlamasını sağlayın. Sonra eşleme deposu için tehdit modelini bir paragrafta
+   yazın.
+
+5. **Geri alınabilirlik denetimi.** İşlettiğiniz bir sistemdeki her aracı
+   sınıflandırın. Kaç tanesinin geri alınamaz ve sınırsız olduğunu ve bunların
+   kaçının modelin dışında zorunlu kılınmış bir sınırı olduğunu raporlayın.
+
+6. **Onay reddetme oranı.** Onay kapınıza ölçüm düzeneği kurun ve hangi kesrinin
+   reddedildiğini ölçün. %95 onayın üstündeyse iki nedenden hangisi olduğunu
+   teşhis edin ve onu düzeltin.
+
+7. **Korkuluk regresyonu.** Bir korkuluk sınıflandırıcısı alın, kırk zor vakadan
+   oluşan etiketli bir küme kurun ve arkasındaki modeli değiştirdikten sonra
+   yeniden ölçün. Kesinlik ve duyarlılıktaki değişimi raporlayın.
+
+8. **Gece üç el kitabı.** "Ajan döngüye girdi ve bütçe yakıyor" için el kitabını
+   yazın, sonra sistemi yazmamış bir meslektaşınız onu hazırlık ortamında
+   uygularken siz süre tutun. Size sormak zorunda kaldığı her soru bir boşluktur.
+
+## Daha derine {#sec-korkuluklar-derinlesme}
+
+Okumadan önce: varsa kişisel veri dedektörünüzü alın ve duyarlılığını değil
+kesinliğini ölçün. Takımınızın hangi sayıyı ezbere söyleyebildiği, hangisini
+eniyilediğinin iyi bir göstergesi.
+
+Bu bölüm hiçbir makaleye atıf vermiyor, dolayısıyla alışıldık iki tablo yerine
+tek bir tablo var. Bu malzemenin çekişmeli tarafı — korkulukların yetersiz
+kaldığı yer — @sec-ajan-guvenligi ve kaynakları orada.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`presidio`](https://github.com/microsoft/presidio) | bu bölümdeki ölçümün üretim sürümü: tanıyıcılar, bağlam güçlendirme, sağlama toplamı doğrulayıcıları ve geri döndürülebilir anonimleştirme, hepsi okunabilir |
+| [`llm-guard`](https://github.com/protectai/llm-guard) | bir girdi ve çıktı tarayıcıları paketi; çoğunlukla makul bir varsayılan kümenin ne içerdiğini okumak için yararlı |
+| [`NeMo-Guardrails`](https://github.com/NVIDIA/NeMo-Guardrails) | prompt metni yerine diyalog akışları olarak politika, ki bu gerçekten farklı bir tasarım noktası |
+| [`guardrails`](https://github.com/guardrails-ai/guardrails) | yeniden sormayla yapılandırılmış çıktı üzerinde doğrulayıcılar, @sec-cozumleme'nin zorunlu kılma karşılığı |
+| [`PyRIT`](https://github.com/Azure/PyRIT) | kırmızı takım otomasyonu; korkuluklarınızın neyi kaçırdığını öğrenmenin en hızlı yolu ve @sec-ajan-guvenligi'ne köprü |
+
+: Bu bölümün ötesi {tbl-colwidths="[26,74]"}
+
+## Akılda kalması gerekenler {#sec-korkuluklar-ozet}
+
+- **Korkuluk bir güvenlik sınırı değildir.** Normal davranan bir sistemden çıkan
+  zararı azaltır; olasılıksal ve sessizce arızalanır ve bir hasım ona karşı
+  sınırsız yeniden deneme hakkı elde eder. [Korkuluklar izin sistemlerinin önüne
+  gider, asla yerine değil]{.hl} — önemli olan her sınır kodda, modelin dışında
+  zorunlu kılınır.
+
+- **Duyarlılığı değil, kesinliği raporlayın.** On bir haneli bir düzenli ifade
+  yerleştirilmiş Türk kimlik numaralarının %100'ünü buldu ve **isabetlerinin
+  %60'ı kimlik numarası değildi**, çünkü boşluksuz yazılmış bir Türk cep numarası
+  da on bir hane. Korkuluğu kullanmak zorunda olan insanların onu açık tutup
+  tutmayacağına karar veren şey kesinlik.
+
+- **Doğrulama kesinlik satın alır ve gerçek kişisel veriyi siler.** TCKN sağlama
+  toplamı kesinliği **%40,0'tan %99,0'a** ve duyarlılığı %100'den **%84,7'ye**
+  taşıdı — ve 15,3 puanlık kayıp mekanik olarak derlemin yazım hatası oranına
+  eşit. [Yanlış yazılmış bir kimlik numarası hâlâ kütüklerinizde bir kimlik
+  numarasıdır.]{.hl}
+
+- **Sağlama toplamını filtrelemek için değil, güveni sıralamak için kullanın.**
+  Doğrulanmış isabetler otomatik maskelenir; doğrulanmamış örüntü isabetleri yine
+  maskelenir, daha düşük güvenli işaretlenir ve düşürülmek yerine incelenir.
+  Rastgele on bir haneli bir dizge TCKN kontrolünü kabaca **100'de 1 kez**
+  geçiyor.
+
+- **Farklı biçimlerde arızalanan sinyalleri birleştirin.** Sağlama toplamı yanlış
+  yazılmış tanımlayıcıları kaçırıyor; bir bağlam kelimesi etiketsiz olanları
+  kaçırıyor. Birleşimleri **%93,6 duyarlılıkta %99,1 kesinliğe** ulaştı — sağlama
+  toplamının kesinliğinin neredeyse tamamı, duyarlılık kaybının üçte ikisi geri
+  kazanılmış olarak.
+
+- **Örüntünün belirsiz olmadığı yerde doğrulamayın.** `TR` + 24 hane zaten
+  **%100 kesindi**, dolayısıyla IBAN sağlama toplamı hiçbir şey satın almadı ve
+  gerçek IBAN'ların **%12,5'ini** attı. Tekdüze titizlik burada saf kayıp.
+
+- **Geri döndürülebilir maskeleyin ve ne yarattığınızı bilin.** Konuşma başına
+  kararlı token'lar, yıkıcı maskelemenin bozduğu yerde ürünü çalışır tutuyor — ama
+  token eşlemesi artık hassas varlık ve transkriptlerle birlikte sızarsa
+  özgününden daha kötü bir ihlal. Bir kez, tek bir sınırda maskeleyin.
+
+- **Eylemleri prompt'ta değil araçta, geri alınabilirliğe göre sınıflandırın.**
+  İşi yapan çizgi sınırlıya karşı sınırsız ve kodda kontrol edilen bir sayıyla
+  zorunlu kılınıyor. Yeni araçlar en katı sınıfa iner ve kasıtlı olarak gevşetilir.
+
+- **Gözetim sessizce çürür.** [Kendisine ulaşanın %99'unu onaylayan bir onay
+  kuyruğu gözetim değil, bir gecikmedir]{.hl} — reddetme oranını ölçün,
+  incelemecilere model tarafından yazılmış bir özet yerine bekleyen çağrıyı ve izi
+  gösterin ve korkuluk tetiklenme oranını iki yönde de izleyin, çünkü bir çöküş
+  onun bozulduğu anlamına gelir ve hiçbir hata oranı bunu size söylemez.
+
+- **Her postmortem bulgusu belgeden uzun yaşamalı.** Bir değerlendirme vakası,
+  yeniden sınıflandırılmış bir araç, kodda bir sınır, ölçülmüş bir eşik, bir
+  uyarı. "Prompt'u iyileştir" listede yok — @sec-uretim-degerlendirme bir prompt
+  yeniden sıralamasının doğruluğu gürültü tabanının neredeyse altı katı
+  kımıldattığını ölçtü.
