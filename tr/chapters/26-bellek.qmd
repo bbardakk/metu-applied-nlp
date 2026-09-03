@@ -1,0 +1,626 @@
+# Bellek Mimarileri {#sec-bellek}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 26. bölüm](../../en/chapters/26-memory.html). Küçük bir yerel ölçüm —
+`ollama` 0.24.0 üzerinden `qwen3.5:9b`'de bir çelişki sondası, kısa prompt'lar,
+dakikalar süren — artı sorunun bu kitabın sağlayamayacağı bir ölçek gerektirdiği
+yerde yayımlanmış sonuçlar. @sec-baglam-muhendisligi bir çalıştırmanın *içinde*
+olanı kapsıyor; bu bölüm çalıştırmalar *arasında* neyin sağ kaldığıyla ilgili.
+Yazılım: NumPy 2.5.2, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- çalışma, epizodik ve anlamsal belleği ayırt edebilir ve her biri için depolama
+  seçebilirsiniz;
+- bir yazma politikası tanımlayabilirsiniz — neyin, ne zaman hatırlanacağı ve
+  kimin karar vereceği;
+- bayat olgular biriktirmek yerine bayatlamayı ve çelişkiyi ele
+  alabilirsiniz;
+- insanları hatırlayan bir sistemde rıza ve silme üzerine akıl
+  yürütebilirsiniz.
+
+## Üç tür bellek, üç farklı problem {#sec-bellek-turler}
+
+Bir ajanda "bellek", bir kelimeyi ve başka neredeyse hiçbir şeyi paylaşan üç
+şeyi kapsar. Onları ayırmak tasarım işinin çoğudur, çünkü her birinin farklı bir
+ömrü, farklı bir depolama cevabı ve farklı bir kusur biçimi vardır.
+
+| | ne tutar | ömür | nerede yaşar | nasıl bozulur |
+|:--|:--|:--|:--|:--|
+| **Çalışma** | mevcut transkript — görev, son adımlar, canlı araç sonuçları | bir çalıştırma | bağlam penceresi | dolar. @sec-baglam-muhendisligi tümüyle bununla ilgili |
+| **Epizodik** | ne olduğu ve ne zaman: geçmiş konuşmalar, yapılan eylemler, sonuçlar | çalıştırmalar boyunca | yalnızca eklenen, erişilebilir kayıt | birikir. Hacim sınırsız büyür ve eski epizotlar işe yarar olanları dışarı iter |
+| **Anlamsal** | kalıcı olgular: tercihler, varlıklar, ilişkiler, öğrenilmiş kurallar | çelişilene kadar | güncelleyebildiğiniz *ve* silebildiğiniz bir depo | **bayatlar** ve bayat olgular yok olanlardan kötüdür |
+
+: Tek kelime, üç problem {tbl-colwidths="[14,32,12,20,22]"}
+
+Pratikte en önemli ayrım son sütundur. Çalışma belleği gürültülü bozulur —
+pencereye çarparsınız. Epizodik bellek yavaş bozulur — sistem pahalılaşır ve
+alaka düşer.
+
+[Anlamsal bellek sessizce bozulur]{.hl}: martta kaydedilmiş bir olgu temmuzda
+hâlâ kendinden emin biçimde döndürülür ve sistemde hiçbir şey onun süresinin
+dolduğunu bilmez. Bu asimetri, hacimce üçünün en küçüğü olmasına rağmen bu
+bölümün çoğunun anlamsal bellekle ilgili olmasının nedenidir.
+
+::: {.column-margin}
+İnsan benzetmesi sözcük dağarcığının geldiği yerdir ve üzerine fazla
+yaslanmamaya değer. Burada önemli olan mühendisliktir: epizodik bellek bir olay
+kaydıdır, anlamsal bellek kökenli değiştirilebilir bir anahtar-değer deposudur
+ve insanların belleğinin ikisini bulandırması, sizin sisteminizin bulandırması
+için bir neden değildir.
+:::
+
+**Neye bakacağız.** Önce her tür belleğin nerede yaşaması gerektiği; popüler
+cevabın — her şeyi göm — tam olarak üçünden biri için yanlış varsayılan olduğu
+yer. Sonra neyin yazıldığı ve kimin karar verdiği; ki bu, seçmeyerek zaten
+seçtiğiniz bir politikadır. Sonra deponun birbiriyle çelişen iki olgu tuttuğunda
+ne olduğunun ölçümü; bu bölümün ucuza cevaplayabildiği ve çoğu tasarımın yok
+saydığı soru. Sonra unutma; ki başta kurulmalıdır. Ve son olarak bir sistemin
+hatırladığı insanlara ne borçlu olduğu; hepsi politika belgeleri değil şema
+kararları çıkıyor.
+
+## Depolama: önce vektör veritabanına uzanmayı bırakın {#sec-bellek-depolama}
+
+Üç tür bellek, üç depolama sorusu demektir ve yalnızca biri zordur. Çalışma
+belleği bağlam penceresinde yaşar, çünkü bağlam penceresi zaten odur. Epizodik
+bellek bir kayıttır ve kayıt çözülmüş bir problemdir. İlginç olan, varsayılan
+içgüdünün her şeyi gömüp benzerlikle erişmek olduğu anlamsal bellektir.
+
+Yanlış varsayılandır ve neden, @sec-baglam-muhendisligi'nin yapılandırılmış veri
+için verdiğinin aynısıdır: **benzerlik araması, belleğin gerçekten ihtiyaç
+duyduğu işlemleri ifade edemez.**
+
+İşlemler şunlardır: *bu kullanıcının mevcut tercihini getir*, *onu güncelle*,
+*bu kişi hakkındaki her şeyi sil*, *marttan beri neyin değiştiğini listele*.
+Bunlar anahtarlar üzerinde arama ve değiştirmedir. Hiçbiri en yakın komşu
+sorgusu değildir.
+
+| depo | gerçekten neyde iyi | bellek olarak nerede bozulur |
+|:--|:--|:--|
+| **İlişkisel** | tercihler, varlıklar, anahtarlanabilir bir kimliği olan her şey; gerçekten silen güncellemeler ve silmeler | bir şema ister, dolayısıyla modelin hatırlamaya karar verdiği her şeyi soğuramaz |
+| **Vektör** | epizodik hatırlama — *buna benzer bir şeyi daha önce konuştuk mu* | [bir *olgunun* doğal güncellemesi ya da silinmesi yok]{.con}; çelişen iki bellek de memnuniyetle erişilir, doğruluğa göre değil benzerliğe göre sıralanmış |
+| **Çizge** | varlıklar arası ilişkiler, onlar hakkında çok adımlı sorular | operasyonel olarak ağır ve çoğu proje buna ihtiyaç duyan bir soru hiç sormaz |
+| **Anahtar–değer / belge** | kullanıcı başına küçük ve yapılandırılmış bir profil, bütün hâlde okunan | kullanıcılar arası sorgulamak istediğinizde kötü ölçeklenir |
+
+: Dört depo ve her birinin gerçekte ne işe yaradığı {tbl-colwidths="[16,42,42]"}
+
+Çoğu sistem için işleyen mimari gösterişsiz ve melezdir:
+
+```text
+  semantic memory   →  a table.   user_id, key, value, source, written_at
+  episodic memory   →  a log, embedded for retrieval, with pointers back
+                       to the full record
+```
+
+[Olgular satırlara, epizotlar vektörlere gider.]{.hl}
+
+Bu alandaki en yaygın üretim hatası olguları vektörlere koymaktır, çünkü bu
+*güncelleme* ve *silmeyi* düzgün yapmayı imkânsız kılar — ve ikisi de hoş
+olurdu değil gereklilik çıkar; biri doğruluk için, biri yasa için.
+
+## Yazma politikaları: kimsenin bilerek vermediği karar {#sec-bellek-yazma}
+
+Önceki bölüm, bir olguyu tutmaya karar verdikten sonra nereye gideceğiyle
+ilgiliydi. Bu bölüm o kararla ilgili; kimsenin yazmadığı karar.
+
+Neyin hatırlanacağı bir politikadır ve birini seçmezseniz "modelin verdiği
+karar" politikasını seçmişsinizdir; ki bunun bilinen kusur biçimleri vardır.
+
+| kim karar verir | nasıl davranır | ne zaman kullanılır |
+|:--|:--|:--|
+| **Kural tabanlı** | çıkarıcıyı siz yazarsınız: şu olaylardan şu alanlar | [öngörülebilir ve denetlenebilir]{.pro}; önemli olan her şey için doğru varsayılan |
+| **Model kararlı** | ajan bir şeyi kalıcı gördüğünde bir `remember` aracı çağırır | esnektir ve sizin hatırlamayacağınız şeyleri hatırlar — hatırlamaması gerekenler dâhil |
+| **Kullanıcı onaylı** | sistem önerir, kişi onaylar | [en yüksek kesinlik ve gerçek rıza veren tek seçenek]{.pro}; her seferinde bir etkileşime mal olur |
+
+: Üç yazma politikası {tbl-colwidths="[20,44,36]"}
+
+Üretimle temastan sağ çıkan üç kural:
+
+**Konuşmayı değil kararları ve tercihleri hatırlayın.** *Kullanıcı faturaları
+Levent ofisinde tercih ediyor* raf ömrü olan bir olgudur. Bunu söylediği
+paragraf bir epizottur ve profile değil kayda aittir.
+
+**Her yazmayla birlikte kökeni kaydedin.** Ne zaman yazıldığı, hangi olayın buna
+yol açtığı ve çıkarıcının ne kadar emin olduğu. Köken olmadan çelişkileri
+çözemez, hiçbir şeyin süresini dolduramaz ve *sistem benim hakkımda bunu neden
+düşünüyor* sorusunu cevaplayamazsınız — ki bu size sorulacak bir sorudur.
+
+**Tek bir bahis üzerine asla yazmayın.** Bir kez ifade edilmiş bir tercihle üç
+kez ifade edilmiş bir tercih farklı şeylerdir. İşe yarayan en ucuz politika bir
+teyit eşiğidir: ikinci geçişte ya da açık bir ifade üzerine yazın, bir çıkarım
+üzerine değil.
+
+::: {.column-margin}
+Her şeyi hatırlamanın kusur biçimi depolama maliyeti değildir — depolama ucuzdur.
+*Erişimin* kötüleşmesidir: ilgisiz her bellek, ilgili olanla yarışan başka bir
+adaydır ve @sec-erisim'in ölçümleri doğrudan geçerlidir. Her şeyi hatırlayan bir
+bellek sistemi, indeksi bilerek bozulmuş bir erişim sistemidir.
+:::
+
+## Çelişki, ölçülmüş hâliyle {#sec-bellek-celiski}
+
+Olgu biriktiren bir depo eninde sonunda birbiriyle çelişen iki olgu tutacaktır.
+Tasarım sorusu bunu *ele almak* zorunda olup olmadığınız, yoksa modelin ikisini
+de okuyunca çözüp çözmediğidir.
+
+Cevaplaması ucuz bir soru, işte cevap. Otuz uydurma çelişki — kullanıcı martta
+e-postayı, temmuzda telefonu tercih etti — birebir aynı olgularla üç koşulda.
+Cevabın **daha yeni** değerle eşleşip eşleşmediği üzerinden puanlandı. Maddelerin
+yarısında daha yeni olgu önce listelendi, böylece konum güncellikten ayrıldı.
+
+```text
+qwen3.5:9b, 30 contradictions per condition, n = 30
+
+ condition     chose newer   95% CI        hedged   newer listed first / last
+ bare                 0.0%   [ 0.0, 11.4]   83.3%          0.0%  /   0.0%
+ dated               33.3%   [19.2, 51.2]   66.7%         33.3%  /  33.3%
+ dated+rule          83.3%   [66.4, 92.7]   16.7%         66.7%  / 100.0%
+```
+
+Kurduğunuz şeyi ne kadar değiştirmeleri gerektiği sırasına göre üç şey.
+
+**Zaman damgaları tek başına yetmiyor.** *[12 Mart 2025'te kaydedildi]* ve
+*[28 Temmuz 2025'te kaydedildi]* eklemek modeli, daha yeni olguyu hiç seçmemekten
+üçte bir oranında seçmeye taşıdı. Zamanın üçte ikisinde hâlâ seçmeyi reddetti.
+Bellek tasarımınız "tarihi sakla ve modelin çözmesine bırak" ise, çözmeyeceğini
+söyleyen ölçüm budur.
+
+**Açık bir kural işin çoğunu yapıyor ve hepsini yapmıyor.** Tek bir cümle
+eklemek — *olgular çeliştiğinde en son kaydedileni kullan* — onu %83,3'e taşıdı.
+Bu büyük ve ucuz bir iyileşmedir ve altı cevaptan biri hâlâ ters yöne gidiyor.
+
+[Çelişki çözümü prompt'unuza değil erişim kodunuza aittir.]{.hl} Enjekte etmeden
+önce çözün: tek bir olgu döndürün — politikanızın seçtiği olguyu — ve modelin
+tutarsız olacağı bir şey kalmaz.
+
+**Varsayılan davranış yalan söylemek değil kaçamak yapmaktır.** Çıplak koşulda
+model *daha eski* olguyu zamanın %16,7'sinde seçti ve **%83,3'ünde** ikisini
+birden ya da hiçbirini verdi. Bu, kendinden emin biçimde yanlış seçmekten
+iyidir — ama "tercihiniz e-posta, ya da belki telefon" diye cevaplayan bir
+sistem kullanıcıyı aynı ölçüde yüzüstü bırakmıştır ve bunu, yanlış bir cevaptan
+saptaması daha zor bir biçimde yapar.
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">Model çelişkileri çözmüyor; bir kural yolun çoğunu alıyor</div>
+<svg viewBox="0 0 764 294" style="max-width:744px" role="img" aria-label="Yığılmış çubuk olarak üç prompt koşulu. Çıplak: yüzde 0 daha yeni olguyu seçti, yüzde 83,3 kaçamak yaptı, yüzde 16,7 eskisini seçti. Tarihli: yüzde 33,3 yeni, yüzde 66,7 kaçamak. Tarihli artı açık güncellik kuralı: yüzde 83,3 yeni, yüzde 16,7 kaçamak.">
+  <text x="26" y="26" class="t-xs t-b t-muted">KOŞUL</text>
+  <text x="250" y="26" class="t-xs t-b t-muted">30 CEVABIN DAĞILIMI</text>
+  <text x="738" y="26" class="t-xs t-b t-accent t-end">YENİYİ SEÇTİ</text>
+  <line x1="26" y1="36" x2="738" y2="36" class="ln-thin"/>
+
+  <text x="26" y="64" class="t-sm t-b">çıplak</text>
+  <text x="26" y="79" class="t-xs t-muted">iki olgu, tarih yok</text>
+  <rect x="250" y="52" width="366.5" height="30" class="chip"/>
+  <rect x="616.5" y="52" width="73.5" height="30" class="box-rose"/>
+  <text x="433" y="71" class="t-xs t-muted t-mid">%83,3 kaçamak</text>
+  <text x="653" y="71" class="t-xs t-rose t-mid">%16,7</text>
+  <text x="738" y="71" class="t-sm t-b t-accent t-end">%0,0</text>
+
+  <text x="26" y="116" class="t-sm t-b">tarihli</text>
+  <text x="26" y="131" class="t-xs t-muted">her olgu tarihini taşıyor</text>
+  <rect x="250" y="104" width="146.5" height="30" class="box-accent"/>
+  <rect x="396.5" y="104" width="293.5" height="30" class="chip"/>
+  <text x="323" y="123" class="t-xs t-accent t-mid">%33,3</text>
+  <text x="543" y="123" class="t-xs t-muted t-mid">%66,7 kaçamak</text>
+  <text x="738" y="123" class="t-sm t-b t-accent t-end">%33,3</text>
+
+  <text x="26" y="168" class="t-sm t-b">tarihli + kural</text>
+  <text x="26" y="183" class="t-xs t-muted">artı bir güncellik cümlesi</text>
+  <rect x="250" y="156" width="366.5" height="30" class="box-accent"/>
+  <rect x="616.5" y="156" width="73.5" height="30" class="chip"/>
+  <text x="433" y="175" class="t-xs t-accent t-mid">%83,3</text>
+  <text x="653" y="175" class="t-xs t-muted t-mid">%16,7</text>
+  <text x="738" y="175" class="t-sm t-b t-accent t-end">%83,3</text>
+
+  <line x1="26" y1="196" x2="738" y2="196" class="ln-thin"/>
+
+  <rect x="26" y="206" width="10" height="10" class="box-accent"/>
+  <text x="42" y="215" class="t-xs t-muted">daha yeni olguyu seçti</text>
+  <rect x="200" y="206" width="10" height="10" class="chip"/>
+  <text x="216" y="215" class="t-xs t-muted">kaçamak &#8212; ikisi ya da hiçbiri</text>
+  <rect x="402" y="206" width="10" height="10" class="box-rose"/>
+  <text x="418" y="215" class="t-xs t-muted">daha eski olguyu seçti</text>
+
+  <rect x="26" y="236" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="254" class="t-xs t-b t-mid">EN ÇOK KURAL YARDIM EDİYOR VE FARKI HİÇ KAPATMIYOR</text>
+  <text x="382" y="269" class="t-xs t-muted t-mid">altı cevaptan biri hâlâ ters yöne gidiyor — erişimde çözün ve tek bir olgu enjekte edin</text>
+</svg>
+```
+
+::: {.fig-cap}
+Gri bant, insanların planlamadığı kusurdur. Yanlış bir cevap değil; hiç cevap
+değil ve prompt'a makine ekledikçe yok olmak yerine küçülüyor. Ayrıca daha eski
+olgunun yalnızca çıplak koşulda seçildiğine dikkat edin — tarihler, modelin işi
+ters yapmasını, doğru yapmasından çok önce durduruyor.
+:::
+
+::::
+
+::: {.column-margin}
+Küçük ölçüm, dar iddia: tek model, otuz madde, aralıklar ±17 puan civarında.
+Ortaya koyduğu şey *sıralamadır* — çıplak < tarihli < tarihli+kural — ve kesin
+rakamlara bağlı olmayan pratik sonuç: bir `WHERE` yan tümcesi ve bir
+`ORDER BY written_at DESC LIMIT 1` bunu tam olarak yapacakken çelişki çözümünü
+modele bırakmayın.
+:::
+
+### Peki erişim tarafı ne yapmalı?
+
+Çözün, sonra enjekte edin. Somut olarak, neredeyse her durumu kapsayan dört
+kural:
+
+- **Anahtar başına tek olgu.** Depo *tercih edilen kanal* için iki değer
+  tutabiliyorsa belirsizlik modele ulaşır. Yazma yolunu bir upsert yapın ve
+  belirsizlik hiç var olmasın.
+- **Varsayılan olarak güncellik kazanır**, çünkü başka herhangi bir basit
+  kuraldan daha sık doğrudur ve kullanıcıların beklediği kuraldır. Yanlış olduğu
+  yerde — ifade edilmiş bir tercih, tarih ne olursa olsun çıkarsanmış olanı
+  yenmeli — *bunu* zaman yerine kaynak üzerinden bir öncelik olarak açıkça
+  kodlayın.
+- **İnançla değil takvimle süre dolumu.** Zamana duyarlı her şey yazma anında
+  bir TTL alır. Bir teslimat adresinin süresi dolmaz; bir *mevcut projenin*
+  dolar.
+- **Çözemediğiniz çelişkileri gösterin.** Eşit öncelikli iki kaynak
+  çelişiyorsa dürüst hamle tahmin etmek değil sormaktır — ve iki cevaptan da çok
+  daha iyi bir kullanıcı deneyimidir.
+
+## Unutmak bir özelliktir {#sec-bellek-unutma}
+
+Yalnızca biriken sistemler kötüleşir ve bozulma bariz değildir, çünkü hiçbir şey
+hata vermez. Üçü de başta eklenmesi ucuz, sonradan takılması zahmetli üç
+mekanizma:
+
+- **Yazma anında TTL.** Her olgu bir süre dolumu ya da açık bir "süresi dolmaz"
+  taşır. Karar, çıkarıcıyı yazarken kolaydır ve altı ay sonra imkânsızdır.
+- **Epizotlar için sönüm.** Erişimi hem alakaya hem *yaşa* göre sıralayın. Geçen
+  haftadan bir epizot, geçen yıldan birebir aynısından genellikle daha
+  yararlıdır ve saf bir benzerlik sıralaması bunu ifade edemez.
+- **Gerçekten silen silme.** Erişimcinin süzmeyi unuttuğu bir `deleted` bayrağı
+  değil. Bu, kitabın yönetişim bölümünün gereksinimidir ve tek başına, olguları
+  `DELETE`'in dediğini yaptığı bir depoda tutmak için iyi bir nedendir.
+
+## Ajanın çağırdığı bir araç mı, hiç görmediği altyapı mı? {#sec-bellek-arayuz}
+
+Şimdiye kadarki her şey depoyla ilgiliydi. Bu bölüm depoyla ajan arasındaki
+telle ilgili ve onu çalıştırmanın yalnızca iki yolu var — @sec-ajan-anatomisi'nin
+özerklik merdiveninin takas ettiği şeyi takas ediyorlar: öngörülebilirliğe karşı
+yetenek.
+
+**Araç olarak bellek.** Ajan `remember(fact)` ve `recall(query)` alır ve onları
+ne zaman kullanacağına karar verir. Transkriptte görünürdür, dolayısıyla neyin
+neden yazıldığını denetleyebilirsiniz ve ajan zahmet etmemeyi seçebilir. Bedeli,
+modelin yanlış yapabileceği başka bir karar olmasıdır — ve @sec-arac-tasarimi kötü
+belirtilmiş bir aracın ne yaptığını ölçtü: sessizce çağrılmıyor.
+
+**Altyapı olarak bellek.** Her çalıştırmadan önce kodunuz ilgili olanı getirir ve
+sistem prompt'una enjekte eder. Ajan bir bellek sistemi olduğunu hiç bilmez;
+yalnızca bir şeyler bilir. Bu öngörülebilir, test edilebilirdir ve hiçbir model
+kararına mal olmaz — ve sabit bir hattın @sec-ajan-anatomisi'nde doğru varsayılan
+olmasıyla aynı nedenle doğru varsayılandır.
+
+Çoğu üretim sisteminin vardığı bileşim: **altyapı olarak oku, araç olarak yaz.**
+Hatırlama otomatik gerçekleşir, çünkü her seferinde gerçekleşmelidir; yazma açık
+bir eylemdir, çünkü kayıtta görmek istediğiniz odur.
+
+## Oturumlar, kontrol noktaları ve devam {#sec-bellek-oturumlar}
+
+Uzun süren bir ajan kesintiye uğrayacaktır — bir dağıtım, bir zaman aşımı, bir
+çökme, sekmeyi kapatan bir kullanıcı. Bundan neyin sağ çıktığı bir tasarım
+kararıdır ve işe yarar çerçeve şudur: **transkript, kalıcılaştırabileceğiniz bir
+değerdir**, bir süreçte yaşayan bir şey değil.
+
+- **Sonda değil her adımdan sonra kontrol noktası alın.** Birim tek bir döngü
+  yinelemesidir: şimdiye kadarki mesajlar, artı çalışma zamanınızın devam etmek
+  için gereksindiği her şey.
+- **Yalnızca çağrıları değil araç sonuçlarını saklayın.** Bir çalıştırmayı
+  araçlarını yeniden yürüterek tekrar oynatmak, yazan her şey için yanlıştır ve
+  diğer her şey için yavaştır.
+- **Devam etmeyi başlatmayla aynı kod yolu yapın.** Farklı bir dala giren bir
+  devam, test etmeyeceğiniz ikinci bir uygulamadır.
+
+@packer2023memgpt bunu ciddiye almanın referans tasarımıdır — küçük bir bağlamla
+dış depolama arasındaki sayfalamayı kendi yöneten bir ajan ve işletim sistemi
+benzetmesinin düzgün yapılmış hâlini istiyorsanız okunacak makale.
+
+## Gizlilik, rıza ve silme {#sec-bellek-gizlilik}
+
+İnsanları hatırlayan bir sistemin, durumsuz bir sistemin sahip olmadığı
+yükümlülükleri vardır ve onları karşılayan mühendislik kararları, sonradan
+yazılmış bir politika belgesinde değil @sec-bellek-depolama'da verilir.
+
+**Silmenin gerçekten silmesi gerekir.** Olguların gerçek bir `DELETE`'i olan bir
+depoya ait olmasının somut nedeni budur ve "her şeyi gömüyoruz"un, birisi ilk kez
+unutulma hakkını kullandığında bir probleme dönüşmesinin nedeni: bir olguyu bir
+vektör indeksinden adıyla kaldıramazsınız, çünkü indeksin adları yoktur. Tek bir
+silme talebini yerine getirmek için bir indeksi yeniden kurmak, mimari kararın
+sonradan ödenen bedelidir.
+
+**Köken, bir cevabı mümkün kılan şeydir.** *Bu sistem neden telefon aramalarını
+tercih ettiğimi düşünüyor?* ancak yazmaya hangi olayın yol açtığını kaydettiyseniz
+iyi bir cevabı olan bir sorudur. Başta eklenen tek bir sütundur.
+
+**Çıkarım rıza değildir.** Kullanıcının ifade ettiği bir tercih, çıkarıcınızın
+çıkarsadığından farklıdır ve kullanıcılar ikincisini, doğru olduğunda bile gözetim
+olarak deneyimler. Ayrımı saklayın, öncelik kurallarında kullanın — ve bir bellek
+görünür bir şeyi tetiklediğinde neye dayandığını gösterebilin.
+
+**Saklama bir karardır, bir varsayılan değil.** Yazılan her şey bir süre dolumu
+ya da açık bir muafiyet alır. Kitabın yönetişim bölümü bunun bir rejime dönüştüğü
+yerdir; buraya ait olan kısım, bir TTL sütununun yazma anında hiçbir şeye mal
+olmadığı ve sonradan ikna edici biçimde eklenmesinin neredeyse imkânsız olduğudur.
+
+::: {.column-margin}
+Bu bölümün rahatsız edici sürümü: çoğu bellek sistemi, demolar iyileşene kadar
+yazma ekleyerek kurulur ve gizlilik işi sonunda başka biri tarafından yapılır.
+Yukarıdaki gereksinimlerin neredeyse hepsi bir *şema* kararıdır — köken, kaynak,
+süre dolumu, silinebilirlik — ki bu da onları birinci günde ucuz, iki yüzüncü
+günde pahalı yapar.
+:::
+
+## Sezgi kontrolleri {#sec-bellek-sezgi}
+
+Her birini açmadan önce cevaplayın. Biri bu bölümün çalıştırdığı ölçümle
+çözülüyor; diğer beşi savunduğu tasarım kararları ve her biri birinci günde
+hiçbir şeye mal olmayan bir şema tercihi.
+
+::: {.callout-note collapse="true"}
+## 1. Bellek bir vektör veritabanına mı konmalı?
+
+Epizotlar evet, olgular hayır. Benzerlik araması *buna benzer bir şeyi konuştuk
+mu* için doğru, *bu kullanıcının mevcut tercihi nedir* için yanlıştır; çünkü bir
+olgu güncelleme ve silme ister ve bir vektör indeksi ikisini de adıyla sunmaz.
+Olgular `(kullanıcı, anahtar)` ile anahtarlanmış satırlara gider; epizotlar,
+kayda geri işaretçileri olan bir indekse. Olguları vektörlere koymak bu alandaki
+en yaygın üretim hatasıdır ve fatura ilk silme talebinde gelir.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. İki bellek çelişiyor. Model bunu çözer mi?
+
+Güvenilir biçimde hayır. Burada ölçüldü: iki olgu da mevcutken ve zaman damgası
+yokken model daha yenisini zamanın **%0'ında** seçti ve %83,3'ünde kaçamak yaptı.
+Zaman damgaları eklemek onu %33,3'e çıkardı. Açık bir "en günceli tercih et"
+kuralı eklemek %83,3'e çıkardı — daha iyi ve hâlâ altıda biri ters yöne gidiyor.
+Erişim katmanında çözün ve tek bir olgu enjekte edin.
+:::
+
+::: {.column-margin}
+Kusurun hangi yöne gittiğine dikkat edin: kendinden emin hata değil kaçamak. Bu
+daha iyi kusurdur, ama "e-posta, ya da belki telefon" diye cevaplayan bir sistem
+yine de başarısız olmuştur ve hiçbir doğruluk metriğinin işaretlemediği bir
+biçimde başarısız olur.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Belleğe yazmayı ne tetiklemeli?
+
+Tek bir bahis değil. İşleyen en ucuz politika, açık bir ifade ya da ikinci bir
+geçiş üzerine yazmak, asla ilk bir çıkarım üzerine yazmamak — ve her yazmayla
+kökeni kaydetmektir, çünkü onsuz çelişkileri çözemez, hiçbir şeyin süresini
+dolduramaz ya da sistemin bir şeye neden inandığını açıklayamazsınız. Her şeyi
+hatırlamanın kusur biçimi depolama maliyeti değil erişim kalitesidir: ilgisiz her
+bellek, ilgili olanla yarışır.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Hangi bellek türü en tehlikeli biçimde bozulur?
+
+Anlamsal. Çalışma belleği gürültülü bozulur — pencereye çarparsınız. Epizodik
+bellek yavaş bozulur — erişim kötüleşir ve maliyetler artar. Anlamsal bellek
+**sessizce** bozulur: martta kaydedilmiş bir olgu temmuzda kendinden emin
+döndürülür ve sistemde hiçbir şey süresinin dolduğunun farkında değildir. Bu
+asimetri, TTL'lerin bir temizlik birikmişine değil yazma anına ait olmasının
+nedenidir.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Neyin hatırlanacağına ajan mı karar vermeli?
+
+Yalnızca yanlış bir yazmanın ucuz olduğu yerde. Model kararlı yazmalar esnektir
+ve sizin seçmeyeceğiniz şeyleri hatırlar; tutmanıza izin verilmeyenler dâhil.
+Kural tabanlı çıkarım öngörülebilir ve denetlenebilirdir ve önemli olan her şey
+için doğru varsayılandır; kullanıcı onaylı yazmalar bir etkileşime mal olur ve
+gerçek rıza veren tek mekanizmadır. Çoğu sistem altyapı-olarak-okuma ve
+açık-eylem-olarak-yazma ister.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Ajanınız çalıştırmanın ortasında çöktü. Ne sağ kalmalı?
+
+Transkript; sonda değil her adımdan sonra kontrol noktası alınmış, araç
+*sonuçları* saklanmış olarak — yalnızca çağrılar değil; bir çalıştırmayı
+araçlarını yeniden yürüterek oynatmak yazan her şey için yanlıştır. Ve devam,
+başlatmayla aynı kod yolu olmalıdır, çünkü ayrı bir devam yolu test
+edilmeyecek ikinci bir uygulamadır.
+:::
+
+## Mülakat soruları {#sec-bellek-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün ölçümünün
+cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Tasarımı anlayıp anlamadığınızı sınayanlar
+
+**S: Konuşmalı bir ajan için belleği nasıl tasarlarsınız?**
+
+Kelimeyi bölerek başlarım: çalışma belleği transkripttir ve bağlam
+mühendisliğine aittir; epizodik bellek benzerlikle erişilen bir olay kaydıdır;
+anlamsal bellek olgulardır ve kökeni ve süre dolumu olan, kullanıcı ve
+özniteliğe göre anahtarlanmış satırlara aittir. Sonra her deponun neyi
+desteklemesi gerektiğini söyleyin — olgular güncelleme ve silme, epizotlar
+alakaya ve yaşa göre sıralama ister — ve "her şeyi göm"ün neden bozulduğunu
+belirtin: bir güncellemeyi ifade edemez.
+
+**S: İki bellek çelişiyor. Ne olur?**
+
+Enjeksiyondan önce, kodda çözün ve modele tek bir olgu verin. Modele
+bırakırsanız tutarsızlık bekleyin: küçük bir sondada ölçüldü, zaman damgaları
+tek başına daha yeni cevabı üçte bir oranında üretti ve açık bir güncellik kuralı
+altı cevaptan birini hâlâ ters yönde bıraktı. İlginç devam sorusu, güncelliğin
+*yanlış* kural olduğu yerdir — ifade edilmiş bir tercih, tarihler ne olursa olsun
+çıkarsanmış olanı yenmeli — ki bu yüzden öncelik zaman kadar kaynak üzerindedir.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Bir kullanıcı, hakkında bildiğiniz her şeyi silmenizi istiyor. Ne olur?**
+
+Gerçek veri yolunu yürüyün: olgu deposu, vektör indeksi, epizot kaydı, yedekler
+ve her önbellek. Dürüst cevap zor olanı adlandırır — bir vektör indeksinin adları
+yoktur, dolayısıyla belirli bir olguyu kaldırmak, başta kurmuş olmanız gereken
+bir eşlemeyi yeniden kurmak ya da sürdürmek demektir. Bunun sonradan eklenen bir
+özellik değil birinci günde verilen bir şema kararı olduğunu ve olguları
+ilişkisel bir depoda tutmak için en güçlü pratik argüman olduğunu söyleyin.
+
+**S: Ajanınız sürekli güncel olmayan bilgiye göre hareket ediyor. Nereye
+bakarsınız?**
+
+Okuma anına değil yazma anına. Herhangi bir şeyin TTL taşıyıp taşımadığını,
+yazmaların upsert mi yoksa ekleme mi yaptığını ve erişimin anahtar başına bir mi
+yoksa birkaç olgu mu döndürdüğünü sorun. Çoğu "bayat bellek" hatası aslında "bir
+anahtar için iki değer" hatasıdır ve çözüm daha zeki bir prompt değil bir
+benzersizlik kısıtıdır.
+
+## 2026 alet çantası {#sec-bellek-araclar}
+
+Bu bölümdeki çelişki sondası aşağıdaki sürümlerle tek bir dizüstü bilgisayarda
+çalıştı. Kısa prompt'lar ve otuz maddedir; oraya sığmasının nedeni de budur.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | çelişki sondası için `qwen3.5:9b` sunmak |
+| `numpy` | 2.5.2 | görev kurulumu ve puanlama |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `letta` | 0.16.8 | kendi yönettiği bellek sayfalaması, MemGPT soyu |
+| `mem0ai` | 2.0.19 | kütüphane olarak çıkarım, güncelleme ve çelişki politikaları |
+| `zep-python` | 2.0.2 | zamansal bilgi çizgesi belleği; *ne zaman*ın *ne* kadar önemli olduğu durumlar |
+| `langmem` | 0.0.30 | LangGraph ajanları için bellek ilkelleri |
+| `pgvector` | 0.5.0 | olgularınızı zaten tutan veritabanında epizotlar — genellikle doğru cevap |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: güvenle yanlış olabilen bir bellek kurun {#sec-bellek-lab}
+
+Altı adım ve ilkinde bilerek hiç kod yok — bir paragrafta tarif edemediğiniz bir
+bellek sistemi, yazma politikasını seçmediğiniz bir sistemdir.
+
+### Adım 1 — politikayı koddan önce yazın
+
+Sisteminizin hatırlamak zorunda olduğu üç şey, asla saklamaması gereken üç şey ve
+sakladığı üçünün her biri için: kim karar veriyor ve ne zaman süresi doluyor.
+
+### Adım 2 — bir indeks değil bir tablo
+
+`user_id, key, value, source, written_at, expires_at`. `(user_id, key)` üzerinde
+upsert yapın, böylece bir anahtar için iki değer var olamasın.
+
+### Adım 3 — bir çelişki ekin
+
+Bir tercih yazın, sonra farklı birini yazın. Sorgulayın. Erişiminiz ikisini de
+döndürüyorsa erişimi düzeltin — bu bölüm, çözümü modele bırakıldığında ne
+olduğunu ölçtü.
+
+### Adım 4 — bayatlığı ölçün
+
+Deponuzun bir kopyasındaki zaman damgalarını altı ay yaşlandırın ve on soru
+sorun. Kaç cevabın artık yanlış olduğunu sayın. O sayı, bir TTL'nin değeridir.
+
+### Adım 5 — bir kullanıcıyı silin, sonra bakın
+
+Silme yolunuzu çalıştırın, sonra ham depoyu, indeksi, kayıtları ve her önbelleği
+o kişinin verisi için arayın. Nerede sağ kaldığını raporlayın.
+
+### Adım 6 — "bunu neden düşünüyorsun?" sorusunu cevaplayın
+
+Üç bellek için, her yazmaya yol açan olayı üretin. Üretemiyorsanız köken sütununu
+şimdi ekleyin.
+
+### Neyi teslim edeceksiniz
+
+1. adımdaki politikayı, 4. adımdaki bayatlık sayımını, 5. adımda verinin silmeden
+sağ çıktığı yerlerin listesini ve sisteminizin yazmayı bırakması gereken belleği
+adlandıran bir cümleyi.
+
+## Alıştırmalar {#sec-bellek-alistirmalar}
+
+1. **Yazma politikası.** Bir destek ajanı için: hatırlamak zorunda olduğu üç şey,
+   asla saklamaması gereken üç şey ve saklanan her madde için kimin karar
+   verdiği ve ne zaman süresinin dolduğu. Bir sayfa, koddan önce.
+2. **Bir çelişki ekin.** Deponuza çelişen iki olgu koyun, sonra çözüm kuralına
+   karar verin ve güncelliğin yanlış cevap olduğu duruma karşı savunun.
+3. **Deponuzu yaşlandırın.** Her zaman damgasını altı ay geri alın ve on soruyu
+   yeniden sorun. Artık yanlış olan cevapları sayın; bir TTL ile satın aldığınız
+   şey budur.
+4. **Silin ve avlayın.** Bir kullanıcı için silme yolunuzu çalıştırın, sonra her
+   depoyu, indeksi, kaydı ve önbelleği arayın. Verinin nerede sağ kaldığını yazın.
+5. **Köken denetimi.** Beş bellek seçin ve her birine yol açan olayı üretin.
+   Hiçbiri için üretemiyorsanız bulgu budur.
+6. **Olgulara karşı epizotlar.** Mevcut bellek deponuzu alın ve her girdiyi ikiden
+   biri olarak sınıflayın. Olgular vektör indeksindeyse onları taşımanın şimdi
+   neye, bir yıl sonra neye mal olacağını tahmin edin.
+7. **Araç mı altyapı mı.** Hatırlamayı aynı görevde iki şekilde de uygulayın ve
+   karşılaştırın: ajan aracı çağırmayı ne sıklıkla unutuyor ve otomatik enjeksiyon
+   size token olarak neye mal oluyor?
+
+## Daha derine {#sec-bellek-derinlesme}
+
+Okumadan önce: bellek deponuzu alın ve on girdiyi olgu ya da epizot olarak
+sınıflayın. Olgular bir vektör indeksinde yaşıyorsa ilk görevinizi buldunuz.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`letta`](https://github.com/letta-ai/letta) | çalışan bir sistem olarak MemGPT tasarımı — bağlamla depolama arasındaki kendi yönettiği sayfalamayı görmenin en net yolu |
+| [`mem0`](https://github.com/mem0ai/mem0) | açık çıkarım ve güncelleme politikaları olan bir bellek katmanı; kendinizinkini kursanız bile politika sözcük dağarcığı için okumaya değer |
+| [`zep`](https://github.com/getzep/zep) | zamansal akıl yürütmesi yerleşik bellek; çelişki probleminin ciddiye alınmış hâli |
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | daha az makinenin neden genellikle kazandığına dair çevreleyen argüman |
+| [Lil'Log — ajanlar üzerine](https://lilianweng.github.io/posts/2023-06-23-agent/) | bu ortamda çalışma/epizodik/anlamsal ayrımını popülerleştiren yazı |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| kendi belleğini sayfalayan bir ajan | @packer2023memgpt |
+| uzun bir bağlamın neyi tutup tutmadığı | @hsieh2024ruler; @modarressi2025nolima |
+| bellek büyüdükçe erişim kalitesi | @thakur2021beir |
+| bütün bunların asıldığı döngü | @yao2023react |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-bellek-ozet}
+
+- **Üç bellek, üç kusur biçimi.** Çalışma belleği pencere dolduğunda gürültülü
+  bozulur; epizodik bellek hacim erişimi bozdukça yavaşça bozulur; **anlamsal
+  bellek sessizce bozulur** ve mart olgusunu temmuzda kendinden emin döndürür.
+- **Olgular satırlarda, epizotlar vektörlerde.** Bir olgu güncelleme ve silme
+  ister ve bir vektör indeksi ikisini de adıyla sunmaz. Olguları bir indekse
+  koymak yaygın üretim hatasıdır ve fatura ilk silme talebinde gelir.
+- **Model çelişkileri sizin yerinize çözmeyecek.** İki olgu da mevcutken ve zaman
+  damgası yokken daha yenisini zamanın **%0'ında** seçti ve %83,3'ünde kaçamak
+  yaptı; tek başına zaman damgaları onu %33,3'e taşıdı; açık bir güncellik kuralı
+  %83,3'e taşıdı ve altıda birini yanlış bıraktı. Erişimde çözün, tek olgu
+  enjekte edin.
+- **Varsayılan kusur kaçamaktır.** Kendinden emin yanlış bir cevap değil,
+  "e-posta ya da belki telefon" — yalan söylemekten iyi, yine de başarısız bir
+  cevap ve doğruluk metriklerine görünmez.
+- **İkinci bahiste yazın, asla ilk çıkarımda değil** ve her seferinde kökeni
+  kaydedin. Köken olmadan çözemez, süre dolduramaz ya da açıklayamazsınız.
+- **Unutmak bir özelliktir.** Yazma anında TTL, epizotlar için sönüm ve
+  erişimcinin unutabileceği bir bayrak yerine gerçekten silen silme.
+- **Altyapı olarak oku, araç olarak yaz.** Hatırlama her seferinde gerçekleşmeli
+  ve hiçbir model kararı gerektirmez; yazma, transkriptte görünür olmasını
+  istediğiniz eylemdir.
+- **Gizlilik gereksinimleri şema kararlarıdır.** Köken, kaynak, süre dolumu ve
+  silinebilirlik birinci günde hiçbir şeye mal olmaz ve iki yüzüncü günde ikna
+  edici biçimde eklenmesi neredeyse imkânsızdır.
