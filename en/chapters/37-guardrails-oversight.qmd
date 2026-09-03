@@ -1,56 +1,774 @@
 # Guardrails and Human Oversight {#sec-guardrails}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One measurement, entirely deterministic and with no
+model in it: four Turkish PII detectors over a 480-message corpus whose planted
+identifiers are known by construction, scored on precision and recall. It exists
+to make one argument concrete — that a guardrail's failure mode is not "it
+missed something" but "it missed something *and* you cannot tell". Software:
+Python 3.14.5 standard library only, no third-party dependencies.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- layer input and output guardrails without making the product unusable;
-- classify irreversible actions and require confirmation for them;
-- design an approval gate that interrupts, reviews, and resumes;
-- run an on-call rotation for agents with real runbooks.
+- say what a guardrail is for, and why it is not a security boundary;
+- build a PII detector that validates, and know what validation costs you;
+- redact reversibly, so a masked conversation can still do useful work;
+- classify every action a system can take by whether it can be undone;
+- design an approval gate that interrupts, reviews and resumes;
+- write the runbook for an agent that is misbehaving at 3am;
+- turn an incident into a regression test rather than a document nobody reads.
 
-## Input and output guardrails; layered defense
+## Guardrails are risk reduction, not a security boundary {#sec-guardrails-boundary}
 
-<!-- TODO(draft): what belongs at each layer; guardrails as risk
-    reduction, not as a security boundary — the boundary is
-    @sec-agent-security. -->
+Start with the distinction that everything else depends on, because getting it
+wrong is how teams end up with a false sense of safety.
 
-## PII detection, redaction, and reversible tokenization
+A **guardrail** reduces the rate and severity of bad outcomes from a system that
+is behaving normally: a user pastes a national ID into a chat, a model drifts
+into advice it should not give, an agent tries to issue a refund larger than
+anyone intended. The adversary here is entropy — users doing unusual things,
+models being wrong, edge cases nobody enumerated.
 
-<!-- TODO(draft): redacting on the way in and restoring on the way out;
-    the Turkish PII patterns that generic detectors miss. -->
+A **security boundary** holds against someone actively trying to break it. That
+is @sec-agent-security's subject, and the technique that defeats most guardrails
+is embarrassingly simple: try again, slightly differently.
 
-## Topical and policy guardrails; classifier-based routing
+[Guardrails are probabilistic filters, so an attacker gets unlimited retries
+against a component that is right most of the time.]{.hl} "Most of the time" is a
+fine property for reducing accidental harm and a useless one for stopping
+deliberate harm. The practical consequence is architectural: a guardrail belongs
+*in front of* a permission system, never *instead of* one. If the only thing
+stopping an agent from issuing a €50,000 refund is a classifier that usually
+notices, the refund limit is not enforced.
 
-<!-- TODO(draft): refusal, escalation, and the false-positive cost. -->
+| | guardrail | boundary |
+|:--|:--|:--|
+| **stops** | accidents, drift, unusual inputs | deliberate attempts |
+| **built from** | classifiers, regexes, prompts, judges | permissions, allowlists, capability limits |
+| **fails** | probabilistically, and quietly | loudly, or not at all |
+| **retries help the attacker** | yes — this is the whole problem | no |
+| **evidence it works** | measured false-positive and false-negative rates | an argument about what is reachable |
 
-## Approval gates: interrupt, review, resume
+: Two different jobs, routinely conflated {tbl-colwidths="[22,40,38]"}
 
-<!-- TODO(draft): the mechanics of pausing an agent mid-trajectory and
-    resuming with a human decision. -->
+The rest of this chapter is about building guardrails well, on the understanding
+that building them well does not turn them into boundaries.
 
-## Classifying irreversible actions and requiring confirmation
+## What a PII detector actually has to do {#sec-guardrails-pii}
 
-<!-- TODO(draft): a taxonomy of side effects by reversibility; the
-    default-deny list. -->
+The most common guardrail is also the one most often shipped broken, because it
+looks finished long before it is. Detecting personal data in Turkish support
+traffic makes a good worked example: the identifiers have published check
+digits, so correctness is verifiable rather than a matter of taste.
 
-## Kill switches and rolling back agent actions
+The corpus is 480 synthetic Turkish support messages built from eight templates
+with randomised slots. Ground truth is known by construction: **360 national ID
+numbers (TCKN)** and **120 IBANs** are planted, of which 15% carry a
+single-digit typo — a user mistyping their own identifier. Alongside them sit
+**540 eleven-digit strings that are not national IDs**: mobile numbers written
+without spaces, order references, cargo tracking codes, invoice numbers, meter
+readings. That collision is the entire problem. A Turkish mobile number written
+`05xxxxxxxxx` is exactly eleven digits, and so is a TCKN.
 
-<!-- TODO(draft): stopping a fleet; connect to compensating transactions
-    in @sec-deployment. -->
+Four detectors, each a superset or filter of the pattern:
 
-## On-call for agents: alerting, runbooks, incident response
+```text
+TCKN, 480 messages, 360 planted, 540 eleven-digit decoys
 
-<!-- TODO(draft): what pages a human at 3am, and what the runbook says. -->
+  detector                      hits   correct   precision   recall
+  pattern only                   900       360       40.0%   100.0%
+  pattern + checksum             308       305       99.0%    84.7%
+  pattern + context word         180       180      100.0%    50.0%
+  pattern + (checksum OR word)   340       337       99.1%    93.6%
+```
 
-## Blameless postmortems for agent failures
+### The naive detector is wrong six times out of ten
 
-<!-- TODO(draft): the write-up template, and how findings become
-    regression tests. -->
+An eleven-digit regex finds every planted TCKN — recall 100%, which is the
+number people report — and **60% of what it returns is not a national ID**. If
+that detector drives redaction, it masks order numbers and phone numbers, and
+the support agent reading the masked ticket cannot do their job. If it drives an
+alert, the alert is ignored within a week.
 
-## Exercises
+[Precision, not recall, is what determines whether a guardrail survives contact
+with the people who have to use it.]{.hl}
 
-1. Classify every tool in a system by reversibility. Which need confirmation, and what does that do to task completion time?
-2. Write the runbook for 'the agent is looping and burning budget'. Include the kill switch.
+::: {.column-margin}
+The 40% figure depends on how many decoys the corpus contains — 1.5 per planted
+identifier here, a number I chose. The direction is robust and the magnitude is
+not; measure it on your own traffic.
+:::
+
+### Validation buys precision, and takes something real
+
+TCKN has a published two-digit checksum. Applying it lifts precision from 40% to
+**99.0%**, which is the result everybody expects, and costs **15.3 points of
+recall**, which is the result nobody plans for.
+
+Look at what it drops. The detector found 305 of the 360 planted identifiers,
+and 305 is exactly the number of planted identifiers that are not mistyped. The
+recall loss is not approximately the typo rate; it *is* the typo rate,
+mechanically. And the dropped items are the worst possible thing to drop:
+
+[A mistyped national ID is still a national ID sitting in your logs.]{.hl} It is
+still personal data, it still identifies a person to anyone who can read it in
+context, and it is the case where a user is most likely to send a correction
+containing the right number too. A validator configured as a filter deletes
+precisely the records a compliance reviewer would care most about.
+
+For calibration on how much work the checksum is doing: a random eleven-digit
+string passes it **9,960 times in 1,000,000**, or about **1 in 100**. That is
+strong but not decisive — on a corpus with a lot of numeric strings, the
+checksum alone still leaves roughly one false positive per hundred candidates.
+
+### Context recovers what validation loses
+
+The third detector ignores the checksum and asks a different question: is there a
+label immediately before the number — `TC kimlik no`, `TCKN`, `kimlik numarası`
+— within thirty characters?
+
+Precision **100%**, recall **50.0%**. The recall figure is not a discovery: half
+the TCKN-bearing templates in this corpus label the identifier and half leave it
+bare, so 50% is the design parameter coming back out. What matters is that the
+two detectors fail on *different* items. The checksum misses mistyped
+identifiers; context misses unlabelled ones; neither miss implies the other.
+
+So take the union. **Precision 99.1%, recall 93.6%** — nearly all of the
+checksum's precision with two-thirds of its recall loss recovered.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Four Turkish PII detectors, precision against recall</div>
+<svg viewBox="0 0 760 300" role="img" aria-label="Chart comparing four PII detectors: pattern only at 40 percent precision and 100 percent recall, pattern plus checksum at 99 percent precision and 84.7 percent recall, pattern plus context word at 100 percent precision and 50 percent recall, and the union at 99.1 percent precision and 93.6 percent recall">
+  <text x="8" y="16" class="t-xs t-muted t-b">480 MESSAGES &#183; 360 PLANTED TCKN &#183; 540 ELEVEN-DIGIT DECOYS</text>
+
+  <text x="8" y="52" class="t-xs t-b">pattern only</text>
+  <rect x="210" y="40" width="128" height="18" rx="3" class="box"/>
+  <text x="346" y="54" class="t-xs t-mono">precision 40.0%</text>
+  <rect x="520" y="40" width="160" height="18" rx="3" class="box"/>
+  <text x="688" y="54" class="t-xs t-mono">recall 100%</text>
+
+  <text x="8" y="98" class="t-xs t-b">+ checksum</text>
+  <rect x="210" y="86" width="317" height="18" rx="3" class="box"/>
+  <text x="535" y="100" class="t-xs t-mono">99.0%</text>
+  <rect x="520" y="86" width="136" height="18" rx="3" class="box"/>
+  <text x="664" y="100" class="t-xs t-mono">84.7%</text>
+
+  <text x="8" y="144" class="t-xs t-b">+ context word</text>
+  <rect x="210" y="132" width="320" height="18" rx="3" class="box"/>
+  <text x="538" y="146" class="t-xs t-mono">100%</text>
+  <rect x="520" y="132" width="80" height="18" rx="3" class="box"/>
+  <text x="608" y="146" class="t-xs t-mono">50.0%</text>
+
+  <text x="8" y="190" class="t-xs t-b t-accent">union of both</text>
+  <rect x="210" y="178" width="317" height="18" rx="3" class="box-accent"/>
+  <text x="535" y="192" class="t-xs t-mono">99.1%</text>
+  <rect x="520" y="178" width="150" height="18" rx="3" class="box-accent"/>
+  <text x="678" y="192" class="t-xs t-mono">93.6%</text>
+
+  <path d="M8,216 H752" class="ln-thin"/>
+  <text x="8" y="238" class="t-xs t-muted t-b">WHY THE UNION WORKS</text>
+  <text x="8" y="256" class="t-xs t-muted">The checksum misses mistyped identifiers &#183; context misses unlabelled ones &#183; the two failures do not overlap.</text>
+  <text x="8" y="278" class="t-xs t-muted">IBAN is the opposite case: the pattern is already 100% precise, so its checksum only discards 12.5% of real ones.</text>
+</svg>
+```
+
+::: {.fig-cap}
+The recall axis is the one to watch. Every filter that raises precision is
+throwing away real personal data, and the question is only whether something
+else catches it.
+:::
+::::
+
+### Do not validate where the pattern is already unambiguous
+
+The IBAN results say the opposite thing, and the contrast is the actionable part.
+
+```text
+IBAN, 120 planted
+
+  detector             hits   correct   precision   recall
+  pattern only          120       120      100.0%   100.0%
+  pattern + checksum    105       105      100.0%    87.5%
+```
+
+`TR` followed by 24 digits does not collide with anything else in this traffic,
+so the pattern is already perfect. Adding the ISO 7064 mod-97 check buys **zero**
+precision and discards **12.5%** of real IBANs — again, exactly the mistyped
+ones.
+
+[Validate where the pattern is ambiguous; do not validate where it is not.]{.hl}
+This is the sort of thing that gets applied uniformly because it feels rigorous,
+and uniform rigour here is pure loss. The general rule the measurement supports:
+**use a checksum to rank confidence, not to filter.** A validated hit is
+high-confidence and can be redacted automatically; an unvalidated pattern hit is
+lower-confidence and should be redacted too, flagged differently, and reviewed —
+not silently dropped.
+
+### What this measurement does not show
+
+Three limits, stated so the numbers are not over-read. The corpus is synthetic
+and its decoy density is a choice, so 40% is illustrative rather than
+transferable. The typo model is a single random digit, which is kinder than real
+mistyping — people transpose, truncate and add spaces. And names, addresses and
+free-text disclosures are not covered at all: those need the NER of
+@sec-sequence-labeling, they do not have check digits, and they are where a real
+Turkish detector will spend most of its difficulty.
+
+## Redaction that you can undo {#sec-guardrails-redaction}
+
+Detection is half the job. What you do with a hit determines whether the product
+still works.
+
+Destructive masking — replacing `12345678901` with `[REDACTED]` — is safe and
+frequently useless: the agent can no longer look up the order, and the human who
+takes over cannot either. **Reversible tokenization** replaces the value with a
+stable handle, `[TCKN_1]`, and keeps the mapping in a separate store that the
+model never sees. The agent reasons over tokens, tools resolve tokens to values
+inside the trusted boundary, and the response is de-tokenized on the way out.
+
+Four properties make this work, and each is a place implementations go wrong:
+
+**Stability within a conversation.** The same value must get the same token, or
+the model cannot tell whether two mentions are the same person. Different
+conversations should get different tokens, or the token itself becomes an
+identifier.
+
+**Format preservation where downstream code cares.** A tool expecting eleven
+digits will reject `[TCKN_1]`. Either the tool resolves tokens, or the token
+preserves the shape — and preserving shape means the token can be mistaken for
+real data, which has to be handled deliberately.
+
+**The mapping is the sensitive asset now.** You have not removed personal data;
+you have concentrated it into one store with a join key. That store needs the
+retention, access control and residency treatment @sec-governance describes,
+and it is a strictly worse breach than the original if it leaks with the
+transcripts.
+
+**Redaction happens at one boundary.** @sec-observability made this argument for
+telemetry, and it generalises: redact once, before the data reaches anything
+that persists it — the model, the trace exporter, the log line, the eval set.
+Redacting in five places means five implementations and one of them is wrong.
+
+## Topical guardrails and the cost of being wrong {#sec-guardrails-policy}
+
+Beyond personal data, most products need to keep the system inside a topic:
+answer questions about our product, decline medical advice, never speculate
+about a competitor's legal problems.
+
+The mechanisms are familiar and layered — a system prompt (cheapest, weakest), a
+classifier on input, a classifier on output, and a rule that hard-blocks the
+handful of cases you can specify exactly. The layering is worth having; the part
+that needs stating is the arithmetic.
+
+[A guardrail's false-positive rate is multiplied by all of your traffic, and its
+false-negative rate only by the rare bad case.]{.hl} At 1% false positives and a
+million requests a month, ten thousand legitimate users are refused so that a
+handful of bad outputs are stopped. Whether that is the right trade depends
+entirely on severity, and it should be an explicit decision with both numbers in
+front of you rather than a threshold someone picked.
+
+Two consequences follow. **Refuse differently depending on confidence** — a
+high-confidence policy hit blocks, a marginal one routes to a human or asks a
+clarifying question, and treating those the same wastes the classifier's
+information. And **measure the guardrail as a classifier**, with the same
+discipline @sec-llm-eval applies to judges: a labelled set of hard cases,
+reported precision and recall, and re-measurement after every prompt or model
+change, since @sec-production-eval showed how little it takes to move behaviour.
+
+## Classify every action by whether it can be undone {#sec-guardrails-reversibility}
+
+Guardrails on text are the easy half. Once an agent has tools (@sec-tool-design),
+the question stops being what it says and becomes what it does — and the
+organising principle is reversibility.
+
+| class | examples | default | what to require |
+|:--|:--|:--|:--|
+| **Reversible** | read a record, run a query, draft a message, create a document nobody sees yet | allow | logging only |
+| **Reversible with effort** | update a record, cancel an order, move a file | allow | an audit trail and a documented undo path |
+| **Irreversible, bounded** | send an email, post a message, issue a small refund | confirm | approval above a threshold; rate limits |
+| **Irreversible, unbounded** | payment, deletion, any external publication, anything touching another person | deny by default | explicit per-action approval, and a limit enforced outside the model |
+
+: A taxonomy that turns "be careful" into configuration
+{tbl-colwidths="[18,34,14,34]"}
+
+Three things make this more than a table. **The classification belongs to the
+tool, not to the prompt** — it lives in the tool definition, so it cannot be
+argued away by a persuasive input. **Bounded and unbounded is the important
+line**, and it is enforced by a limit outside the model: an agent that can issue
+refunds under €50 is a different risk from one that can issue refunds, and the
+difference is a number checked in code. And **defaults are the whole design**:
+new tools should land in the strictest class and be relaxed deliberately, because
+the alternative is a system whose risk profile is decided by whoever added the
+most recent tool.
+
+## Approval gates: interrupt, review, resume {#sec-guardrails-approval}
+
+An approval gate is easy to describe and awkward to build, because it requires
+the agent loop to survive being paused for an hour.
+
+The mechanics that matter:
+
+1. **Serialise the pending action, not the conversation.** What awaits approval
+   is a specific call with specific arguments — `refund(order=14822,
+   amount=780.50)` — and that is what a human must see. Showing them the
+   transcript and asking "does this look right?" is not an approval.
+2. **Persist enough state to resume.** The loop's state must outlive the process
+   (@sec-deployment), or approvals that arrive after a deploy are lost.
+3. **Time out explicitly, and decide which way.** An approval that nobody answers
+   must expire into a defined outcome. Silent expiry into "denied" strands users;
+   into "approved" it is not a gate.
+4. **Show the reviewer the evidence, not the conclusion.** The trace
+   (@sec-observability) — what the agent read, which tools returned what — is
+   what makes a decision possible. A summary written by the same model that
+   proposed the action is not independent evidence.
+5. **Record the decision as data.** Who approved, when, what they saw. That is
+   both the audit trail @sec-governance needs and the labelled set that tells you
+   which approvals were rubber-stamped.
+
+That last point is the one that decays. [An approval queue where 99% of items are
+approved is not oversight; it is a delay.]{.hl} Measure the rejection rate, and
+when it collapses, either the gate is on the wrong actions or the reviewers have
+nothing to reject with — both fixable, neither visible without the number.
+
+## Kill switches, and undoing what already happened {#sec-guardrails-killswitch}
+
+Everything above is preventive. This section is for when prevention did not work,
+and it has two halves that get conflated.
+
+**Stopping.** A kill switch must be operable by someone who did not write the
+system, at 3am, without a deploy. That means a runtime flag rather than a code
+change, and it needs granularity: stop one tool, one agent, one tenant, or
+everything. A single global switch is one people hesitate to pull, and
+hesitation at 3am is the failure. Test it on a schedule — an untested kill switch
+is a belief.
+
+**Undoing.** Stopping does not reverse the forty actions already taken, and
+@sec-deployment's compensating transactions are the mechanism: for every
+irreversible tool, a documented inverse or an explicit statement that there is
+none. Writing that list is uncomfortable in the useful way, because the entries
+that read "no inverse exists" are exactly the tools that need the strictest gate.
+
+Then the ordinary operational hygiene that agents make more urgent: a budget
+ceiling per run and per tenant that halts rather than warns; a step ceiling
+(@sec-deployment) so a loop terminates; and rate limits per tool, because "the
+agent sent 4,000 emails" is a loop, not a decision.
+
+## On-call for agents {#sec-guardrails-oncall}
+
+Agents fail in ways ordinary services do not, and the alert set has to reflect
+that. The classic signals — error rate, latency, saturation — stay, and none of
+them fire when an agent is confidently doing the wrong thing.
+
+What is worth waking someone for, drawn from what @sec-observability makes
+visible:
+
+- **spend rate** above a ceiling, per tenant and per run — the fastest-moving
+  failure and the easiest to detect;
+- **step-ceiling hits** rising, which means loops;
+- **tool error rate** on a single tool, which usually means a dependency changed
+  under you;
+- **approval queue depth**, because a stalled queue is a stalled product;
+- **guardrail trigger rate** moving in either direction — a spike is an attack or
+  a bad deploy, a collapse means the guardrail broke;
+- **refusal rate**, which is the same signal from the user's side.
+
+A runbook has to answer four questions in the order an on-call engineer needs
+them: how do I stop it, how do I tell how bad it is, how do I undo what it did,
+and who do I tell. The last one is not administrative — for personal data
+incidents there are notification deadlines (@sec-governance), and the clock
+starts before anyone has finished diagnosing.
+
+## Postmortems that produce tests {#sec-guardrails-postmortem}
+
+The failure mode of agent postmortems is a specific and boring one: every
+finding comes out as "improve the prompt", the document is filed, and the same
+class of failure returns in a month.
+
+The fix is to require that each finding produce an artefact that outlives the
+document, and there are only a few kinds worth having:
+
+- a **case in the eval suite** that fails before the fix and passes after
+  (@sec-production-eval, @sec-agent-eval);
+- a **tool reclassified** into a stricter reversibility class;
+- a **limit enforced in code** rather than requested in a prompt;
+- a **guardrail with a measured threshold**, not a new instruction;
+- an **alert** for the signal that would have caught it earlier.
+
+"Improve the prompt" is not on the list. It is unfalsifiable, unversioned in
+practice, and @sec-production-eval measured what happens to prompts that are
+edited without a gate: a reordering nobody would question moved accuracy by
+nearly six times the noise floor.
+
+The blameless part matters more here than in ordinary software, and for a
+non-obvious reason. When a system's behaviour is stochastic, the honest finding
+is often "the system did something unlikely and our design assumed it would
+not" — and that is a *design* finding. A culture that looks for the person who
+approved the prompt will get findings shaped like that, and will keep shipping
+the design.
+
+## Intuition checks {#sec-guardrails-intuition}
+
+Answer each before you open it. The first is the framing the whole chapter rests
+on; the next three carry the measurement; the last two are about oversight
+decaying quietly while all the dashboards stay green.
+
+::: {.callout-note collapse="true"}
+## 1. Your guardrail catches 99% of policy violations. Is the policy enforced?
+
+No. Against an adversary, 99% is a retry budget.
+
+A guardrail is a probabilistic filter, and someone deliberately trying to get
+through gets unlimited attempts against a component that is right most of the
+time. That is fine for reducing accidental harm — users pasting things they
+should not, models drifting off-topic — and useless as a boundary
+(@sec-agent-security).
+
+The architectural consequence: a guardrail belongs in front of a permission
+system, never instead of one. If the only thing stopping a large refund is a
+classifier that usually notices, the limit is not enforced. Enforce it in code,
+outside the model.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Your PII regex has 100% recall on the test set. Ship it?
+
+Recall is the number that looks finished; precision is the one that decides
+whether anyone can use it.
+
+An eleven-digit regex found all 360 planted Turkish national IDs here — and
+**60% of its hits were not national IDs**. Turkish mobile numbers written
+without spaces are exactly eleven digits, and so are order references, tracking
+codes and meter readings. Driving redaction from that detector masks the order
+number the support agent needs; driving alerts from it produces an alert people
+ignore within a week.
+
+The 40% precision figure depends on decoy density, which is a property of your
+traffic. Measure it on yours before shipping.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Adding the checksum raised precision to 99%. What did it cost?
+
+**15.3 points of recall — and precisely the records you least want to lose.**
+
+The checksum found 305 of 360 planted identifiers, and 305 is exactly the number
+that were not mistyped. The recall loss is not approximately the typo rate; it is
+the typo rate, mechanically. A mistyped national ID is still a national ID in
+your logs: still personal data, still identifying, and often accompanied by a
+correction containing the right number.
+
+So use validation to **rank confidence, not to filter**. Validated hits redact
+automatically; unvalidated pattern hits still redact, flagged as lower
+confidence, and get reviewed rather than dropped. Adding a context check — a
+label like `TCKN` shortly before the number — recovers most of the loss, because
+it fails on different items: union precision 99.1%, recall 93.6%.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Should you apply the same validation to every identifier type?
+
+No — and IBAN is the counterexample that makes the rule concrete.
+
+`TR` plus 24 digits collides with nothing else in this traffic, so the pattern
+alone was **100% precise at 100% recall**. Adding the ISO 7064 mod-97 check
+bought **zero** precision and discarded **12.5%** of real IBANs, all of them
+mistyped ones.
+
+Validate where the pattern is ambiguous; do not validate where it is not.
+Uniform rigour feels principled and is pure loss here. For calibration on how
+much the TCKN checksum is doing: a random eleven-digit string passes it about **1
+time in 100**.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Your approval queue approves 99% of what reaches it. Working as intended?
+
+Almost certainly not — that is a delay wearing oversight's clothes.
+
+Either the gate is on the wrong actions (approving things that never needed
+review, which trains reviewers to click through) or the reviewers lack what they
+need to reject anything. The second is common and fixable: they are being shown a
+summary written by the same model that proposed the action, rather than the trace
+of what it actually read and called (@sec-observability).
+
+Measure the rejection rate as a first-class metric. Fix the gate's scope, show
+evidence rather than conclusions, and put the specific pending call in front of
+them — `refund(order=14822, amount=780.50)`, not the transcript.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Every postmortem finding says "improve the prompt". What is wrong?
+
+Nothing outlives the document, so the same failure class returns.
+
+Require each finding to produce an artefact: an eval case that fails before the
+fix and passes after, a tool moved to a stricter reversibility class, a limit
+enforced in code rather than requested in a prompt, a guardrail with a measured
+threshold, or an alert for the signal that would have caught it sooner.
+
+"Improve the prompt" is unfalsifiable, and @sec-production-eval measured why it
+is also unsafe: reordering a prompt's rules with nothing added or removed moved
+accuracy by nearly six times the noise floor. Prompt edits need a gate, not a
+resolution in a document.
+:::
+
+## Interview questions {#sec-guardrails-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurement makes answerable.
+:::
+
+### Testing whether you understand the layer
+
+**Q: What is the difference between a guardrail and a security control?**
+
+The adversary. A guardrail reduces harm from a system behaving normally —
+unusual inputs, drift, edge cases — and it is a probabilistic filter, so someone
+deliberately trying to get past it has unlimited retries against something that
+is right most of the time. A security control holds against that. The practical
+statement: guardrails go in front of permission systems, never instead of them,
+and any limit that matters is enforced in code outside the model.
+
+**Q: How would you detect national ID numbers in Turkish support messages?**
+
+Start with the collision: a Turkish mobile written without spaces is eleven
+digits and so is a TCKN, so pattern-only precision was 40% here at 100% recall.
+Add the published checksum and precision goes to 99% — but recall falls 15
+points, and what it drops is mistyped identifiers, which are still personal
+data. So use the checksum to rank rather than filter, and add a context check
+for a nearby label, which fails on different items: the union reached 99.1%
+precision at 93.6% recall. Then note what none of it covers — names and
+addresses have no check digits and need NER.
+
+**Q: How do you decide which agent actions need human approval?**
+
+By reversibility, classified in the tool definition rather than in the prompt so
+it cannot be argued away by input. Reversible actions log; reversible-with-effort
+actions need a documented undo path; irreversible-but-bounded actions confirm
+above a threshold; irreversible-and-unbounded actions deny by default. The line
+that does the work is bounded versus unbounded, and it is a number checked in
+code — an agent that can refund under €50 is a different system from one that
+can refund.
+
+### Testing whether you have operated one
+
+**Q: Your redaction broke the product — agents cannot look up orders any more.
+Fix it.**
+
+Two problems, and they need separating. Precision: measure how much of what you
+are masking is not personal data, which for an eleven-digit regex was 60%. And
+destructiveness: replace masking with reversible tokenization, so the model sees
+`[TCKN_1]` while tools resolve tokens to values inside the trusted boundary. Then
+say the thing people miss — the token mapping is now the sensitive asset, with
+the retention and access controls to match, and a worse breach than the original
+if it leaks alongside the transcripts.
+
+**Q: It is 3am and an agent is looping and burning budget. What happens?**
+
+A runbook answers four questions in order: how to stop it, how bad it is, how to
+undo it, and who to tell. Stopping is a runtime flag, not a deploy, and it needs
+granularity — one tool, one tenant, everything — because a single global switch
+is one people hesitate to pull. Undoing is the compensating-transaction list
+written in advance, including the entries that say no inverse exists. Telling
+matters because personal-data incidents have notification deadlines that start
+before diagnosis finishes.
+
+**Q: How do you know your guardrails still work after a model upgrade?**
+
+Treat each one as a classifier with a labelled set of hard cases and re-measure
+precision and recall on every model or prompt change, exactly as you would audit
+a judge. Then watch two production signals: guardrail trigger rate and refusal
+rate, in both directions — a spike is an attack or a bad deploy, and a collapse
+means the guardrail silently stopped firing, which no error rate will show you.
+
+## The 2026 toolbox {#sec-guardrails-tools}
+
+The measurement used no libraries at all — the point was that the hard parts are
+the checksum arithmetic and the corpus design, both of which fit in the standard
+library. The second table splits into detection and redaction (the first three)
+and policy enforcement (the rest).
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| Python standard library | 3.14.5 | `re`, `random` and integer arithmetic; the entire PII measurement |
+
+: The stack these numbers came from. No third-party dependencies
+{tbl-colwidths="[30,16,54]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `presidio-analyzer` | 2.2.364 | Microsoft's PII detection with recognisers, context enhancement and checksum validators — the production version of this chapter's measurement |
+| `presidio-anonymizer` | 2.2.364 | the redaction half, including reversible encryption of detected entities |
+| `llm-guard` | 0.3.16 | a bundle of input and output scanners — PII, prompt injection, toxicity, secrets — when you want a starting set rather than a framework |
+| `nemoguardrails` | 0.24.0 | NVIDIA's programmable rails; dialogue-level policy expressed as flows rather than as prompt text |
+| `guardrails-ai` | 0.11.0 | validators over structured output with automatic re-asking on failure, which pairs with @sec-decoding |
+| `detoxify` | 0.5.2 | a small toxicity classifier, useful as a cheap output scanner that does not need a model call |
+| `pyrit` | 1.0.1 | Microsoft's red-teaming toolkit; how you find out what your guardrails miss before someone else does (@sec-agent-security) |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,12,64]"}
+
+## Lab: build a guardrail, then measure what it costs {#sec-guardrails-lab}
+
+### Step 1 — build a corpus with planted ground truth
+
+Two hundred messages in your domain, with identifiers planted by construction so
+you never hand-label. Include the decoys that actually occur in your traffic —
+for Turkish support that means phone numbers, order references and tracking
+codes — and mistype a stated fraction of the real identifiers.
+
+### Step 2 — measure the naive detector
+
+Pattern only. Report precision *and* recall, not recall alone. Then read ten of
+the false positives and write down what a support agent would lose if each were
+masked.
+
+### Step 3 — add validation, and measure what it deletes
+
+Apply the checksum. Report the precision gain and the recall loss, and confirm
+whether the recall loss equals your typo rate — if it does, you now know exactly
+which records the filter removes, and that they are all real personal data.
+
+### Step 4 — add a second, independent signal
+
+A context check, or an NER model (@sec-sequence-labeling). Measure it alone, then
+as a union with the checksum. The union should beat both; if it does not, the two
+signals are failing on the same items and you need a different second signal.
+
+### Step 5 — make redaction reversible
+
+Replace masking with stable per-conversation tokens and a mapping the model never
+sees. Verify the agent can still complete a lookup task end to end. Then write
+down where the mapping lives, who can read it, and how long it is kept.
+
+### Step 6 — classify your tools and enforce one limit in code
+
+Put every tool in the four-class taxonomy. Take the riskiest one, add a numeric
+limit enforced outside the model, and confirm by test that a prompt asking
+nicely cannot exceed it.
+
+### Step 7 — pull your own kill switch
+
+In staging, stop one tool at runtime with no deploy, and time it. Then list the
+irreversible actions that were in flight and how each would be undone. Entries
+with no inverse are your findings.
+
+### What to hand in
+
+Precision and recall for all four detector configurations on your own corpus;
+ten false positives with what each would have cost; evidence that reversible
+redaction preserves task completion; your tool classification with one limit
+enforced in code and a test proving it; and the timed kill-switch result with
+your compensating-action list.
+
+## Exercises {#sec-guardrails-exercises}
+
+1. **Precision on real traffic.** Run an eleven-digit detector over a week of
+   your own logs and hand-check fifty hits. Report precision, and compare it to
+   the 40% measured here on synthetic decoy density.
+
+2. **The typo question.** Mistype 15% of the identifiers in your test corpus,
+   then confirm that your validator's recall loss equals that rate. Decide, and
+   write down, what your system should do with an unvalidated pattern hit.
+
+3. **Where validation is pointless.** Find an identifier type in your domain
+   whose pattern is already unambiguous. Measure whether its checksum buys any
+   precision. If it does not, remove it and report the recall you get back.
+
+4. **Reversible redaction, end to end.** Implement tokenization and have an agent
+   complete a task that requires resolving a token through a tool. Then write the
+   threat model for the mapping store in one paragraph.
+
+5. **The reversibility audit.** Classify every tool in a system you run. Report
+   how many are irreversible and unbounded, and how many of those have a limit
+   enforced outside the model.
+
+6. **Approval rejection rate.** Instrument your approval gate and measure what
+   fraction is rejected. If it is above 95% approval, diagnose which of the two
+   causes it is and fix that one.
+
+7. **Guardrail regression.** Take a guardrail classifier, build a labelled set of
+   forty hard cases, and re-measure it after changing the model behind it. Report
+   the change in precision and recall.
+
+8. **The 3am runbook.** Write the runbook for "the agent is looping and burning
+   budget", then have a colleague who did not write the system execute it against
+   staging while you time them. Every question they have to ask you is a gap.
+
+## Where to go deeper {#sec-guardrails-deeper}
+
+Before reading: take your PII detector, if you have one, and measure its
+precision rather than its recall. Which number your team can quote is a good
+indicator of which one it optimised.
+
+This chapter cites no papers, so there is one table rather than the usual two.
+The adversarial side of this material — where guardrails stop being sufficient —
+is @sec-agent-security, and its sources are there.
+
+| resource | what it is |
+|:--|:--|
+| [`presidio`](https://github.com/microsoft/presidio) | the production version of this chapter's measurement: recognisers, context enhancement, checksum validators and reversible anonymisation, all readable |
+| [`llm-guard`](https://github.com/protectai/llm-guard) | a bundle of input and output scanners; useful mostly for reading what a reasonable default set contains |
+| [`NeMo-Guardrails`](https://github.com/NVIDIA/NeMo-Guardrails) | policy as dialogue flows rather than prompt text, which is a genuinely different design point |
+| [`guardrails`](https://github.com/guardrails-ai/guardrails) | validators over structured output with re-asking, the enforcement counterpart to @sec-decoding |
+| [`PyRIT`](https://github.com/Azure/PyRIT) | red-teaming automation; the fastest way to find out what your guardrails miss, and the bridge to @sec-agent-security |
+
+: Beyond this chapter {tbl-colwidths="[26,74]"}
+
+## What to remember {#sec-guardrails-summary}
+
+- **A guardrail is not a security boundary.** It reduces harm from a system
+  behaving normally; it fails probabilistically and quietly, and an adversary
+  gets unlimited retries against it. [Guardrails go in front of permission
+  systems, never instead of them]{.hl} — any limit that matters is enforced in
+  code, outside the model.
+
+- **Report precision, not recall.** An eleven-digit regex found 100% of planted
+  Turkish national IDs and **60% of its hits were not national IDs**, because a
+  Turkish mobile written without spaces is also eleven digits. Precision is what
+  decides whether the people who have to use the guardrail keep it switched on.
+
+- **Validation buys precision and deletes real personal data.** The TCKN checksum
+  took precision from **40.0% to 99.0%** and recall from 100% to **84.7%** — and
+  the 15.3-point loss is mechanically equal to the corpus's typo rate. [A
+  mistyped national ID is still a national ID in your logs.]{.hl}
+
+- **Use a checksum to rank confidence, not to filter.** Validated hits redact
+  automatically; unvalidated pattern hits still redact, flagged lower-confidence,
+  and get reviewed rather than dropped. A random eleven-digit string passes the
+  TCKN check about **1 time in 100**.
+
+- **Combine signals that fail differently.** The checksum misses mistyped
+  identifiers; a context word misses unlabelled ones. Their union reached
+  **99.1% precision at 93.6% recall** — nearly all of the checksum's precision
+  with two-thirds of its recall loss recovered.
+
+- **Do not validate where the pattern is unambiguous.** `TR` + 24 digits was
+  already **100% precise**, so the IBAN checksum bought nothing and discarded
+  **12.5%** of real IBANs. Uniform rigour is pure loss here.
+
+- **Redact reversibly, and know what you have created.** Stable per-conversation
+  tokens keep the product working where destructive masking breaks it — but the
+  token mapping is now the sensitive asset, and it is a worse breach than the
+  original if it leaks with the transcripts. Redact once, at one boundary.
+
+- **Classify actions by reversibility, in the tool rather than the prompt.** The
+  line that does the work is bounded versus unbounded, enforced by a number
+  checked in code. New tools land in the strictest class and are relaxed
+  deliberately.
+
+- **Oversight decays quietly.** [An approval queue that approves 99% of what
+  reaches it is a delay, not oversight]{.hl} — measure the rejection rate, show
+  reviewers the pending call and the trace rather than a model-written summary,
+  and watch guardrail trigger rate in both directions, since a collapse means it
+  broke and no error rate will tell you.
+
+- **Every postmortem finding must outlive the document.** An eval case, a tool
+  reclassified, a limit in code, a measured threshold, an alert. "Improve the
+  prompt" is not on the list — @sec-production-eval measured a prompt reordering
+  moving accuracy by nearly six times the noise floor.
