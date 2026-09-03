@@ -1,0 +1,1003 @@
+# Erişim: Üretimden Önce Arama {#sec-erisim}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 19. bölüm](../../en/chapters/19-retrieval.html). Ölçümler
+@sec-turkce-nlp'nin erişim deneyini genişletiyor — aynı 7.165 Türkçe belge,
+aynı sorgu kurulumu, aynı seed — böylece buradaki ve oradaki seyrek (sparse)
+sayılar doğrudan karşılaştırılabilir. İki sorgu koşulu ve iki yoğun (dense)
+model bilerek kullanıldı; her birinden yalnızca birini çalıştırmanın neden
+yanlış şeyi ölçeceğini @sec-erisim-kosullar anlatıyor. Yazılım:
+`sentence-transformers` 6.0.0, `snowballstemmer` 3.1.1, NumPy 2.5.2, Python
+3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- bir BM25 baseline'ı kurabilir ve tam olarak hangi sorguları kazandığını
+  söyleyebilirsiniz;
+- yoğun bir erişimcinin ne kattığını açıklayabilir ve onun sözcüksel aramayı
+  yetmiş puan yendiği bir sorgu türüyle altmış puan kaybettiği bir tür
+  kurabilirsiniz;
+- iki erişimciyi birleştirip birleştirmeyeceğinize alışkanlıkla değil bir
+  kuralla karar verebilirsiniz;
+- yaklaşık bir indekste recall/gecikme kadranını bilerek ayarlayabilirsiniz;
+- erişim kalitesini recall@k ve nDCG ile raporlayabilir ve hangisinin aşağı
+  akıştaki sisteminizin yapabileceğinin sınırını çizdiğini bilirsiniz.
+
+## İki aile ve aralarında karar veren soru {#sec-erisim-aileler}
+
+Erişimin iki ailesi var ve zıt yönlerde bozuluyorlar.
+
+**Sözcüksel erişim** kelimeleri eşleştirir. Standart puanlama işlevi olan BM25
+[@robertson2009probabilistic], @sec-metin-veri'nin TF-IDF'inin önemli iki
+düzeltmeyle donatılmış hâlidir: terim frekansı **doyuma ulaşır**, dolayısıyla
+bir kelimenin onuncu geçişi ikincisinden çok daha az katkı verir; ve belge
+uzunluğu normalize edilir, dolayısıyla uzun bir belge her şeyden daha fazla
+içerdiği için kazanmaz.
+
+Hızlıdır, kesindir, yorumlanabilirdir, eğitim gerektirmez ve hiç görmediği bir
+kelimeyi eşleştiremez.
+
+**Yoğun erişim** anlamı eşleştirir. Bir
+[çift kodlayıcı](#gloss-bi-encoder){#term-bi-encoder .term-ref}
+[@karpukhin2020dense] sorguları ve belgeleri ayrı ayrı aynı uzaya gömer;
+böylece belgeler bir kez kodlanıp vektör benzerliğiyle aranabilir. Başka
+anlatımı, eşanlamlılığı ve — bu bölümün göstereceği gibi — farklı dilleri
+kaldırır.
+
+Eğitilmiş bir model ister, bir parça numarasında tam eşleşmeyi garanti edemez
+ve kusurlarını açıklamak zordur.
+
+::: {#gloss-bi-encoder .column-margin .term-gloss}
+**çift kodlayıcı** (bi-encoder) — sorgu ve belge bağımsız kodlanır, böylece her
+belge önceden gömülebilir ve arama bir vektör aramasıdır. Ölçeklenmesini
+sağlayan da, çapraz kodlayıcıya kıyasla doğruluğunu sınırlayan da bu
+bağımsızlıktır. [↩](#term-bi-encoder){.term-back}
+:::
+
+Yaygın çerçeve, yoğun olanın modern, sözcüksel olanınsa nezaketen raporladığınız
+baseline olduğudur. Aşağıdaki ölçümler daha az rahat bir şey söylüyor.
+
+**Neye bakacağız.** Önce deney; bir değil iki sorgu koşuluna ihtiyaç duyuyor,
+çünkü tek bir koşul sorgu formatını ölçüp faturayı modele keserdi. Sonra
+sonuçlar; aynı iki sistemin altmış puanla yer değiştirdiği ve herkesin önerdiği
+şey olan melez birleştirmenin iki ebeveyninden de pahalıya patladığı yer. Sonra
+yoğun bir erişimcinin nasıl eğitildiği; zor negatiflerin bütün oyun olduğu yer.
+Sonra yeniden sıralama, yaklaşık indeks ve dört metrik; biri aşağı akıştaki her
+şeyin tavanı. Ve son olarak vektörlerin nereye konacağı; genellikle
+yapıldığından daha küçük bir soru.
+
+## Deney ve neden iki koşulu olduğu {#sec-erisim-kosullar}
+
+@sec-turkce-nlp seyrek tarafı 7.165 Türkçe belgede ölçmüştü: terimleri
+belgedekinden farklı çekimlenmiş sorgularla — kullanıcının sözlük biçimini
+yazdığı durum — yüzey biçimli BM25 %28,0 recall@1'e ulaşıyor ve gövdeleme onu
+%95,3'e taşıyor.
+
+Bariz sonraki adım o kuruluma yoğun bir erişimci ekleyip bakmak. **Bariz sonraki
+adım aynı zamanda bir tuzak** ve üzerine bir paragraf harcamaya değer, çünkü
+aynı tuzak kuracağınız her erişim değerlendirmesinde mevcut.
+
+O sorgular *birbirinden kopuk üç içerik kelimesi*. Bu, sözcüksel bir eşleştirici
+için doğal girdidir ve cümle gömmeye eğitilmiş bir çift kodlayıcı için dağılım
+dışıdır. Yalnızca o koşulu çalıştırıp "yoğun erişim Türkçede zayıf" diye
+raporlamak, sorgu formatını ölçüp faturayı modele kesmek olurdu.
+
+Bu yüzden deney aynı belgelere karşı **iki sorgu koşulu** çalıştırıyor:
+
+| koşul | sorgu şu | kimin lehine |
+|:--|:--|:--|
+| **A. anahtar kelime, çekimli** | belgedekinden farklı bir çekimde üç içerik kelimesi | morfolojiyi kaldırabiliyorsa sözcüksel eşleştirme |
+| **B. diller arası** | belgenin profesyonel İngilizce çevirisi | yalnızca yoğun — ortak sözcük dağarcığı hiç yok |
+
+: İki koşul; hiçbir aile kendi sahasında oynamasın diye seçildi
+{tbl-colwidths="[24,44,32]"}
+
+Ve aynı nedenle **iki yoğun model**:
+`paraphrase-multilingual-MiniLM` bir *benzerlik* modeli, iki cümlenin ne kadar
+benzediğini puanlamaya eğitilmiş; `multilingual-e5-base` [@wang2024e5] ise bir
+*erişim* modeli, zor negatiflerle sorgu-belge çiftleri üzerinde eğitilmiş. Ünlü
+olanı diye birincisine uzanmak yaygın bir hata ve yalnızca onu çalıştırmak yoğun
+erişimi olduğundan kötü göstermiş olurdu.
+
+## Ölçümler ne diyor {#sec-erisim-sonuclar}
+
+İki koşul da aynı derleme karşı çalışıyor, dolayısıyla aşağıdaki iki tablo
+doğrudan karşılaştırılabilir — ve mesele ne kadar az ortak yanlarının olduğu.
+Koşul başına 800 sorgu, 7.165 belge, sorgu başına tek bir ilgili belge.
+
+### Koşul A — anahtar kelime sorguları, çekimli
+
+Bu, sözcüksel eşleştirmenin — Türkçe morfolojiyi kaldırabildiği sürece —
+kazanması gereken koşul:
+
+```text
+system                                        R@1    R@10   MRR@10  nDCG@10
+BM25 surface form                           27.5%   54.1%     34.9     39.4
+BM25 stemmed                                96.0%   99.8%     97.7     98.2
+dense: paraphrase-MiniLM (similarity model) 10.6%   28.2%     15.6     18.6
+dense: multilingual-e5-base (retrieval)     35.9%   63.7%     44.5     49.1
+hybrid RRF, surface + e5                    37.6%   71.6%     47.6     53.3
+hybrid RRF, stemmed + e5                    63.2%   96.5%     73.7     79.2
+```
+
+[Gövdelenmiş BM25 altmış puan farkla kazanıyor.]{.hl} Yüz satırlık ek soyma
+kuralı, eğitilmiş çok dilli bir erişimciyi %96,0'a %35,9 yeniyor — ve çoğu
+insanın ilk uzandığı benzerlik modelini %96,0'a %10,6.
+
+Yüzey biçimi ve gövdelenmiş satırlar @sec-turkce-nlp'nin %28,0 ve %95,3'ünü
+biraz farklı bir sorgu örnekleminde yeniden üretiyor; tablonun geri kalanının
+ona karşı okunmasını sağlayan süreklilik kontrolü bu.
+
+### Koşul B — diller arası sorgular
+
+Şimdi aynı belgeler, İngilizce sorgulanıyor. Sözcüksel bir eşleştiricinin
+çalışabileceği ortak bir sözcük dağarcığı yok:
+
+```text
+system                                        R@1    R@10   MRR@10  nDCG@10
+BM25 surface form                           23.2%   43.5%     28.9     32.3
+BM25 stemmed                                23.8%   41.9%     29.1     32.1
+dense: paraphrase-MiniLM (similarity model) 93.8%   98.1%     95.4     96.0
+dense: multilingual-e5-base (retrieval)     96.2%   99.9%     97.8     98.3
+hybrid RRF, surface + e5                    49.4%   99.6%     71.6     78.7
+hybrid RRF, stemmed + e5                    48.1%   99.6%     70.9     78.2
+```
+
+[Yoğun, yetmiş iki puan farkla kazanıyor.]{.hl} İngilizce sorgu ile Türkçe belge
+neredeyse hiç sözcük paylaşmıyor, dolayısıyla BM25 özel adları ve sayıları
+eşleştirmeye indirgeniyor — sıfır yerine %23,8 almasının nedeni tam olarak bu ve
+dikkat çekmeye değer, çünkü bunlar tam da yoğun erişimin en kötü olduğu durumlar.
+
+::: {.column-margin}
+Gövdeleme koşul A'da **68 puan**, koşul B'de **0,6 puan** ediyor. Bu bir
+çelişki değil; aynı olgunun iki kez görünüşü. Gövdeleme bir dilin *içindeki*
+sözcük uyuşmazlığını düzeltir ve koşul B'de uyuşmazlık tam olduğu için
+düzeltecek bir şey yok.
+:::
+
+### Yaygın kanıyla çelişen bulgu
+
+Her tablodaki iki melez satırı en iyi ebeveynlerine karşı okuyun:
+
+```text
+condition A     stemmed BM25 alone         96.0%  R@1
+                hybrid stemmed + e5        63.2%  R@1      -32.8
+
+condition B     dense e5 alone             96.2%  R@1
+                hybrid surface + e5        49.4%  R@1      -46.8
+```
+
+**Karşılıklı sıra birleştirme (RRF) iki koşulda da işleri kötüleştirdi**, hem de
+fena hâlde. Bu, melez erişimin iki ebeveyni de yendiği yolundaki standart
+iddianın tersi [@cormack2009reciprocal] ve nedeni mekanizmada görünüyor.
+
+[RRF, birleştirdiği sistemlerin karşılaştırılabilir ölçüde iyi olduğunu
+varsayar.]{.hl} Her belgeyi listeler boyunca $\sum 1/(k + \text{sıra})$ ile
+puanlar; bu da işe yaramaz bir sistemden gelen 1. sıra isabetini mükemmel bir
+sistemden gelen 1. sıra isabetiyle birebir aynı sayar.
+
+Bir ebeveyn %96'da, diğeri %36'dayken zayıf ebeveynin kendinden emin çöpü tam
+ağırlıkla gelir ve güçlü ebeveynin doğru cevabını yerinden eder.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">İki sıralayıcıyı elle birleştirin — ve doğru belgenin kaybedişini izleyin</div>
+```
+
+```{ojs}
+//| echo: false
+viewof rrfGoldStrong = Inputs.range([1, 10], {step: 1, value: 1,
+  label: "doğru belgenin güçlü sistemdeki sırası"})
+```
+
+```{ojs}
+//| echo: false
+viewof rrfGoldWeak = Inputs.range([1, 60], {step: 1, value: 40,
+  label: "zayıf sistemdeki sırası (60 = döndürülmedi)"})
+```
+
+```{ojs}
+//| echo: false
+viewof rrfK = Inputs.range([1, 60], {step: 1, value: 60, label: "RRF sabiti k"})
+```
+
+```{ojs}
+//| echo: false
+// Zayıf sistem yanlış şeyden emindir: bir tuzağı ilk sıraya koyar.
+// Güçlü sistem o tuzağı kendi listesinde çok aşağıda tutar.
+rrfRows = {
+  const score = (a, b) => 1 / (rrfK + a) + 1 / (rrfK + b);
+  const rows = [
+    {doc: "doğru belge", strong: rrfGoldStrong, weak: rrfGoldWeak},
+    {doc: "zayıf sistemin bayıldığı tuzak", strong: 20, weak: 1},
+    {doc: "zayıf sistemin sevdiği tuzak", strong: 25, weak: 2},
+    {doc: "iki sistemin de sevmediği tuzak", strong: 15, weak: 15}
+  ].map(r => ({...r, fused: score(r.strong, r.weak)}));
+  const order = [...rows].sort((a, b) => b.fused - a.fused);
+  return rows.map(r => ({...r, rank: order.indexOf(r) + 1}));
+}
+```
+
+```{ojs}
+//| echo: false
+Inputs.table(rrfRows, {
+  columns: ["doc", "strong", "weak", "fused", "rank"],
+  header: {doc: "belge", strong: "güçlü sıra", weak: "zayıf sıra",
+           fused: "RRF puanı", rank: "birleşik sıra"},
+  format: {fused: v => v.toFixed(5)},
+  width: {doc: 240, strong: 100, weak: 100, fused: 100, rank: 90},
+  rows: 5})
+```
+
+```{ojs}
+//| echo: false
+md`**${rrfRows[0].rank === 1
+  ? "Doğru belge 1. sırada hayatta kalıyor."
+  : `Doğru belge ${rrfRows[0].rank}. sıraya düşüyor.`}** Güçlü sistemin
+${rrfGoldStrong === 1 ? "birinci" : `${rrfGoldStrong}.`} sıraya koyduğu bir
+belge, yanlış olan bir sistem eşit oy sahibi olduğunda
+${rrfRows[0].rank === 1 ? "hâlâ birinci" : "artık birinci değil"}.`
+```
+:::
+
+İkinci kaydırıcıyı hareket ettirin, mekanizma belirginleşir: zayıf sistemin
+sonucu değiştirmek için *haklı* olması gerekmiyor, yalnızca kendinden emin
+olması. Ve `k`'nin ne yaptığına dikkat edin — onu yükseltmek sıralar arasındaki
+farkları düzleştirir, bu da birleştirmeyi yumuşatır ve limitte döndürülen her
+belgeyi birbirinin yerine geçebilir kılar.
+
+Hasarın görmeye değer bir biçimi var, çünkü size bundan ne zaman
+kurtulabileceğinizi söylüyor:
+
+```text
+condition B     dense alone       R@1 96.2%    R@10  99.9%
+                hybrid            R@1 49.4%    R@10  99.6%
+```
+
+**Recall@10 neredeyse hiç oynamadı; recall@1 yarıya indi.** Birleştirme belgeyi
+*kaybetmedi* — listede aşağı itti. Yani tüketiciniz ilk onu okuyorsa
+birleştirme size neredeyse hiçbir şeye mal olmadı; ilk biri okuyorsa
+doğruluğunuzun yarısına mal oldu.
+
+Üç bulgu da tek bir resme sığıyor — yer değiştirme, birleştirme kaybı ve bunu
+gizleyen metrik:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Tek bir derlemde recall@1: kazanan yer değiştiriyor ve birleştirme ikisine de kaybediyor</div>
+<svg viewBox="0 0 764 322" style="max-width:744px" role="img"
+     aria-label="Aynı ölçekte çizilmiş iki panel recall@1 çubuğu. Belgeden farklı çekimlenmiş anahtar kelime sorgularının olduğu A koşulunda gövdelenmiş BM25 yüzde 96,0'a, yoğun multilingual-e5 erişimcisi yüzde 35,9'a ve karşılıklı sıra birleştirmeleri yüzde 63,2'ye ulaşıyor; bu, daha iyi ebeveynin 32,8 puan altında. Diller arası sorguların olduğu B koşulunda sıralama tersine dönüyor: gövdelenmiş BM25 yüzde 23,8'e düşüyor, yoğun yüzde 96,2'ye ulaşıyor ve birleştirme yüzde 49,4'te kalıyor; daha iyi ebeveynin 46,8 puan altında. Alt bant aynı B koşulu birleştirmesini recall@10'da gösteriyor; yoğun tek başına yüzde 99,9, birleştirme yüzde 99,6 alıyor, yani hasar o derinlikte görünmüyor.">
+
+  <text x="16" y="16" class="t-xs t-b t-muted">KOŞUL A — ANAHTAR KELİME SORGULARI, ÇEKİMLİ</text>
+  <text x="392" y="16" class="t-xs t-b t-muted">KOŞUL B — DİLLER ARASI SORGULAR</text>
+
+  <text x="16" y="40" class="t-sm t-b t-navy">BM25, gövdelenmiş</text>
+  <rect x="16" y="46" width="341.76" height="18" rx="4" class="box-navy"/>
+  <text x="349.76" y="59" class="t-sm t-b t-end">%96,0</text>
+
+  <text x="16" y="88" class="t-sm t-b t-accent">yoğun: multilingual-e5-base</text>
+  <rect x="16" y="94" width="127.80" height="18" rx="4" class="box-accent"/>
+  <text x="135.80" y="107" class="t-sm t-b t-end">%35,9</text>
+
+  <text x="16" y="136" class="t-sm t-b t-rose">melez RRF, gövdelenmiş + e5</text>
+  <rect x="16" y="142" width="224.99" height="18" rx="4" class="box-rose"/>
+  <text x="232.99" y="155" class="t-sm t-b t-end">%63,2</text>
+
+  <line x1="357.76" y1="46" x2="357.76" y2="178" class="ln-thin ln-dash"/>
+  <line x1="240.99" y1="174" x2="357.76" y2="174" class="ln-rose"/>
+  <line x1="240.99" y1="170" x2="240.99" y2="178" class="ln-rose"/>
+  <text x="299.4" y="192" class="t-xs t-rose t-b t-mid">−32,8 puan</text>
+
+  <text x="392" y="40" class="t-sm t-b t-navy">BM25, gövdelenmiş</text>
+  <rect x="392" y="46" width="84.73" height="18" rx="4" class="box-navy"/>
+  <text x="468.73" y="59" class="t-sm t-b t-end">%23,8</text>
+
+  <text x="392" y="88" class="t-sm t-b t-accent">yoğun: multilingual-e5-base</text>
+  <rect x="392" y="94" width="342.47" height="18" rx="4" class="box-accent"/>
+  <text x="726.47" y="107" class="t-sm t-b t-end">%96,2</text>
+
+  <text x="392" y="136" class="t-sm t-b t-rose">melez RRF, yüzey + e5</text>
+  <rect x="392" y="142" width="175.86" height="18" rx="4" class="box-rose"/>
+  <text x="559.86" y="155" class="t-sm t-b t-end">%49,4</text>
+
+  <line x1="734.47" y1="46" x2="734.47" y2="178" class="ln-thin ln-dash"/>
+  <line x1="567.86" y1="174" x2="734.47" y2="174" class="ln-rose"/>
+  <line x1="567.86" y1="170" x2="567.86" y2="178" class="ln-rose"/>
+  <text x="651.2" y="192" class="t-xs t-rose t-b t-mid">−46,8 puan</text>
+
+  <line x1="16" y1="204" x2="372" y2="204" class="ln-thin"/>
+  <line x1="392" y1="204" x2="748" y2="204" class="ln-thin"/>
+  <text x="16" y="216" class="t-xs t-muted">%0</text>
+  <text x="194" y="216" class="t-xs t-muted t-mid">%50</text>
+  <text x="372" y="216" class="t-xs t-muted t-end">%100</text>
+  <text x="392" y="216" class="t-xs t-muted">%0</text>
+  <text x="570" y="216" class="t-xs t-muted t-mid">%50</text>
+  <text x="748" y="216" class="t-xs t-muted t-end">%100</text>
+
+  <line x1="16" y1="238" x2="748" y2="238" class="ln-thin ln-dash"/>
+  <text x="16" y="258" class="t-xs t-b t-muted">KOŞUL B YİNE, RECALL@10'DA ÖLÇÜLMÜŞ — AYNI HASARIN GÖRÜNMEZ OLDUĞU YER</text>
+
+  <rect x="16" y="268" width="355.64" height="20" rx="4" class="box-accent"/>
+  <text x="26" y="282" class="t-sm">yoğun tek başına</text>
+  <text x="363.64" y="282" class="t-sm t-b t-end">%99,9</text>
+
+  <rect x="16" y="294" width="354.58" height="20" rx="4" class="box-rose"/>
+  <text x="26" y="308" class="t-sm">melez RRF</text>
+  <text x="362.58" y="308" class="t-sm t-b t-end">%99,6</text>
+
+  <text x="392" y="282" class="t-sm t-b">Recall@10 hiçbir şey olmadığını söylüyor.</text>
+  <text x="392" y="306" class="t-sm t-muted">Recall@1'de aynı birleştirme %96,2'den %49,4'e gitti.</text>
+</svg>
+```
+
+::: {.fig-cap}
+İki panel de aynı ölçekte çizildi, dolayısıyla aynı uzunluktaki bir çubuk aynı
+recall@1 demek. İki aile, tek bir derlemde ve tek bir belge kümesinde koşullar
+arasında tümüyle yer değiştiriyor. Her panelde kesikli çizgi daha iyi ebeveyni
+işaretliyor ve gül rengi ayraç birleştirmenin ona karşı neye mal olduğunu
+gösteriyor. Alt bant aynı B koşulu birleştirmesinin onuncu derinlikteki hâli;
+iki çubuk ayırt edilemiyor — doğru belge hiç kaybedilmedi, yalnızca aşağı
+itildi. Bir sistemin, izlediğiniz sayı oynamazken fena hâlde geriye gitmesinin
+nedeni budur.
+:::
+::::
+
+### Peki ne zaman birleştirmeli?
+
+Ölçümün desteklediği kural, halk bilgisinden daha dar:
+
+- **Ebeveynler karşılaştırılabilir ve farklı biçimlerde bozuluyorsa
+  birleştirin.** @cormack2009reciprocal'ın incelediği durum budur ve
+  birleştirmenin ününü hak ettiği yer.
+- **Bir ebeveyn baskınsa birleştirmeyin.** Önce kendi sorgularınızda kontrol
+  edin. Bir değerlendirme çalıştırmasına mal olur ve alternatifi, her blog
+  yazısının iyileştirme dediği 47 puanlık bir regresyonu sevk etmektir.
+- **Sorgu karışımınız iki türü de içeriyorsa** — çoğu gerçek sistem içerir;
+  kullanıcılar hem parça numarası yazar hem soru sorar — cevap genellikle
+  birleştirmek değil *yönlendirmek*tir: sorguyu sınıflayın, onu kaldırabilen
+  erişimciye gönderin ve birleştirmeyi gerçekten belirsiz olan ortaya saklayın.
+
+::: {.column-margin}
+Ağırlıklı birleştirme bariz onarımdır ve bedavaya gelmez: ağırlık uydurulmuş
+bir parametredir, dolayısıyla ayrılmış sorgular ister ve sorgu karışımınız
+değiştikçe kayar. Yönlendirmenin aynı gereksinimi daha dürüsttür, çünkü bir
+yönlendirici, bir kez ayarladığınız bir sabit değil değerlendirebileceğiniz bir
+modeldir.
+:::
+
+### Ve yoğun model seçimi tam olarak görevin zor olduğu yerde önemli
+
+İki koşulun mümkün kıldığı bir karşılaştırma daha. Benzerlik modeliyle erişim
+modelini ikisinde de yan yana koyun:
+
+```text
+                              condition A   condition B
+paraphrase-MiniLM (similarity)      10.6%         93.8%
+multilingual-e5-base (retrieval)    35.9%         96.2%
+                                   ------        ------
+                                   +25.3          +2.4
+```
+
+Kolay koşulda ikisi iki puan içinde, dolayısıyla üstünkörü bir ölçüt model
+seçiminin önemli olmadığı sonucuna varırdı. Zor koşulda erişime eğitilmiş model
+**üç buçuk kat daha iyi**.
+
+[İyi bir bileşenle vasat bir bileşen arasındaki fark yalnızca o bileşen için zor
+olan girdilerde ortaya çıkar]{.hl}; bu da kolay bir koşulun ortalamasını
+raporlamak yerine zor koşulu değerlendirmenize dâhil etmek için bir argümandır.
+
+## Yoğun bir erişimciyi eğitmek {#sec-erisim-egitim}
+
+Yukarıdaki modeller hazır kullanıldı. Alanınızda yeterli olmadıklarında eğitim
+tarifi kısaca anlatılabilir ve bir parçası diğerlerinden çok daha önemlidir.
+
+Bir çift kodlayıcı **karşıtsal** olarak eğitilir: bir sorgunun gömmesini ilgili
+belgesine doğru çekin ve ilgisiz olanlardan uzaklaştırın. Kayıp genellikle bir
+yığın üzerinde InfoNCE'dir ve bütün zorluk *ilgisiz* kelimesindedir.
+
+**Yığın içi negatifler** bedavadır: bir sorgu-belge çifti yığını için yığındaki
+diğer her belge bir negatiftir. Hiçbir şeye mal olmazlar ve çoğunlukla
+*kolaydırlar* — futbolla ilgili rastgele bir belge faturayla ilgili bir sorgunun
+makul cevabı değildir, dolayısıyla model konuları ayırmayı öğrenir ve orada
+durur.
+
+**Zor negatifler** doğru görünen ve olmayan belgelerdir. Mevcut modelinizle
+erişim yaparak ve en üst sıradaki yanlış cevapları alarak çıkarın.
+
+[Bütün oyun budur.]{.hl} Yalnızca rastgele negatiflerle eğitilmiş bir erişimci
+konusal benzerliği öğrenir; zor negatiflerle eğitilmiş bir erişimci
+kullanıcılarınızın gerçekten ihtiyaç duyduğu ayrımı öğrenir — ikisi de faturayla
+ilgili olan ve yalnızca biri soruyu cevaplayan iki belge arasındaki ayrımı.
+
+Planlanacak iki kusur biçimi:
+
+1. **Yanlış negatifler.** "Zor negatifiniz" etiketlenmemiş ilgili bir belge
+   olabilir ve eğitim onun yanlış olduğunu söyler. İlgililik etiketleri seyrek
+   olan bir derlemde bu, zarar verecek kadar yaygındır; alışıldık hafifletme,
+   erişilen listenin en tepesini atlayıp biraz aşağıdan çıkarmaktır.
+2. **Bayatlama.** İlk modelle çıkarılan negatifler, model iyileştikçe zor olmayı
+   bırakır. Periyodik olarak yeniden çıkarın; bunu bir ön işleme adımı değil
+   yinelemeli bir yordam yapan şey budur.
+
+Hiç etiketli çiftiniz yoksa üretin: bir LLM'den her belgenin cevapladığı bir
+soru yazmasını isteyin ve onlarla eğitin. Sentetik sorgu girdi tarafında
+gürültülü, belge ise çıktı tarafında gerçektir — @sec-makine-cevirisi'nde geri
+çeviriyi işleten aynı asimetri.
+
+## Yeniden sıralama {#sec-erisim-yeniden-siralama}
+
+Yukarıdaki her mimari, bir sorgu vektörünü sorguyu hiç görmeden hesaplanmış bir
+belge vektörüyle karşılaştırır. Yapılacak daha doğru bir şey var ve kimsenin
+bunu derlem ölçeğinde yapmamasının bir nedeni var.
+
+Bir [çapraz kodlayıcı](#gloss-cross-encoder){#term-cross-encoder .term-ref}
+[@nogueira2019passage] sorguyu ve belgeyi **birlikte** okur; tek bir ileri
+geçişte ve ikisi arasında attention ile. Bu, bağımsız hesaplanmış iki vektörü
+karşılaştırmaktan kesinlikle daha bilgilendiricidir ve bir çapraz kodlayıcının
+her çift kodlayıcıdan daha doğru olmasının nedenidir.
+
+::: {#gloss-cross-encoder .column-margin .term-gloss}
+**çapraz kodlayıcı** (cross-encoder) — sorgu ve belge birleştirilip tek bir
+ileri geçişte okunur, böylece attention ikisi boyunca çalışır. Çift
+kodlayıcıdan daha doğrudur ve önceden hesaplanamaz; bu yüzden bir derlemi
+aramak yerine bir kısa listeyi yeniden sıralar.
+[↩](#term-cross-encoder){.term-back}
+:::
+
+Erişimci olarak da kullanılamaz. Puan çifte bağlı olduğu için hiçbir şey
+önceden hesaplanamaz: bir sorguyu bir milyon belgeye karşı puanlamak bir milyon
+ileri geçiş demektir. Dolayısıyla standart iki aşamalı örüntü:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Mimarinin neden hep iki aşamalı olduğu</div>
+<svg viewBox="0 0 764 322" style="max-width:744px" role="img"
+     aria-label="Bir çift kodlayıcıyı bir çapraz kodlayıcıyla karşılaştıran ve sonra ikisini birleştiren iki aşamalı hattı gösteren şema. Solda çift kodlayıcı sorguyu ve her belgeyi ayrı ayrı, nokta çarpımıyla karşılaştırılan vektörlere kodluyor; belge vektörleri çevrimdışı hesaplanmış olarak işaretli, dolayısıyla bir milyon belgede arama bir sorgu kodlaması artı bir vektör işlemine mal oluyor. Sağda çapraz kodlayıcı sorguyu ve tek bir belgeyi birleştirip tek bir ileri geçişte, ikisi boyunca attention ile okuyor; hiçbir şey önceden hesaplanamıyor, dolayısıyla bir milyon belgeyi puanlamak bir milyon ileri geçişe mal olurdu. Altta bir hat, bir milyon belgelik derlemin ucuz ve recall odaklı birinci aşamaya girdiğini, elli ile yüz arası bir kısa liste döndürdüğünü, sonra pahalı ve kesinlik odaklı çapraz kodlayıcının o kısa listeyi yeniden sıraladığını ve ilk beş ile onun döndürüldüğünü gösteriyor. Bir etiket, birinci aşamanın ikincinin yükseltemeyeceği bir tavan koyduğunu belirtiyor.">
+
+  <text x="10" y="16" class="t-xs t-b t-muted">ÇİFT KODLAYICI — AYRI, BU YÜZDEN ÖNCEDEN HESAPLAR</text>
+  <text x="400" y="16" class="t-xs t-b t-muted">ÇAPRAZ KODLAYICI — BİRLİKTE, BU YÜZDEN HESAPLAYAMAZ</text>
+
+  <rect x="10"  y="28" width="110" height="30" rx="6" class="chip"/>
+  <text x="65"  y="48" class="t-xs t-mid t-b">sorgu</text>
+  <rect x="10"  y="66" width="110" height="30" rx="6" class="chip"/>
+  <text x="65"  y="86" class="t-xs t-mid t-b">belge</text>
+
+  <rect x="136" y="28" width="86" height="30" rx="6" class="box-accent"/>
+  <text x="179" y="48" class="t-xs t-mid t-b t-accent">kodlayıcı</text>
+  <rect x="136" y="66" width="86" height="30" rx="6" class="box-accent"/>
+  <text x="179" y="86" class="t-xs t-mid t-b t-accent">kodlayıcı</text>
+  <path d="M124 43 L 132 43" class="ln"/><path d="M124 81 L 132 81" class="ln"/>
+
+  <path d="M226 43 L 250 43" class="ln"/><path d="M226 81 L 250 81" class="ln"/>
+  <rect x="254" y="44" width="76" height="34" rx="6" class="box"/>
+  <text x="292" y="59" class="t-xs t-mid t-b">nokta</text>
+  <text x="292" y="72" class="t-xs t-mid t-b">çarpımı</text>
+
+  <text x="179" y="112" class="t-xs t-mid t-navy t-b">belge tarafı: bir kez, çevrimdışı hesaplanır</text>
+  <text x="179" y="126" class="t-xs t-mid t-muted">1M belge = 1 sorgu kodlaması + bir vektör işlemi</text>
+
+  <rect x="400" y="28" width="200" height="30" rx="6" class="chip"/>
+  <text x="500" y="48" class="t-xs t-mid t-b">sorgu ⧺ belge</text>
+  <path d="M500 60 L 500 70" class="ln"/><path d="M496 70 l 4 8 l 4 -8 z" class="head"/>
+
+  <rect x="400" y="80" width="200" height="34" rx="6" class="box-rose"/>
+  <text x="500" y="101" class="t-xs t-mid t-b t-rose">tek ileri geçiş, ikisi boyunca attention</text>
+  <path d="M610 97 L 634 97" class="ln"/>
+  <rect x="638" y="80" width="76" height="34" rx="6" class="box"/>
+  <text x="676" y="101" class="t-xs t-mid t-b">puan</text>
+
+  <text x="500" y="132" class="t-xs t-mid t-rose t-b">hiçbir şey önceden hesaplanamaz</text>
+  <text x="500" y="146" class="t-xs t-mid t-muted">1M belge = 1M ileri geçiş</text>
+
+  <path d="M10 166 L 754 166" class="ln-thin ln-dash"/>
+  <text x="10" y="186" class="t-xs t-b t-muted">BU YÜZDEN HAT İKİSİNİ DE KULLANIR</text>
+
+  <rect x="10"  y="198" width="128" height="46" rx="6" class="chip"/>
+  <text x="74"  y="220" class="t-sm t-mid t-b">derlem</text>
+  <text x="74"  y="235" class="t-xs t-mid t-muted">1.000.000 belge</text>
+  <path d="M142 221 L 172 221" class="ln"/><path d="M172 217 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="184" y="198" width="180" height="46" rx="6" class="box-accent"/>
+  <text x="274" y="213" class="t-xs t-mid t-b t-accent">AŞAMA 1 — ERİŞ</text>
+  <text x="274" y="227" class="t-xs t-mid t-muted">ucuz, recall odaklı</text>
+  <text x="274" y="239" class="t-xs t-mid t-muted">BM25 / yoğun / ikisi</text>
+  <path d="M368 221 L 398 221" class="ln"/><path d="M398 217 l 8 4 l -8 4 z" class="head"/>
+  <text x="383" y="210" class="t-xs t-mid t-muted">50–100</text>
+
+  <rect x="410" y="198" width="180" height="46" rx="6" class="box-rose"/>
+  <text x="500" y="213" class="t-xs t-mid t-b t-rose">AŞAMA 2 — YENİDEN SIRALA</text>
+  <text x="500" y="227" class="t-xs t-mid t-muted">pahalı, kesinlik odaklı</text>
+  <text x="500" y="239" class="t-xs t-mid t-muted">çapraz kodlayıcı</text>
+  <path d="M594 221 L 624 221" class="ln"/><path d="M624 217 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="636" y="198" width="118" height="46" rx="6" class="chip"/>
+  <text x="695" y="226" class="t-sm t-mid t-b">ilk 5–10</text>
+
+  <path d="M184 254 L 184 268 L 590 268 L 590 254" class="ln-accent"/>
+  <text x="387" y="286" class="t-xs t-mid t-b t-accent">aşama 1, aşama 2'nin yükseltemeyeceği bir tavan koyar</text>
+  <text x="387" y="300" class="t-xs t-mid t-muted">bir yeniden sıralayıcı yalnızca kendisine verileni yeniden sıralayabilir</text>
+</svg>
+```
+
+::: {.fig-cap}
+Çift kodlayıcı hızlıdır çünkü hiçbir zaman bir çift görmez; çapraz kodlayıcı
+doğrudur çünkü yalnızca çift görür. İki özellik de pazarlığa açık değildir,
+dolayısıyla üretim sistemleri recall'ü birinciyle, kesinliği ikinciyle satın
+alır.
+:::
+::::
+
+İçselleştirmeye değer üç sonuç:
+
+- **Birinci aşama, ikincinin yükseltemeyeceği bir tavan koyar.** Bir yeniden
+  sıralayıcı yalnızca kendisine verileni yeniden sıralayabilir. Recall@50 %80
+  ise hiçbir yeniden sıralayıcı sizi %80'in ötesine geçirmez — @sec-erisim-metrikler'in
+  birinci aşamada izlenecek metriğin recall@k olduğunu savunmasının nedeni budur.
+- **Bedel kısa liste uzunluğunda doğrusaldır**, dolayısıyla kısa liste boyutu
+  kalite/gecikme kadranınızdır ve ANN parametresinden daha iyi bir kadrandır,
+  çünkü etkisi tekdüzedir ve üzerine akıl yürütmek kolaydır.
+- **Geç etkileşim orta yoldur.** ColBERT [@khattab2020colbert] token başına bir
+  vektör tutar ve toplanmış maksimum benzerlikle puanlar; bu da çapraz
+  kodlayıcının doğruluğunun çoğunu, önceden hesaplanabilir kalarak geri kazanır.
+  Bir büyüklük mertebesi daha fazla depolamaya mal olur; takas budur.
+
+## Yaklaşık en yakın komşu ve kimsenin bilerek ayarlamadığı kadran {#sec-erisim-ann}
+
+Birkaç bin vektör üzerinde tam arama bir matris çarpımıdır ve hiç zaman almaz —
+yukarıdaki yoğun sayılar böyle hesaplandı. Milyonlarca vektörde bedava olmayı
+bırakır ve yaklaşık bir indekse geçersiniz.
+
+İki aile:
+
+**HNSW** [@malkov2018hnsw] gezilebilir bir çizge kurar ve kaba bir katmandan
+ince bir katmana açgözlü biçimde yürür. Hızlı ve doğru, bellek açısından aç —
+çizge artı tam vektörler RAM'de durur.
+
+**IVF-PQ** [@johnson2019billion] uzayı hücrelere böler, yalnızca en yakın
+birkaçını arar ve vektörleri ürün nicemlemesiyle *sıkıştırılmış* saklar. Çok
+daha küçüktür ve sıkıştırma doğruluğa mal olacak biçimde kayıplıdır.
+
+İkisi de recall'ü gecikmeye karşı takas eden bir düğme açığa çıkarır — HNSW için
+`efSearch`, IVF için `nprobe`. [Kafanıza kazınması gereken sayı, varsayılanın
+başkasının çalışma noktası olduğudur]{.hl}; sizin derleminiz olmayan bir ölçüt
+için seçilmiş.
+
+Disiplin, @sec-siniflandirma'nın bir karar eşiğine uyguladığının aynısı: tarayın,
+recall'ü p95 gecikmeye karşı çizin, gecikme SLO'nuzu belirtin ve onu karşılayan
+noktayı seçin.
+
+Ve recall'ü kütüphanenin yayımlanmış eğrisine karşı değil **kendi verinizde tam
+aramaya karşı** ölçün — kayıp, vektörlerinizin nasıl dağıldığına bağlıdır ve bu,
+derleminizin ve gömme modelinizin bir özelliğidir.
+
+::: {.column-margin}
+Bir ANN indeksini tam aramaya karşı değil *etiketlere* karşı değerlendirmede bir
+tuzak var. İndeksi açtığınızda recall@10'unuz düşüyorsa, indeksin mi belge
+kaybettiğini yoksa gömmenin baştan mı yanlış olduğunu bilmek istersiniz. Tam
+arama ikisini ayıran kontroldür ve bir örneklemde bir kez çalıştırmak ucuzdur.
+:::
+
+## Erişimi ölçmek {#sec-erisim-metrikler}
+
+Yukarıdakilerin hepsi dört sayıyla raporlandı ve ne anlama geldikleri
+söylenmedi. Farklı sorulara cevap veriyorlar ve yanlışını seçmek, bir erişim
+regresyonunun nasıl görünmez kaldığıdır.
+
+| metrik | sorduğu | ne zaman kullanılır |
+|:--|:--|:--|
+| **[recall@k](#gloss-recall-k){#term-recall-k .term-ref}** | doğru belge ilk *k* içinde var mı? | tüketici *k*'nın tamamını okuduğunda — her RAG sistemi dâhil |
+| **MRR** | ilk doğru cevap ne kadar yukarıda? | kullanıcı tek bir sonuç okuyup durduğunda |
+| **nDCG@k** | ilgili belgeler ne kadar ilgili olduklarına göre ağırlıklanarak tepeye yakın mı? | dereceli ilgililik, birden çok ilgili belge |
+| **precision@k** | *k*'nın ne kadarı ilgili? | yanlış bir sonucun bedeli sonuç başına olduğunda |
+
+: Dört metrik, dört soru {tbl-colwidths="[16,42,42]"}
+
+::: {#gloss-recall-k .column-margin .term-gloss}
+**recall@k** — doğru belge ilk *k* içinde herhangi bir yerde göründü mü. Aşağı
+akıştaki her şeyin sınırını çizen sayı: bir üretici, erişimcinin hiç
+döndürmediği bir belgeye cevap dayandıramaz.
+[↩](#term-recall-k){.term-back}
+:::
+
+[Bir RAG sisteminin erişim aşaması için tek bir sayı raporlayacaksanız, modele
+gerçekten geçirdiğiniz *k* için recall@k raporlayın.]{.hl} Bu katı bir tavandır:
+üretici yalnızca gelenle çalışabilir, dolayısıyla %80'lik bir erişim recall@10'u,
+cevapların %20'sinin üretim başlamadan önce dayanaksız olduğu anlamına gelir — ve
+hiçbir promptlama miktarı onları düzeltmez.
+
+Sonuç olarak **iki aşama farklı metrikler ister.** Birinci aşama recall üzerinden
+yargılanır, çünkü işi kaçırmamaktır. İkinci aşama — bir yeniden sıralayıcı ya da
+üreticinin kendisi — kesinlik ve sıralama üzerinden yargılanır, çünkü işi
+seçmektir. Birinci aşamayı precision@1 için optimize etmek yaygın ve pahalı bir
+hatadır.
+
+Ölçümün kendisi hakkında iki pratik not:
+
+- **İlgililik yargılarına ihtiyacınız var ve onları kurmak asıl iştir.** Etiket
+  yoksa en ucuz dürüst başlangıç bu bölümün yaptığıdır: elinizdeki belgeleri
+  alın, cevabını bildiğiniz sorgular kurun ve sentetik sorguların bir vekil
+  olduğunu kabul edin. Kendi derleminizi ölçmek yerine yayımlanmış sayılarla
+  karşılaştırmak istiyorsanız BEIR [@thakur2021beir] referans ölçüt süitidir.
+- **Sorgu karışımını raporlayın.** @sec-erisim-sonuclar, sorgu dağılımı olmayan
+  bir erişim sayısının yorumlanamayacağına dair uzun bir argümandır — aynı iki
+  sistem aynı derlemde iki koşul arasında altmış puanla yer değiştiriyor.
+
+## Vektör veritabanı, ya da değil {#sec-erisim-depolama}
+
+Son karar vektörlerin nerede yaşayacağıdır ve genellikle çok erken ve çok
+pahalıya verilir. Dürüst rehber ölçeğe göredir:
+
+| belge | ne kullanılır | neden |
+|:--|:--|:--|
+| ~100 binin altı | NumPy dizisi artı tam arama | bir matris çarpımı; bu bölümdeki yoğun sayılar böyle hesaplandı ve kesin |
+| ~100 bin–10M | zaten çalıştırdığınız Postgres'te `pgvector` ya da süreç içi FAISS | işlemleri, yedekleri, join'leri ve erişim kontrolünü bedavaya alırsınız ve işletecek yeni bir servis olmaz |
+| 10M+ ya da çok kiracılı | özel bir vektör deposu | parçalama, çoğaltma ve süzgeçli arama sizin çözeceğiniz problem olmaktan çıktığında |
+
+: Vektörler nereye konur {tbl-colwidths="[18,38,44]"}
+
+[Çoğu proje için varsayılan cevap sıkıcı olanıdır]{.hl}: vektörleri ait
+oldukları verinin yanında tutun.
+
+İkinci bir veri deposunun operasyonel bedeli — onunla doğruluk kaynağınız
+arasındaki tutarlılık, kendi yedek hikâyesi, kendi erişim kontrol modeli —
+genellikle kazanmaya çalıştığınız sorgu gecikmesinden büyüktür ve başka bir
+ekibin takviminde gelir.
+
+Özel bir depoyu gerçekten zorunlu kılan soru nadiren ham ölçektir. **Ölçekte
+süzgeçli aramadır**: "bu kullanıcının görmesine izin verilen, son 90 gündeki,
+Türkçe ilk 10 belge." Bunu iyi yapmak süzgecin ve vektör aramasının işbirliğini
+gerektirir ve bu bir boyut meselesi değil gerçek bir mühendislik yeteneğidir.
+
+## Sezgi kontrolleri {#sec-erisim-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular.
+
+::: {.callout-note collapse="true"}
+## 1. BM25'i yoğun bir erişimciyle değiştirmeli misiniz?
+
+Yalnızca gerçekte hangi sorguları aldığınızı kontrol ettikten sonra. Tek bir
+derlemde ölçüldü: aynı iki sistem iki sorgu koşulu arasında altmış puanla yer
+değiştirdi — anahtar kelime sorgularında gövdelenmiş BM25 **%96,0**'a yoğun
+**%35,9**; diller arası sorgularda yoğun **%96,2**'ye BM25 **%23,8**.
+
+Hiçbir aile baskın değil. Sözcüksel olan tam eşleşmeyi ve nadir token
+sorgularını kazanır; yoğun olan başka anlatımı, eşanlamlılığı ve dil sınırını
+aşan her şeyi. Seçmeden önce yüz gerçek sorgu örnekleyip sınıflayın.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Herkes melez erişimin iki ebeveyni de yendiğini söylüyor. Yeniyor mu?
+
+Ebeveynler eşit olmadığında hayır. Burada ölçüldü: karşılıklı sıra birleştirme
+bir koşulda **32,8 puana**, diğerinde **46,8 puana** mal oldu; her seferinde
+daha iyi ebeveyne karşı.
+
+RRF zayıf bir sistemden gelen 1. sıra isabetini güçlü bir sistemden gelenle
+birebir aynı ağırlıklandırır, dolayısıyla zayıf ebeveynin kendinden emin yanlış
+cevapları güçlü ebeveynin doğrularını yerinden eder. Birleştirme
+*karşılaştırılabilir* sistemler için bir varyans azaltma numarasıdır.
+Birleştirmeden önce sizinkilerin karşılaştırılabilir olduğunu kontrol edin; bir
+değerlendirme çalıştırmasına mal olur.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Recall@10'unuz neredeyse hiç değişmedi ama kullanıcılar şikâyet ediyor. Ne oldu?
+
+Recall@1'e bakın. Bu bölümün B koşulunda birleştirme recall@10'u %99,9'dan
+%99,6'ya götürdü — hiçbir şey — recall@1 ise **%96,2'den %49,4'e** gitti. Belge
+hâlâ erişiliyordu; listede aşağı itilmişti.
+
+Hangi metriğin önemli olduğu tüketiciye bağlıdır. Bir modele on parça geçiren
+RAG hattı recall@10'u önemser. İlk sonucu okuyan bir kullanıcı recall@1'i
+önemser. Yalnızca iyi görüneni raporlamak erişimdeki en kolay kendini
+kandırmadır.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Hangi gömme modelini kullanmalısınız?
+
+Ünlü olanı değil ve fark yalnızca zor girdilerde görünür. Burada bir *benzerlik*
+modeliyle bir *erişim* modeli kolay koşulda 2,4 puan içindeydi — ve zor koşulda
+**25,3 puan** ayrıydı; %10,6'ya %35,9.
+
+Benzerlik modelleri iki cümlenin ne kadar benzediğini puanlamaya eğitilir;
+erişim modelleri zor negatiflerle sorgu-belge çiftleri üzerinde eğitilir. Bunlar
+farklı görevlerdir. Ve değerlendirme için pratik sonuç: test kümeniz kolaysa her
+model aynı görünür ve indirme sayısına göre seçersiniz.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Recall@k neden bir RAG sisteminin sınırını çizen sayı?
+
+Çünkü bir üretici, hiç almadığı bir belgeye cevap dayandıramaz. Recall@10 %80 ise
+ve on parça geçiriyorsanız, soruların %20'si model çağrılmadan önce
+cevaplanamazdır ve prompt mühendisliği onlara ulaşamaz.
+
+İki aşamanın farklı metrikler istemesinin nedeni budur. Birinci aşama
+kaçırmamak üzerinden yargılanır; ikinci aşama — yeniden sıralayıcı ya da üretici
+— gelenden iyi seçmek üzerinden. Birinci aşamayı precision@1 için ayarlamak,
+ikinci aşamanın ihtiyaç duyduğu recall'ü çöpe atar.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Vektör veritabanına ihtiyacınız var mı?
+
+Yaklaşık 100 bin belgenin altında hayır — bir NumPy dizisi üzerinde tam arama
+bir matris çarpımıdır ve kesindir. Birkaç milyona kadar, zaten çalıştırdığınız
+Postgres'teki `pgvector` size işlemleri, yedekleri, join'leri ve erişim
+kontrolünü bedavaya verir.
+
+Özel bir depoyu gerçekten zorunlu kılan şey nadiren ölçektir; **süzgeçli
+aramadır** — bu kullanıcının görebileceği, son 90 gündeki, bu dildeki ilk on
+belge — ki bu, süzgecin ve vektör aramasının işbirliğini gerektirir. Bunu, kendi
+tutarlılık ve yedek hikâyesi olan ikinci bir veri deposu işletmeye karşı
+tartın.
+:::
+
+## Mülakat soruları {#sec-erisim-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+ölçümlerinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Mekanizmayı anlayıp anlamadığınızı sınayanlar
+
+**S: BM25'i yazın ve `k1` ile `b`'nin ne yaptığını açıklayın.**
+
+Puanlama işlevi, uzunluk düzeltmeli, doyuma ulaşan bir terim frekansıyla
+çarpılmış IDF'tir:
+
+$$
+\text{BM25}(q,d) = \sum_{t \in q} \text{IDF}(t) \cdot
+\frac{f_{t,d}\,(k_1+1)}{f_{t,d} + k_1\left(1 - b + b\,\frac{|d|}{\text{avgdl}}\right)}
+$$
+
+Yüksek sesle söylemeye değen kısım *neden* doyuma ulaştığıdır.
+@sec-metin-veri'nin TF-IDF'inde bir terimin onuncu geçişi birincisi kadar
+sayılır; burada $k_1$ katkıyı sınırlar, dolayısıyla bir kelimeyi yirmi kez
+tekrarlayan bir belge onu daha iyi bir bağlamda üç kez kullanandan üste
+çıkamaz. Ve $b$ uzunluk normalizasyonunu ara değerler: $b=0$ belge uzunluğunu
+yok sayar, $b=1$ tümüyle böler. `scikit-learn`'deki `sublinear_tf`'in aynı
+fikrin kaba hâli olduğunu eklerseniz iki bölümü birbirine bağlamış olursunuz.
+
+**S: Çift kodlayıcı mı çapraz kodlayıcı mı? Neden her yerde daha iyi olanı
+kullanmıyoruz?**
+
+Bir çift kodlayıcı sorguyu ve belgeyi *bağımsız* gömer, dolayısıyla belgeler bir
+kez, çevrimdışı kodlanabilir ve arama bir vektör işlemidir. Bir çapraz kodlayıcı
+çifti birlikte okur ve puanlar; bu kesinlikle daha bilgilendiricidir ve önceden
+hesaplanamaz — bedeli sorgu anında aday başına bir ileri geçiştir. Mimarinin hep
+ikisi birden olmasının nedeni budur: kısa listeyi ucuza erişin, pahalıya yeniden
+sıralayın. Gönüllü olarak eklenecek devam, kısa listenin nerede doyduğudur;
+1.000 adayı yeniden sıralamak 100'ü sıralamaktan nadiren daha fazlasını
+kazandırır ve on kat pahalıya gelir.
+
+**S: Yaklaşık bir indekste kalite kadranı nedir ve şu anda kaça ayarlı?**
+
+HNSW'de `efSearch`, IVF'de `nprobe` — çizgenin ne kadarının ya da kaç kümenin
+ziyaret edileceği. Sorunun amacı ikinci yarısı: bir varsayılanı var, varsayılanı
+kütüphane yazarı seçti, siz değil ve bu, performans kılığına girmiş bir *recall*
+ayarıdır. Gerçek komşuların %92'sini sessizce döndüren bir ANN indeksi, model
+hiçbir şey görmeden sisteminizi %92'ye sabitlemiştir. Yaklaşığı bir örneklemde
+tam aramaya karşı ölçün, sayıyı varsaymak yerine bilirsiniz.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Size bir derlem ve hiç sorgu verilmedi. Değerlendirme kümesini nasıl
+kurarsınız?**
+
+Yüz *gerçek* sorgu toplarım — kayıtlardan, destek kayıtlarından, onu
+kullanacak insanlardan — çünkü uydurulmuş sorgular gerçek olanlardan sistematik
+biçimde daha temizdir ve sınadığınız her sistemi olduğundan iyi gösterir. Sonra
+havuzlarım: iki üç farklı erişimci çalıştırıp ilk 10'larının birleşimini
+etiketlerim; böylece bütün derlemi okumadan ilgililik yargılarım olur. Açıkça
+söyleyin ki yüz etiketli sorgu bin etiketsizden iyidir ve küme, sonradan
+yapacağınız her model seçiminden değerlidir.
+
+**S: Bir paydaş anlamsal aramanın anahtar kelime aramasının yerini almasını
+istiyor. Ona ne söylersiniz?**
+
+Cevabın onların sorguları hakkında ampirik bir soru olduğunu ve sonra bu
+bölümün iki koşulunu gösteririm: çekimli anahtar kelime sorgularında
+gövdelenmiş BM25 **%96,0** recall@1 aldı, yoğun bir erişimci **%35,9**; diller
+arası sorgularda aynı yoğun model **%96,2** aldı, BM25 **%23,8**. Aynı derlem,
+zıt hükümler. Yani asıl teslim edilecek şey onların sorgu karışımının sayımıdır
+ve karışım gerçekten karışıksa sorgu türüne göre yönlendirmek birleştirmeyi
+yener — bu bölüm RRF'in daha iyi tek erişimciye karşı 32,8 ve 46,8 recall@1
+puanına *mal olduğunu* ölçtü.
+
+**S: Erişim iyi görünüyor ama cevaplar kötü. Kimin problemi?**
+
+Tahmin etmeyin — atfedin. Destekleyici belgenin ilk k içinde olup olmadığını
+kontrol edin: değilse bu bir erişim problemidir ve hiçbir promptlama düzeltmez;
+öyleyse modelin ihtiyacı olan elindeydi ve kullanmadı, ki bu bir dayandırma
+problemidir. Kitabın RAG bölümü o ayrıştırmayı düzgün kuruyor. Tek cümlelik hâli
+ve bu bölümün ondan önce gelmesinin nedeni: recall@k bütün sistemin *tavanıdır*,
+dolayısıyla ölçülecek ilk ve bir prompt ayarlayarak düzeltebileceğiniz son şeydir.
+
+## 2026 alet çantası {#sec-erisim-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle tek bir dizüstü bilgisayarda çalıştı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `sentence-transformers` | 6.0.0 | iki yoğun model ve @sec-erisim-sonuclar'daki kodlama |
+| `snowballstemmer` | 3.1.1 | A koşulunda 68 puan eden Türkçe gövdeleyici |
+| `numpy` | 2.5.2 | BM25, tam yoğun arama ve RRF — bu bölümdeki erişim yığınının tamamı birkaç yüz satır |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `faiss-cpu` | 1.15.0 | HNSW ve IVF-PQ indeksleri [@johnson2019billion]; referans uygulama ve @sec-erisim-ann'nin recall/gecikme kadranını taradığınız yer |
+| `pgvector` | 0.5.0 | zaten çalıştırdığınız veritabanında vektörler — çoğu proje için varsayılan cevap |
+| `qdrant-client` / `chromadb` | 1.19.0 / 1.5.9 | özel depolar; ölçekte süzgeçli arama gereksinim hâline geldiğinde |
+| `rank-bm25` | 0.2.2 | kendiniz yazmadan BM25, hızlı bir baseline için |
+| `ir-measures` | 0.4.3 | standart IR metrikleri standart biçimde hesaplanmış; böylece nDCG'niz herkesin nDCG tanımıyla eşleşir |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: melez bir erişimci kurun ve ayarlayın {#sec-erisim-lab}
+
+İki aileyi de kendi sorgularınızda kurun, sonra birleştirmeyi sevk ettikten
+sonra değil öncesinde kontrol edin.
+
+### Adım 1 — yüz gerçek sorgu toplayın
+
+Varsa kayıtlardan, yoksa kullanıcılardan. Diğer her şeye karar veren adım budur,
+çünkü @sec-erisim-sonuclar sorgu dağılımının hangi erişimcinin kazandığını
+belirlediğinin uzun bir gösterimidir.
+
+Sınıflayın: tam eşleşme (parça numaraları, adlar, kodlar), doğal dil soruları ve
+dil sınırını aşan her şey.
+
+### Adım 2 — ilgililiği etiketleyin, sonra BM25 kurun
+
+Her sorgu için onu cevaplayan belge. Elli etiketli sorgu, on puan farkla ayrışan
+sistemleri ayırt etmeye yeter. Sonra BM25 kurun — ve diliniz morfolojik olarak
+zenginse iki kez kurun, gövdelemeli ve gövdelemesiz, çünkü @sec-turkce-nlp o tek
+adımın altmış puan edebileceğini söylüyor.
+
+### Adım 3 — yoğun erişim ekleyin, bir erişim modeliyle
+
+Benzerlik modeliyle değil. Kodlayın, tam arayın — 100 binin altında belgede
+henüz indekse ihtiyacınız yok — ve recall@1 ile recall@10'u BM25'in yanına
+raporlayın.
+
+### Adım 4 — birleştirmenin yardımcı olup olmadığını sevk etmeden *önce* kontrol edin
+
+RRF çalıştırın ve **daha iyi ebeveyne** karşı karşılaştırın, zayıf olana karşı
+değil. Ebeveynler yaklaşık yirmi puandan fazla ayrışıyorsa birleştirmenin zarar
+vermesini bekleyin ve doğrulayın. Bu, bu bölümün ölçümlerinin rutin olarak
+atlandığını düşündürdüğü on beş dakikalık bir kontroldür.
+
+### Adım 5 — sorgu karışımınız karışıksa bunun yerine yönlendirin
+
+Sorguyu sınıflayın ve onu kaldırabilen erişimciye gönderin. Yönlendiricinin
+doğruluğunu erişimcilerinkinden ayrı ölçün, çünkü bir yönlendirici hatası ve bir
+erişim hatası son sayıda birebir aynı görünür ve farklı düzeltmeleri vardır.
+
+### Adım 6 — bir yeniden sıralayıcı ekleyin ve kısa listenin nerede doyduğunu bulun
+
+İlk 10, 25, 50, 100 üzerinde çapraz kodlayıcı. Son doğruluğu gecikmeye karşı
+çizin. Kısa liste boyutu her ANN parametresinden daha temiz bir kadrandır ve
+etkisi tekdüzedir.
+
+### Neyi teslim edeceksiniz
+
+Kendi sorgularınızda her sistem için **sorgu türüne göre** ayrılmış recall@1,
+recall@10 ve nDCG@10 içeren tek bir tablo; 4. adımın birleştirme kontrolü ve
+hükmü; ve birinci aşamanızın aşağı akıştaki her şeye dayattığı tavanı adlandıran
+bir cümle.
+
+## Alıştırmalar {#sec-erisim-alistirmalar}
+
+1. **Yer değiştirmeyi bulun.** Tek bir derlemde BM25 ve yoğun bir erişimci kurun.
+   Her birinin diğerini geniş farkla yendiği üçer sorgu bulun ve örüntüyü tek
+   cümlede belirtin.
+
+2. **Birleştirme sonucunu yeniden üretin.** Verinizde en az yirmi puan ayrışan
+   iki erişimci alın ve RRF ile birleştirin. İki ebeveyn ve birleştirme için
+   recall@1 ve recall@10 raporlayın. Hasarın biçimini açıklayın.
+
+3. **Birleştirmeyi ağırlıklandırın.** 2. alıştırmayı düz RRF yerine ağırlıklı
+   bir bileşimle, ağırlığı ayrılmış sorgularda ayarlayarak tekrarlayın. Kaybın
+   ne kadarını geri kazanıyorsunuz ve ayarlama genellemede size neye mal oldu?
+
+4. **Benzerlik modeline karşı erişim modeli.** İkisini de kolay bir sorgu
+   kümesinde ve zor bir kümede çalıştırın. Her birindeki farkı raporlayın. Sonra
+   yalnızca birini kursaydınız hangisini kuracağınızı söyleyin.
+
+5. **ANN kadranı.** `efSearch` ya da `nprobe` tarayın ve recall'ü p95 gecikmeye
+   karşı çizin — recall'ü etiketlerinize karşı değil *tam aramaya* karşı ölçerek,
+   böylece indeks kaybını gömme hatasından ayırın.
+
+6. **Tavan olarak recall.** Erişimcinizde k = 1, 5, 10, 25 için recall@k ölçün.
+   Her biri için aşağı akıştaki bir üreticinin ulaşabileceği en yüksek doğruluğu
+   belirtin. RAG sisteminizin gerçekte ulaştığıyla karşılaştırın ve kalan farkın
+   nerede yaşadığını söyleyin.
+
+7. **Sorgu türü sayımı.** 100 üretim sorgusu örnekleyin ve sınıflayın. Bu bölümün
+   tablolarından, karışımınızı hangi erişimcinin kazanması gerektiğini öngörün.
+   Sonra ölçün ve haklı olup olmadığınıza bakın.
+
+## Daha derine {#sec-erisim-derinlesme}
+
+Önce şunu yapın: yirmi gerçek sorgu alın ve doğru belgenin ilk onda olup
+olmadığını kontrol edin. O sayı, sonradan kuracağınız her şeyin tavanıdır ve çoğu
+ekip onu hiç ölçmemiştir.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Introduction to Information Retrieval](https://nlp.stanford.edu/IR-book/) — Manning, Raghavan, Schütze | ücretsiz ve hâlâ en iyi temel; indeksleme ve değerlendirme bölümleri eskimedi |
+| [Sentence Transformers](https://sbert.net/) | çift kodlayıcılar, çapraz kodlayıcılar ve her birinin ne zaman uygun olduğuna dair pratik rehber |
+| [Pinecone Learn](https://www.pinecone.io/learn/) | üretici yayını ama ANN indeksleri ve melez arama üzerine gerçekten iyi açıklayıcılar |
+| [`faiss`](https://github.com/facebookresearch/faiss) | referans ANN kütüphanesi; wiki'si recall/gecikme kadranını çoğu makaleden iyi açıklıyor |
+| [ColBERT](https://github.com/stanford-futuredata/ColBERT) | geç etkileşim; @sec-erisim-yeniden-siralama'daki iki mimari arasındaki orta yol |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| BM25, iddia edilmek yerine türetilmiş | @robertson2009probabilistic |
+| standartlaştığı hâliyle yoğun erişim | @karpukhin2020dense |
+| burada kullanılan çok dilli erişim modeli | @wang2024e5 |
+| çapraz kodlayıcıyla yeniden sıralama | @nogueira2019passage |
+| geç etkileşim | @khattab2020colbert |
+| bu bölümün zararlı ölçtüğü birleştirme | @cormack2009reciprocal |
+| işe yarayan yaklaşık arama | @malkov2018hnsw; @johnson2019billion |
+| genellemenin zor olduğunu gösteren ölçüt | @thakur2021beir |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-erisim-ozet}
+
+- **Hiçbir erişim ailesi baskın değildir ve sorgu türü karar verir.** Aynı
+  derlem, iki sorgu koşulu: anahtar kelime sorgularında gövdelenmiş BM25
+  **%96,0**'a yoğun **%35,9**; diller arası **%96,2**'ye BM25 **%23,8**. Sorgu
+  dağılımı olmayan bir erişim sayısı yorumlanamaz.
+
+- **Melez birleştirme bedava değildir ve her zaman olumlu değildir.** RRF, iki
+  koşulda daha iyi ebeveyne karşı **32,8** ve **46,8** recall@1 puanına mal oldu.
+  Zayıf bir sistemden gelen 1. sıra isabetini güçlü bir sistemdenmiş gibi
+  ağırlıklandırır, dolayısıyla eşit olmayan ebeveynler daha kötü bir çocuk üretir.
+
+- **Hasar recall@10'a değil recall@1'e iner.** B koşulunda birleştirme R@10'u
+  %99,9'dan %99,6'ya, R@1'i %96,2'den %49,4'e götürdü. Hangi metriği izlediğiniz
+  fark edip etmeyeceğinizi belirler.
+
+- **Karşılaştırılabilir sistemleri birleştirin; karışık sorgu yüklerini
+  yönlendirin.** Sorgularınızda bir erişimci baskınsa onu kullanın.
+  Kullanıcılarınız iki türü de gönderiyorsa sorguyu sınıflayıp dağıtın — ve
+  yönlendiriciyi ayrı değerlendirin.
+
+- **Benzerlik modeli erişim modeli değildir.** İkisi kolay koşulda 2,4 puan,
+  zor koşulda **25,3** puan ayrıydı. Bileşen kalitesi yalnızca o bileşen için
+  zor olan girdilerde görünür olur; bu da değerlendirmenizde zor bir dilim
+  tutmak için bir argümandır.
+
+- **Yoğun eğitimde zor negatifler bütün oyundur.** Yığın içi negatifler konusal
+  ayrımı öğretir; çıkarılmış zor negatifler kullanıcılarınızın ihtiyaç duyduğu
+  ayrımı öğretir. Model iyileştikçe yeniden çıkarın ve etiketlenmemiş ilgili
+  belgelere karşı eğitmemek için listenin tepesinin biraz altından çıkarın.
+
+- **Geniş erişin, hassas yeniden sıralayın.** Bir çapraz kodlayıcı daha doğrudur
+  ve önceden hesaplanamaz, dolayısıyla bir kısa listeyi yeniden sıralar.
+  Yalnızca birinci aşamanın döndürdüğünü sıralayabilir — **birinci aşama,
+  ikincinin yükseltemeyeceği bir tavan koyar**.
+
+- **Aşağı akışa gerçekten geçirdiğiniz k için recall@k raporlayın.** Bu, her RAG
+  sisteminin katı sınırıdır: bir üretici hiç almadığı bir belgeye cevap
+  dayandıramaz ve %80 recall@10, soruların %20'sinin üretim başlamadan
+  cevaplanamaz olduğu anlamına gelir.
+
+- **Ölçek zorlayana kadar vektörleri verinin yanında tutun.** 100 binin altında
+  belgede tam arama kesin ve anlıktır. Sonunda özel bir depoyu zorunlu kılan
+  şey ham hacim değil ölçekte süzgeçli aramadır.
