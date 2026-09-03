@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerate the glossary tables in c-glossary.qmd from glossary.csv.
+"""Regenerate both editions' glossary tables from glossary.csv.
 
 The book has no executed cells: CI enforces that _freeze/ matches the source,
 and contributors may not have Quarto locally, so a render-time cell would be
 unbuildable. The tables are therefore generated ahead of time and committed.
 
-    python3 scripts/build-glossary.py            # rewrite the .qmd
-    python3 scripts/build-glossary.py --check    # fail if the .qmd is stale
+    python3 scripts/build-glossary.py            # rewrite both .qmd files
+    python3 scripts/build-glossary.py --check    # fail if either is stale
 """
 
 import argparse
@@ -14,25 +14,62 @@ import csv
 import sys
 from pathlib import Path
 
-APPENDICES = Path(__file__).resolve().parent.parent / "en" / "appendices"
-CSV_PATH = APPENDICES / "glossary.csv"
-QMD_PATH = APPENDICES / "c-glossary.qmd"
+ROOT = Path(__file__).resolve().parent.parent
+CSV_PATH = ROOT / "en" / "appendices" / "glossary.csv"
 
 BEGIN = "<!-- BEGIN GENERATED — edit glossary.csv, then run `make glossary`. -->"
 END = "<!-- END GENERATED -->"
 
-HEADERS = ("English", "Türkçe", "Notes")
 COLWIDTHS = ': {tbl-colwidths="[35,35,30]"}'
+
+# The Turkish edition prints the same rows under Turkish headings. The map is
+# here rather than in the CSV because the group name is a section title in two
+# languages, not a datum about a term.
+TR_GROUPS = {
+    "Text, tokens, and morphology": "Metin, token'lar ve biçimbilim",
+    "Representing text as vectors": "Metni vektör olarak temsil etmek",
+    "Models and architecture": "Modeller ve mimari",
+    "Modelling, training, and statistics": "Modelleme, eğitim ve istatistik",
+    "Language modelling": "Dil modelleme",
+    "Prompting and generation": "Promptlama ve üretim",
+    "Prompting practice": "Promptlama pratiği",
+    "Decoding and structured output": "Çözümleme ve yapılandırılmış çıktı",
+    "Retrieval": "Erişim",
+    "RAG": "RAG",
+    "Retrieval, agents, and tools": "Erişim, ajanlar ve araçlar",
+    "Annotation and data quality": "Etiketleme ve veri kalitesi",
+    "Sequence labeling and extraction": "Dizi etiketleme ve çıkarım",
+    "Summarization and generation": "Özetleme ve üretim",
+    "Machine translation": "Makine çevirisi",
+    "Turkish and morphology": "Türkçe ve biçimbilim",
+    "Evaluation and serving": "Değerlendirme ve servis",
+    "Multimodal": "Çok modlu",
+    "Evaluation": "Değerlendirme",
+    "Agents": "Ajanlar",
+}
+
+TARGETS = (
+    {
+        "path": ROOT / "en" / "appendices" / "c-glossary.qmd",
+        "headers": ("English", "Türkçe", "Notes"),
+        "group": lambda g: g,
+    },
+    {
+        "path": ROOT / "tr" / "appendices" / "c-sozluk.qmd",
+        "headers": ("İngilizce", "Türkçe", "Notlar"),
+        "group": lambda g: TR_GROUPS[g],
+    },
+)
 
 
 def row(cells):
     return "|" + "|".join(f" {c} " if c else " " for c in cells) + "|"
 
 
-def render(entries):
+def render(entries, headers, group_name):
     out = []
     for group in dict.fromkeys(e["group"] for e in entries):
-        out += [f"## {group}", "", row(HEADERS), "|---|---|---|"]
+        out += [f"## {group_name(group)}", "", row(headers), "|---|---|---|"]
         out += [
             row((e["english"], e["turkish"], e["notes"]))
             for e in entries
@@ -74,33 +111,39 @@ def main():
             print(f"  {p}", file=sys.stderr)
         return 1
 
-    current = QMD_PATH.read_text(encoding="utf-8")
-    try:
-        head, rest = current.split(BEGIN)
-        _, tail = rest.split(END)
-    except ValueError:
-        print(f"{QMD_PATH.name}: missing BEGIN/END generated markers", file=sys.stderr)
-        return 1
+    status = 0
+    for target in TARGETS:
+        qmd = target["path"]
+        current = qmd.read_text(encoding="utf-8")
+        try:
+            head, rest = current.split(BEGIN)
+            _, tail = rest.split(END)
+        except ValueError:
+            print(f"{qmd.name}: missing BEGIN/END generated markers", file=sys.stderr)
+            status = 1
+            continue
 
-    updated = f"{head}{BEGIN}\n{render(entries)}\n\n{END}{tail}"
+        body = render(entries, target["headers"], target["group"])
+        updated = f"{head}{BEGIN}\n{body}\n\n{END}{tail}"
 
-    if args.check:
-        if updated != current:
-            print(
-                f"{QMD_PATH.name} is stale — run `make glossary` and commit.",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"{QMD_PATH.name} is up to date ({len(entries)} terms).")
-        return 0
+        if args.check:
+            if updated != current:
+                print(
+                    f"{qmd.name} is stale — run `make glossary` and commit.",
+                    file=sys.stderr,
+                )
+                status = 1
+            else:
+                print(f"{qmd.name} is up to date ({len(entries)} terms).")
+            continue
 
-    if updated == current:
-        print(f"{QMD_PATH.name} already up to date ({len(entries)} terms).")
-        return 0
+        if updated == current:
+            print(f"{qmd.name} already up to date ({len(entries)} terms).")
+            continue
 
-    QMD_PATH.write_text(updated, encoding="utf-8")
-    print(f"{QMD_PATH.name} regenerated ({len(entries)} terms).")
-    return 0
+        qmd.write_text(updated, encoding="utf-8")
+        print(f"{qmd.name} regenerated ({len(entries)} terms).")
+    return status
 
 
 if __name__ == "__main__":
