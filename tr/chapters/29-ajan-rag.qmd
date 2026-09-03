@@ -1,0 +1,570 @@
+# Ajan Tabanlı RAG {#sec-ajan-rag}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 29. bölüm](../../en/chapters/29-agentic-rag.html). Dakikalar süren
+küçük bir ölçüm: 660 gerçek Türkçe haberin içine ekilmiş uydurma olgulardan
+oluşan bir derlem üzerinde iki adımlı sorular; karşılaştırma bölümün konusu
+lehine hileli olmasın diye tek adımlı bir kontrolle birlikte. @sec-rag sabit
+hattın, @sec-ajan-anatomisi ise döngünün sahibidir; bu bölüm birini diğerinin
+içine koyduğunuzda ne olduğuyla ilgili. Yazılım: `ollama` 0.24.0 üzerinden
+`qwen3.5:9b`, `snowballstemmer` 3.1.1, NumPy 2.5.2, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- erişimi sabit bir hat adımından modelin seçtiği bir araca dönüştürebilirsiniz;
+- klasik RAG'in *yapısal olarak* cevaplayamadığı soru biçimini tanıyabilirsiniz;
+- yinelemeli bir erişim döngüsünü sonlanacak ve karşılanabilir kalacak şekilde
+  sınırlayabilirsiniz;
+- ajan tabanlı RAG'i daha iyi olduğunu varsaymak yerine klasik RAG'e karşı
+  ölçebilirsiniz.
+
+## Hattan politikaya {#sec-ajan-rag-kayma}
+
+@sec-rag'in hattı bir kez erişir, sonra üretir. Her tasarım kararı — neyin
+erişileceği, ne kadarının, nereden — kurma anında sizin tarafınızdan verilir ve
+her istekte aynı şey olur. O öngörülebilirlik bir özelliktir ve hattın doğru
+varsayılan olmasının nedenidir.
+
+Ajan tabanlı RAG tek bir kararı kurma anından çalışma anına taşır: **erişim,
+modelin gerekli gördüğü kadar çağırdığı bir araç hâline gelir.**
+@sec-ajan-anatomisi'nin terimleriyle erişimci, bir hattın 5. aşaması olmayı
+bırakır ve araç listesinde bir madde olur.
+
+Bunun kazandırdığı, tam olarak:
+
+- **Birincisinin içeremeyeceği ikinci bir sorgu.** Bütün gerekçe budur ve
+  @sec-ajan-rag-tavan onu ölçüyor.
+- **Bir yeterlilik yargısı.** *Cevaplamak için yeterince şeyim var mı?* bir
+  varsayım değil açık bir adım hâline gelir.
+- **Bir kaynak seçimi.** Birkaç indeksle, hangisine sorulacağı sorgunun kendisinin
+  bilgilendirebileceği bir karardır.
+
+Bedeli, çalışma anı kararlarının hep ödettiğidir ve @sec-ajan-anatomisi onu
+fiyatlandırdı: öngörülebilirlik, hata ayıklanabilirlik, değişken bir fatura ve
+sonlanması bir koşul değil bir model yargısı olan bir döngü.
+
+**Neye bakacağız.** Önce sabit bir hattın yapısal olarak cevaplayamadığı tek soru
+biçimi ve ne kadar kötü cevaplayamadığının ölçümü — hattın en başından beri
+yeterli olduğu durumda döngünün neye mal olduğunu gösteren bir kontrolle. Sonra
+ikinci sorguyu elde etmenin iki yolu ve aralarında seçim kuralı. Sonra birkaç
+indeksle ne olduğu; cazip cevabın, @sec-erisim'in zaten kaybettiğini ölçtüğü
+cevap olduğu yer. Sonra çıkış koşulu bir modelin görüşü olan bir döngünün nasıl
+durdurulacağı. Ve son olarak iki mimarinin, kazasız biçimde kendi kurduğunuz
+durumu ölçmeden nasıl karşılaştırılacağı.
+
+## Klasik RAG'in tırmanamadığı tavan {#sec-ajan-rag-tavan}
+
+İşte bu bölümdeki her şeye karar veren soru biçimi.
+
+```text
+  [document 1]  ZRG-14's successor project has been designated KVT-22.
+  [document 2]  KVT-22's approved budget is 4,382 lira.
+
+  question      What is the budget of ZRG-14's successor project?
+```
+
+Soru `ZRG-14` içeriyor. `KVT-22` **içermiyor**, çünkü soran onu bilmiyor —
+sorduğu şey zaten bu.
+
+Yani bu sorguyu alan bir erişimci 1. belgeyi bulabilir ve 2. belgeyi bulamaz ve
+hiçbir miktarda ayar bunu değiştirmez: [ikinci belgeyi getirmek için gereken
+terim yalnızca birincinin içinde vardır]{.hl}.
+
+Bu zayıf bir erişimci değil. @sec-erisim'in ölçümleri geçerli değil, çünkü mesele
+sıralama değil. Tek bir sorgunun bilgi ihtiyacını ifade edememesi. Bu **yapısal**
+bir tavandır ve erişimin etrafına bir döngü koymanın bütün gerekçesidir.
+
+### Ölçüldü
+
+Tam olarak o biçimde otuz iki adımlı soru; olgular 660 gerçek Türkçe haber
+belgesinin arasına ekilmiş. Ve — yalnızca konusunun kazandığı durumu ölçen bir
+bölüm ölçüm yapmıyor olacağından — sorunun anahtarı içerdiği otuz **tek adımlı**
+kontrol.
+
+```text
+qwen3.5:9b, 30 questions per cell, 660 documents, top-3 retrieval
+
+ question    system   accuracy   95% CI          rounds   tokens
+    1-hop   classic     100.0%   [88.6, 100.0]     1.00      155
+    1-hop   agentic     100.0%   [88.6, 100.0]     1.00      179
+    2-hop   classic       0.0%   [ 0.0,  11.4]     1.00      158
+    2-hop   agentic      30.0%   [16.7,  47.9]     3.43    1,043
+```
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">Döngü yalnızca hattın sıfırda olduğu yerde kazanıyor</div>
+<svg viewBox="0 0 764 302" style="max-width:744px" role="img" aria-label="Dört koşul için doğruluk çubukları. Tek adımlı sorularda hem klasik hem ajan tabanlı RAG yüzde 100 alıyor; istek başına 155 ve 179 token. İki adımlı sorularda klasik RAG 158 token'da yüzde 0,0 ve ajan tabanlı RAG 1.043 token'da yüzde 30,0 alıyor. Bıyıklar yüzde 95 güven aralıklarını gösteriyor.">
+  <text x="26" y="26" class="t-xs t-b t-muted">SİSTEM</text>
+  <text x="420" y="26" class="t-xs t-b t-muted t-mid">DOĞRULUK (HÜCRE BAŞINA 30 SORU)</text>
+  <text x="738" y="26" class="t-xs t-b t-muted t-end">İSTEK BAŞINA TOKEN</text>
+  <line x1="26" y1="36" x2="738" y2="36" class="ln-thin"/>
+
+  <line x1="180" y1="62" x2="180" y2="192" class="ln-thin"/>
+  <line x1="380" y1="62" x2="380" y2="192" class="ln-thin"/>
+  <line x1="580" y1="62" x2="580" y2="192" class="ln-thin"/>
+
+  <text x="26" y="56" class="t-xs t-b">TEK ADIM &#8212; gerçek trafiğe hâkim olan durum</text>
+
+  <rect x="180" y="66" width="400" height="20" rx="2" class="chip"/>
+  <text x="26" y="80" class="t-sm">klasik</text>
+  <line x1="534" y1="76" x2="580" y2="76" class="ln"/>
+  <line x1="534" y1="71" x2="534" y2="81" class="ln"/>
+  <line x1="580" y1="71" x2="580" y2="81" class="ln"/>
+  <text x="596" y="80" class="t-sm t-b">%100,0</text>
+  <text x="738" y="80" class="t-sm t-muted t-end">155</text>
+
+  <rect x="180" y="92" width="400" height="20" rx="2" class="box-accent"/>
+  <text x="26" y="106" class="t-sm">ajan tabanlı</text>
+  <line x1="534" y1="102" x2="580" y2="102" class="ln"/>
+  <line x1="534" y1="97" x2="534" y2="107" class="ln"/>
+  <line x1="580" y1="97" x2="580" y2="107" class="ln"/>
+  <text x="596" y="106" class="t-sm t-b">%100,0</text>
+  <text x="738" y="106" class="t-sm t-muted t-end">179</text>
+
+  <text x="26" y="132" class="t-xs t-b">İKİ ADIM &#8212; mimarinin var olma nedeni</text>
+
+  <line x1="180" y1="142" x2="180" y2="162" class="ln-rose"/>
+  <text x="26" y="156" class="t-sm">klasik</text>
+  <line x1="180" y1="152" x2="226" y2="152" class="ln"/>
+  <line x1="226" y1="147" x2="226" y2="157" class="ln"/>
+  <text x="596" y="156" class="t-sm t-b t-rose">%0,0</text>
+  <text x="738" y="156" class="t-sm t-muted t-end">158</text>
+
+  <rect x="180" y="168" width="120" height="20" rx="2" class="box-accent"/>
+  <text x="26" y="182" class="t-sm">ajan tabanlı</text>
+  <line x1="247" y1="178" x2="372" y2="178" class="ln"/>
+  <line x1="247" y1="173" x2="247" y2="183" class="ln"/>
+  <line x1="372" y1="173" x2="372" y2="183" class="ln"/>
+  <text x="596" y="182" class="t-sm t-b t-accent">%30,0</text>
+  <text x="738" y="182" class="t-sm t-muted t-end">1.043</text>
+
+  <text x="180" y="204" class="t-xs t-muted t-mid">%0</text>
+  <text x="380" y="204" class="t-xs t-muted t-mid">%50</text>
+  <text x="580" y="204" class="t-xs t-muted t-mid">%100</text>
+
+  <line x1="26" y1="216" x2="738" y2="216" class="ln-thin"/>
+  <text x="738" y="230" class="t-xs t-muted t-end">bıyıklar %95 güven aralıklarıdır</text>
+
+  <rect x="26" y="244" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="262" class="t-xs t-b t-mid">KALDIRILMIŞ BİR TAVAN, AŞILMIŞ BİR TAVAN DEĞİLDİR</text>
+  <text x="382" y="277" class="t-xs t-muted t-mid">kazandığı durumda 6,6&#215; token, trafiğin çoğu olan durumda 1,15&#215;</text>
+</svg>
+```
+
+::: {.fig-cap}
+İki adımlı klasik çubuğun hiç uzunluğu yok — yapısal sıfır odur ve aralığı
+yalnızca %11,4'e ulaşıyor, dolayısıyla daha iyi bir sıralamanın büyütebileceği
+küçük bir sayı değil. Ajan tabanlı iki adımlı aralığın ne kadar geniş olduğuna
+dikkat edin: otuz soru gerçek değeri %16,7 ile %47,9 arasında bir yere koyuyor;
+ki bu tavanın kaydığını ortaya koymaya yetiyor ve sistemi kullanılabilir demeye
+yetmiyor.
+:::
+
+::::
+
+Üç okuma ve üçüncüsü üzerine tartışmaya değer olan.
+
+**Tavan gerçek ve tam olarak sıfır.** Klasik RAG otuz iki adımlı sorunun
+**hiçbirini** cevaplamadı. Düşük bir puan değil — aynı olguların tek adımlı
+sürümlerinde %100 alan bir erişimciden gelen yapısal bir sıfır. İnsanlar bir RAG
+sisteminin "çok adımlı soruları kaldıramadığını" söylediğinde kusurun biçimi
+budur ve hiçbir yeniden sıralayıcı ya da gömme yükseltmesi buna değmez.
+
+**Tek adımlı sorularda döngü hiçbir şey kazandırmıyor ve 1,15 kata mal
+oluyor.** Birebir aynı doğruluk, birebir aynı tur sayısı, her seferinde yeterli
+dönen bir yeterlilik kontrolü için %15 daha fazla token. Üretimdeki soruların
+çoğu tek adımlıdır, dolayısıyla gerçek bir yüke hâkim olan durum budur — ve
+mimarinin saf ek yük olduğu durum.
+
+**Tavanı kırmak onu aşmakla aynı şey değildir.** Ajan tabanlı erişim %0'dan
+**%30**'a gitti; ki bu yapısal bir sıfırdan sonsuz bir göreli iyileşmedir ve
+hâlâ onda yedi yanlış olan bir sistemdir. **6,6 kat token**'a ve 3,43 tura mal
+oldu — yani genellikle bütçesinin çoğunu harcadı. *Doğru* cevap başına bu,
+hiçbir fiyata cevap üretmeyen klasik bir hatta karşı yaklaşık 3.475 token
+demektir.
+
+[Ajan tabanlı RAG tavanı kaldırdı. Çalışan bir sistem teslim etmedi.]{.hl}
+Döngü artık ikinci sorguyu ifade edebiliyor; model sıklıkla onu kuramıyor ya da
+geleni kullanamıyor — ki bu, araç kullanımının kusursuz ve toplamanın kusurlu
+olduğu @sec-ajan-anatomisi bulgusunun tekrarı.
+
+::: {.column-margin}
+Küçük ölçüm, tek model, hücre başına otuz soru, aralıklar ±15 puan civarında.
+Ortaya koyduğu şey *sıralama* ve biçimdir: sıfır yapısaldır, yineleme onu
+yükseltir, maliyet çarpar ve tek adımlı kontrol kaybeder. Daha büyük bir model
+büyük olasılıkla %30'dan yüksek alırdı — ve diğer üç bulgu değişmezdi, çünkü
+hiçbiri model yeteneğiyle ilgili değil.
+:::
+
+### Bu, kuracağınız şey için ne anlama geliyor
+
+Dürüst öneri bir mimari değil bir yönlendirici:
+
+- **Klasik hatta varsayılan olarak dönün.** Çoğunluk durumunda, maliyette,
+  gecikmede ve hata ayıklanabilirlikte kazanıyor.
+- **Yineleme gerektiren soruları saptayın** — cevabı, sorunun içermediği bir
+  anahtara bağlı olanları — ve yalnızca onları döngüye yönlendirin.
+- **Önce kendi karışımınızı ölçün.** İki adımlı sorular trafiğinizin %5'iyse, o
+  %5'in bir kısmını düzeltmek için tamamına 6,6 katlık bir maliyet çarpanı kötü
+  bir takastır ve aritmetiği bir şey kurmadan önce yapmak yeterince kolaydır.
+
+## Planlama ve ne zaman atlanacağı {#sec-ajan-rag-planlama}
+
+İkinci sorguyu elde etmenin iki yolu var ve farklı davranıyorlar.
+
+**Önce planla.** Herhangi bir şey erişmeden önce soruyu alt sorulara ayırın:
+*ZRG-14'ün ardılı hangi proje* ve *o projenin bütçesi ne*. Ayrıştırma önceden
+bilinebilir olduğunda temizdir — ve yukarıdaki iki adımlı örnek tam da *olmadığı*
+bir durumdur, çünkü ikinci alt soru, birincisi cevaplanana kadar yazılamaz.
+
+**Eriş, sonra karar ver.** Erişin, bakın ve cevap orada değilse başka bir sorgu
+gönderin. Bu, mimariyi motive eden bağımlı durumu halleder. Aynı zamanda
+sonlanmayabilecek döngüdür.
+
+Çıkan kural: **alt sorular bağımsızsa planlayın, bağımlıysa yineleyin.**
+Bağımsız alt sorular aynı zamanda paralel çalıştırmaya değer olanlardır; ki bu
+@sec-cok-ajanli'nın okuma ağırlıklı durumu ve dağılımın gerçekten kazandırdığı
+durumdur.
+
+### İlginç adım yeterliliktir
+
+Döngünün *yeterince şeyim var mı?* sorusuna bir cevaba ihtiyacı var ve ajan
+tabanlı RAG en çok burada kırılgandır. @sec-ajan-anatomisi problemin genel
+sürümünü ölçtü: döngünün çıkışı kontrol edilmiş bir koşul değil bir model
+tahminidir ve bir metin protokolünde, cevabı zaten getirmiş olarak **tek adımlı
+görevlerin %60'ında** sonlanamadı.
+
+Yargıyı daha güvenilir kılan iki şey var ve hiçbiri daha iyi bir prompt değil:
+
+- **"Cevapla" ile "yine ara"yı yapısal olarak farklı eylemler yapın**;
+  @sec-cozumleme ve @sec-ajan-anatomisi'ne göre — aynı çıktıda yarışan iki dizgi
+  değil, bir araç çağrısına karşı içerik.
+- **Bir yargı değil eksik anahtarı isteyin.** *Hâlâ neye ihtiyacın var?*
+  erişilebilir bir terim üretir. *Yeterince şeyin var mı?* bir evet üretir.
+
+## Kaynaklar arası yönlendirme {#sec-ajan-rag-yonlendirme}
+
+Şimdiye kadarki her şey tek bir indeks varsaydı. Döngünün kazandırdığı üçüncü
+şey bir kaynak seçimiydi ve ancak birden fazlası olduğunda bir seçim hâline
+gelir.
+
+Birkaçıyla — bir belge deposu, bir kayıt sistemi, bir kod deposu, bir veritabanı
+— *hangisine sorulacağı* bir karar hâline gelir ve bunu vermenin üç yolu vardır.
+
+| yaklaşım | nasıl işler | ne zaman uyar |
+|:--|:--|:--|
+| **Her şeyi ara, birleştir** | bütün kaynakları sorgula, sonuçları kaynaştır | az sayıda kaynak, benzer içerik. Ama @sec-erisim saf birleştirmenin bedelini ölçtü: RRF, daha iyi tek erişimciye karşı **32,8 ve 46,8 recall@1 puanı** kaybetti |
+| **Bir kez yönlendir** | bir sınıflandırıcı ya da model kaynağı seçer, sonra erişir | [öngörülebilir ve ucuz]{.pro}; kaynaklar açıkça farklıysa doğru varsayılan |
+| **Ajan seçsin** | her kaynak, kendi açıklamasıyla bir araçtır | gerçekten karışık ihtiyaçlar ve @sec-arac-tasarimi'nin kurallarının işleyip işlemediğine karar verdiği durum — her kaynağın ne zaman geçerli olduğunu söyleyen şey açıklamadır |
+
+: Birkaç kaynağı ele almanın üç yolu {tbl-colwidths="[18,42,40]"}
+
+Kaynaklar birleştirildiğinde kaybedilmesi kolay bir şey: **eşit güvene sahip
+değiller.** Bir iç politika belgesiyle kazınmış bir web sayfası birbirinin yerine
+geçen kanıtlar değildir ve içerikleri tek bir bağlama birleştirildiğinde ayrım
+kaybolur.
+
+Bu yüzden erişilen her parçada kökeni tutun, modele geçirin ve cevapta zorunlu
+kılın — bu, @sec-bellek'in köken argümanının farklı bir sistemde ortaya çıkışıdır.
+
+## Döngüyü sınırlamak {#sec-ajan-rag-maliyet}
+
+Çıkışı bir model yargısı olan bir erişim döngüsü dış sınırlara ihtiyaç duyar ve
+bu bir ayar ayrıntısı değildir — @sec-ajan-anatomisi'nin adım bütçesi tam da
+alternatifi sınırsız olduğu için mimari bir bileşendir.
+
+Dört sınır, hepsi ucuz ve dördüncüsü insanların atladığı:
+
+- **Bir tur sınırı.** İki ya da üç. Cevap ortaya çıkmadıysa daha fazla tur onu
+  nadiren bulur ve güvenilir biçimde daha pahalıya gelir.
+- **Bütün istek için bir token bütçesi**, turlar arasında kontrol edilen. Sizi
+  patolojik bir ortalamadan değil patolojik bir sorudan koruyan budur.
+- **Bir tekrar kontrolü.** Bir sorgu döngünün zaten gönderdiği bir sorguysa durun
+  — @sec-ajan-anatomisi, cevabı 0. adımdan beri elinde olan bir döngünün aynı
+  çağrıyı bütçesi bitene kadar yeniden gönderdiğini izledi.
+- **Cevap için bir taban.** Sınıra cevapsız ulaşıldığında bunu söyleyin.
+  Bütçesini tüketip yine de cevaplayan bir döngü, saptanabilir bir kusuru
+  saptanamaz bir kusura çevirmiştir.
+
+## Birini diğerine karşı değerlendirmek {#sec-ajan-rag-degerlendirme}
+
+Yukarıdaki sınırlar döngüyü karşılanabilir tutar. Bu bölüm önceki soruyla ilgili
+— trafiğinizde hiç var olması gerekip gerekmediği — ki buna bir demo değil bir
+karşılaştırma karar verir.
+
+O karşılaştırmanın dört sütunu var ve daha azını raporlamak, ajan tabanlı RAG'in
+en iyi durumunun gücüyle benimsenme biçimidir.
+
+| ne raporlanacak | neden isteğe bağlı değil |
+|:--|:--|
+| **Soru türüne göre ayrılmış doğruluk** | toplam her şeyi gizler. Burada %100'lük tek adımlı beraberliği %0'a karşı %30'luk çok adımlı farkla ortalayıp hiçbirini tarif etmeyen bir sayı üretirdi |
+| ***Doğru* cevap başına token** | istek başına değil. 6,6 kata mal olan ve zamanın %30'unda cevaplayan bir sistem, doğru cevap başına yaklaşık 3.475 token'a mal olur; istek başına rakam onu olduğundan iyi gösterir |
+| **Tur sayısı ve sınıra ne sıklıkla çarpıldığı** | 3 turluk bir bütçenin 3,43'ü, döngünün genellikle kendini tükettiği anlamına gelir; ki bu, tatmin olduğunda duran bir sistemden farklı bir sistemdir |
+| **Varyans** | sabit bir hat her seferinde aynıya mal olur. Bir döngü olmaz ve ortancasının on katı bir p99, bütçenizin dayanması gereken operasyonel bir olgudur |
+
+: Dört sütun ve her birinin nedeni {tbl-colwidths="[34,66]"}
+
+Ve @sec-llm-degerlendirme'nin baseline disiplini burada güçlü biçimde geçerli:
+değerlendirme kümenizin **iki** soru türünü de gerçek oranlarına yakın biçimde
+içermesi gerekir. Projeyi motive eden çok adımlı sorulardan kurulmuş bir
+değerlendirme, ajan tabanlı RAG'i muazzam kazanırken gösterecek ve hiçbir
+kullanıcının üretmediği bir dağılımı ölçüyor olacaktır.
+
+## Sezgi kontrolleri {#sec-ajan-rag-sezgi}
+
+Her birini açmadan önce cevaplayın. Üçü bu bölümdeki ölçümle çözülüyor — yapısal
+sıfır, yinelemenin geri kazandırdığı ve zaten sorunsuz olan sorularda neye mal
+olduğu — diğer üçü tasarım kararları; ikisi burada savunulan bir şeye değil önceki
+bölümlerin ölçümlerine dayanıyor.
+
+::: {.callout-note collapse="true"}
+## 1. Klasik RAG çok adımlı soruları neden cevaplayamıyor?
+
+Çünkü ikinci belgeyi getirmek için gereken terim yalnızca birincinin içinde var.
+*ZRG-14'ün ardılının bütçesi nedir?* `ZRG-14` içeriyor, `KVT-22` içermiyor —
+soran onu bilmiyor, sorduğu şey o. Burada ölçüldü: tek adımlı sorularda **%100**
+alan bir erişimci, aynı olguların iki adımlı sürümlerinde **%0** aldı. Bu bir
+sıralama problemi değil yapısal bir tavandır, dolayısıyla hiçbir yeniden
+sıralayıcı ya da gömme yükseltmesi ona dokunmaz.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Ajan tabanlı RAG bunu düzeltiyor mu?
+
+Tavanı aşmadan kaldırıyor. **%0'dan %30'a** — yapısal bir sıfırdan sonsuz göreli
+iyileşme ve hâlâ onda yedi yanlış — **6,6 kat token**'da ve üç turluk bir
+bütçenin 3,43 turunda. Döngü artık ikinci sorguyu ifade edebiliyor; model
+sıklıkla onu kuramıyor ya da geleni kullanamıyor, ki bu @sec-ajan-anatomisi'nin
+toplama kusurunun tekrarı.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Döngü sıradan sorularda neye mal oluyor?
+
+**Hiçbir şey için 1,15 kat.** Tek adımlı sorularda iki sistem de tek turda %100
+aldı ve ajan tabanlı sürüm, her seferinde yeterli dönen bir yeterlilik kontrolüne
+%15 daha fazla token harcadı. Üretimdeki soruların çoğu tek adımlı olduğundan
+gerçek bir yüke hâkim olan durum budur — ve değiştirmek yerine yönlendirmenin
+argümanıdır.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Alt soruları planlamalı mı, erişip karar mı vermeli?
+
+Bağımsızlarsa planlayın, bağımlılarsa yineleyin. İki adımlı örnek planlanamaz:
+ikinci alt soru, birincisi cevaplanana kadar yazılamaz. Bağımsız alt sorular aynı
+zamanda paralel çalıştırmaya değer olanlardır; ki bu @sec-cok-ajanli'nın okuma
+ağırlıklı durumudur.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Döngünün sonsuza kadar çalışmasını nasıl durdurursunuz?
+
+Dört sınır ve dördüncüsü insanların atladığı: iki ya da üç turluk bir tur sınırı;
+turlar arasında kontrol edilen bir token bütçesi; bir tekrar kontrolü, çünkü
+@sec-ajan-anatomisi bir döngünün cevabı zaten elindeyken aynı sorguyu bütçesi
+bitene kadar yeniden gönderdiğini izledi; ve **cevap için bir taban** — sınıra
+cevapsız ulaşıldığında bunu söyleyin. Bütçesini tüketip yine de cevaplayan bir
+döngü, saptanabilir bir kusuru saptanamaz bir kusura çevirmiştir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Dört indeksiniz var. Ajan nasıl seçiyor?
+
+Kaynaklar açıkça farklıysa bir kez yönlendirin — ucuz ve öngörülebilir.
+İhtiyaçlar gerçekten karışıksa ajana kaynak başına bir araç verin; o durumda
+işleyip işlemediğine @sec-arac-tasarimi'nin kuralları karar verir, çünkü her
+kaynağın ne zaman geçerli olduğunu söyleyen şey açıklamadır.
+Her-şeyi-ara-ve-birleştir cazip seçenektir ve @sec-erisim bedelini ölçtü: saf
+birleştirme, daha iyi tek erişimciye karşı 32,8 ve 46,8 recall@1 puanı kaybetti.
+Ve kökeni tutun: kaynaklar eşit güvene sahip değildir ve birleştirme ayrımı yok
+eder.
+:::
+
+## Mülakat soruları {#sec-ajan-rag-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün ölçümünün
+cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Problemi anlayıp anlamadığınızı sınayanlar
+
+**S: Bir RAG hattı ne zaman yapısal olarak başarısız olur?**
+
+Sorgunun, cevabı getirmek için gereken terimi içeremediğinde — anahtarın henüz
+erişmediğiniz bir belgede yaşadığı çok adımlı durum. Bunun neden bir sıralama
+problemi değil yapısal olduğunu söyleyin, çünkü alışıldık düzeltmeleri eleyen
+budur: burada ölçüldü, tek adımlı sorularda %100'de olan bir erişimci aynı
+olguların iki adımlı sürümlerinde %0 aldı. Sonra çareyi adlandırın: birincisinin
+içeremeyeceği ikinci bir sorgu gönderebilen bir döngü.
+
+**S: Ajan tabanlı RAG neye mal olur?**
+
+Öngörülebilirliğe ve token'lara. Çok adımlı durumda doğruluğu 6,6 kat token'da
+%0'dan %30'a taşıdı; tek adımlı sorularda hiçbir şey kazandırmadı ve 1,15 kata
+mal oldu. Muhakeme gösteren cevap sonuçtur: değiştirmek yerine yönlendirin,
+çünkü ek yükü ödeyen çoğunluk durumudur.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Ajan tabanlı RAG'i klasik RAG'e karşı nasıl değerlendirirsiniz?**
+
+Soru türüne göre ayrılmış dört sütun: doğruluk, istek başına değil *doğru* cevap
+başına token, sınıra çarpma oranıyla birlikte tur sayısı ve varyans. Ve
+değerlendirme kümesinin iki soru türünü de kabaca üretim oranlarında içermesi
+gerekir — projeyi motive eden çok adımlı sorulardan kurulmuş bir değerlendirme,
+hiçbir kullanıcının üretmediği bir dağılımda büyük bir kazanç gösterecektir.
+
+**S: Erişim döngünüz ara sıra ortancasının elli katına mal oluyor. Ne
+yaparsınız?**
+
+Bir şey değiştirmeden önce o isteklere bakarım; genellikle iki şeyden biridir. Ya
+döngü zaten çalıştırdığı sorguları yeniden gönderiyordur, ki bunu bir tekrar
+kontrolü düzeltir; ya da soru derlemden cevaplanamazdır ve döngü bütçesi bitene
+kadar arıyordur — ki bu, cevap için bir taban gerektirir; böylece sınırı tüketmek
+kendinden emin bir tahmin değil açık bir "bulunamadı" üretir. Sonra yalnızca tur
+sayısını değil isteği de sınırlayın.
+
+## 2026 alet çantası {#sec-ajan-rag-araclar}
+
+İki koşul da aşağıdaki sürümlerle tek bir dizüstü bilgisayarda çalıştı. Tek bir
+yerel modele karşı altmış soru oraya sığacak kadar küçüktür; @sec-ajan-rag-tavan'daki
+aralıkların bu kadar geniş olmasının nedeni de budur.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | iki koşul için de `qwen3.5:9b` sunmak |
+| `snowballstemmer` | 3.1.1 | BM25 indeksi için Türkçe gövdeleme |
+| `numpy` | 2.5.2 | erişimci ve puanlama |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `llama-index` | 0.14.24 | alt soru motorları ve yönlendiriciler zaten uygulanmış hâlde |
+| `langgraph` | 1.2.11 | çizge olarak döngü, sınırlar görebileceğiniz kenarlar hâlinde |
+| `ragas` | 0.4.3 | erişimi ve üretimi ayrı puanlamak |
+| `openai-agents` | 0.22.0 | küçük ve okunabilir bir döngüde araç olarak erişim |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: yönlendirin, değiştirmeyin {#sec-ajan-rag-lab}
+
+Başlık bulgunun kendisi. 1. ve 2. adımlar, gerisinin trafiğinizde yapmaya değer
+olup olmadığını size söylemek için var.
+
+### Adım 1 — elli gerçek soruyu sınıflayın
+
+Tek adımlı mı çok adımlı mı? Oran bu labdaki en önemli sayıdır ve neredeyse
+kimse onu ölçmeden bilmez.
+
+### Adım 2 — klasik hattı ellisinde de çalıştırın
+
+Türe göre doğruluk, token, gecikme. Hangi kusurların yapısal olduğunu — cevabın
+anahtarı soruda yoktu — ve hangilerinin sıralama kusuru olduğunu not edin.
+
+### Adım 3 — döngüyü ekleyin, üç turla sınırlı
+
+Araç olarak erişim, açık bir "hâlâ neye ihtiyacın var" adımı ve
+@sec-ajan-rag-maliyet'teki dört sınır.
+
+### Adım 4 — ikisini de soru türüne göre ölçün
+
+Dört sütun. Tek adımlı ek yükü dürüstçe raporlayın; trafiğinize hâkim olan durum
+odur.
+
+### Adım 5 — doğru cevap başına token hesaplayın
+
+Tür başına. Karar veren sayı budur ve genellikle döngünün zekice değil pahalı
+göründüğü ilk andır.
+
+### Adım 6 — yönlendiriciyi kurun
+
+Yalnızca ihtiyaç duyan soruları döngüye gönderin. Karışımı yeniden ölçün.
+Yönlendirme karışımınızda iki saf mimariyi de yenmiyorsa bunu söyleyin.
+
+### Neyi teslim edeceksiniz
+
+1. adımdaki soru türü oranını, türe göre dört sütunlu tabloyu, doğru cevap başına
+token rakamlarını ve döngünün trafiğinizde yerini hak edip etmediğine dair bir
+cümleyi.
+
+## Alıştırmalar {#sec-ajan-rag-alistirmalar}
+
+1. **Oranınızı bulun.** Elli gerçek soruyu tek ya da çok adımlı diye sınıflayın.
+   Önce bölünmeyi öngörün, sonra ölçün.
+2. **Sıfırı yeniden üretin.** Cevap anahtarı soruda bulunmayan üç soru kurun.
+   Klasik hattınızın sıfır aldığını teyit edin ve altın belgenin sırasını kontrol
+   ederek bunun yapısal olduğunu teyit edin.
+3. **Doğru cevap başına maliyet.** İki mimari için de iki soru türünde
+   hesaplayın. Hangi karşılaştırma fikrinizi değiştiriyor?
+4. **Dirseği bulun.** Doğruluğu tur sınırına karşı birden beşe çizin. Ek turlar
+   nerede kazandırmayı bırakıyor?
+5. **Döngüyü bilerek bozun.** Derleminizin cevaplayamayacağı bir soru sorun.
+   Döngü durup bunu söylüyor mu, yoksa bütçesini tüketip yine de cevaplıyor mu?
+6. **Yönlendirin.** 1. alıştırmadaki sınıflandırıcıyı kurun, yalnızca çok adımlı
+   soruları döngüye gönderin ve karışımı iki saf sisteme karşı ölçün.
+7. **Güven düzeyleri.** Güvenilirliği farklı iki kaynak alın ve cevaplarınızın
+   köken taşıyıp taşımadığını kontrol edin. Taşımıyorsa bunun önemli olduğu
+   durumu kurun ve başarısız olduğunu gösterin.
+
+## Daha derine {#sec-ajan-rag-derinlesme}
+
+Okumadan önce: kendi sorularınızdan ellisini tek ya da çok adımlı diye
+sınıflayın. Oran, bu literatürün hangi yarısının sizi ilgilendirdiğine karar
+verir.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`ragas`](https://github.com/explodinggradients/ragas) | erişim/üretim ayrımı ayrı puanlanmış; dört sütunlu karşılaştırmanın ihtiyaç duyduğu şey |
+| [`llama-index` belgeleri](https://docs.llamaindex.ai/) | sorgu ayrıştırma, yönlendiriciler ve alt soru motorları, soyutlamalar adlandırılmış |
+| [`langgraph`](https://github.com/langchain-ai/langgraph) | açık bir çizge olarak erişim döngüsü; sınırları görünür kılar |
+| [Chip Huyen'in blogu](https://huyenchip.com/blog/) | bir erişim mimarisinin ne zaman doğru ürün kararı olduğu üzerine |
+| [Eugene Yan — LLM örüntüleri](https://eugeneyan.com/writing/llm-patterns/) | RAG varyantları diğer örüntüler arasına yerleştirilmiş, takasları belirtilmiş |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| özgün erişimle zenginleştirilmiş formülasyon | @lewis2020rag |
+| erişim yapılıp yapılmayacağına karar vermek | @asai2024selfrag |
+| varyantların haritası | @gao2023rag |
+| eylemle iç içe geçmiş akıl yürütme | @yao2023react |
+| ilgisiz erişilmiş bağlamın neye mal olduğu | @shi2023large |
+| daha çok turun yanlış bir cevabı neden kurtarmadığı | @huang2024large |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-ajan-rag-ozet}
+
+- **Klasik RAG'in çok adımlı sorularda yapısal bir tavanı var ve o tavan
+  sıfır.** Tek adımlı sorularda **%100** alan bir erişimci, aynı olguların iki
+  adımlı sürümlerinde **%0** aldı; çünkü ikinci belge için gereken terim yalnızca
+  birincinin içinde var. Hiçbir yeniden sıralayıcı bunu düzeltmez.
+- **Ajan tabanlı erişim tavanı aşmadan kaldırıyor.** %0'dan **%30**'a, **6,6 kat
+  token**'da ve üç turluk bir bütçenin 3,43 turunda — doğru cevap başına yaklaşık
+  3.475 token; hiçbir fiyata cevap üretmeyen bir hatta karşı.
+- **Tek adımlı sorularda döngü 1,15 kata mal olur ve hiçbir şey kazandırmaz.**
+  Gerçek trafiğe hâkim olan durum budur ve sonucu değiştirmek değil yönlendirmek
+  yapar.
+- **Bağımsız alt soruları planlayın; bağımlı olanlarda yineleyin.** İki adımlı
+  durum planlanamaz, çünkü ikinci alt soru birincisi cevaplanana kadar
+  yazılamaz.
+- **Bir yargı değil eksik anahtarı isteyin.** *Hâlâ neye ihtiyacın var?*
+  erişilebilir bir terim üretir; *yeterince şeyin var mı?* bir evet üretir.
+- **Döngüyü dört şekilde sınırlayın**: tur sınırı, token bütçesi, tekrar
+  kontrolü ve cevap için bir taban. Sonuncusu olmadan, bütçesini tüketen bir
+  döngü yine de cevaplar ve saptanabilir bir kusuru saptanamaz bir kusura
+  çevirir.
+- **Soru türüne göre ayrılmış dört sütun raporlayın.** Doğruluk, *doğru* cevap
+  başına token, sınıra çarpma oranıyla tur sayısı ve varyans — ve değerlendirme
+  kümesini projeyi motive eden çok adımlı durumlardan değil gerçek soru
+  karışımınızdan kurun.
