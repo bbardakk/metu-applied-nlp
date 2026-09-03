@@ -1,0 +1,588 @@
+# Çok Ajanlı Örüntüler {#sec-cok-ajanli}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 28. bölüm](../../en/chapters/28-multi-agent.html). Maliyet modeli
+aritmetiktir ve sabitleri tahminlerden değil kitabın önceki ölçümlerinden
+alınmıştır — @sec-mcp'nin araç tanımı başına 89 token'ı ve
+@sec-ajan-anatomisi'nin döngü muhasebesi. Bir token sorusunu cevaplıyor ve
+bilerek bir doğruluk sorusunu cevaplamıyor; fark, @sec-cok-ajanli-durust'un
+meselesi. Yazılım: Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- topolojiyi modadan değil işin biçiminden seçebilirsiniz;
+- işi ajanlara bölmenin bağlam kazandırıp kazandırmadığını hesaplayabilirsiniz;
+- bu sistemleri bozan paylaşılan durum problemlerini tanıyabilirsiniz;
+- tek ajan lehine argümanı kurabilir ve bir tane eklemeden önce ona karşı
+  ölçebilirsiniz.
+
+## Tek ajan baseline'dır {#sec-cok-ajanli-baseline}
+
+Çok ajanlı mimariler kitabın bu kısmındaki en çok aşırı uygulanan fikirdir ve
+nedeni *ilginç* olmalarıdır. Uzmanlara devreden bir koordinatör tatmin edici bir
+şemadır. Bir while döngüsü değildir.
+
+Bu yüzden bu bölüm, @sec-ajan-anatomisi'nin bittiği yerden başlıyor: [iyi
+araçları olan tek bir ajan, yenilmesi gereken şeydir]{.hl} ve bir ikincisini
+eklemek bir şemayla değil bir ölçümle gerekçelendirilmelidir. Üretimle temastan
+sağ çıkan tam olarak üç gerekçe var ve üçü de estetik değil yapısaldır:
+
+1. **Bağlam.** İş, tek bir pencerenin tutması gerekenden fazla malzeme üretir.
+   Bu aritmetiktir ve @sec-cok-ajanli-maliyet onu hesaplıyor.
+2. **Paralellik.** Bağımsız alt görevler gerçekten aynı anda çalışabilir ve duvar
+   saati kazancı hayalî değil gerçektir.
+3. **Yalıtım.** Farklı alt görevler farklı araçlar, farklı izinler ya da farklı
+   modeller ister — ve onları karıştırmak her birini kötüleştirir.
+
+Başka her şey — "görev karmaşık", "aşamaları var", "farklı uzmanlık" — tek bir
+ajanın daha uzun bir prompt ve birkaç araçla hallettiği bir görevi tarif eder.
+
+**Neye bakacağız.** Önce bir bölmenin alabileceği dört biçim ve aralarında seçim
+yapan tek sezgisel kural: okuma ağırlıklı iş paralelleşir, yazma ağırlıklı iş
+paralelleşmez. Sonra insanların iddia ettiği ve kimsenin hesaplamadığı birinci
+gerekçenin aritmetiği — üç ajan bir ajandan ucuza gelmeden önce işin ne kadar
+malzeme üretmesi gerektiği. Sonra o kazancın neyle ödendiği; parayla değil
+bilgiyle. Sonra bu sistemlerin gerçekte bozulduğu yer olan paylaşılan durum ve
+başarısız bir görevin size sonsuza kadar fatura kesmesini durduran kuyruk
+disiplini. Ve son olarak çatılar; her biri, hangisine ihtiyacınız olduğunu
+bilmeden önce bir denetim akışına verilmiş bir taahhüt.
+
+## Topolojiler ve her birinin ne işe yaradığı {#sec-cok-ajanli-topolojiler}
+
+Üç koşuldan birinin geçerli olduğunu varsayalım. Bölmenin alabileceği dört biçim
+var ve birbirlerinin yerine geçmezler — her biri farklı türde bir işte iyidir ve
+farklı biçimde bozulur.
+
+| topoloji | biçim | ne zaman uyar | neye mal olur |
+|:--|:--|:--|:--|
+| **Merkez ve uçlar** | bir koordinatör, N uzman, yanal bağlantı yok | hiç bölerseniz varsayılan. Koordinatör bir *bağlam güvenlik duvarıdır*: uzmanların ham gözlemleri ona hiç ulaşmaz | koordinatör bir darboğaz ve tek arıza noktası hâline gelir |
+| **Sıralı** | her biri bir öncekini tüketen bir ajan hattı | gerçekten farklı gereksinimleri olan aşamalar — çıkar, sonra doğrula, sonra yaz | [bu bir hattır. Ajanlara hiç ihtiyacı olup olmadığını sorun]{.con} |
+| **Paralel dağılım** | bağımsız dilimlerde N uzman, sonuçlar birleştirilir | ayrılabilir girdiler üzerinde okuma ağırlıklı iş: çok belge, çok depo | birleştirme bir `join` değil gerçek bir tasarım problemidir |
+| **Döngü / tartışma** | ajanlar birbirinin çıktısını eleştirir ya da iyileştirir | dar: bağımsız bir kontrolün gerçekten bir şey yakaladığı yer | pahalıdır ve @sec-akil-yuruten, kendini düzeltmenin zaten göremediğini düzeltemediğini ölçtü |
+
+: Dört topoloji {tbl-colwidths="[16,24,34,26]"}
+
+İşe yarar sezgisel kural tek cümledir: **okuma ağırlıklı iş paralelleşir, yazma
+ağırlıklı iş paralelleşmez.** On belgeyi okuyan on ajan on kat hızlıdır. Tek bir
+kod tabanını düzenleyen on ajan, üstlenmeyi niyet etmediğiniz bir dağıtık
+sistem problemidir ve @sec-cok-ajanli-durum bunun nedeniyle ilgilidir.
+
+### Devretme mi devir mi?
+
+İki şeye aynı ad veriliyor ve farklı kusur biçimleri var.
+
+**Devretme (delegation)** — koordinatör konuşmayı elinde tutar, bir alt görev
+gönderir, bir sonuç geri alır. Uzman, içinde bir model olan bir işlev çağrısıdır
+ve **durumsuz** olmalıdır: ihtiyaç duyduğu her şey istekle gelir. Düzgün
+davranan örüntü budur.
+
+**Devir (handoff)** — koordinatör konuşmanın kendisini, artık ona sahip olan
+başka bir ajana geçirir. Daha ucuzdur ve güvenlik duvarını kaybeder: ikinci
+ajanın yaptığı her şey artık aynı transkriptte ve onu özetleyecek ya da
+reddedecek bir koordinatör kalmamıştır.
+
+Durumsuz uzmanlarla devretmeyi tercih edin. Önceki çağrıları hatırlayan bir
+uzman, geçersiz kılma hikâyesi olmayan bir dağıtık önbellektir.
+
+## Bölmek gerçekten bağlam kazandırıyor mu? {#sec-cok-ajanli-maliyet}
+
+Birinci gerekçe — bağlam — insanların iddia ettiği ve kimsenin hesaplamadığıdır.
+Aritmetiktir, işte burada.
+
+Tek bir ajan her model çağrısında bütün transkriptini yeniden gönderir,
+dolayısıyla maliyeti adım sayısının *karesiyle* büyür. Aşağıdaki her şeyin
+savaştığı terim budur.
+
+Uzmanları olan bir koordinatör bununla, her ajanda sabit bir bedel ödeyerek
+savaşır — sistem prompt'u artı araç tanımları; ki @sec-mcp bunu araç başına 89
+token olarak ölçtü — karşılığında iki şey alır: her uzman temiz bir pencereden
+başlar ve koordinatör ham sonuçlar yerine özetler görür.
+
+Sabit maliyeti 1.450 token (bir sistem prompt'u artı on dört araç tanımı) ve bir
+uzmanın geri raporunu 120 alarak:
+
+```text
+ steps  obs size   single agent   3 specialists    ratio
+     6       200         11,700          14,010    1.20x
+     6       800         20,700          15,810    0.76x
+     6     3,000         53,700          22,410    0.42x
+    12       200         30,600          25,710    0.84x
+    12       800         70,200          36,510    0.52x
+    12     3,000        215,400          76,110    0.35x
+    24       200         90,000          56,310    0.63x
+    24       800        255,600         106,710    0.42x
+    24     3,000        862,800         291,510    0.34x
+```
+
+Ve geçiş noktası — üç uzmanın bir ajandan ucuz hâle gelmesi için bir gözlemin ne
+kadar büyük olması gerektiği:
+
+```text
+    6 steps  ->    400 tokens per observation
+   12 steps  ->    100 tokens per observation
+   24 steps  ->     50 tokens per observation
+```
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">Bölmek hacimde kazandırır, zorlukta değil</div>
+<svg viewBox="0 0 764 316" style="max-width:744px" role="img" aria-label="Üç ajanın bir ajana karşı maliyet oranlarından oluşan üçe üç ızgara. Satırlar 6, 12 ve 24 adım sayıları; sütunlar 200, 800 ve 3.000 token gözlem boyutları. Yalnızca sol üst hücre, 200 token'lık gözlemlerle 6 adım, 1,20 katla biri aşıyor. Diğer her hücre birin altında ve 3.000 token'lık gözlemlerle 24 adımda 0,34 kata düşüyor.">
+  <text x="444" y="20" class="t-xs t-b t-muted t-mid">GÖZLEM BAŞINA TOKEN</text>
+  <text x="26" y="40" class="t-xs t-b t-muted">ADIM</text>
+  <text x="246" y="40" class="t-xs t-b t-muted t-mid">200</text>
+  <text x="444" y="40" class="t-xs t-b t-muted t-mid">800</text>
+  <text x="642" y="40" class="t-xs t-b t-muted t-mid">3.000</text>
+  <line x1="26" y1="50" x2="738" y2="50" class="ln-thin"/>
+
+  <text x="26" y="82" class="t-sm t-b">6</text>
+  <text x="26" y="97" class="t-xs t-muted">adım</text>
+  <rect x="150" y="62" width="192" height="46" rx="4" class="box-rose"/>
+  <text x="246" y="84" class="t-sm t-b t-rose t-mid">1,20&#215;</text>
+  <text x="246" y="99" class="t-xs t-muted t-mid">11.700 / 14.010</text>
+  <rect x="348" y="62" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="444" y="84" class="t-sm t-b t-accent t-mid">0,76&#215;</text>
+  <text x="444" y="99" class="t-xs t-muted t-mid">20.700 / 15.810</text>
+  <rect x="546" y="62" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="642" y="84" class="t-sm t-b t-accent t-mid">0,42&#215;</text>
+  <text x="642" y="99" class="t-xs t-muted t-mid">53.700 / 22.410</text>
+
+  <text x="26" y="134" class="t-sm t-b">12</text>
+  <text x="26" y="149" class="t-xs t-muted">adım</text>
+  <rect x="150" y="114" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="246" y="136" class="t-sm t-b t-accent t-mid">0,84&#215;</text>
+  <text x="246" y="151" class="t-xs t-muted t-mid">30.600 / 25.710</text>
+  <rect x="348" y="114" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="444" y="136" class="t-sm t-b t-accent t-mid">0,52&#215;</text>
+  <text x="444" y="151" class="t-xs t-muted t-mid">70.200 / 36.510</text>
+  <rect x="546" y="114" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="642" y="136" class="t-sm t-b t-accent t-mid">0,35&#215;</text>
+  <text x="642" y="151" class="t-xs t-muted t-mid">215.400 / 76.110</text>
+
+  <text x="26" y="186" class="t-sm t-b">24</text>
+  <text x="26" y="201" class="t-xs t-muted">adım</text>
+  <rect x="150" y="166" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="246" y="188" class="t-sm t-b t-accent t-mid">0,63&#215;</text>
+  <text x="246" y="203" class="t-xs t-muted t-mid">90.000 / 56.310</text>
+  <rect x="348" y="166" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="444" y="188" class="t-sm t-b t-accent t-mid">0,42&#215;</text>
+  <text x="444" y="203" class="t-xs t-muted t-mid">255.600 / 106.710</text>
+  <rect x="546" y="166" width="192" height="46" rx="4" class="box-accent"/>
+  <text x="642" y="188" class="t-sm t-b t-accent t-mid">0,34&#215;</text>
+  <text x="642" y="203" class="t-xs t-muted t-mid">862.800 / 291.510</text>
+
+  <line x1="26" y1="224" x2="738" y2="224" class="ln-thin"/>
+
+  <rect x="26" y="234" width="10" height="10" class="box-rose"/>
+  <text x="42" y="243" class="t-xs t-muted">üç ajan daha pahalı</text>
+  <rect x="220" y="234" width="10" height="10" class="box-accent"/>
+  <text x="236" y="243" class="t-xs t-muted">üç ajan daha ucuz</text>
+  <text x="738" y="243" class="t-xs t-muted t-end">bir ajana karşı üç, aynı iş</text>
+
+  <rect x="26" y="260" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="278" class="t-xs t-b t-mid">İŞ UZADIKÇA GEÇİŞ NOKTASI SOLA KAYAR</text>
+  <text x="382" y="293" class="t-xs t-muted t-mid">6 adım başa baş için gözlem başına 400 token ister &#8212; 12 adım 100, 24 adım 50</text>
+</svg>
+```
+
+::: {.fig-cap}
+Bir hücre kırmızı ve o hücre ucuz köşe — küçük sonuçlu kısa iş; ki çoğu çok
+ajanlı sistemin gerçekte kurulduğu durum budur. İki eksen de simetrik değil:
+200 token'lık sonuçlarla yirmi dört adım hâlâ yalnızca 0,63 kata ulaşıyor,
+3.000 token'lık sonuçlarla altı adım ise şimdiden 0,42 kata. Her adımın ne kadar
+döndürdüğü, kaç adım olduğundan daha fazla oynatıyor.
+:::
+
+::::
+
+İki okuma ve ikisi de önemli.
+
+**Küçük sonuçlu kısa işte bölmek daha pahalıdır.** Her biri 200 token döndüren
+altı adım, üç ajanlı bir sistem olarak **1,20 kata** mal oluyor; çünkü hiç
+biriktirmediğiniz transkripti kurtarmak için ajan başına sabit bedeli üç kez
+fazladan ödediniz. İnsanların yine de kurduğu durum budur ve şemanın tartışmayı
+yaptığı durumdur.
+
+**Büyük sonuçlu uzun işte bölmek muazzam kazandırır.** Her biri 3.000 token
+döndüren yirmi dört adım, **tek ajan olarak 862.800 token ve üç ajan olarak
+291.510** — 0,34 kat, üçte iki tasarruf. Mekanizma karesel terimdir: tek ajan
+her gözlemi sonraki her çağrıya taşır, uzmanlar taşımaz.
+
+[Kadran görevinizin ne kadar karmaşık olduğu değil. Ne kadar malzeme
+ürettiğidir.]{.hl} Büyük gözlemli uzun transkriptler bölmenin var olma
+nedenidir. Kısa olanlar değil.
+
+::: {.column-margin}
+Bu modelin bilerek içermediğine dikkat edin: prompt önbellekleme, tek ajanın
+tekrarlanan ön ekini ham aritmetiğin düşündürdüğünden ucuz kılar ve dolayısıyla
+geçiş noktasını daha ileri iter. Sağlayıcınız iyi önbelleklüyorsa bu sayıları
+kazancın bir üst sınırı olarak görün.
+:::
+
+## Kazanç bilgiyle ödenir {#sec-cok-ajanli-durust}
+
+O tablo bir token sorusunu cevaplıyor. Cevabın hâlâ doğru olup olmadığı hakkında
+hiçbir şey söylemiyor ve çok ajanlı mimarilerin gerçekte bozulduğu yer burası.
+
+**Koordinatör gözlemleri değil bir özeti görür.** Kazancın bütün mekanizması
+budur — ve koordinatörün, uzmanın gördüğünün kayıplı bir sıkıştırması üzerine
+akıl yürüttüğü anlamına gelir. Uzmanın raporlamaya değer görmediği ne varsa
+gitmiştir ve aşağı akıştaki hiçbir şey onu geri getiremez. @sec-ozetleme
+özetlemenin sadakate ne yaptığını ölçtü; özetleyici kendi alt ajanınız ve okur
+kendi koordinatörünüz olduğunda da aynısı geçerli.
+
+**Hatalar, göremediğiniz bir sınır boyunca birikir.** %90 doğru olan bir uzman,
+kontrol etme imkânı olmayan bir koordinatöre kendinden emin bir rapor verir. Üç
+böyle uzman kabaca 0,9³ verir — yaklaşık %73 — ve bu, koordinatörün kendi
+sentezinden önce; ki @sec-ajan-anatomisi asıl bozulan adımın o olduğunu ölçtü:
+araç kullanımı her adım sayısında kusursuzken doğruluk yalnızca toplamada
+%100'den %40'a düştü.
+
+**Hata ayıklama niteliksel olarak zorlaşır.** Tek ajan tek transkript üretir. Beş
+ajan beş tane üretir, artı aralarındaki devretme kararları ve "bunu neden böyle
+cevapladı" sorusu artık dağıtık bir izin yeniden kurulmasını gerektirir.
+@sec-ajan-anatomisi'nin bir ajanın hata ayıklanabilirliği açık uçluluk
+karşılığında takas ettiği argümanı yine geçerli, bir üst düzeyde ve daha
+keskin.
+
+Yani bölmeden önceki dürüst test iki taraflıdır:
+
+```text
+  does it save tokens?   compute it. The table above is the shape.
+  does it stay right?    measure it, against the single agent, on your task.
+```
+
+İkincisini cevaplayamıyorsanız bir mimariyi değerlendirmiş olmazsınız; bir şema
+seçmiş olursunuz.
+
+## En zor kısım paylaşılan durumdur {#sec-cok-ajanli-durum}
+
+Yukarıdakilerin hepsi uzmanların yalnızca okuduğunu varsayıyor. İki ajan aynı
+şeye *yazabildiği* anda bir dağıtık sisteminiz olur ve sıradan dağıtık sistem
+problemleri, sıradan dağıtık sistem disiplini olmadan gelir.
+
+| problem | burada nasıl görünür |
+|:--|:--|
+| **Kayıp güncelleme** | iki ajan bir dosyayı okur, ikisi de düzenler, ikinci yazma birincisini siler. İkisi de fark etmez ve ikisi de hata bildirmez |
+| **Tutarsız okuma** | bir uzman, bir diğerinin değiştirmekte olduğu durumu okur ve yarı yazılmış bir değerden kendinden emin akıl yürütür |
+| **Çelişen sonuçlar** | iki ajan aynı veriden zıt cevaplara varır ve koordinatörün seçim kuralı yoktur — @sec-bellek bir modelin çelişkilerle ne yaptığını ölçtü ve çoğunlukla kaçamak yapıyor |
+| **Belirlenimsizlik** | çalıştırma yeniden üretilemez, dolayısıyla dün gördüğünüz hata bugün yeniden yaratılamaz |
+
+: Paylaşılan durumun bozulmasının dört yolu {tbl-colwidths="[26,74]"}
+
+Hafifletmeler sıkıcı olanlardır ve sıkıcıdırlar çünkü işe yararlar:
+
+- **Her ajana kendi çalışma alanını verin.** Bir dal, bir karalama dizini, bir
+  işlem. Seçtiğiniz bir noktada, bilerek birleştirin.
+- **Yazmaları tek iş parçacıklı yapın.** Bir ajan — genellikle koordinatör — her
+  değişikliğin sahibidir. Uzmanlar önerir; sahip uygular.
+- **Araçları etkisiz (idempotent) yapın**, @sec-arac-tasarimi'ne göre, çünkü
+  yeniden denemeler kesindir ve ikinci bir `create_invoice` yuvarlama hatası
+  değildir.
+- **Yalnızca eklemeyi tercih edin.** Birinin uzlaştırdığı bir öneri kaydı,
+  paylaşılan durumun eşzamanlı değiştirilmesini yener ve hata ayıklayabileceğiniz
+  bir iz bırakır.
+
+## Kuyruklar ve zehirli bir mesajla ne yapılacağı {#sec-cok-ajanli-kuyruklar}
+
+Önceki bölüm iki ajanın aynı duruma uzanmasıyla ilgiliydi. Bu bölüm aralarındaki
+telle ilgili; ki bu, fark etmemiş olsanız bile zaten verdiğiniz bir karardır.
+
+Doğrudan çağrılar varsayılandır ve basittirler: çağıranın ömrünü çağrılanınkine
+bağlarlar. Bir kuyruk onları ayırır ve kuyrukların hep aldığı şeyleri satın alır
+— geri basınç, yeniden denemeler ve bir tarafı diğeri olmadan yeniden başlatma
+imkânı.
+
+Sıradan altyapı pratiği olan ve yükler mesajdan çok konuşmaya benzediği için
+burada atlanan üç kural:
+
+- **Yeniden denemeleri sınırlayın.** Başarısız olan bir ajan görevi yine
+  başarısız olacaktır; genellikle birebir aynı biçimde ve genellikle pahalıya —
+  her yeniden deneme taze bir model faturasıdır. @sec-ajan-anatomisi'nin adım
+  bütçesi, bir üst düzeyde.
+- **Bir ölü mektup kuyruğunuz olsun ve onu okuyun.** İşlenemeyen bir görev, bir
+  insanın baktığı bir yere gider. Bu olmadan zehirli mesajlar ya sonsuza kadar
+  döner ya da yok olur ve ikisi de bir uyarıdan kötüdür.
+- **Yükü kendi kendine yeten yapın.** Başka yerdeki bir duruma atıfta bulunan bir
+  mesaj — *yaptığımız analize devam et* — yeniden denenemez ya da tekrar
+  oynatılamaz. Bu, @sec-cok-ajanli-topolojiler'in durumsuz uzman kuralının
+  taşıma tarafından zorlanmış hâlidir.
+
+## Çatılar, 2026 itibarıyla {#sec-cok-ajanli-catilar}
+
+Buradaki her çatı sizi bir denetim akışı modeline sokar ve o tercih API'den daha
+önemlidir. Bu bölüm eskiyecek; sürümleri kontrol edin.
+
+| çatı | sizi neye sokar |
+|:--|:--|
+| **LangGraph** | açık bir durum makinesi olarak döngü. Ayrıntılıdır ve denetim akışı inceleyebileceğiniz bir şema olmayı hak ettiğinde doğru tercihtir |
+| **OpenAI Agents SDK** | devretmeleri ve guardrail'leri olan küçük bir döngü; üretim kenarları eklenmiş, @sec-ajan-anatomisi'nin on dört satırına en yakın şey |
+| **Pydantic AI** | tipli araçlar ve tipli sonuçlar; ajanlar arasındaki sınır düzyazı değil doğrulama gerektirdiğinde en güçlüsü |
+| **CrewAI** | birinci sınıf kavramlar olarak roller ve görevler. Çalışan bir demoya hızlıdır; soyutlama istemeyebileceğiniz bir topoloji hakkında fikir sahibidir |
+| **AutoGen** | ajanların birbiriyle konuştuğu, konuşmalı çok ajanlılık. Güçlüdür ve @sec-cok-ajanli-durust'taki kusurları üretmeye en yatkın örüntüdür |
+| **Google ADK** | dağıtılabilir servisler olarak ajanlar; prototiplemeye değil işletmeye yönelmiş |
+
+: Altı çatı ve taahhütleri {tbl-colwidths="[24,76]"}
+
+Hepsinden uzun ömürlü tavsiye: **önce tek ajanı, çatısız kurun.** O zaman
+bunlar arasında, başkasının cevabını sorunuz olmadan benimsemek yerine, denetim
+akışınızın neye ihtiyacı olduğunu zaten bilerek seçiyor olursunuz.
+
+## Sezgi kontrolleri {#sec-cok-ajanli-sezgi}
+
+Her birini açmadan önce cevaplayın. İkisi bu bölümdeki aritmetikle çözülüyor —
+token modeli ve hataların birikme biçimi — diğer dördü ise savunduğu tasarım
+kararları; her biri, şeyi kurduktan sonra değil kurmadan önce değiştirmesi daha
+ucuz olanlar.
+
+::: {.callout-note collapse="true"}
+## 1. Bir görev ne zaman birden çok ajana ihtiyaç duyar?
+
+Üç yapısal koşuldan biri geçerli olduğunda: iş bir pencerenin tutması gerekenden
+fazla malzeme üretiyor, bağımsız alt görevler gerçekten aynı anda çalışabiliyor
+ya da farklı alt görevler farklı araçlar, izinler veya modeller istiyor. "Görev
+karmaşık" o listede yok — karmaşıklık daha uzun bir prompt ve daha iyi araçlarla
+hallolur. Tek ajan baseline'dır ve ikinci ajanın onu bir ölçümde yenmesi
+gerekir.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. İşi ajanlara bölmek token kazandırır mı?
+
+İşin ne kadar malzeme ürettiğine bağlıdır ve aritmetiği çalıştırmaya değer. 200
+token'lık gözlemlerle altı adım, üç ajan olarak **1,20 kata** mal oluyor —
+bölmek *daha* pahalı, çünkü ajan başına sabit bedeli üç kez fazladan ödüyorsunuz.
+3.000 token'lık gözlemlerle yirmi dört adım **0,34 kata** mal oluyor — üçte iki
+tasarruf, çünkü tek bir ajan her gözlemi sonraki her çağrıya taşır. Kadran,
+üretilen malzemedir; zorluk değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Token kazancı size neye mal oluyor?
+
+Bilgiye. Kazanç tam da koordinatörün gözlemler yerine bir özet görmesi
+*nedeniyle* vardır, dolayısıyla uzmanın gördüğünün kayıplı bir sıkıştırması
+üzerine akıl yürütür. Hatalar da kimsenin kontrol edemeyeceği bir sınır boyunca
+birikir: %90'da üç uzman, koordinatörün kendi sentezinden önce yaklaşık %73
+verir; ki @sec-ajan-anatomisi ilk bozulan adımın o olduğunu ölçtü.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Yazma ağırlıklı iş neden paralelleşmez?
+
+Çünkü eşzamanlı yazmalar onu bir dağıtık sistem yapar: ikinci yazmanın
+birincisini hatasızca sildiği kayıp güncellemeler, yarı yazılmış durumun
+tutarsız okumaları, koordinatörün çözecek kuralı olmadığı çelişen sonuçlar ve
+dünkü hatayı yeniden üretilemez kılan belirlenimsizlik. On belgeyi okuyan on ajan
+on kat hızlıdır; tek bir kod tabanını düzenleyen on ajan, üstlenmeyi niyet
+etmediğiniz bir problemdir.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Devir mi devretme mi?
+
+Devretme, durumsuz uzmanlarla. Koordinatör konuşmayı elinde tutar, kendi kendine
+yeten bir alt görev gönderir ve bir sonuç alır — bu da bağlam güvenlik duvarını
+korur ve her uzmanı yeniden denenebilir kılar. Bir devir, konuşmanın kendisini
+geçirir; dolayısıyla ikinci ajanın çıktısı aynı transkripte iner ve onu
+özetleyecek ya da reddedecek bir koordinatör kalmaz; ve önceki çağrıları
+hatırlayan bir uzman, geçersiz kılma hikâyesi olmayan bir dağıtık önbellektir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Hangi çatıyı kullanmalısınız?
+
+Önce tek ajanı çatısız kurun. Bunların her biri sizi bir denetim akışı modeline
+sokar — açık bir durum makinesi, roller ve görevler, konuşmalı ajanlar — ve o
+taahhüt API'den daha önemlidir. Denetim akışınızın neye ihtiyacı olduğunu
+bildikten sonra seçmek, sorunuz olmadan başkasının cevabını benimsemekten farklı
+bir faaliyettir.
+:::
+
+## Mülakat soruları {#sec-cok-ajanli-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+aritmetiğinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Takası anlayıp anlamadığınızı sınayanlar
+
+**S: Ne zaman çok ajanlı bir mimari kullanırsınız?**
+
+Üç yapısal koşulu adlandırın — bağlam hacmi, gerçek paralellik, farklı araç ya
+da izinler — ve görev karmaşıklığının bunlardan biri olmadığını açıkça söyleyin.
+Sonra maliyetlendirdiğinizi gösterin: bölmek iş çok malzeme ürettiğinde
+kazandırır, çünkü tek bir ajanın maliyeti adım sayısının karesiyle büyür ve kısa
+işte *kaybettirir*, çünkü ajan başına sabit bedel her ajanda ödenir. En güçlü
+cevap kazancın neye mal olduğunu adlandırır: koordinatör gözlemleri değil
+özetleri görür.
+
+**S: Yazma ağırlıklı iş neden paralelleşmez?**
+
+Çünkü alışıldık garantilerin hiçbiri olmadan bir dağıtık sisteme dönüşür. Somut
+kusurları verin — hata vermeyen kayıp güncellemeler, tutarsız okumalar,
+koordinatörün çözemediği çelişen sonuçlar — ve sonra gösterişsiz hafifletmeleri:
+tek yazar, bilerek birleştirilen ajan başına çalışma alanları, etkisiz araçlar,
+yalnızca eklenen öneriler.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Çok ajanlı sisteminiz, yerini aldığı tek ajandan daha az doğru. Ne oldu?**
+
+İki aday ve onları transkriptlerden ayırt edebilirsiniz. Ya özetler bir şey
+kaybetti — uzman pencerelerini, mevcut olup raporlanmamış bilgi için okuyun — ya
+da hatalar birikti; ki bunu her uzmanı tek başına ölçüp çarparak kontrol
+edersiniz. Bu karşılaştırmanın geçişten önce var olması gerektiğini ve tek ajanın
+tam da bu nedenle baseline olduğunu söyleyin.
+
+**S: Beş ajanlı bir sistemde nasıl hata ayıklarsınız?**
+
+Bunun bir dağıtık izleme problemi olduğunu kabul ederek ve önceden ona göre
+kurarak: her devretmeden geçen bir korelasyon kimliği, kalıcılaştırılmış her
+uzman transkripti ve birinci sınıf olay olarak kaydedilmiş koordinatör devretme
+kararları. Dürüst ekleme, bunun mimarinin gerçek bir maliyeti olduğudur — tek
+ajan tek transkript üretir ve bu, bilerek vazgeçtiğiniz bir hata ayıklama
+özelliğidir.
+
+## 2026 alet çantası {#sec-cok-ajanli-araclar}
+
+Burada hiçbir şey bir modele karşı çalıştırılmadı. Maliyet modeli, önceki
+bölümlerde ölçülmüş sabitler üzerinde aritmetiktir, dolayısıyla yığın tek satır
+— ve aşağıdaki çatılar, aritmetik bölmeyi söyledikten sonra uzanacağınız
+şeylerdir, öncesinde değil.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| Python | 3.14.5 | @sec-cok-ajanli-maliyet'teki maliyet modeli aritmetiktir ve başka bir şeye ihtiyaç duymaz |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `langgraph` | 1.2.11 | açık çizgeler, kontrol noktaları ve insan-döngüde kesmeler |
+| `openai-agents` | 0.22.0 | çok az makineyle devretmeler ve guardrail'ler |
+| `pydantic-ai` | 2.35.3 | ajanlar arasında tipli sınırlar |
+| `crewai` | 1.15.18 | roller ve görevler, demoya en hızlısı |
+| `autogen-agentchat` | 0.7.5 | konuşmalı çok ajanlı araştırma |
+| `google-adk` | 2.8.0 | dağıtılabilir servisler olarak paketlenmiş ajanlar |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: ikinci ajanı hak edin {#sec-cok-ajanli-lab}
+
+Sıra meselenin kendisi: bölmeyi kurmadan önce hesaplıyorsunuz, ki bu da 2.
+adımda bitirmenize izin verildiği anlamına geliyor.
+
+### Adım 1 — tek ajanı kurun
+
+Bir döngü, görevin ihtiyaç duyduğu araçlar, bir adım bütçesi. Yirmi gerçek
+görevde puanı, token'ları ve duvar saatini ölçün. Yenilecek sayı budur.
+
+### Adım 2 — bölmeyi kurmadan önce hesaplayın
+
+Gözlemlediğiniz adım sayısını ve gözlem boyutunu alıp
+@sec-cok-ajanli-maliyet'in aritmetiğini çalıştırın. Model bölmenin daha pahalı
+olduğunu söylüyorsa sonucunuz budur — yazın ve durun.
+
+### Adım 3 — koordinatörü ve üç uzmanı kurun
+
+Devir değil devretme. Durumsuz uzmanlar. Koordinatör özetleri görür.
+
+### Adım 4 — aynı yirmi görevi ölçün
+
+Puan, token, duvar saati. Üçünü de raporlayın; tek ajan kazandıysa bile.
+
+### Adım 5 — özetlerin ne kaybettiğini bulun
+
+Çok ajanlı sistemin yanlış bildiği beş görevi alın ve uzman transkriptlerini
+okuyun. Bilgi ne sıklıkla bir uzmanın penceresinde mevcut ve raporunda yoktu?
+
+### Adım 6 — bir yazma ekleyin
+
+İki uzmana aynı kaynağı değiştirme yeteneği verin. Yirmi görev çalıştırın ve
+tutarsızlıkları sayın. Mimarinizin bir dağıtık sistem olup olmadığına karar veren
+adım budur.
+
+### Neyi teslim edeceksiniz
+
+İki üç sütunlu sonuç tablosunu, 5. adımdaki sayımı, 6. adımdaki tutarsızlık
+sayımını ve tek bir cümleyi: ikinci ajan yerini hak etti mi?
+
+## Alıştırmalar {#sec-cok-ajanli-alistirmalar}
+
+1. **Baseline'ı yenin.** Birden çok ajana ihtiyaç duyduğunu varsaydığınız bir
+   görev alın. Onu tek ajanla uygulayın. Puanı, maliyeti ve gecikmeyi
+   karşılaştırın ve tek ajan kazandığında bile sonucu raporlayın.
+2. **Aritmetiği çalıştırın.** Gerçek adım sayınızı ve gözlem boyutunuzu ölçün,
+   sonra sisteminiz için geçiş noktasını hesaplayın. Ondan ne kadar uzaktasınız?
+3. **Kaybolan bilgiyi bulun.** Başarısız beş çalıştırma için uzman
+   transkriptlerini okuyun ve cevabın bir uzmanın penceresinde mevcut olup
+   raporunda eksik olma sıklığını sayın.
+4. **Yarışı yaratın.** İkisi de yazabilen iki ajan için bir paylaşılan durum
+   düzeni tasarlayın. Sonra az önce yarattığınız yarış koşulunu ve onu kaldıran
+   en küçük değişikliği tarif edin.
+5. **Bir kuyruğu zehirleyin.** Ajanınızın işleyemeyeceği bir mesaj gönderin. Ne
+   olduğunu izleyin: döngüye mi giriyor, yok mu oluyor, yoksa birinin okuduğu bir
+   ölü mektup kuyruğuna mı ulaşıyor?
+6. **Hataları biriktirin.** Bir uzmanın doğruluğunu yalıtılmış hâlde ölçün, sonra
+   üç uzmanlı sistemin doğruluğunu ölçmeden önce öngörün. Öngörünüzü sonuçla
+   karşılaştırın.
+7. **Bir ajanı silin.** Çalışan bir çok ajanlı sistem alın ve bir ajanı, işini bir
+   komşusuna katarak kaldırın. Ölçün. Kaldırmalar eklemeler kadar bilgi vericidir
+   ve kimse onları çalıştırmaz.
+
+## Daha derine {#sec-cok-ajanli-derinlesme}
+
+Okumadan önce: tek ajanı kurun ve ölçün. Aşağıdaki her argümanı bir baseline
+elinizde olduğunda değerlendirmek daha kolay.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | işleyen en basit şeyi savunur ve bu bölümün konusuna en iyi karşı ağırlıktır |
+| [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system) — Anthropic | diğer taraf, üretimden: dağılımın bedelini nerede hak ettiği ve neyi bozduğu |
+| [`langgraph`](https://github.com/langchain-ai/langgraph) | incelenebilir bir durum makinesi olarak denetim akışı |
+| [`openai-agents`](https://github.com/openai/openai-agents-python) | küçük ve okunabilir bir döngüde devretmeler ve guardrail'ler |
+| [`autogen`](https://github.com/microsoft/autogen) | konuşmalı çok ajanlılık ve kusur biçimlerini kendiniz görmenin en net yolu |
+| [`crewAI`](https://github.com/crewAIInc/crewAI) / [`adk-python`](https://github.com/google/adk-python) | roller-ve-görevler ve servis-olarak-ajanlar |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| her ajanın çalıştırdığı döngü | @yao2023react |
+| kendini eleştirmenin yanlış bir cevabı neden kurtarmadığı | @huang2024large; @madaan2023selfrefine |
+| ayrı bir arama olarak planlama | @yao2023tree |
+| uzun paylaşılan bir bağlamın erişime ne yaptığı | @hsieh2024ruler |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-cok-ajanli-ozet}
+
+- **Tek ajan baseline'dır ve ikinci ajan onu bir ölçümde yenmelidir.** Üç
+  yapısal gerekçe geçerlidir — bağlam hacmi, gerçek paralellik, farklı araç ya da
+  izinler. "Karmaşık" değildir.
+- **Bölmeyi kurmadan önce hesaplayın.** 200 token'lık sonuçlarla altı adım, üç
+  ajan olarak **1,20 kata** mal olur; 3.000 token'lık sonuçlarla yirmi dört adım
+  **0,34 kata**. Kadran işin ne kadar malzeme ürettiğidir, ne kadar zor
+  olduğu değil.
+- **Kazanç bilgiyle ödenir.** Koordinatör özetleri görür, çünkü mekanizma
+  *budur*; dolayısıyla kayıplı bir sıkıştırma üzerine akıl yürütür — ve %90'da üç
+  uzman, koordinatörün kendi sentezinden önce yaklaşık %73 verir; ki
+  @sec-ajan-anatomisi ilk bozulan adımın o olduğunu ölçtü.
+- **Okuma ağırlıklı iş paralelleşir; yazma ağırlıklı iş paralelleşmez.**
+  Eşzamanlı yazmalar bir mimariyi, hata vermeyen kayıp güncellemeleri ve yeniden
+  üretilmeyecek hataları olan bir dağıtık sisteme çevirir.
+- **Tek yazar, kendi çalışma alanları, etkisiz araçlar, yalnızca eklenen
+  öneriler.** Hafifletmeler sıkıcıdır, çünkü işe yarayanlar onlardır.
+- **Durumsuz uzmanlara devredin; konuşmayı devretmeyin.** Kendi kendine yeten bir
+  alt görev yeniden denenebilir ve bağlam güvenlik duvarını korur.
+- **Hata ayıklama, bilerek ödediğiniz bir bedeldir.** Tek ajan, tek transkript.
+  Beş ajan korelasyon kimlikleri, kalıcılaştırılmış uzman transkriptleri ve
+  kaydedilmiş devretme kararları ister — ilk olaydan sonra değil önceden
+  kurulmuş.
