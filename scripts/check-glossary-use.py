@@ -58,6 +58,17 @@ REF_RE = re.compile(
     r"\[[^\]]*\]\(#gloss-([a-z0-9-]+)\)\{#term-([a-z0-9-]+) \.term-ref\}")
 
 
+def tr_fold(s):
+    """casefold() that is correct for Turkish.
+
+    str.casefold() maps 'İ' to 'i' + U+0307 COMBINING DOT ABOVE, so a Turkish
+    term written with a capital dotted I never matches its glossary entry.
+    This is the bug @sec-turkish-nlp documents, and it was live in this script:
+    'İstatistiksel güç'.casefold() != 'istatistiksel güç'.
+    """
+    return s.replace("\u0130", "i").replace("I", "\u0131").casefold()
+
+
 def slug(term):
     """The id both ends of a link are built from. Must match link-glosses.py."""
     s = term.lower().replace("&", " and ")
@@ -84,7 +95,7 @@ def turkish_terms():
                     variants |= {m.group(1), m.group(2)}
                 for v in list(variants):
                     variants |= {p.strip() for p in v.split("/") if p.strip()}
-                terms |= {v.casefold() for v in variants if v}
+                terms |= {tr_fold(v) for v in variants if v}
     return terms
 
 
@@ -130,7 +141,7 @@ def known_terms():
             # "n-gram / bigram" -> each alternative
             for v in list(variants):
                 variants |= {p.strip() for p in v.split("/") if p.strip()}
-            terms |= {v.casefold() for v in variants if v}
+            terms |= {tr_fold(v) for v in variants if v}
     return terms
 
 
@@ -162,7 +173,7 @@ def main():
                     f"**bolded term**")
                 continue
             term = lead.group(1).strip()
-            key = term.casefold()
+            key = tr_fold(term)
             if key not in terms:
                 problems.append(
                     f"{rel}:{line}: '{term}' is not in glossary.csv — add "

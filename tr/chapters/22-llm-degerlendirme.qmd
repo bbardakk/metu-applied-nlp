@@ -1,0 +1,830 @@
+# LLM Sistemlerini Değerlendirmek {#sec-llm-degerlendirme}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 22. bölüm](../../en/chapters/22-evaluating-llm-systems.html). Hakem
+denetimi 60 XL-Sum Türkçe haberi üzerinde `ollama` 0.24.0 aracılığıyla
+`qwen3.5:9b` ve `gemma3:27b` çalıştırıyor; boyutlandırma tabloları `scipy` ile
+benzetimlenip kapalı biçim sonuca karşı kontrol edildi. Yazılım: NumPy 2.5.2,
+`scipy` 1.18.1, `ollama` 0.24.0, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- model ölçütlerini *sistem* değerlendirmesinden ayırt edebilir ve hangisine
+  ihtiyacınız olduğunu bilirsiniz;
+- bir değerlendirme kümesini makul hissettiren şeyden değil, saptamanız gereken
+  farktan boyutlandırabilirsiniz;
+- bir LLM hakemine inanmadan önce onu, doğru cevapları bilinen kontrollerle
+  denetleyebilirsiniz;
+- sonuçları belirsizlikle raporlayabilir ve eşli tasarımı gerçekten işe
+  yaradığında seçebilirsiniz.
+
+Bu, istatistik eğitiminizin tam da onun için yapıldığı bölüm: uygulamalı LLM
+değerlendirmesi, temelinde, [dağılım kayması altında ölçüm tasarımıdır]{.hl}.
+Aşağıdakilerin çoğu yeni istatistik değil. Neredeyse hiç kimsenin uygulamadığı
+bir ortama uygulanmış sıradan istatistik.
+
+## Ölçütler sizin değerlendirmeniz değildir {#sec-llm-degerlendirme-olcutler}
+
+Açık bir ölçüt şu soruyu cevaplar: *bu model, başkasının seçtiği bir görevde
+diğer modellerle nasıl karşılaştırılır*. Sizin değerlendirmeniz şunu
+cevaplar: *bu sistem işimi sevk edilecek kadar iyi yapıyor mu*. Bunlar farklı
+sorulardır ve birincisi ikincisi hakkında ancak ara sıra kanıttır.
+
+Sizi ısıracakları sırayla üç özgül neden.
+
+**[Bulaşma](#gloss-benchmark-contamination){#term-benchmark-contamination .term-ref}.**
+Bir model eğitilmeden önce yayımlanmış bir ölçüt, o modelin eğitim verisinin
+içinde olabilir ve bunu genellikle kontrol edemezsiniz.
+
+::: {#gloss-benchmark-contamination .column-margin .term-gloss}
+**Ölçüt bulaşması** (benchmark contamination) — bir modelin eğitim verisinde
+bulunan test maddeleri; böylece puanı yeteneği değil ezberi raporlar. Dışarıdan
+genellikle ölçülemez, bu yüzden düzeltilecek bir şey değil ölçütlere
+güvenmemek için bir nedendir.
+[↩](#term-benchmark-contamination){.term-back}
+:::
+
+Bu kitap etkiyi daha küçük ölçekte @sec-dizi-etiketleme'de ölçtü: **WikiANN'in
+Türkçe test kümesinin %13,06'sı bir eğitim cümlesiyle bayt bazında birebir
+aynı** ve o sızıntının ürettiği puan bonusu bir sistemin ne kadar ezberlediğine
+göre tekdüze düştü — bir sözlük listesi için +26,50 span F1, bir CRF için
++16,25, ince ayarlı bir encoder için +7,65. Bunun olması için kimsenin dürüst
+olmaması gerekmedi.
+
+**Doyum.** Manşet modeller 88, 89 ve 90'dayken ölçüt yeteneği ölçmeyi bırakmış
+ve etiket gürültüsünün son birkaç yüzdesini ölçmeye başlamıştır. Doymuş bir
+sıralama tablosunun tepesindeki farklar sıklıkla o ölçütün kendi hata oranından
+küçüktür.
+
+**Yapı uyumsuzluğu.** Ölçüt bir görevi ölçer; sizde ise bir *sistem* vardır — bir
+prompt, bir erişim adımı, bir ayrıştırıcı, bir yedek ve bir model. Bir ölçüt
+puanı size JSON ayrıştırıcınızın yanıtların %2'sini düşürdüğünü söyleyemez —
+@sec-cozumleme, biçimlendirme kusurlarının akıl yürütme kusuru olarak sayıldığı
+bir durumu ölçtü ve zorlama, modelde hiçbir değişiklik olmadan doğruluğu
+%70,7'den %88,0'a taşıdı.
+
+::: {.column-margin}
+Açık ölçütlerin işe yarar rolü *eleme*dir: apaçık uygunsuz modelleri ucuza
+eler ve genel olarak neyin mümkün olduğunu söylerler. Bir sıralama tablosunu üç
+aday seçmenin yolu olarak görün, asla birini seçmenin yolu olarak değil.
+:::
+
+**Neye bakacağız.** Önce boyutlandırma sorusu; neredeyse hiç kimsenin
+hesaplamadığı kesin bir cevabı var ve çoğu ekibin zaten sahip olduğu
+değerlendirme kümesini diskalifiye ediyor. Sonra bir tanesini nasıl kuracağınız
+— nereden örnekleneceği, etiketleme sırasının neden önemli olduğu ve çökmek
+yerine makul bir sayı raporlayan koşum takımı hataları. Sonra bir LLM hakeminin,
+doğru cevapları önceden bilinen sondalara karşı denetimi; herkesin aklına gelen
+kontrolün iki hakemi en az ayıran kontrol olduğu yer. Ve son olarak birinin
+üzerine hareket edebileceği bir sonucun nasıl raporlanacağı; ki bu çoğunlukla
+bir sayıyı, onun neyi saptayamayacağını da söylemeden hiç alıntılamamak
+meselesidir.
+
+## Değerlendirme kümeniz ne kadar büyük olmalı? {#sec-llm-degerlendirme-boyut}
+
+İşte neredeyse her LLM projesinin sezgiyle cevapladığı soru ve kesin bir cevabı
+var. Zamanın yaklaşık %80'inde haklı olan bir sistem verildiğinde, *d* puanlık
+bir iyileşmeyi %80
+[**istatistiksel güç**](#gloss-statistical-power){#term-statistical-power .term-ref}
+ve alışıldık %5 anlamlılık düzeyinde saptamak için bir değerlendirme kümesi ne
+kadar büyük olmalıdır?
+
+::: {#gloss-statistical-power .column-margin .term-gloss}
+**İstatistiksel güç** (statistical power) — değerlendirmenizin belirli
+büyüklükte gerçek bir farkı saptama olasılığı. Düşük güç yanlış cevaplar
+üretmez; *hiç* cevap üretmez ve bunu bir cevapmış gibi raporlar.
+[↩](#term-statistical-power){.term-back}
+:::
+
+```text
+smallest difference detectable at 80% power (two proportions, base 80%)
+
+     items      smallest detectable difference
+        30            none — see below
+        50                    17.5 points
+       100                    13.4 points
+       200                    10.0 points
+       500                     6.6 points
+     1,000                     4.8 points
+     2,000                     3.4 points
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Kendi değerlendirme kümenizi boyutlandırın</div>
+```
+
+```{ojs}
+//| echo: false
+viewof evalBase = Inputs.range([0.50, 0.95], {step: 0.01, value: 0.80,
+  label: "mevcut doğruluk"})
+```
+
+```{ojs}
+//| echo: false
+viewof evalDiff = Inputs.range([1, 20], {step: 1, value: 5,
+  label: "saptamanız gereken fark (puan)"})
+```
+
+```{ojs}
+//| echo: false
+viewof evalPower = Inputs.radio(new Map([["%80", 0.80], ["%90", 0.90]]),
+  {value: 0.80, label: "güç"})
+```
+
+```{ojs}
+//| echo: false
+// Abramowitz–Stegun 26.2.23 ters normal, ~4.5e-4 hassasiyetinde — burası için fazlasıyla yeterli
+evalZ = p => {
+  const t = Math.sqrt(-2 * Math.log(p < 0.5 ? p : 1 - p));
+  const x = t - (2.515517 + 0.802853 * t + 0.010328 * t * t) /
+            (1 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+  return p < 0.5 ? -x : x;
+}
+```
+
+```{ojs}
+//| echo: false
+evalN = {
+  const d = evalDiff / 100, pa = evalBase, pb = Math.min(pa + d, 0.999);
+  const za = evalZ(0.975), zb = evalZ(evalPower);
+  const pbar = (pa + pb) / 2;
+  const n = Math.pow(za * Math.sqrt(2 * pbar * (1 - pbar)) +
+                     zb * Math.sqrt(pa * (1 - pa) + pb * (1 - pb)), 2) / (d * d);
+  return Math.ceil(n);
+}
+```
+
+```{ojs}
+//| echo: false
+md`%${(evalBase * 100).toFixed(0)} üzerine **${evalDiff} puanı**
+%${(evalPower * 100).toFixed(0)} güçle saptamak için sistem başına yaklaşık
+**${evalN.toLocaleString()} maddeye** ihtiyacınız var — ${evalN > 500
+  ? "çoğu ekibin etiketlediğinden fazla; bunu karşılaştırmadan sonra değil önce öğrenmek işe yarar"
+  : "gerçekçi biçimde etiketleyebileceğiniz bir boyut"}.
+Eşli bir tasarım, iki sistem çoğunlukla anlaşıyorsa daha azını ister ve ne kadar
+çok anlaşırlarsa o kadar azını; aşağıdaki tabloya bakın.`
+```
+:::
+
+[Otuz maddede cevap yoktur, çünkü hiçbir fark yeterince büyük değildir.]{.hl}
+Zamanın %80'inde haklı olan bir sisteme karşı, *kusursuz* bir yenisi bile —
+zamanın %100'ünde haklı olan — otuz maddede yalnızca %75 güce ulaşır. Yüz madde
+13,4 puan saptar. Gerçek iyileşmelerin çoğu iki ile beş arasındadır.
+
+Bunun üzerinde durmaya değer, çünkü otuz madde yaygın bir boyut; bu bölümün
+kendi alıştırmasının taslakta istediği boyut.
+
+Bu, küçük değerlendirme kümelerinin işe yaramaz olduğu anlamına **gelmez**.
+Farklı bir soruyu cevapladıkları anlamına gelir ve bu ayrım, bu bölümdeki en
+pratik yararlı şeydir:
+
+| küme boyutu | gerçekte ne işe yarar |
+|:--|:--|
+| **20–50 madde** | *kusur biçimlerini* bulmak. Her çıktıyı elle okuyun. Bir sayı değil, yanlışlık kategorileri arıyorsunuz ve otuz madde bunları iyi ortaya çıkarır — bu gerçek bir iştir ve boyut ona uygundur |
+| **100–300 madde** | *büyük* regresyonları yakalamak — bozulmuş bir ayrıştırıcı, çalışmayı bırakmış bir prompt, kötü giden bir model değişimi |
+| **500+ madde** | gerçekten yakın olan iki sistemi karşılaştırmak; ki bu, düzeltmek yerine ayar yaptığınız her durumdur |
+
+: Üç farklı iş, üç farklı boyut {tbl-colwidths="[22,78]"}
+
+Bunları ayırt edememek, prompt mühendisliğinin bu kadar çoğunun neden folklor
+olduğudur. Otuz örnek denendi, bir prompt daha iyi göründü ve fark, gürültü
+tabanından bir büyüklük mertebesi küçüktü.
+
+### Eşlemenin kazandırdığı ve kazandırmadığı
+
+@sec-promptlama, örtüşen güven aralıklarının sonuçsuz sayacağı 14,67 puanlık bir
+aralığı ortaya koymak için McNemar testini kullandı. Oradaki karşılaştırma
+**eşliydi** — aynı 150 yorum her prompt'tan geçti — ve eşleme standart
+tavsiyedir.
+
+Tavsiye doğrudur ve koşulsuz değildir, çünkü McNemar testi iki sistemin
+anlaştığı her maddeyi çöpe atar. Yani eşlemenin kazandırdığı şey ne sıklıkla
+ayrıştıklarına bağlıdır ve bu da *sizin* sistemlerinizin ampirik bir
+özelliğidir:
+
+```text
+power to detect a 5-point difference (alpha = 0.05)
+
+   items   unpaired    paired, by how often the two systems disagree
+                          10%       20%       30%       40%
+      30       0.08      0.01      0.03      0.03      0.04
+      50       0.10      0.07      0.06      0.07      0.05
+     100       0.15      0.24      0.14      0.10      0.10
+     200       0.26      0.55      0.30      0.21      0.16
+     500       0.56      0.94      0.68      0.51      0.39
+   1,000       0.84      1.00      0.94      0.81      0.69
+```
+
+**Eşleme, sistemleriniz çoğunlukla anlaştığında kazandırır.** %10 ayrışmada
+n = 200'de gücünüzü iki katından fazla artırır. %30'da başa baştır. %40'ta eşsiz
+testten daha kötüdür, çünkü o kadar çok uyumsuz çift vardır ki test, anlaşmadan
+yararlanmak yerine büyük bir örneklemden bir yazı turayı kestirmektedir.
+
+Bunun temiz bir pratik okuması var. İki prompt'u, iki checkpoint'i ya da iki kod
+çözme ayarını karşılaştırırken — sistemlerin çoğu maddede anlaştığı durumlar —
+eşli tasarımı kullanın ve gerçek güç kazanın. Sürekli ayrışan gerçekten farklı
+iki mimariyi karşılaştırırken eşleme size az şey kazandırır ve dürüst hamle,
+daha zeki bir test değil daha büyük bir değerlendirme kümesidir.
+
+::: {.column-margin}
+Bunu ilk denemede tersine anlamıştım. Ayrışma oranını @sec-promptlama'nın
+ölçtüğü %30,7'de sabitledim, eşlemenin eşsiz testten *daha kötü* olduğunu buldum
+ve kısa süre bir ders kitabı sonucunu çürüttüğüme inandım. Benzetim doğruydu;
+çerçeve yanlıştı — tek bir ayrışma oranı, bütün içeriği cevabın o oranla nasıl
+değiştiği olan bir soruyu cevaplayamaz. Betikteki kapalı biçim kontrolü de bunu
+yakalamazdı, çünkü eşsiz taraf baştan beri doğruydu.
+:::
+
+## Bir değerlendirme kümesi kurmak {#sec-llm-degerlendirme-kurma}
+
+Bir değerlendirme kümesi bir **örneklemdir** ve istatistik eğitiminizin
+örneklemler hakkında söylediği her şey geçerlidir. İşin neredeyse tamamını üç
+karar yapar.
+
+**Hayalden değil gerçek trafikten örnekleyin.** Uydurulmuş test durumları
+sistematik biçimde daha temiz, daha doğru yazılmış ve kullanıcıların
+gönderdiğinden daha tipiktir. Henüz trafiğiniz yoksa en yakın olanı kullanın —
+destek kayıtları, arama kayıtları, bir meslektaşınızın gerçek soruları — ve
+farkı açıkça etiketleyin. Yüz gerçek madde bin uydurulmuşu yener ve bu,
+bölümdeki en yüksek değerli tek karardır.
+
+**Bilerek tabakalayın, sonra ne yaptığınızı söyleyin.** Gerçek trafiğe kolay
+durumlar hâkimdir, dolayısıyla düzgün bir örneklem maddelerinin çoğunu kolay
+durumların hâlâ çalıştığını teyide harcar. Zor dilimleri, nadir ama pahalı
+kategorileri ve gerçekten hizmet verdiğiniz dilleri fazla örnekleyin — ve sonra
+bir manşet sayı raporlarken ya trafik dağılımına yeniden ağırlıklandırın ya da
+sayının tabakalı bir örneklemde olduğunu açıkça söyleyin. İkisi de olur;
+sessizlik olmaz.
+
+**İyi cevabı olmayan durumları dâhil edin.** Sisteminizin reddetmesi gereken
+sorular, kapsam dışı girdiler, cevabı içermeyen belgeler. @sec-rag bunun
+kimsenin çalıştırmadığı test olduğunu buldu ve @sec-cok-modlu, olmayan bir şey
+sorulduğunda 90'da 90 reddeden bir model buldu — yalnızca sorarak
+öğrenebileceğiniz bir sonuç.
+
+### Model çıktısına bakmadan önce veriyi etiketleyin
+
+Sıra kulağa geldiğinden önemli. Bir sistemin cevapları görüldükten sonra
+yazılan etiketler o cevaplara doğru kayar ve kayma sonradan görünmez. Rubriği
+yazın, ona karşı bir örneklem etiketleyin, iki etiketleyicinin ne sıklıkla
+anlaştığını ölçün ve *sonra* bir şey çalıştırın. İki insan arasındaki anlaşma
+%70 ise hiçbir sistem anlamlı biçimde %70'in üstünde puan alamaz ve onun
+üstündeki her puan sinyal diye okuduğunuz gürültüdür — makine
+@sec-veri-etiketleme'de.
+
+### Değerlendirmeyi kod gibi sürümleyin
+
+Değerlendirme kümesi raporladığınız her sayının bir bağımlılığıdır, dolayısıyla
+depoda, bir dosyada, incelemeye tabi ve bir değişiklik kaydıyla birlikte
+bulunur. Kendini amorti eden iki kural:
+
+- **Bir maddeyi asla yerinde düzenlemeyin.** Yeni bir tane ekleyin ve eskisini
+  emekliye ayırın; böylece marttaki bir puan hazirandaki bir puanla
+  karşılaştırılabilir kalır ve *testin* değişmesi nedeniyle oynayan bir puan,
+  sistemin değişmesi nedeniyle oynayandan ayırt edilebilir olur.
+- **Nadiren baktığınız ayrılmış bir dilim tutun.** Her gün karşısında ayar
+  yaptığınız bir değerlendirme kümesi bir eğitim kümesidir.
+  @sec-siniflandirma'nın ayırma disiplini, bir üst düzeydeki aynı disiplindir.
+
+### İyi sayılar üreten koşum takımı hataları
+
+Bozuk bir değerlendirme koşum takımı genellikle çökmez. Makul bir şey raporlar
+ve bunu tehlikeli kılan bir asimetri vardır: **kötü bir sayı soruşturulur, iyi
+bir sayı yayımlanır.** Bu kitabın kendi çalışmasından, ikisi de geç yakalanmış
+iki hata:
+
+- Bir akıl yürütme modeline 24 token'lık üretim bütçesi verildi. `ollama`
+  düşünce zincirini ayrı bir `thinking` alanında döndürür, dolayısıyla bütün
+  bütçe oraya gitti, cevap alanı boş kaldı, her yanıt ayrıştırılamadı ve her
+  kusur bir çoğunluk sınıfı varsayılanına düştü. Çalıştırma **%93,75 doğruluk**
+  raporladı — ki bu tam olarak çoğunluk baseline'ıydı.
+- Ayarlanmış bir eşik bir olasılığın yanlış tarafına uygulandı ve bir modeli
+  80,23 yerine 51,50 makro-F1 ile puanladı.
+
+Hiçbiri hata vermedi. Onları yakalayacak korumalar ucuz: **çalıştırma başına
+ayrıştırma oranını kaydedin ve %50'nin altında iptal edin**, bir gecelik
+kuyruktan önce her model×koşulu iki düzine maddede duman testinden geçirin ve
+madde başına ortalama değil *ortanca* saniye verin — bu kitabın kendi
+çalıştırmalarındaki makine takılmaları bir ortalamayı ortancasının dokuz katı
+yaptı.
+
+## Hakem olarak LLM, denetlenmiş {#sec-llm-degerlendirme-hakem}
+
+O korumalar size yalan söyleyen bir koşum takımını yakalar. Size yalan söyleyen
+bir *aleti* yakalamazlar — ve 2026'da en yaygın alet başka bir modeldir.
+
+Bir modelin çıktısını derecelendirmek için başka bir model kullanmak, tam
+eşleşmeyle puanlanamayan her şey için artık varsayılan. Makul bir fikir ve aynı
+zamanda **kalibre etmediğiniz bir ölçüm aleti**. O yüzden onu kalibre edin —
+doğru cevabını zaten bildiğiniz sondalarla, ki bu da hakeme güvenmek yerine onu
+puanlayabilmeniz demek.
+
+60 Türkçe haber üzerinde özetleri karşılaştıran üç sonda:
+
+1. **Birebir aynı.** A ile B aynı metin. Tek doğru hüküm beraberliktir. Bu,
+   @sec-ozetleme'nin kopyalanmış metin kontrolünün metriklerden tercihlere
+   taşınmış hâlidir.
+2. **Konum.** Gerçek bir karşılaştırma — profesyonel özete karşı haberin ilk
+   cümlesi — **iki sırayla da** çalıştırılmış.
+   [**Konum yanlılığı**](#gloss-position-bias){#term-position-bias .term-ref}
+   olmayan bir hakem iki seferde de aynı kazananı döndürür.
+3. **Uzunluk.** Aynı özet, içeriksiz dolguyla şişirilmiş. Hiçbir bilgi
+   eklenmiyor, dolayısıyla şişirilmiş sürümü tercih etmek uzunluğu tercih
+   etmektir.
+
+::: {#gloss-position-bias .column-margin .term-gloss}
+**Konum yanlılığı** (position bias) — bir hakemin, önce gördüğü adayı tercih
+etmesi. Aynı karşılaştırmayı iki sırayla çalıştırıp hükmün ne sıklıkla
+değiştiğini sayarak doğrudan ölçülür. [↩](#term-position-bias){.term-back}
+:::
+
+```text
+                                       qwen3.5:9b     gemma3:27b     Fisher p
+
+ 1. identical texts → called a tie        100.0%         100.0%            —
+
+ 2. same winner in both orders             61.7%          85.0%      0.00674
+    picked whichever was in slot A         57.5%          54.2%            —
+    preferred the professional summary     51.7%          74.2%      0.00048
+
+ 3. preferred the padded copy              28.3%           0.0%      <0.0001
+```
+
+### İki hakem de herkesin çalıştırdığı testi geçiyor
+
+Birebir aynı metin kontrolü, dikkatli bir ekibin çalıştırmayı akıl edeceği akıl
+sağlığı kontrolüdür ve **iki model de %100 alıyor**. Altmış çift bayt bazında
+birebir metin, altmış beraberlik, istisna yok. Denetiminizin tamamı bu olsaydı
+iki sağlam hakeminiz olduğu sonucuna varır ve fiyata göre seçerdiniz.
+
+Sonra ayırt eden sondalar:
+
+[Küçük hakem, sırayı değiştirdiğinizde maddelerin %38'inde cevabını
+değiştiriyor.]{.hl} Aynı iki metin, aynı soru, farklı hüküm. Bu, zor
+karşılaştırma problemi değil — aletin bir özelliği ve hükümlerinin üçte
+birinden fazlasının özetler hakkında hiçbir bilgi taşımadığı anlamına geliyor.
+
+Ayrıca gerçek karşılaştırmada **şans düzeyinde**: profesyonel BBC özetinin
+haberin açılış cümlesine karşı %51,7'si; güven aralığı [42,8, 60,4] rahatça
+50'yi içeriyor.
+
+Modele hakkını verelim: bir haber girişi gerçekten güçlü bir özettir —
+@sec-ozetleme lead-3'ü, çıkarımsal oracle'ın 24,89'una karşı 14,03 ROUGE-1
+olarak ölçtü; dolayısıyla bunu zor bulmak saçma değil. Ama o ikisini
+ayıramayan bir hakem sizin sisteminizin çıktılarını da sıralamamalı.
+
+Büyük hakem her sondada daha iyi: %85,0 sıra tutarlılığı, gerçek karşılaştırmada
+%74,2 ve dolguya bir kez bile kanmadı. Üç fark da n = 60'ta anlamlı.
+
+::: {.column-margin}
+Bu, @sec-llm-degerlendirme-boyut üzerine hoş bir içsel kontrol: boyutlandırma
+tablosu 50 maddelik bir değerlendirmenin 17,5 puanlık bir farkı saptadığını
+söylüyor ve buradaki hakem farkı n = 60'ta 23,3 puan. Deney *bulduğu fark için*
+yeterli güçteydi — ve 5 puanlık bir fark için fena hâlde yetersiz güçte olurdu;
+tasarımın hiç gücü olmadığı slot-A sayılarına (%57,5'e karşı %54,2) bir anlam
+yüklemeden önce hatırlamaya değer.
+:::
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Dört sonda ve yalnızca üçü hakemleri birbirinden ayırıyor</div>
+<svg viewBox="0 0 764 310" style="max-width:744px" role="img" aria-label="Dört hakem sondasının halter grafiği. Birebir aynı metin kontrolünde iki hakem de yüzde 100'de duruyor. Sıra tutarlılığında, gerçek karşılaştırmada ve dolgu sondasında iki hakem birbirinden uzak.">
+  <circle cx="31" cy="15" r="5" class="head-rose"/>
+  <text x="41" y="19" class="t-xs t-mono">qwen3.5:9b</text>
+  <circle cx="124" cy="15" r="5" class="head-accent"/>
+  <text x="134" y="19" class="t-xs t-mono">gemma3:27b</text>
+
+  <line x1="290" y1="48" x2="290" y2="240" class="ln-thin"/>
+  <line x1="390" y1="48" x2="390" y2="240" class="ln-thin"/>
+  <line x1="490" y1="48" x2="490" y2="240" class="ln-thin"/>
+  <line x1="590" y1="48" x2="590" y2="240" class="ln-thin"/>
+  <line x1="690" y1="48" x2="690" y2="240" class="ln-thin"/>
+  <text x="290" y="42" class="t-xs t-muted t-mid">%0</text>
+  <text x="390" y="42" class="t-xs t-muted t-mid">%25</text>
+  <text x="490" y="42" class="t-xs t-muted t-mid">%50</text>
+  <text x="590" y="42" class="t-xs t-muted t-mid">%75</text>
+  <text x="690" y="42" class="t-xs t-muted t-mid">%100</text>
+
+  <text x="26" y="64" class="t-xs t-b t-muted">HERKESİN ÇALIŞTIRDIĞI SONDA</text>
+  <text x="270" y="89.5" class="t-xs t-end">birebir aynı metinler &#8594; beraberlik dendi</text>
+  <circle cx="690" cy="86" r="6" class="head-rose"/>
+  <circle cx="690" cy="86" r="3" class="head"/>
+  <text x="676" y="89.5" class="t-xs t-muted t-end">iki hakem de %100,0</text>
+
+  <line x1="26" y1="108" x2="738" y2="108" class="ln-dash"/>
+  <text x="26" y="128" class="t-xs t-b t-muted">NEREDEYSE HİÇ KİMSENİN ÇALIŞTIRMADIĞI ÜÇÜ</text>
+
+  <text x="270" y="155.5" class="t-xs t-end">iki sırada da aynı kazanan</text>
+  <line x1="536.8" y1="152" x2="630" y2="152" class="ln"/>
+  <circle cx="536.8" cy="152" r="6" class="head-rose"/>
+  <circle cx="630" cy="152" r="6" class="head-accent"/>
+  <text x="526.8" y="155.5" class="t-xs t-rose t-end">%61,7</text>
+  <text x="640" y="155.5" class="t-xs t-accent">%85,0</text>
+
+  <text x="270" y="191.5" class="t-xs t-end">profesyonel özeti tercih etti</text>
+  <line x1="496.8" y1="188" x2="586.8" y2="188" class="ln"/>
+  <circle cx="496.8" cy="188" r="6" class="head-rose"/>
+  <circle cx="586.8" cy="188" r="6" class="head-accent"/>
+  <text x="486.8" y="191.5" class="t-xs t-rose t-end">%51,7</text>
+  <text x="596.8" y="191.5" class="t-xs t-accent">%74,2</text>
+
+  <text x="270" y="217" class="t-xs t-end">şişirilmiş kopyayı tercih etti</text>
+  <text x="270" y="232" class="t-xs t-muted t-end">burada düşük olan daha iyi</text>
+  <line x1="290" y1="224" x2="403.2" y2="224" class="ln"/>
+  <circle cx="290" cy="224" r="6" class="head-accent"/>
+  <circle cx="403.2" cy="224" r="6" class="head-rose"/>
+  <text x="290" y="207" class="t-xs t-accent t-mid">%0,0</text>
+  <text x="413.2" y="227.5" class="t-xs t-rose">%28,3</text>
+
+  <rect x="26" y="256" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="272" class="t-xs t-b t-mid">HERKESİN ÇALIŞTIRDIĞI SONDA, HAKEMLERİ EN AZ AYIRAN SONDADIR</text>
+  <text x="382" y="287" class="t-xs t-muted t-mid">sıra tutarlılığında hakem farkı n = 60'ta 23,3 puan</text>
+</svg>
+```
+
+::: {.fig-cap}
+Dikkatli bir ekibin çalıştırmayı akıl ettiği kontrol düz olanıdır: iki hakem de
+aynı noktaya iniyor. Onları birbirinden ayıran her şey altındaki üç satırda
+yaşıyor — bu da her hakemi sağlam gösteren tek sonda yerine, doğru cevaplarını
+zaten bildiğiniz sondalar çalıştırmak için bir argümandır.
+:::
+::::
+
+### Uzunluk yanlılığı yeniden üretilmedi
+
+Folklor hakemlerin uzun cevapları tercih ettiğini söyler. Bu ikisi etmedi:
+`qwen3.5:9b` şişirilmiş kopyayı zamanın %28,3'ünde tercih etti, `gemma3:27b`
+hiç etmedi. Bunu, @sec-rag'in iğne sonucunun belirtilmek zorunda olduğu gibi dar
+belirteceğim: dolgum **apaçık** içeriksiz kalıp metindi — üç cümle "durum
+yukarıda anlatıldığı gibidir" — ve bunu saptamak, gerçekten daha ayrıntılı,
+daha iyi düzenlenmiş, daha uzun bir cevaba direnmekten çok daha kolay bir
+görevdir.
+
+Ölçtüğüm şey, iki hakemin de apaçık dolguyu reddettiğidir. Ölçmediğim şey,
+gerçek yapı ekleyen ama doğruluk eklemeyen bir ayrıntılandırmayla ne
+yaptıklarıdır; ki folklorun asıl konusu odur.
+
+### Bu konuda ne yapmalı
+
+Beş değişiklik ve birincisi sayıları topladıktan sonra değil önce gerçekleşmeli.
+
+- **Sondaları değerlendirmeden önce çalıştırın.** Üçü de bir öğleden sonra sürer
+  ve hangi hakemi kullanacağınızı değiştirirler.
+- **Sırayı rastgeleleştirin ya da üzerinden ortalama alın.** Her çifti iki
+  sırada da sunun ve yalnızca hükmün anlaştığı maddeleri sayın; ya da
+  rastgeleleştirin ve ek varyansı kabul edin. %38 çevirme oranı olan bir
+  hakemden tek sıralı bir eşli sonuç raporlamak, sistemleri değil parayı
+  raporlamaktır.
+- **Mutlak puanlama yerine ikili karşılaştırmayı tercih edin**, ama bedelini
+  bilin. "Hangisi daha iyi" diye sormak, 1–5 derecelendirme istemekten daha
+  güvenilirdir, çünkü bir derecelendirme ölçeği çağrılar arasında kayar ve
+  çıpası yoktur. Bedeli, ikili karşılaştırmaların daha fazla yapı olmadan bir
+  puana toplanmamasıdır.
+- **Bir alt örneklemde insan etiketlerine karşı kalibre edin.** Elle
+  etiketlenmiş elli madde, hakemin gerçekten önemsediğiniz şeyle anlaşma oranını
+  söyler. O sayı olmadan bir hakem puanı, birimi bilinmeyen bir ölçümdür.
+- **Hakemin, sınanan sistemle aynı model olmasına asla izin vermeyin**; ya da en
+  azından bu kurulumun davet ettiği kendini tercih etmeyi ölçmeden izin
+  vermeyin.
+
+## Birinin üzerine hareket edebileceği bir sonuç raporlamak {#sec-llm-degerlendirme-raporlama}
+
+Aralığı olmayan bir sayı bir söylentidir. Dört kural, hepsi ucuz:
+
+**Bir aralık raporlayın ve onu nasıl elde ettiğinizi söyleyin.** Bir oran için
+Wilson, bu alanın gerçekten kullandığı küçük örneklem boyutlarında ders
+kitabındaki normal yaklaşımı yener — 0'ın altında ya da 1'in üstünde imkânsız
+sınırlar üretmez. Bu bölümdeki her yüzdenin bir tane var.
+
+**Sistemler çoğunlukla anlaştığında eşli testi kullanın**, @sec-llm-degerlendirme-boyut'a
+göre; ve hangisini kullandığınızı söyleyin. Örtüşen iki marjinal aralık, fark
+olmadığının kanıtı değildir: @sec-promptlama'nın 14,67 puanlık aralığının
+örtüşen aralıkları vardı ve McNemar p = 0,0009 buldu.
+
+**Gecikme için asla ortalama değil ortanca verin.** Takılan tek bir istek bir
+ortalamayı yeniden yazar. Bu kitabın kendi zamanlama çalıştırmaları
+ortancasının dokuz katı bir ortalama üretti ve eşzamanlı bir iş, bir
+yapılandırmayı birebir aynı olan bir diğerinden on dokuz kat yavaş gösterdi —
+buradaki hiçbir bölümün başka bir şey çalışırken toplanmış bir gecikme sayısı
+yayımlamamasının nedeni budur.
+
+**Bir şey çekimser kalabildiğinde, ayrıştırılamadığında ya da zaman aşımına
+uğradığında doğrulukla birlikte kapsamı raporlayın.** Yalnızca başarılı
+yanıtlar üzerinden hesaplanmış bir doğruluk, doğruluk değildir —
+@sec-cozumleme'nin çekimserlik sonucu, yalnızca en zor beşte biri reddederek
+%86,75'i %92,50'ye taşıdı; ki bu ancak soruların %80'ini cevapladığınızı da
+söylerseniz bir iyileşmedir.
+
+### Regresyon testi, ki bütün bunların amacı budur
+
+Değerlendirme kümesi ekmeğini bir değişiklik indiğinde kazanır. Her prompt
+değişikliğinde, model sürümünde ve bağımlılık yükseltmesinde çalıştırın ve
+özeti değil madde başına sonuçları saklayın — çünkü bir düşüşten sonra işe
+yarar soru *hangi maddelerin değiştiğidir* ve saklanmış bir toplam bunu
+cevaplayamaz.
+
+Kimsenin cevapta payı olmadan, önceden anlaşmaya değer iki eşik: bir yayını
+engelleyen düşüş büyüklüğü ve yalnızca bir soruşturma açan büyüklük. Bunları
+yuvarlak bir sayıdan değil @sec-llm-degerlendirme-boyut'un tablosundan
+belirleyin, çünkü 100 maddelik bir değerlendirmede 2 puanlık düşüşte engelleyen
+bir kural gürültüde sürekli tetiklenir ve sonra yok sayılır; bu da hiç kural
+olmamasından kötüdür.
+
+## Sezgi kontrolleri {#sec-llm-degerlendirme-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular.
+
+::: {.callout-note collapse="true"}
+## 1. Modeliniz açık bir ölçütte 91 alıyor. Ne öğrendiniz?
+
+Apaçık uygunsuz olmadığını ve pek bir şey değil. Ölçütün onun eğitim verisinde
+olup olmadığını öğrenmediniz — @sec-dizi-etiketleme **bir ölçütün test
+kümesinin %13,06'sının kendi eğitim ayrımında tekrarlandığını** buldu — ölçütün
+doymuş olup olmadığını da, sizin görevinizi ölçüp ölçmediğini de. Ölçütler üç
+aday seçmek için bir elemedir. Aralarında sizin değerlendirmeniz karar verir.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. 30 maddelik bir değerlendirme kümesi kurmaya değer mi?
+
+Evet, doğru soru için — ama sistemleri karşılaştırmak için değil. Otuz maddede,
+%80 doğrulukta bir baseline'a karşı %80 güçle saptanabilir **hiçbir** fark
+yoktur: her seferinde haklı olan bir yenisi bile yalnızca %75'e ulaşır. Otuz
+maddenin mükemmel olduğu şey *kusur biçimlerini bulmaktır*: otuz çıktının
+hepsini elle okuyun; hiçbir toplam puanın ortaya çıkarmayacağı yanlışlık
+kategorileri bulacaksınız. Küçük kümeleri neyin bozulduğunu öğrenmek, büyük
+kümeleri neyin sevk edileceğine karar vermek için kullanın.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Her zaman eşli test mi kullanmalısınız?
+
+Genellikle, ama nedenini bilerek. McNemar sistemlerin anlaştığı her maddeyi
+atar, dolayısıyla gücü ayrışma oranına bağlıdır. Burada ölçüldü: %10 ayrışmada
+eşleme n = 200'de gücü iki katından fazla artırıyor; %30'da başa baş; **%40'ta
+eşsiz testten daha kötü**. Çoğu maddede anlaşan iki prompt'u karşılaştırırken
+eşleyin. Çok farklı iki sistemi karşılaştırırken eşleme az şey kazandırır ve
+dürüst çözüm daha büyük bir değerlendirme kümesidir.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. LLM hakeminiz birebir aynı iki metne her seferinde beraberlik veriyor. Güvenilir mi?
+
+Mümkün olan en kolay kontrolü geçtiğini öğrendiniz, başka bir şey değil.
+Buradaki iki hakem de o sondada **%100** aldı ve sonra keskin biçimde ayrıştı:
+biri sıra değiştirildiğinde maddelerin %38'inde hükmünü çevirdi ve gerçek
+karşılaştırmada şans düzeyindeydi; diğeri %15'te çevirdi ve %74,2'ye ulaştı.
+Herkesin çalıştırdığı kontrol, en az ayırt edendir.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. İki prompt 100 maddelik değerlendirmenizde %84 ve %79 alıyor. Birincisi daha mı iyi?
+
+Bu sayılardan söyleyemezsiniz. 100 maddelik bir değerlendirme %80 güçle
+yaklaşık **13 puan** saptar ve bu 5. Karşılaştırma eşliyse — aynı 100 madde iki
+prompt'tan da geçtiyse — ayrışmalarda McNemar çalıştırın, pekâlâ bulabilir.
+Eşli değilse dürüst rapor "bu örneklem boyutunda saptanabilir bir fark yok"
+olur; ki bu "fark yok"tan farklı bir ifadedir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Değerlendirme koşum takımınız %93,75 doğruluk raporluyor. Önce neyi kontrol edersiniz?
+
+Ayrıştırma oranını. O tam sayı, bir akıl yürütme modelinin bütün token
+bütçesini bir `thinking` alanında harcadığı, her cevabın ayrıştırılamadığı ve
+her kusurun çoğunluk sınıfına düştüğü bir çalıştırmadan geldi — yani koşum
+takımı **çoğunluk baseline'ını** bir sonuç olarak raporluyordu. Kötü bir sayı
+soruşturulur ve iyi bir sayı yayımlanır, dolayısıyla şüphe uyandıracak kadar iyi
+bir sayı, kötü olanın kendiliğinden gördüğü aynı incelemeyi hak eder.
+:::
+
+## Mülakat soruları {#sec-llm-degerlendirme-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+ölçümlerinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Ölçümü anlayıp anlamadığınızı sınayanlar
+
+**S: Bir LLM özelliğini nasıl değerlendirirsiniz?**
+
+İki soruyu ayırarak başlayın — model yetkin mi ve sistemim çalışıyor mu — ve
+açık ölçütlerin yalnızca birincisini cevapladığını söyleyin. Sonra yapıyı
+verin: gerçek trafikten örneklenmiş, saptamanız gereken farktan boyutlandırılmış,
+sistemin reddetmesi gereken durumları içeren, hiçbir model çıktısı görülmeden
+insan etiketleri toplanmış, sürümlenmiş bir değerlendirme kümesi.
+Raporlamayla bitirin: aralıklar, sistemlerin çoğunlukla anlaştığı yerde eşli
+testler ve doğrulukla birlikte kapsam.
+
+**S: Değerlendirme kümenizde 100 madde var ve yeni prompt 5 puan yüksek alıyor.
+Sevk eder misiniz?**
+
+Bu kanıtla hayır. Yüz madde %80 güçle yaklaşık 13 puan saptar, dolayısıyla 5
+puan gürültünün içindedir — tasarım eşli değilse; eşliyse ayrışmalarda McNemar
+çalıştırın, marjinal aralıkların bulamadığı etkileri bulabilir. Muhakeme
+gösteren cevap, sonra ne yapacağınızı adlandırmaktır: ya değerlendirmeyi
+büyütürsünüz ya da bir iyileşme iddia etmediğinizi açıkça belirterek düşük
+riskli bir değişiklik olarak sevk edersiniz.
+
+**S: GPT-4 sınıfı modelleri hakem olarak kullanmanın nesi yanlış?**
+
+Önce birini kalibre ettiğiniz sürece hiçbir şey. Kusur, onu bir alet değil bir
+kâhin olarak görmektir. Özgül yanlılıkları ve her birini nasıl ölçeceğinizi
+adlandırın: konum, iki sırayı da çalıştırarak — burada küçük bir hakem için %38,
+büyük bir hakem için %15 çevirme oranı ölçüldü; uzunluk, bir cevabı bilgi
+eklemeden şişirerek; kendini tercih etme, bir hakemin kendi ailesini kontrol
+etmeden derecelendirmesine asla izin vermeyerek. Ve bir alt örneklemde insan
+etiketlerine karşı kalibre edin, çünkü aksi hâlde puanın birimi yoktur.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Bozuk bir değerlendirmeyi nasıl yakalarsınız?**
+
+Doğru cevapları bilinen kontrollerle, çünkü bozuk bir koşum takımı genellikle
+çökmek yerine makul bir şey döndürür. Bir referansı kendisine karşı puanlayın ve
+kusursuz bir sonuç isteyin. Ayrıştırma oranını kaydedin ve bir eşiğin altında
+iptal edin. Her çalıştırmada bir çoğunluk sınıfı baseline'ıyla karşılaştırın —
+modeliniz onunla birebir eşleşiyorsa bu bir tesadüf değil bir hatadır. Ve
+hepsini gerekli kılan şeyi söyleyin: kötü bir sayı soruşturulur, iyi bir sayı
+yayımlanır.
+
+**S: Üretim kaliteniz düştü ve değerlendirme oynamadı. Ne oldu?**
+
+Büyük olasılıkla değerlendirme artık trafiğe benzemiyor — girdiler kaydı, yeni
+bir müşteri segmenti geldi ya da değerlendirme baştan hayalî durumlardan
+kuruldu. Modele dokunmadan önce girdi dağılımını kontrol edin. İkinci aday,
+kusurun sistemin değerlendirmenin çalıştırmadığı bir parçasında olmasıdır: bir
+ayrıştırıcı, bir erişim adımı, bir zaman aşımı. Madde başına sonuçların toplam
+yerine saklanmasının ve kapsamın doğrulukla birlikte raporlanmasının nedeni
+budur.
+
+## 2026 alet çantası {#sec-llm-degerlendirme-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle yerelde çalıştı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `scipy` | 1.18.1 | güç benzetimi, Fisher kesin testleri ve Wilson aralıkları |
+| `numpy` | 2.5.2 | örnekleme |
+| `ollama` | 0.24.0 | iki hakemi de yerelde sunmak |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `lm-evaluation-harness` | GitHub'da | açık bir ölçüt sayısını herkesin hesapladığı biçimde yeniden üretmek |
+| `lighteval` | 0.13.0 | aynı iş, daha küçük ve değiştirmesi daha kolay |
+| `promptfoo` | 0.122.2 (npm) | CI'da prompt'ları ve modelleri iddialara karşı taramak; bu addaki PyPI paketi ince bir sarmalayıcıdır, npm sürümünü alın |
+| `ragas` | 0.4.3 | @sec-rag-kusurlar'ın erişim/üretim ayrımı, puanlanmış |
+| `deepeval` | 4.2.0 | bir test koşucusuna bağlanmış hakem tabanlı metrikler; böylece değerlendirmeler birim testler gibi başarısız olur |
+| `statsmodels` | 0.15.0 | kendiniz yazmak istemiyorsanız `proportion_confint` ve `mcnemar` |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: bir hakemi denetleyin, sonra değerlendirmenizi boyutlandırın {#sec-llm-degerlendirme-lab}
+
+Denetimi değerlendirmeden önce, bu sırayla yapın; çünkü puanlamadığınız bir
+hakem, sonraki her sayıyı birimi bilinmeyen bir ölçüme dönüştürür.
+
+### Adım 1 — gerçek trafikten 50 madde yazın
+
+Gerçek girdiler ve sisteminizin reddetmesi gereken beş tane dâhil. Bir şey
+çalıştırmadan önce kendiniz etiketleyin.
+
+### Adım 2 — insan anlaşmasını ölçün
+
+İkinci bir kişi 25 tanesini etiketlesin. Anlaşmayı hesaplayın. O sayı, sonradan
+raporlayacağınız her puanın tavanıdır.
+
+### Adım 3 — birebir aynı metin sondasını çalıştırın
+
+Hakeminizden bir çıktıyı kendisiyle karşılaştırmasını 30 kez isteyin.
+Beraberlik demiyorsa durun ve başka bir şey yapmadan önce prompt'u düzeltin.
+
+### Adım 4 — konum sondasını çalıştırın
+
+30 gerçek karşılaştırma alın ve her birini iki sırada da çalıştırın. Çevirme
+oranını raporlayın. Yaklaşık %20'nin üstündeyse, o güne kadar topladığınız her
+tek sıralı sonuç kısmen gürültüdür.
+
+### Adım 5 — kendi etiketlerinize karşı kalibre edin
+
+Etiketlediğiniz 50 maddede hakem sizinle ne sıklıkla anlaşıyor? Hakem
+puanlarını anlamlı bir şeye dönüştüren sayı odur.
+
+### Adım 6 — sonraki değerlendirmeyi boyutlandırın
+
+Bir kararı değiştirecek en küçük farka karar verin.
+@sec-llm-degerlendirme-boyut'un tablosunu kullanarak gerektirdiği madde sayısını
+bulun. Sayı etiketleyebileceğinizden büyükse, yetersiz güçte bir karşılaştırmayı
+sevk edip ona sonuç demek yerine bunu açıkça söyleyin.
+
+### Neyi teslim edeceksiniz
+
+İki sonda sonucunu, hakem–insan anlaşma oranını, insan–insan anlaşma oranını ve
+değerlendirme kümenizin gerçekte saptayabileceği en küçük farkı adlandıran bir
+cümleyi.
+
+## Alıştırmalar {#sec-llm-degerlendirme-alistirmalar}
+
+1. **Mevcut değerlendirmenizi boyutlandırın.** Zaten kullandığınız bir
+   değerlendirme kümesini alın, madde sayısını
+   @sec-llm-degerlendirme-boyut'un tablosunda bulun ve saptayabileceği en küçük
+   farkı yazın. Bunu raporlamakta olduğunuz farklarla karşılaştırın.
+2. **Hakeminizi denetleyin.** Şu anda kullandığınız hakemde birebir aynı metin
+   ve konum sondalarını çalıştırın. Beraberlik oranını ve çevirme oranını
+   raporlayın.
+3. **İki sıra da.** Zaten çalıştırdığınız bir ikili değerlendirmeyi alın ve
+   sırayı değiştirerek yeniden çalıştırın. Kaç hüküm değişiyor? Bu, sonucunuza ne
+   yapıyor?
+4. **Anlaşma tavanını bulun.** İki kişi aynı 30 maddeyi bağımsız etiketlesin.
+   Anlaşmayı hesaplayın. Sisteminiz için raporlamakta olduğunuz doğrulukla
+   karşılaştırın.
+5. **Yokluk dilimini kurun.** Sisteminizin reddetmesi gereken on madde ekleyin.
+   Ne sıklıkla reddettiğini ölçün. Bu genellikle gerçek bir problem bulmanın en
+   hızlı yoludur.
+6. **Kendi koşum takımınızı bozun.** Bir akıl yürütme modeli için fazla küçük
+   bir üretim bütçesi ayarlayın ve hattınızın ne raporladığını görün. Sonra onu
+   yakalayacak ayrıştırma oranı korumasını ekleyin.
+7. **Tersinden güç.** Kurumunuzda bir kararı değiştirecek en küçük iyileşmeyi
+   seçin. Gerektirdiği değerlendirme boyutunu hesaplayın. Karşılayamıyorsanız
+   bunun yerine ne yapacağınızı yazın — o cümle, çoğu değerlendirme raporundan
+   daha işe yarar bir teslimattır.
+
+## Daha derine {#sec-llm-degerlendirme-derinlesme}
+
+Herhangi bir şey okumadan önce: mevcut değerlendirme kümenizdeki maddeleri sayın
+ve saptayabileceği en küçük farka bakın. Onun altındaki farkları
+raporluyorsanız, buradaki diğer her şey acildir.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Hamel Husain — değerlendirme](https://hamel.dev/blog/posts/evals/) ve [LLM hakemleri](https://hamel.dev/blog/posts/llm-judge/) üzerine | bu konudaki en iyi uygulamalı yazı; herhangi bir makaleden önce buradan başlayın |
+| [Eugene Yan — değerlendirme üzerine](https://eugeneyan.com/writing/evals/) | göreve özgü değerlendirmenin iyi kaynaklandırılmış bir turu, kusur durumları adlandırılmış |
+| [HELM](https://crfm.stanford.edu/helm/) | Stanford'un bütünsel ölçütü; sıralama tablosunu hiç kullanmasanız bile *yöntemi* için okumaya değer |
+| [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness) | standart koşum takımı; kendinizinkini yazmadan önce cevap çıkarımını nasıl yaptığını okuyun |
+| [`lighteval`](https://github.com/huggingface/lighteval) | aynı fikirle daha hafif bir alternatif, baştan sona okuması daha kolay |
+| [`promptfoo`](https://github.com/promptfoo/promptfoo) | aynı değerlendirmeyi prompt'lar ve modeller genelinde iddialarla çalıştırır; @sec-llm-degerlendirme-lab'ı rutin kılar |
+| [`ragas`](https://github.com/explodinggradients/ragas) / [`deepeval`](https://github.com/confident-ai/deepeval) | ayrıştırması hazır gelen hakem tabanlı metrikler |
+| [Chip Huyen'in blogu](https://huyenchip.com/blog/) | ürün çerçevesi — bir değerlendirmenin ne *için* olduğu ve cevabın ne zaman bir sayı olmadığı |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| hakem olarak bir model, insanlara karşı ölçülmüş | @zheng2023judging |
+| ve beraberinde gelen yanlılıklar | @wang2024large |
+| bütünsel ölçütleme, bilerek yapılmış | @liang2023holistic |
+| ölçüt bulaşmasının neden ölçülmesi gerektiği | @sainz2023nlp |
+| bu bölümün sürekli kullandığı eşli test | @mcnemar1947note |
+| küçük *n*'de düzgün davranan aralık | @wilson1927probable |
+| üretim için hakem tabanlı metrikler | @liu2023geval |
+| otomatik özetleme metriklerinin kaçırdıkları | @fabbri2021summeval |
+| modellerin ne bildiklerini bilip bilmedikleri | @kadavath2022language |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-llm-degerlendirme-ozet}
+
+- **Açık bir ölçüt eler; sizin değerlendirmeniz karar verir.** Bulaşma gerçektir
+  ve dışarıdan genellikle ölçülemez — @sec-dizi-etiketleme bir ölçütün test
+  kümesinin **%13,06**'sının eğitim ayrımında tekrarlandığını buldu — ve doymuş
+  bir sıralama tablosu yeteneği değil etiket gürültüsünü ölçer.
+- **Değerlendirmeyi saptamanız gereken farktan boyutlandırın.** Zamanın
+  %80'inde haklı olan bir sistemde %80 güçte **30 madde hiçbir şey saptayamaz**
+  — kusursuz bir yenisi bile yalnızca %75 güce ulaşır — 100 madde 13,4 puan
+  saptar ve 1.000 madde 4,8. Gerçek iyileşmelerin çoğu 2–5 puandır, dolayısıyla
+  kullanımdaki değerlendirme kümelerinin çoğu kurulma amaçları olan şeyi
+  göremez.
+- **Küçük değerlendirme kümeleri kusur biçimlerini bulmak içindir, sistem
+  karşılaştırmak için değil.** Elle okunan yirmi ile elli madde size *neyin*
+  bozulduğunu söyler. *Hangisinin daha iyi* olduğunu söylemek beş yüz veya
+  fazlasını gerektirir.
+- **Eşleme, sistemlerin ne kadar anlaştığıyla orantılı yardım eder.** %10
+  ayrışmada gücü iki katından fazla artırır; %30'da başa baştır; **%40'ta eşsiz
+  testten daha kötüdür**, çünkü McNemar her anlaşmayı atar.
+- **Hakemi, doğru cevapları bilinen kontrollerle denetleyin.** Buradaki iki
+  hakem de birebir aynı metin beraberliklerinde **%100** aldı — ve sonra biri
+  sıra değiştirildiğinde **maddelerin %38'inde** hükmünü çevirdi ve gerçek
+  karşılaştırmada şans düzeyinde (%51,7) kaldı; diğeri %15'te çevirdi ve %74,2'ye
+  ulaştı. Herkesin çalıştırdığı kontrol en az ayırt edendir.
+- **İkili karşılaştırmaları iki sırada da çalıştırın** ve yalnızca ikisinin
+  anlaştığı maddeleri sayın. %38 çevirme oranı olan bir hakemden tek sıralı bir
+  sonuç, parayı raporluyordur.
+- **Uzunluk yanlılığı burada yeniden üretilmedi** — hiçbir hakem apaçık
+  şişirilmiş bir kopyayı tercih etmedi — ama bu, apaçık dolgu hakkında dar bir
+  iddiadır; folklorun asıl konusu olan ayrıntılı-ama-boş cevaplar hakkında
+  değil.
+- **Kötü bir sayı soruşturulur; iyi bir sayı yayımlanır.** Tasarımda karşı
+  durulacak şey hata değil o asimetridir. Ayrıştırma oranlarını kaydedin, her
+  çalıştırmada bir çoğunluk sınıfı baseline'ı tutun, bir referansı kendisine
+  karşı puanlayın ve şüphe uyandıracak kadar iyi bir sonuca, kötü olanın
+  kendiliğinden gördüğü şüpheyle yaklaşın.
