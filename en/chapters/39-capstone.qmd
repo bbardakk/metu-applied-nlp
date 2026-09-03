@@ -1,46 +1,585 @@
 # Case Study: Building an Enterprise Agent Platform {#sec-capstone}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** This chapter has no measurement of its own. It is a
+worked example — a system constructed so that the book's own measurements bear
+on it — rather than a report on a particular company's deployment. Every number
+below was measured in an earlier chapter and is cited to it; nothing here is a
+new claim about the world. Read it as an exercise in assembling what you already
+have, which is also what the capstone asks of you.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- trace a full system from requirements through architecture to production;
-- read architecture decisions together with the alternatives that were rejected;
-- anticipate the failures that only appear at the second team and the tenth agent;
+- trace one system from requirements through architecture to production,
+  naming the chapter behind each decision;
+- write an architecture decision record that includes the rejected
+  alternatives;
+- build a cost, latency and risk budget for a system before you build the
+  system;
+- anticipate the failures that appear at the second team and the tenth agent;
 - scope and deliver the capstone project.
 
-## Requirements, constraints, and non-goals
+## The system, and the four things it will not do {#sec-capstone-requirements}
 
-<!-- TODO(draft): the non-goals matter most; write them down first. -->
+The example is a support platform for a mid-size Turkish e-commerce company.
+Agents answer customer questions about orders, shipping and returns, in Turkish,
+over roughly 40,000 conversations a month. Three tools: look up an order, check
+a shipment, start a return. Escalation to a human is always available.
 
-## Architecture decisions and the rejected alternatives
+The requirements that shape everything:
 
-<!-- TODO(draft): ADR-style: decision, alternatives, consequences. This is
-    where the whole book gets applied. -->
+| requirement | where it bites |
+|:--|:--|
+| Turkish, including the morphology that breaks naive tokenisation | @sec-turkish-nlp, and every eval set below |
+| Customer messages contain national IDs, IBANs and addresses | @sec-guardrails, @sec-governance |
+| A return is money leaving the company | @sec-guardrails' reversibility taxonomy |
+| Answers must be traceable to a policy document | @sec-rag, @sec-observability |
+| One platform team, five product teams wanting agents | @sec-capstone-platform |
 
-## The first agent: from notebook to production
+: What the requirements actually constrain {tbl-colwidths="[46,54]"}
 
-<!-- TODO(draft): the concrete path, referencing the relevant chapter at
-    each step. -->
+[The non-goals are worth more than the goals, and they should be written
+first.]{.hl} This system will not: generate marketing copy, answer questions
+outside orders and shipping, take any action a human cannot undo within one
+working day, or operate without a human escalation path. Each of those is a
+decision that removes an entire class of failure — and each will be argued
+against by someone who wants one more feature, which is why they are written
+down before anyone is invested.
 
-## Scaling to many agents and many teams
+## Six decisions, and what was rejected {#sec-capstone-decisions}
 
-<!-- TODO(draft): the platform problems: registry, shared tools, cost
-    attribution, golden paths. -->
+An architecture decision record is worth writing only if it records the
+alternative honestly. The compressed form:
 
-## What broke, and what we would do differently
+| decision | chosen | rejected, and why |
+|:--|:--|:--|
+| **Model access** | one gateway in front of all providers | direct SDK calls per service — cheaper to start, and then attribution, pinning and rate limits have five implementations (@sec-gateway) |
+| **Where the loop lives** | durable execution with checkpointed state | in-memory loop behind a request handler — fine until a deploy lands mid-conversation (@sec-deployment) |
+| **Retrieval** | hybrid search over the policy corpus, with citations | full-context stuffing of all policies — simpler, and @sec-serving's prefill cost makes it the dominant latency term |
+| **PII** | detect and tokenise reversibly at the boundary | mask destructively — safe and it breaks order lookup (@sec-guardrails) |
+| **Refunds** | agent proposes, service enforces the ceiling, human approves above it | agent calls the refund API with a limit in the prompt — a limit in a prompt is a request (@sec-agent-security) |
+| **Eval** | golden set in the repo, gate on every prompt change | manual spot-checks before release — @sec-production-eval measured what slips through |
 
-<!-- TODO(draft): the honest retrospective — the most valuable section in
-    the chapter. -->
+: Six decisions; the rejected column is the one to read
+{tbl-colwidths="[16,34,50]"}
 
-## Capstone project brief and rubric
+Two of these deserve their reasoning spelled out, because they are the ones
+teams most often get backwards.
 
-<!-- TODO(draft): the deliverable, the constraints, and how it will be
-    graded. -->
+**Retrieval rather than long context.** Stuffing every policy document into the
+prompt is genuinely simpler and it loses on the numbers: @sec-serving measured
+90.7% of wall-clock time spent before the first character at 7,455 tokens of
+context, and decode slowing from 185 to 139 tokens per second as the window
+filled. Long context is charged twice. Retrieval adds a component and removes
+the dominant latency term.
 
-## Exercises
+**The refund ceiling lives in the refund service.** This is the single most
+important line in the design, and @sec-agent-security is why: an agent that
+reads customer messages is reading attacker-controlled input, and a planted
+instruction made an agent call a tool it was never asked to call on **25 runs out
+of 25**. If the ceiling is in the prompt, the ceiling is a suggestion.
 
-1. Write the ADR for the single most consequential decision in your capstone, including the alternative you rejected and why.
-2. Produce the cost model for your capstone system at 100x its current traffic. What breaks first?
+## The first agent, chapter by chapter {#sec-capstone-first}
+
+The path from notebook to production, with the chapter that governs each step:
+
+1. **Write the task down as an eval before writing the agent** (@sec-llm-eval).
+   Fifty real conversations, labelled by what a good answer would have been.
+2. **Build the retrieval layer and measure it alone** (@sec-retrieval,
+   @sec-rag). If the right policy document is not in the top five, no amount of
+   prompting fixes the answer.
+3. **Write the tools as APIs, not as prompts** (@sec-tool-design), each with its
+   reversibility class attached (@sec-guardrails).
+4. **Build the smallest loop that works** (@sec-agent-anatomy), with all three
+   ceilings set from the start (@sec-deployment).
+5. **Add structured output and validate it** (@sec-decoding) — the validator is
+   also the escalation signal in @sec-capstone-budget.
+6. **Instrument before you have a problem** (@sec-observability), including
+   conversation id, both model fields, token counts and your own dimensions.
+7. **Gate the prompt on the eval suite** (@sec-production-eval), with a threshold
+   set from a measured noise floor rather than a round number.
+8. **Attack it yourself before shipping** (@sec-agent-security), and write down
+   the rate.
+
+Steps 1 and 8 are the ones teams skip, and they are the two that decide whether
+the rest was worth doing.
+
+## What the book's numbers say this costs {#sec-capstone-budget}
+
+The useful discipline before building is a budget assembled from measurements
+you already have. Every figure below is quoted from an earlier chapter, and the
+arithmetic is the only new thing.
+
+**Latency.** @sec-serving's split — prefill around 2,000 tokens per second
+against decode at 185 — means the answer's length barely matters and the
+prompt's length is almost everything. With retrieval keeping context near a
+thousand tokens rather than seven thousand, time-to-first-token is the term to
+optimise, and prompt caching is the first lever: warm prefill measured **flat at
+13–18 ms regardless of prompt length**, an 8.2× improvement on the whole request
+at 4,258 tokens. That is free of quality risk, which is why it goes first.
+
+**Token volume.** @sec-serving's own summarisation measurement — **890 prompt
+tokens against 53 generated** — is the shape to plan for. [Asking for shorter
+answers saves almost nothing; sending less saves almost everything.]{.hl} At
+40,000 conversations a month with a few model calls each, the boilerplate in
+your system prompt is a larger line item than the model you chose.
+
+**Telemetry.** @sec-observability measured **4.8 spans and 3,167 bytes per run**
+on 301-token prompts, of which **48.3% was prompt and completion text** — and at
+890-token prompts the same structure is **10,180 bytes with 83.9% content**. At
+40,000 runs a month that is roughly 190,000 spans and, with content recorded,
+about 0.4 GB. Small. At a million runs it is 10 GB, and the decision to record
+content is a six-fold difference. Decide it deliberately, and sample content
+while keeping it on every error.
+
+**Evaluation.** @sec-llm-eval's sizing says 100 items resolves a 13.4-point
+difference and 1,000 resolves 4.8 — so a hundred-item golden set finds broken,
+not better. @sec-production-eval's paired gate is what makes small regressions
+visible anyway: a noise floor of **0.60 points**, a 1-point threshold, **4.3%
+false blocks** at 100 items and a review-invisible prompt regression still caught
+**99.4%** of the time.
+
+**Guardrails.** @sec-guardrails' detector numbers set the escalation rate: an
+eleven-digit pattern alone is **40% precise**, and pattern plus checksum-or-context
+reaches **99.1% precision at 93.6% recall**. The residual matters — roughly one
+in fifteen real identifiers is not caught by the union, which is a number to put
+in the DPIA rather than to hide.
+
+**Security.** @sec-agent-security's attack success of **92–100%** against an
+agent with an outward tool, and best-case detection of **14.7%**, is why the
+architecture separates the agent that reads tickets from the one that can move
+money. That is not a mitigation with a residual rate; it is a pair that has been
+broken.
+
+**Routing.** @sec-gateway measured a difficulty-router at **AUROC 0.667** — real
+signal, and not enough to route on blindly. The version of routing that survives
+is the cascade of @sec-governance: answer with the small model, escalate on a
+validator failure rather than on a predicted difficulty.
+
+[Notice what the budget did not require: a single new experiment.]{.hl} Eight
+chapters of measurement, assembled, produce a design with numbers attached — and
+the places where the numbers are missing are exactly where your first
+measurements should go.
+
+## The second team and the tenth agent {#sec-capstone-platform}
+
+Everything above is one agent. The failures that appear later are organisational,
+and they arrive on a schedule.
+
+**At the second team**, the shared thing is prompts and tools, and the first
+platform failure is a tool changed by one team breaking another team's agent. The
+fix is the one from software: tools are versioned interfaces with owners
+(@sec-tool-design), and a tool definition change is reviewed like a dependency
+bump (@sec-agent-security).
+
+**At the fifth agent**, nobody can answer "how many agents do we run and what can
+they reach". An **agent registry** — one row per agent, listing its tools, its
+data access, its owner and its reversibility profile — is unglamorous and is the
+artefact every audit, incident and cost review will need (@sec-governance).
+
+**At the tenth agent**, the platform team becomes the bottleneck, and the
+resolution is a golden path rather than a review queue: a template repository
+where the eval gate, tracing, PII boundary and tool classification are already
+wired, so the compliant way is the fastest way. [A platform team that reviews
+everything scales linearly and then stops; one that makes the safe path the easy
+path does not.]{.hl}
+
+**Throughout**, cost attribution has to exist from the first agent, because
+@sec-observability's dimensions cannot be added retrospectively — you cannot
+group by a dimension you did not record — and the number a budget review wants is
+cost per resolved ticket, not cost per session.
+
+## What breaks {#sec-capstone-retro}
+
+The honest retrospective, written as the failures this book's measurements
+predict rather than as war stories. Each is a thing that will happen.
+
+**The eval set will be too small and too easy.** It starts as fifty cases
+someone wrote in an afternoon, it gets easier as you fix what is in it, and its
+flat score will be read as stability. @sec-production-eval: a set that has not
+changed in six months is stale, and it still produces a green check.
+
+**Someone will edit a prompt without running the gate**, because the change is
+obviously cosmetic. @sec-production-eval measured a pure reordering costing 3.40
+points of field accuracy — nearly six times the noise floor — with the entire
+regression inside one field.
+
+**The PII detector will be tuned on recall and break the product.** At 40%
+precision it masks the order numbers agents need, and the response will be to
+turn it off rather than to fix precision (@sec-guardrails).
+
+**The first serious incident will be an approval queue nobody rejects
+anything in.** 99% approval is a delay wearing oversight's clothes, and it is
+invisible until someone measures the rejection rate.
+
+**Someone will propose giving the ticket-reading agent the refund tool** to
+remove a hop. The answer is in @sec-agent-security, and it needs to be a
+measurement — your own attack success rate — rather than an argument.
+
+**The model will be upgraded underneath you.** @sec-gateway's alias problem: if
+you record only the requested model, you find out weeks later from a quality
+regression. Two attributes prevent it (@sec-observability).
+
+What would be done differently, in one line: **write the eval and the attack
+before writing the agent.** Both are cheap at the start and neither gets written
+once the system works.
+
+## The capstone project {#sec-capstone-project}
+
+Your capstone is the small version of this chapter: one agent, at least one real
+tool, an eval harness shipped alongside it, and a written argument for the
+decisions you made.
+
+The brief, deliverables, rubric and timeline are in @sec-capstone-brief. What is
+worth saying here is what distinguishes the projects that go well:
+
+- **They scope down early.** One task done properly beats three demonstrated.
+  The non-goals list is the first artefact, not the last.
+- **They measure something.** A project with one honest number — including a
+  negative result — is stronger than one with a polished demo, and this book has
+  spent thirty-eight chapters making that case.
+- **They report what did not work.** @sec-llm-eval's asymmetry applies to
+  coursework too: a bad number gets investigated and a good one gets published.
+  Say what you tried that failed.
+- **They separate the claim from the evidence.** "Our agent resolves 80% of
+  tickets" needs a set, a definition of resolved, and an interval.
+
+Non-CS students are graded on reasoning, not on code elegance. A clear argument
+about why an approach was chosen, with a measurement that could have refuted it,
+is the deliverable.
+
+## Intuition checks {#sec-capstone-intuition}
+
+Answer each before opening it. These are synthesis questions: each pulls
+together two or three chapters, which is what the capstone will ask of you.
+
+::: {.callout-note collapse="true"}
+## 1. Long context or retrieval, for a policy-grounded support agent?
+
+Retrieval, and the reason is latency arithmetic rather than taste.
+
+@sec-serving measured **90.7%** of wall-clock time elapsing before the first
+character at 7,455 tokens of context, and decode falling from **185 to 139
+tokens per second** as the window filled. Long context is charged twice: once in
+prefill, then again on every generated token.
+
+Stuffing all policies in is simpler and makes the dominant latency term as large
+as possible. Retrieval adds a component you must evaluate separately
+(@sec-retrieval) and removes that term — plus it gives you citations, which the
+requirement asked for anyway.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Where does the refund ceiling live?
+
+In the refund service, enforced in code.
+
+An agent that reads customer messages reads attacker-controlled input, and
+@sec-agent-security measured a planted instruction making an agent call an
+outward tool on **25 runs out of 25**, with a hidden-in-markup variant working
+**23 of 25**. A ceiling written in the prompt is a request to a component the
+attacker also gets to write to.
+
+The stronger move is structural: do not give the ticket-reading agent the refund
+tool at all. That breaks the pair rather than mitigating it, and the cost —
+an extra hop — is the cheapest security you will buy all year.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Your golden set has 100 items. What can it tell you?
+
+That something is broken, not that something is better.
+
+@sec-llm-eval's sizing: at 80% power on an 80%-accurate system, 100 items
+resolves a **13.4-point** difference and 1,000 resolves **4.8**. Most real
+improvements are 2–5 points, so a hundred-item set cannot see the thing it was
+built to see — as an unpaired comparison.
+
+But @sec-production-eval's gate is paired, comparing two runs on the *same*
+items, and there 100 items caught a 3.4-point regression **99.4%** of the time
+with a 1-point threshold. Same set, different question: use it as a gate, not as
+evidence that version B is better than version A in the population.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. What do you build before the agent?
+
+The eval and the attack.
+
+Both are cheap before anything works and neither gets written afterwards. The
+eval gives you a definition of done and the gate that protects it
+(@sec-production-eval); the attack gives you a number for the risk you are
+carrying (@sec-agent-security), which is the only form in which that risk
+survives a conversation with a stakeholder.
+
+Everything else — retrieval, tools, the loop, tracing — is buildable in any
+order. These two are not, because after the system works the incentive to write
+them disappears.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Five teams want agents. What does the platform team build?
+
+A golden path, not a review queue.
+
+Reviewing every agent scales linearly with the number of teams and then stops.
+A template repository with the eval gate, tracing, PII boundary and tool
+classification already wired makes the compliant way the fastest way, which is
+the only version of governance that survives contact with a deadline.
+
+Plus one artefact nobody wants to own: an **agent registry** — one row per agent
+with its tools, data access, owner and reversibility profile. Every audit,
+incident and cost review needs it, and it cannot be reconstructed after the fact
+any more than @sec-observability's cost dimensions can.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your dashboard is green, the gate is passing, users are unhappy. Where do you look?
+
+At what each instrument cannot see, in order.
+
+The gate is green about **your suite**, which is a claim about coverage — go to
+traces, find the complained-about runs, and check whether the failure class
+exists in the set at all (@sec-production-eval). The dashboard is green about
+**transport**: @sec-observability's point is that a `status=OK` span happily
+contains a confidently wrong answer.
+
+Then rule out the boring cause before the interesting ones: a metric moving less
+than its noise floor is not moving. @sec-production-eval measured that floor at
+**0.60 points**, which is the number that tells you whether there is anything to
+investigate.
+:::
+
+## Interview questions {#sec-capstone-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout. This chapter's
+answers are syntheses of measurements made earlier in the book.
+:::
+
+### Testing whether you can design a system
+
+**Q: Design a customer support agent for a Turkish e-commerce company.**
+
+Start with non-goals, because they remove failure classes: no actions
+irreversible within a working day, no scope outside orders and shipping, always
+a human escalation path. Then the shape — retrieval over policy documents rather
+than long context, for the latency reason; a gateway for attribution and
+pinning; durable state so a deploy mid-conversation is survivable; PII tokenised
+reversibly at the boundary so lookups still work; and the refund ceiling
+enforced in the refund service, with the ticket-reading agent not holding that
+tool at all.
+
+**Q: What would you measure before building it?**
+
+Nothing new, at first — assemble what is known. Prefill-versus-decode to find
+which half your latency is in; prompt and completion token counts, because you
+pay for reading rather than writing; spans and bytes per run before turning
+content logging on; the eval-set size your target improvement requires; your PII
+detector's precision as well as recall; and your own attack success rate. Where
+the assembled budget has a hole is where the first experiment goes.
+
+**Q: How do you decide whether to use a smaller model?**
+
+Not from a benchmark table. Make it a measurement on your own suite, and prefer
+a cascade to a routing decision: answer with the small model and escalate on a
+runtime validity check, because a validator is a signal you actually have at
+request time, where predicted difficulty is a guess — @sec-gateway measured a
+difficulty router at AUROC 0.667, which is real signal and not enough to route
+on blindly.
+
+### Testing whether you have run a platform
+
+**Q: Five teams want to build agents. What do you centralise?**
+
+The choke point and the golden path. One gateway for attribution, pinning and
+limits; a template repository with the eval gate, tracing, PII boundary and tool
+classification pre-wired; and an agent registry listing every agent's tools, data
+access and owner. Do not centralise review — a platform team that reviews
+everything is a bottleneck by construction. Make the safe path the fast path
+instead.
+
+**Q: What is the first thing that breaks at scale, organisationally?**
+
+A tool changed by one team breaking another team's agent, because tool
+definitions are shared context and nobody treated them as an interface. Version
+them, give them owners, and review changes as dependency bumps. Shortly after
+that: nobody can answer what agents exist and what they can reach, which is the
+registry's job and which cannot be reconstructed retrospectively.
+
+**Q: Your agent platform's costs tripled. How do you find out why?**
+
+Only if you recorded the dimensions in advance — user, team, feature,
+environment, and the outcome — because you cannot group by what you did not
+record. Then check the usual order: content logging turned on somewhere,
+retries amplifying a degradation, prompt growth pushing you off the cache's
+byte-identical prefix, or a loop hitting no ceiling. Report cost per resolved
+ticket rather than per session, or a feature nobody completes will look cheap.
+
+## The 2026 toolbox {#sec-capstone-tools}
+
+This chapter runs nothing, so there is no measurement stack. The second table is
+the assembled set — the tools named across Parts VI and VII, in the order a
+platform adopts them.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| — | — | this chapter makes no measurements; every number is cited to the chapter that made it |
+
+: No new stack {tbl-colwidths="[24,16,60]"}
+
+The platform's shape, as a reading list of what earlier chapters recommended:
+
+| layer | representative choices | chapter |
+|:--|:--|:--|
+| serving | `vllm`, `sglang`, `ollama` for local work | @sec-serving |
+| gateway | `litellm` and equivalents, for attribution and pinning | @sec-gateway |
+| durable execution | a workflow engine with checkpointed state | @sec-deployment |
+| tracing | `opentelemetry-sdk` plus a UI such as `arize-phoenix` or `langfuse` | @sec-observability |
+| eval gate | `promptfoo`, `inspect-ai` or `deepeval` in CI | @sec-production-eval |
+| security testing | `agentdojo`, `PyRIT`, `garak` | @sec-agent-security |
+| guardrails | `presidio` for PII; policy enforcement in code | @sec-guardrails |
+
+: The assembled platform, by layer {tbl-colwidths="[20,50,30]"}
+
+## Lab: build the budget before the system {#sec-capstone-lab}
+
+### Step 1 — write the non-goals
+
+Four to six sentences saying what your capstone will not do. Circulate them. Any
+disagreement surfaces now, when changing them is free.
+
+### Step 2 — write the eval before the agent
+
+Fifty real cases with what a good answer would be. Note how long it took; that
+number is the honest cost of knowing whether your system works.
+
+### Step 3 — assemble the budget from this book's numbers
+
+Latency, token volume, telemetry bytes, eval-set size, guardrail precision,
+attack success. Cite each to its chapter. Where you cannot fill a cell, that is
+your first experiment — write down what it would take to measure it.
+
+### Step 4 — write three ADRs with the rejected alternative
+
+Decision, alternatives, consequences. The rejected column must contain a real
+argument, not a straw man. If you cannot argue the other side, you have not
+finished thinking about the decision.
+
+### Step 5 — classify your tools and enforce one limit outside the model
+
+Every tool into @sec-guardrails' reversibility classes, then one numeric or
+allowlist limit in the tool's implementation, with a test proving a persuasive
+prompt cannot move it.
+
+### Step 6 — attack your own system and record the rate
+
+Four payload framings, twenty-five runs each, with a clean control
+(@sec-agent-security). Put the number in your report whatever it says.
+
+### Step 7 — measure your gate's noise floor and set a threshold
+
+Five identical runs, widest gap, threshold above it (@sec-production-eval). Then
+submit a no-op change and confirm the gate does not block it.
+
+### What to hand in
+
+Your non-goals; the eval set with the time it took; the budget table with every
+cell cited or marked as a gap; three ADRs; the tool classification with one
+enforced limit and its test; your attack success rates with the clean control;
+and your measured noise floor with the threshold you chose.
+
+## Exercises {#sec-capstone-exercises}
+
+1. **The ADR you will be asked about.** Write the record for the most
+   consequential decision in your capstone, including the alternative you
+   rejected and the argument for it that you found hardest to dismiss.
+
+2. **The 100× cost model.** Produce the cost model for your system at a hundred
+   times its traffic. Name what breaks first, and whether it is money, latency,
+   or someone's attention.
+
+3. **The budget with holes.** Build the budget table of
+   @sec-capstone-budget for your own system. Report how many cells you could
+   fill from this book, how many from your own measurements, and how many are
+   still guesses.
+
+4. **Break one pair.** Find one agent in your design that reads untrusted
+   content and holds an outward tool. Split it, and report what capability you
+   lost (@sec-agent-security).
+
+5. **The registry.** Write the agent registry for a system you run — tools, data
+   access, owner, reversibility profile. Report what you could not answer without
+   asking someone.
+
+6. **The golden path.** Take the compliance requirements for a new agent at your
+   organisation and design the template that satisfies them by default. Then
+   estimate how long the non-template path takes, in days.
+
+7. **The retrospective in advance.** Write the postmortem for the incident you
+   think is most likely in your system, before it happens. Then implement the one
+   control that would have prevented it.
+
+## Where to go deeper {#sec-capstone-deeper}
+
+Before reading: try to write your system's budget table from memory. The cells
+you cannot fill are the chapters to reread.
+
+This chapter cites no new sources — it assembles the book's own. The table below
+is a reading order rather than a bibliography.
+
+| if you are stuck on | reread |
+|:--|:--|
+| what to measure before building | @sec-llm-eval and @sec-agent-eval, then @sec-production-eval for the gate |
+| whether the latency is the prompt or the answer | @sec-serving, and the prefill/decode split specifically |
+| where a limit should live | @sec-guardrails for the taxonomy, @sec-agent-security for why the prompt is not a place |
+| why quality moved and nothing changed | @sec-production-eval on noise floors, @sec-observability on the responded model |
+| what your obligations are | @sec-governance, and note the dates move |
+| how to make the safe path the fast one | @sec-capstone-platform above, and @sec-gateway for the choke point |
+
+: A reading order for the capstone {tbl-colwidths="[42,58]"}
+
+## What to remember {#sec-capstone-summary}
+
+- **Write the non-goals first.** Each one removes a class of failure, and each
+  will be argued against later by someone who wants one more feature. Deciding
+  them before anyone is invested is the cheapest architectural work you will do.
+
+- **An ADR without a real rejected alternative is a press release.** If you
+  cannot argue the other side, the decision has not been made yet.
+
+- **You can budget a system before you build it, from measurements you already
+  have.** Latency from @sec-serving's prefill/decode split, token volume from
+  **890 prompt tokens against 53 generated**, telemetry from **4.8 spans and
+  3,167 bytes per run**, eval size from @sec-llm-eval's **13.4 points at 100
+  items**, guardrail precision from **40% pattern-only**, and risk from
+  @sec-agent-security's **92–100%** attack success. [Where the budget has a hole
+  is where your first experiment goes.]{.hl}
+
+- **Retrieval beats long context on arithmetic, not taste.** @sec-serving
+  measured **90.7%** of the wall clock elapsing before the first character at
+  7,455 tokens, and decode falling from **185 to 139 tokens per second**.
+
+- **Every limit that matters is enforced outside the model.** A ceiling in a
+  prompt is a request, and the stronger move is not to give the untrusted-input
+  agent the dangerous tool at all — breaking the pair rather than mitigating it.
+
+- **Write the eval and the attack before the agent.** Both are cheap at the
+  start, neither gets written once the system works, and they are the two things
+  that decide whether the rest was worth building.
+
+- **The platform failures arrive on a schedule.** At the second team, a shared
+  tool breaks someone; at the fifth agent, nobody knows what exists; at the
+  tenth, the platform team is the bottleneck. Versioned tools with owners, an
+  agent registry, and a golden path — in that order.
+
+- **A platform team that reviews everything scales linearly and then stops.**
+  Make the compliant path the fastest path instead, because that is the only
+  governance that survives a deadline.
+
+- **Report the claim with its evidence.** "Resolves 80% of tickets" needs a set,
+  a definition of resolved, and an interval. That standard is what this book has
+  been arguing for since @sec-llm-eval, and it is what the capstone is graded
+  on.
