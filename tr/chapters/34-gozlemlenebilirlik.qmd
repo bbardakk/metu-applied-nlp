@@ -1,0 +1,663 @@
+# Ajanlar için Gözlemlenebilirlik {#sec-gozlemlenebilirlik}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 34. bölüm](../../en/chapters/34-observability.html). Tek bir küçük
+ölçüm: bir izin span ve bayt cinsinden gerçekte neye mal olduğunu öğrenmek için,
+OpenTelemetry GenAI uzlaşımlarına göre biçimlendirilmiş span'lerle ölçüm düzeneği
+kurulmuş beş ajan koşusu. Uzlaşım ayrıntıları hatırlanarak değil, şartnameden
+okundu — 2026'da depo değiştirdi ve büyük kısmı hâlâ kararsız, ki bu da başlı
+başına etrafında plan yapılacak bir şey. Yazılım: `ollama` 0.24.0, `llama3.2:3b`
+servis ediyor; Python 3.14.5, Apple Silicon; uzlaşımlar
+`open-telemetry/semantic-conventions-genai` deposundan 2026-08-27 tarihinde
+okundu.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- bir ajan izinin hangi parçalarının sıradan dağıtık izleme olduğunu ve hangi üç
+  parçasının gerçekten farklılaştığını söyleyebilirsiniz;
+- GenAI uzlaşımlarıyla ölçüm düzeneği kurabilir ve bunların ne kadarının
+  güvenilecek kadar oturmuş olduğunu bilirsiniz;
+- bir iz hiyerarşisini oturumdan tek bir araç çağrısına kadar okuyabilirsiniz;
+- telemetrinizin açmadan önce span ve bayt cinsinden neye mal olacağını tahmin
+  edebilirsiniz;
+- token harcamasını bir kullanıcıya, bir takıma ve bir özelliğe
+  atfedebilirsiniz;
+- bir kullanıcı şikâyetinden arızalı span'e tekrarlanabilir bir yordamla
+  gidebilirsiniz;
+- izlemenin neyi kapsamadığını ve o işin yerine nereye ait olduğunu
+  söyleyebilirsiniz.
+
+## Bir ajan izi, üç farkla, bir dağıtık izdir {#sec-gozlemlenebilirlik-ayni}
+
+Önce iyi haber, çünkü çok fazla yeniden icadı önlüyor. Bir ajan koşusu; ebeveynleri,
+çocukları, zamanlamaları ve hataları olan, iç içe geçmiş işlemlerden oluşan bir
+ağaçtır — ki dağıtık izleme tam da bunun için kuruldu. Span'ler, iz bağlamının
+yayılması, örnekleme, dışa aktarıcılar ve zaten işlettiğiniz her arka uç
+değişmeden geçerli.
+
+Üç şey gerçekten farklı ve GenAI uzlaşımlarının varlığını hak ettiği yer de bu
+üçü:
+
+**İlginç yük metin ve büyük.** Bir HTTP span'i bir yöntem ve bir durum kaydeder.
+Bir LLM span'inin en yararlı içeriği, kilobaytlarca tutan ve kullanıcının yazdığı
+her ne ise onu içeren prompt ile tamamlamadır. @sec-gozlemlenebilirlik-maliyet
+bunun hacme ne yaptığını ölçüyor, @sec-gozlemlenebilirlik-mahremiyet ise
+yükümlülüklerinize ne yaptığını ele alıyor.
+
+**Maliyet bir öznitelik, sonradan akla gelen bir şey değil.** Sıradan span'lerin
+bir süresi vardır. LLM span'lerinin ayrıca girdi ve çıktı token sayıları vardır ve
+bunlar paraya çevrilir. Bu da izi, "bu özellik neye mal oldu?" sorusunu
+cevaplamak için doğal yer yapıyor — izleme sistemlerine daha önce sorulmayan bir
+soru.
+
+**Arıza çoğu zaman bir hata değil.** `status=OK` olan bir span kendinden emin
+yanlış bir cevabı, uydurulmuş bir araç argümanını ya da adım tavanına çarpıp
+duran bir ajanı içerebilir. @sec-dagitim bir tavana çarpmayı tam da bu nedenle
+birinci sınıf bir sonuç yaptı: taşıma katmanındaki hiçbir şey koşunun
+başarısız olduğunu bilmiyor.
+
+## Uzlaşımlar ve ne kadarının oturmuş olduğu {#sec-gozlemlenebilirlik-semconv}
+
+Kendi öznitelik adlarınızla ölçüm düzeneği kurmak, bir satıcının arayüzünü,
+paylaşılan bir panoyu ya da bir göçü isteyene kadar işe yarar. OpenTelemetry
+**GenAI anlamsal uzlaşımları** üzerinde anlaşılmış sözlük ve mevcut durumları
+hakkındaki iki olgu, herhangi bir tekil öznitelik adından daha önemli.
+
+**Taşındılar.** 2026 itibarıyla GenAI uzlaşımları, ana `semantic-conventions`
+deposundan ayrılarak kendi deposunda,
+`open-telemetry/semantic-conventions-genai` içinde yaşıyor — eski yollar artık
+bir yönlendirme bildiriminden başka bir şey taşımıyor. Ayrılmadan önce yazılmış
+belgeler, blog yazıları ve ölçüm kütüphaneleri artık şartnameyi tutmayan
+sayfalara işaret ediyor.
+
+**Çoğu kararlı değil.** Mevcut span, ajan span'i ve metrik belgelerindeki
+kararlılık rozetleri sayıldığında: **span uzlaşımlarında işaretli 308 kalemin
+286'sı `Development` ve yalnızca 22'si `Stable`** — ajan ve metrik belgelerinde
+de aşağı yukarı aynı oran. Yeni deponun hiç etiketlenmiş bir sürümü yok.
+
+::: {.callout-warning appearance="simple"}
+[`Development` işaretli bir uzlaşım, öznitelik adlarını sürümler arasında
+değiştirebilir ve bunların kabaca onda dokuzu öyle.]{.hl} Bu, onlardan kaçınmak
+için bir neden değil — hâlâ tek ortak sözlük onlar — ama ölçüm düzeneğini
+kurduğunuz sürümü sabitlemek, kaydetmek ve bir göçe şaşırmak yerine onu beklemek
+için bir neden.
+:::
+
+Bunu söyledikten sonra: biçim öğretilecek kadar kararlı. Span adları serbest
+metin değil, kalıplı:
+
+| işlem | span adı | örnek |
+|:--|:--|:--|
+| bir model çağrısı | `{gen_ai.operation.name} {gen_ai.request.model}` | `chat llama3.2:3b` |
+| bir araç çağrısı | `execute_tool {gen_ai.tool.name}` | `execute_tool lookup` |
+| bir erişim | `{gen_ai.operation.name} {gen_ai.data_source.id}` | `embeddings kb-main` |
+| bir ajan sırası | `{gen_ai.operation.name}` | `invoke_agent` |
+
+: Şartnamenin tanımladığı hâliyle span adlandırma {tbl-colwidths="[20,42,38]"}
+
+İşlem adları kapalı bir küme ve mevcut listeyi okumak, çalışma grubunun bir
+ajanın *ne olduğunu* düşündüğünü söylüyor: `chat`, `text_completion`,
+`generate_content`, `embeddings`, `execute_tool`, `invoke_agent`,
+`create_agent`, `invoke_workflow`, `create_memory`, `fetch_response`. Bir izleme
+şartnamesine bellek ve iş akışı işlemlerinin girmesi, @sec-bellek ile
+@sec-dagitim'in vardığı yerin adil bir özeti.
+
+Yalnızca span belgesindeki 65 öznitelikten, ezbere bilmeye değer olanlar az:
+
+```text
+gen_ai.operation.name        chat, execute_tool, invoke_agent, ...
+gen_ai.provider.name         kimin servis ettiği
+gen_ai.request.model         ne istediğiniz
+gen_ai.response.model        neyin cevapladığı — her zaman aynısı değil
+gen_ai.usage.input_tokens    baskın olan maliyet (@sec-servis)
+gen_ai.usage.output_tokens
+gen_ai.conversation.id       bir oturumu birbirine diken şey
+gen_ai.agent.name            birkaç taneniz varken hangi ajan
+gen_ai.tool.name             hangi araç
+gen_ai.input.messages        prompt — bkz. @sec-gozlemlenebilirlik-mahremiyet
+gen_ai.output.messages       tamamlama
+```
+
+Bunlardan ikisi ilgiyi hak ediyor. Bir takma ad tarihli bir sürüme çözüldüğünde
+`gen_ai.response.model`, `gen_ai.request.model`ten farklılaşıyor — ki bu
+@sec-gecit'in sabitleme problemi; ikisini de kaydederseniz izlerinizde görünür,
+birini kaydederseniz görünmez. `gen_ai.conversation.id` ise bir span yığınını
+yeniden oynatabileceğiniz bir oturuma çeviren şey.
+
+Metrikler de benzer biçimde kalıplı ve içlerinden biri tanıdık gelmeli:
+
+```text
+gen_ai.client.token.usage             türe göre token
+gen_ai.client.operation.duration      çağrı başına uçtan uca
+gen_ai.server.time_to_first_token     @sec-servis'in TTFT'si, metrik olarak
+gen_ai.server.time_per_output_token   decode hızı, metrik olarak
+gen_ai.execute_tool.duration
+gen_ai.invoke_agent.duration
+```
+
+[@sec-servis'teki servis ölçümleri ayrı bir alıştırma değil; standart
+metriklerden ikisi.]{.hl} Uzlaşıma göre ölçüm düzeneği kurarsanız prefill/decode
+ayrımını tek seferlik bir deney olarak değil, bir pano olarak elde edersiniz.
+
+## Hiyerarşi ve her kimliğin asılacağı yer {#sec-gozlemlenebilirlik-hiyerarsi}
+
+Bir iz, ancak düzeyler tutarlıysa gezilebilir. Beş düzey var ve takımların
+yaptığı hata ortadaki ikisini birleştirmek:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir ajan koşusu, span'ler olarak</div>
+<svg viewBox="0 0 760 268" role="img" aria-label="Tek bir ajan koşusu için iç içe span şeması; oturum, koşu, ajan, model çağrısı ve araç çağrısı düzeylerini gösteriyor">
+  <text x="8" y="18" class="t-xs t-muted t-b">OTURUM &#183; gen_ai.conversation.id &#183; &#231;ok koşu, tek kullanıcı</text>
+  <rect x="8" y="26" width="744" height="32" rx="6" class="box"/>
+  <text x="20" y="47" class="t-sm t-mono">conv-042</text>
+  <text x="736" y="47" class="t-xs t-muted t-end">g&#252;nler</text>
+
+  <text x="28" y="80" class="t-xs t-muted t-b">KOŞU &#183; tek kullanıcı isteği</text>
+  <rect x="28" y="88" width="704" height="32" rx="6" class="box"/>
+  <text x="40" y="109" class="t-sm t-mono">invoke_agent maintenance-bot</text>
+  <text x="716" y="109" class="t-xs t-muted t-end">2,6 s</text>
+
+  <text x="48" y="142" class="t-xs t-accent t-b">ADIMLAR &#183; d&#246;n&#252;şümlü model &#231;ağrısı ve ara&#231; &#231;ağrısı</text>
+
+  <rect x="48"  y="150" width="150" height="30" rx="5" class="box-accent"/>
+  <text x="58"  y="170" class="t-xs t-mono">chat llama3.2:3b</text>
+  <rect x="206" y="150" width="118" height="30" rx="5" class="box"/>
+  <text x="216" y="170" class="t-xs t-mono">execute_tool</text>
+  <rect x="332" y="150" width="150" height="30" rx="5" class="box-accent"/>
+  <text x="342" y="170" class="t-xs t-mono">chat llama3.2:3b</text>
+  <rect x="490" y="150" width="118" height="30" rx="5" class="box"/>
+  <text x="500" y="170" class="t-xs t-mono">execute_tool</text>
+  <rect x="616" y="150" width="116" height="30" rx="5" class="box-accent"/>
+  <text x="626" y="170" class="t-xs t-mono">chat</text>
+
+  <path d="M8,200 H752" class="ln-thin"/>
+  <text x="8"   y="222" class="t-xs t-muted t-b">MODEL SPAN'LERİNDE</text>
+  <text x="8"   y="240" class="t-xs t-mono">usage.input_tokens &#183; usage.output_tokens &#183; response.model</text>
+  <text x="8"   y="256" class="t-xs t-muted">maliyet burada yaşıyor ve her &#252;st d&#252;zeye toplanıyor</text>
+  <text x="440" y="222" class="t-xs t-muted t-b">ARA&#199; SPAN'LERİNDE</text>
+  <text x="440" y="240" class="t-xs t-mono">tool.name &#183; call.arguments &#183; call.result</text>
+  <text x="440" y="256" class="t-xs t-muted">ajanın ger&#231;ekte ne yaptığı</text>
+</svg>
+```
+
+::: {.fig-cap}
+Beş düzey ve onları gezilebilir kılan iki kimlik: koşular arasında hayatta kalan
+bir konuşma kimliği ve koşu başına bir iz kimliği. Token sayıları model
+span'lerinde oturuyor ve yukarı toplanıyor; üstlerindeki her şey aritmetik.
+Burada ölçülen koşu ortalama 4,8 span tuttu — bir ajan span'i, 2,4 model çağrısı
+ve 1,4 araç çağrısı.
+:::
+::::
+
+Kaçınılacak iki birleştirme: her koşuyu tek bir ize koymak, ki bu bir haftalık
+konuşmayı gezilemez tek bir ağaç yapar; ve her adıma kendi izini vermek, ki bu da
+koşuyu yitirir. Hem "bana bu isteği göster" hem de "bana bu kullanıcının
+haftasını göster" sorularını destekleyen biçim **koşu başına bir iz, koşular
+arasında bir konuşma kimliğidir**.
+
+## Bir iz neye mal olur {#sec-gozlemlenebilirlik-maliyet}
+
+Ölçüm düzeneği genellikle bir tahmin yapılmadan benimseniyor ve fatura sonra
+geliyor. Beş ajan koşusu, span'ler yukarıdaki gibi biçimlendirilmiş:
+
+```text
+ task  spans  chat  tool    bytes  w/o content
+    1      4     2     1     2467         1363
+    2      6     3     2     4059         2029
+    3      6     3     2     4260         2032
+    4      4     2     1     2489         1370
+    5      4     2     1     2562         1388
+
+spans per run        4.8
+bytes per run        3,167
+  without content    1,636
+content share        48.3%
+```
+
+Hacmin yarısı prompt ve tamamlama metni — ve [bunlar oyuncak prompt'lar, yani
+%48,3 bir tahmin değil, bir taban]{.hl}. Yukarıdaki koşular ortalama 301 prompt
+token'ı tuttu. @sec-ozetleme gerçekçi, tek seferlik bir isteği **890 prompt
+token'ı** olarak ölçtü ve @sec-servis 4.258'lik bağlamlarla çalıştı. Ölçülen yapı
+sabit tutulup yalnızca metin ölçeklendiğinde:
+
+| çağrı başına prompt boyutu | koşu başına bayt | içerik payı |
+|:--|--:|--:|
+| 301 token (burada ölçülen) | 3.167 | %48,3 |
+| 890 token (@sec-ozetleme) | 10.180 | %83,9 |
+| 4.258 token (@sec-servis) | 42.513 | %96,2 |
+
+: Prompt boyutuna karşı iz hacmi, yapı sabit tutulmuş
+{tbl-colwidths="[40,28,32]"}
+
+Ayda bir milyon koşuda bu, 4,8 milyon span ve **gerçekçi prompt'lar kaydedilirken
+10,2 GB'a karşı 1,6 GB yapı** demek — tümüyle içeriği kütüklemeye karar vermekten
+gelen altı kat fark ve uzun bağlamda yirmi altı kat.
+
+Yani prompt'ları kaydetme kararı aynı anda bir depolama kararı, bir saklama
+kararı ve bir mahremiyet kararıdır ve bir varsayılanı açık bırakarak değil,
+kasıtlı olarak verilmelidir. Alışıldık çözüm örneklemektir: her koşuda yapı, küçük
+bir yüzdede ve her hatada içerik.
+
+## Maliyeti atfetmek {#sec-gozlemlenebilirlik-atif}
+
+Model span'lerindeki token sayıları, yönetişim bölümünün birim ekonomisini
+mümkün kılan şey ve mekanizma gösterişsiz: gruplamak isteyeceğiniz boyutları
+span'e koyun, çünkü onları geriye dönük ekleyemezsiniz.
+
+Neredeyse her zaman istenen ve hiçbiri GenAI uzlaşımlarında olmayan dördü —
+çünkü onlar modelin değil sizin: kullanıcı kimliği, takım ya da kiracı, özellik
+ve ortam. Kökte bir kez iliştirin ve yayılmalarına izin verin.
+
+[Raporlanmaya değen sayı harcama değil, değer birimi başına harcamadır.]{.hl}
+Oturum başına maliyet kimsenin bitirmediği bir özelliği kayırır;
+@sec-ajan-degerlendirme aynı argümanı *doğru* cevap başına maliyet için yaptı.
+Çözülen bilet başına, tamamlanan görev başına, kabul edilen öneri başına maliyet
+— bir bütçe incelemesinden sağ çıkan sayılar bunlar ve onları hesaplamak sonucun
+da izde olmasını gerektiriyor.
+
+## Bir şikâyetten arızalı span'e {#sec-gozlemlenebilirlik-kokneden}
+
+İzlemenin amacı, hata ayıklamanın bir esin değil bir yordam hâline gelmesidir.
+İşe yarar bir tanesi:
+
+1. **Oturumu bulun.** Bir kullanıcı raporundan, `gen_ai.conversation.id` — o
+   kimliğin yalnızca panonuza değil, destek aletlerinize de ulaşması gerekmesinin
+   nedeni bu.
+2. **Koşuyu bulun.** Koşu başına bir iz, zamana göre sıralanmış. Şikâyet "yanlıştı"
+   ise koşu, şikâyetten önceki koşudur.
+3. **Model span'lerini değil, önce araç span'lerini okuyun.** Ajanın *ne yaptığı*
+   `gen_ai.tool.name` ve argümanlarında ve taranması prompt'lardan çok daha
+   hızlı.
+4. **Yörüngenin ayrıştığı ilk adımı bulun.** @sec-ajan-degerlendirme'nin ayrımı
+   burada geçerli: yanlış cevap genellikle yanlış karardan birkaç adım sonradır.
+5. **Ancak ondan sonra o span'in prompt'unu ve tamamlamasını okuyun.** İçeriği
+   örnekleyerek attıysanız başarısız olacak adım budur — hatalarda içeriği tutmanın
+   argümanı da bu.
+6. **Bunu bir teste çevirin.** @sec-ajan-degerlendirme'nin regresyon disiplini:
+   az önce okuduğunuz iz bir senaryodur.
+
+## OpenTelemetry'nin kapsamadıkları {#sec-gozlemlenebilirlik-kapsamdisi}
+
+Açıkça söylemeye değer, çünkü satıcılar bunu bulanıklaştırıyor. İzleme **ne
+olduğunu** kaydeder: hangi model, ne kadar sürdü, kaç token, hangi araçlar, hangi
+hatalar. Çıktının iyi olup olmadığı hakkında söyleyecek hiçbir şeyi yoktur.
+
+Sadakat, doğruluk, güvenlik ve kalite değerlendirme katmanıdır —
+@sec-llm-degerlendirme, @sec-ajan-degerlendirme ve üretim değerlendirmesi — ve
+izler tarafından üretilmek yerine izlere *iliştirilirler*. Bir hakem puanı bir
+span özniteliği olarak kaydedilebilir; izleme SDK'sının bildiği bir şey değildir.
+
+Pratik sonuç şu: "gözlemlenebilirliğimiz var" ile "işe yarayıp yaramadığını
+biliyoruz" farklı iddialardır ve yeşil span'lerle dolu bir pano, isteklerin üçte
+birinde kendinden emin biçimde yanlış olan bir ürünle uyumludur.
+
+## Telemetride hassas veri {#sec-gozlemlenebilirlik-mahremiyet}
+
+Prompt'lar kullanıcıların yazdığı her neyse onu içerir; bir destek ürününde bu
+adlar, adresler, sipariş numaraları ve ara sıra kart bilgileri demektir.
+Dolayısıyla `gen_ai.input.messages`i kaydetmek, kişisel veriyi gecikme
+histogramları için tasarlanmış bir sisteme kopyalıyor.
+
+Bundan çıkan ve politika beyanı değil mühendislik işi olan üç sonuç:
+
+**Sınırda, dışa aktarmadan önce maskeleyin.** Dışa aktarıcıdan önce temizleyen
+bir span işlemcisi, bunun bir kez yapılabileceği tek yer. Arka uçta maskelemek,
+iletildiği anlamına gelir; ölçüm düzeneği başına maskelemek beş uygulama demek,
+ki bu @sec-gecit'in argümanının başka bir binadaki hâli.
+
+**Telemetrinin de ikametgâh ve saklama yükümlülükleri var.** Veri, veri
+tabanınızın tuttuğu kişisel verinin bir kopyası ve bir izleme satıcısında
+yaşıyor olması onu muaf kılmıyor. Yükümlülüklerin kendisinin yaşadığı yer
+yönetişim bölümü.
+
+**İçeriği örneklemek yalnızca bir maliyet değil, bir mahremiyet denetimidir.**
+Yukarıdaki ölçüm bunu depolama olarak çerçeveliyor; aynı zamanda her kullanıcının
+metnini tutmakla küçük bir örneklemi tutmak arasındaki fark. Bunlar aynı karar
+olduğu için de uygun; kararı iki neden için aynı anda vermeye değer.
+
+## Sezgi kontrolleri {#sec-gozlemlenebilirlik-sezgi}
+
+Her birini açmadan önce cevaplayın. Birinci ve üçüncü, izlemenin ne olup ne
+olmadığıyla ilgili — bu katman kurulmak yerine satın alındığında en sık
+karıştırılan iki iddia — geri kalanı ise bölümün sayılarını taşıyor: bir izin
+içerik payı, uzlaşımlardaki kararlılık oranı ve sessiz bir model yükseltmesini
+görünür kılan iki öznitelik.
+
+::: {.callout-note collapse="true"}
+## 1. Zaten dağıtık izleme işletiyorsunuz. Gerçekte ne değişiyor?
+
+Satıcıların ima ettiğinden azı ve gerçekten üç şey.
+
+Yük metin ve büyük, dolayısıyla hacme span sayısı değil prompt'lar hâkim.
+Maliyet sonradan akla gelen bir şey değil bir öznitelik, çünkü token sayıları
+paraya çevriliyor ve yukarı toplanıyor. Ve arıza çoğu zaman bir hata değil:
+`status=OK` olan bir span, kendinden emin yanlış bir cevabı ya da adım tavanına
+çarpmış bir koşuyu tutabilir.
+
+Diğer her şey — bağlam yayılması, örnekleme, dışa aktarıcılar, arka ucunuz —
+zaten sahip olduklarınız.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Prompt'ları ve tamamlamaları kaydetmeli misiniz?
+
+Bu aynı anda bir depolama, bir saklama ve bir mahremiyet kararı; öyleyse bir kez,
+kasıtlı olarak verin.
+
+Burada ölçüldüğü hâliyle içerik, 301 token'lık oyuncak prompt'larda iz hacminin
+%48,3'üydü. @sec-ozetleme'nin gerçekçi 890 token'ında %83,9 ve @sec-servis'in
+uzun bağlamlarında %96,2 — tümüyle bu tek ayardan gelen, baytta altı ilâ yirmi
+altı kat fark.
+
+Alışıldık çözüm örneklemek: her koşuda yapı, küçük bir yüzdede ve her hatada
+içerik. Bu, hata ayıklamayı önemli olduğu yerde mümkün tutar ve her kullanıcının
+metnini elinizde tutmanızı önler.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Panonuz yeşil ve kullanıcılar ajanın yanlış olduğunu söylüyor. Çelişki mi?
+
+Hayır — yanlış aleti okuyorsunuz.
+
+İzleme ne olduğunu kaydeder: modeller, süreler, token'lar, araçlar, istisnalar.
+Cevabın iyi olup olmadığını bilmez ve 900 ms'de akıcı bir yalan döndüren bir
+koşu, her taşıma katmanı ölçüsüne göre sağlıklı bir span'dir.
+
+Kalite değerlendirme katmanında yaşar (@sec-llm-degerlendirme,
+@sec-ajan-degerlendirme ve üretim değerlendirmesi) ve izlere puan olarak
+*iliştirilir*. "Gözlemlenebilirliğimiz var" ile "işe yarayıp yaramadığını
+biliyoruz" farklı iddialardır.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. İstenen modelle cevaplayan modeli neden birlikte kaydetmeli?
+
+Çünkü tam da önemli olduğu anda farklılaşıyorlar.
+
+`gen_ai.request.model` istediğiniz şey; `gen_ai.response.model` cevaplayan şey.
+Sürümsüz bir takma ad tarihli bir sürüme çözüldüğünde — @sec-gecit'in sessiz
+yükseltme problemi — ikincisi değişir, birincisi değişmez. İkisini de kaydedin,
+yükseltme olduğu gün izlerinizde belirsin; birini kaydedin, haftalar sonra bir
+çıktı kalitesi gerilemesinden öğrenin.
+
+İki öznitelik ve görünmez bir bağımlılık değişikliğini görünür bir değişikliğe
+çeviriyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Geçen yıl GenAI uzlaşımlarına göre ölçüm düzeneği kurdunuz ve adlar değişti.
+
+Beklenen bir şey ve çare, hangi sürümü hedeflediğinizi kaydetmiş olmak.
+
+Uzlaşımlar 2026'da depo değiştirdi —
+`open-telemetry/semantic-conventions-genai` içine — ve mevcut span belgesindeki
+işaretli kalemlerin 286'sı `Development`, 22'sine karşı `Stable`. Yeni deponun
+hiç etiketlenmiş bir sürümü yok.
+
+Bu, onları kullanmaya karşı bir argüman değil; tek ortak sözlük olarak kalıyorlar
+ve onları anlayan bir satıcı arayüzü çok şey ifade ediyor. Bu, sabitleme için,
+sabitlemeyi ölçüm düzeneğinin yanına kaydetmek için ve bir göçe şaşırmak yerine
+ona bütçe ayırmak için bir argüman.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Bir bütçe incelemesi hangi maliyet sayısını görmeli?
+
+Oturum başına maliyeti değil, değer birimi başına maliyeti.
+
+Oturum başına maliyet, kimsenin tamamlamadığı bir özelliği kayırır ve birkaç
+adımda gerçek iş yapanı cezalandırır. @sec-ajan-degerlendirme aynı argümanı
+değerlendirme için *doğru* cevap başına maliyetle yaptı; burada bu, çözülen bilet
+başına, tamamlanan görev başına, kabul edilen öneri başına maliyet.
+
+Onu hesaplamak sonucun izde olmasını gerektiriyor, ki bu kök span'de iki satırlık
+bir değişiklik ve geriye dönük eklenmesi imkânsız — kaydetmediğiniz bir boyuta
+göre gruplayamazsınız.
+:::
+
+## Mülakat soruları {#sec-gozlemlenebilirlik-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Aşağıdaki sorular
+bu kitabın baştan sona kullandığı iki güvenilir açık kaynakta ve bu bölümün
+kendi ölçümünün cevaplanabilir kıldığı yerlerde tekrar ediyor.
+:::
+
+### Katmanı anlayıp anlamadığınızı sınayanlar
+
+**S: Bir LLM ajanını izlemek, bir mikroservisi izlemekten nasıl farklı?**
+
+Yapısal olarak farklı değil — span'ler, ebeveynler, bağlam yayılması ve mevcut
+arka ucunuz hepsi geçerli. Üç şey farklı: yük metin ve hacme hâkim, dolayısıyla
+ilginç öznitelik bir durum kodu değil kilobaytlar; maliyet bir öznitelik, çünkü
+token sayıları paraya çevriliyor ve ağaçta yukarı toplanıyor; ve başarılı bir
+span yanlış bir cevap içerebilir, dolayısıyla `status=OK` koşunun işe yaradığının
+kanıtı değil.
+
+**S: Bir LLM span'ine ne koyardınız?**
+
+İşlem adı, sağlayıcı, istenen *ve* cevaplayan model, iki token sayısı, bir
+konuşma kimliği ve kendi boyutlarınız — kullanıcı, takım, özellik, ortam — çünkü
+kaydetmediğiniz şeye göre gruplayamazsınız. Sonra her zaman kaydetmek yerine
+neyi örnekleyeceğinizi söyleyin: hacmin çoğu olan prompt ve tamamlama.
+
+**S: Bu ne kadar telemetri üretecek?**
+
+Bir sayıyla değil, bir yöntemle cevaplayın. Koşu başına span çarpı trafik, artı
+koşu başına bayt — ve baytlara prompt'ların hâkim olduğunu belirtin. Burada
+oyuncak prompt'larda koşu başına 4,8 span ve 3,2 KB ölçüldü; gerçekçi prompt
+boyutlarında aynı yapı 10 KB ve içerik bunun %84'ü oluyor. Yani tahmin neredeyse
+tümüyle içeriği kaydedip kaydetmediğinize dayanıyor.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Bir kullanıcı ajanın dün yanlış cevap verdiğini söylüyor. Anlatın.**
+
+Destek biletinden konuşma kimliği — ki bu o kimliğin yalnızca panoya değil destek
+aletlerine de ulaşması gerektiği anlamına geliyor. Sonra şikâyetten önceki koşu,
+sonra model span'lerinden önce araç span'leri, çünkü ajanın *ne yaptığı*
+okuduğundan daha hızlı taranıyor. Yörüngenin ayrıştığı ilk adımı bulun, çünkü
+yanlış cevap genellikle yanlış karardan birkaç adım sonradır. Sonra o span'in
+prompt'unu okuyun. Sonra onu bir regresyon testine çevirin.
+
+**S: LLM izlemesi ekledikten sonra izleme faturanız üçe katlandı. Neden?**
+
+Neredeyse kesinlikle içerik. Yapı küçük ve koşu başına kabaca sabit;
+prompt'lar değil ve bağlamla büyüyorlar. Burada ölçüldüğü hâliyle 301 token'lık
+prompt'lardan 4.258 token'lık olanlara geçmek, aynı span sayısıyla bir koşuyu
+3,2 KB'den 42,5 KB'ye taşıyor. Çare, yapıyı her şeyde tutarken içeriği
+örneklemek ve hatalarda içeriği saklamak.
+
+**S: Kişisel veriyi izlerinizden nasıl uzak tutarsınız?**
+
+Dışa aktarmadan önce, bir span işlemcisinde maskeleyin; böylece beş kez farklı
+farklı değil, her ölçüm düzeneği için bir kez olsun. Sonra insanların kaçırdığı
+iki şeyi söyleyin: telemetri, aynı verinin bir kopyası olduğu için veri tabanıyla
+aynı ikametgâh ve saklama yükümlülüklerini devralır; ve içerik örneklemesi bir
+maliyet denetimi olduğu kadar bir mahremiyet denetimidir, ki bu da onu iki kez
+gerekçelendirmesi kolay bir karar yapar.
+
+## 2026 alet çantası {#sec-gozlemlenebilirlik-araclar}
+
+Ölçüm bir modelden başka bir şey gerektirmedi, dolayısıyla birinci tablonun tek
+satırı var. İkincisini bir menü olarak değil, bir katmanlanma olarak okuyun:
+OpenTelemetry SDK'sı zemin, ölçüm paketleri onun üstünde oturuyor ve son üçü
+onların ürettiğini okuyan arayüzler. Yayın öncesi sürüm numaralarına dikkat
+edin — yukarıdaki uzlaşım rozetleriyle aynı olgunluk sinyali onlar.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | ölçüm düzeneği kurulmuş ajan koşuları için `llama3.2:3b` servis ediyor |
+
+: Bu sayıların geldiği yığın. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| proje | sürüm | ne zaman başvurursunuz |
+|:--|:--|:--|
+| `opentelemetry-sdk` | 1.44.0 | izleme SDK'sının kendisi; diğer her şeyin üzerine kurulduğu satıcıdan bağımsız zemin |
+| `opentelemetry-instrumentation` | 0.65b0 | GenAI olanları dâhil otomatik ölçüm paketleri — yayın öncesi sürüme dikkat, uzlaşımların kendi olgunluğuyla örtüşüyor |
+| `openinference-instrumentation` | 0.1.59 | Arize'ın LLM çerçeveleri için ölçümü, OTel uyumlu |
+| `arize-phoenix` | 20.4.0 | yerelde çalıştırabileceğiniz açık kaynak bir iz arayüzü; neyin kaydedileceğini öğrenirken yararlı |
+| `langfuse` | 4.15.1 | değerlendirme ve prompt yönetimi ekli, LLM odaklı izleme |
+| `traceloop-sdk` | 0.62.3 | OpenLLMetry'nin SDK'sı, OTel'i LLM'e özgü varsayılanlarla sarmalıyor |
+
+: Daha geniş ekosistem, yazım anındaki sürümler {tbl-colwidths="[30,12,58]"}
+
+## Lab: bir ajana ölçüm düzeneği kurun, sonra yalnızca izden hata ayıklayın {#sec-gozlemlenebilirlik-lab}
+
+### Adım 1 — bir ajana uzlaşıma göre ölçüm düzeneği kurun
+
+Şartnamenin dediği gibi adlandırılmış, `gen_ai.operation.name`i, istek ve cevap
+modelini, iki token sayısını ve bir konuşma kimliğini taşıyan model span'leri ve
+araç span'leri. Uzlaşımların hangi sürümüne göre kurduğunuzu kaydedin — öznitelik
+adları taşındığında bunu isteyeceksiniz.
+
+### Adım 2 — kendi iz hacminizi ölçün
+
+Yirmi gerçekçi istek koşun ve koşu başına span'i, koşu başına baytı ve içerik
+sıyrılmış baytı kaydedin. Aylık trafiğinizle çarpın. Bunu içerik kaydını
+açmadan *önce* yapın ki sayı faturayı açıklamak yerine kararı bilgilendirsin.
+
+### Adım 3 — kendi boyutlarınızı ekleyin
+
+Kullanıcı, takım, özellik, ortam. Bunları kökte iliştirin ve her çocuk span'e
+yayıldıklarını doğrulayın. Sonra bir gün için özellik başına maliyet üretin.
+
+### Adım 4 — değer birimi başına maliyet üretin
+
+Sonucu — çözüldü, terk edildi, yükseltildi — kök span'e ekleyin ve *çözülen*
+görev başına maliyeti yeniden hesaplayın. İki sıralamayı karşılaştırın. Bir
+özellik yer değiştiriyorsa, adımın amacı zaten oydu.
+
+### Adım 5 — bir arıza enjekte edin ve onu kör bulun
+
+Başka biri bir şeyi bozsun: bayat veri döndüren bir araç, düşürülmüş bir adım
+tavanı, kırpılmış bir prompt. Sonra yalnızca izi kullanarak onu bulun ve
+kendinizi süreyle ölçün. Neyi ölçseydim dediğinizi yazın — o liste bu labın asıl
+çıktısı.
+
+### Adım 6 — maskeleyin ve kanıtlayın
+
+Dışa aktarmadan önce kişisel veriyi temizleyen bir span işlemcisi ekleyin. Bir
+e-posta adresi ve bir telefon numarası içeren bir istek gönderin, sonra arka
+ucunuzda ikisini de arayın. Herhangi birini bulmak bir bulgu değil, başarısız bir
+adımdır.
+
+### Teslim edilecekler
+
+İçerikli ve içeriksiz koşu başına span'iniz ve baytınız, trafiğinize
+ölçeklenmiş; özelliğe göre çözülen görev başına maliyet tablosu; enjekte edilmiş
+arızayı bulmanın ne kadar sürdüğü ve keşke kursaydım dediğiniz ölçüm düzeneği; ve
+maskelemenin dışa aktarmadan önce gerçekleştiğine dair kanıt.
+
+## Alıştırmalar {#sec-gozlemlenebilirlik-alistirmalar}
+
+1. **Faturadan önce hacim.** Bir iş yüküne ölçüm düzeneği kurun, içerikli ve
+   içeriksiz koşu başına span ve baytı ölçün ve aylık trafiğe ölçekleyin. Sonra
+   içerik örnekleme oranınıza karar verin ve gerekçeyi yazın.
+
+2. **Takma adı bulun.** Barındırılan bir sağlayıcıya karşı bir hafta boyunca
+   `gen_ai.request.model` ve `gen_ai.response.model`i kaydedin. Hiç ayrışıp
+   ayrışmadıklarını ve ayrışsalardı neyi fark edeceğinizi raporlayın.
+
+3. **Çözülen görev başına maliyet.** Özelliklerinizin iki sıralamasını üretin —
+   oturum başına maliyete göre ve çözülen görev başına maliyete göre. Yer
+   değiştiren her özelliği açıklayın.
+
+4. **Kör hata ayıklama, süreli.** Bir meslektaşınız bir arıza enjekte etsin.
+   Yalnızca izi kullanarak bulun ve süreyi kaydedin. Keşke kursaydım dediğiniz
+   ölçüm düzeneğini ekledikten sonra tekrarlayın ve karşılaştırın.
+
+5. **Maskeleme sınaması.** Ölçüm düzeneği kurulmuş yolunuzdan bir e-posta adresi
+   ve bir telefon numarası içeren bir istek gönderin, sonra telemetri arka
+   ucunuzda ikisini de arayın. Herhangi biri mevcutsa maskelemeniz yanlış yerde.
+
+6. **Uzlaşım kayması.** Kullandığınız bir ölçüm kütüphanesini alın ve GenAI
+   uzlaşımlarının hangi sürümünü hedeflediğini bulun. Öznitelik adlarını mevcut
+   şartnameyle karşılaştırın ve neyin bozulacağını listeleyin.
+
+7. **Hataları saklayan örnekleme.** Başarılı koşuların %5'ini ve arızaların
+   %100'ünü kaydeden bir içerik örneklemesi uygulayın. Gerçek trafikte hiçbir
+   arızalı koşunun prompt'unu yitirmediğini doğrulayın.
+
+## Daha derine {#sec-gozlemlenebilirlik-derinlesme}
+
+Okumadan önce: işlettiğiniz bir sistemden bir iz açın ve yalnızca ondan "bu istek
+neye mal oldu?" sorusunu cevaplamayı deneyin. Cevaplayıp cevaplayamamanız bu
+bölümün konusunun tamamı.
+
+Bu bölüm hiçbir makaleye atıf vermiyor, dolayısıyla alışıldık iki tablo yerine
+tek bir tablo var. Burada birincil kaynak şartname ve o da hareket hâlinde —
+yukarıda alıntılanan orana güvenmek yerine kararlılık rozetlerini kendiniz
+kontrol edin; o oran belirli bir günde sayıldı.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`semantic-conventions-genai`](https://github.com/open-telemetry/semantic-conventions-genai) | şartnamenin kendisi, güncel evinde; herhangi bir öznitelik adına bel bağlamadan önce kararlılık rozetlerini okuyun |
+| [OpenTelemetry tracing concepts](https://opentelemetry.io/docs/concepts/signals/traces/) | span'ler, bağlam yayılması ve yukarıdaki her şeyin sizde zaten olduğunu varsaydığı model |
+| [The trace SDK specification](https://opentelemetry.io/docs/specs/otel/trace/sdk/) | span işlemcilerinin tanımlandığı yer — maskelemenin dışa aktarmadan önce gerçekleşmesi için kullanması gereken kanca |
+| [Sampling](https://opentelemetry.io/docs/concepts/sampling/) | şartnamenin tanımladığı hâliyle baş ve kuyruk örneklemesi; içeriği yalnızca hatalarda tutmanızı sağlayan şey kuyruk örneklemesi |
+| [`opentelemetry-python`](https://github.com/open-telemetry/opentelemetry-python) | SDK ve bir span işlemcisinin gerçekte neye benzediğini okuyacağınız yer |
+| [`openinference`](https://github.com/Arize-ai/openinference) | span'leri elle yazmamayı tercih ettiğinizde, yaygın ajan çerçeveleri için ölçüm |
+| [`arize-phoenix`](https://github.com/Arize-ai/phoenix) | yerelde çalıştırabileceğiniz bir iz arayüzü; neyi kaydetmiş olmayı dileyeceğinizi öğrenmenin en ucuz yolu |
+| [`langfuse`](https://github.com/langfuse/langfuse) / [`openllmetry`](https://github.com/traceloop/openllmetry) | değerlendirme ekli LLM'e özgü izlemeye iki yaklaşım, ki bu da üretim değerlendirmesine açılan dikiş |
+
+: Bu bölümün ötesi {tbl-colwidths="[42,58]"}
+
+## Akılda kalması gerekenler {#sec-gozlemlenebilirlik-ozet}
+
+- **Bir ajan izi, üç farkla, bir dağıtık izdir.** Yük metin ve hacme hâkim;
+  maliyet sonradan akla gelen bir şey değil bir öznitelik, çünkü token sayıları
+  paraya çevriliyor ve yukarı toplanıyor; ve arıza çoğu zaman bir hata değil,
+  dolayısıyla `status=OK` olan bir span kendinden emin yanlış bir cevabı ya da
+  tavanına çarpmış bir koşuyu tutabilir.
+
+- **GenAI uzlaşımları taşındı ve çoğu kararsız.** Artık ana semantic-conventions
+  deposundan ayrılarak `open-telemetry/semantic-conventions-genai` içinde
+  yaşıyorlar; eski depo hâlâ eski yollarda yönlendirme bildirimleri taşıyor.
+  Mevcut span belgesindeki işaretli kalemlerin **286'sı `Development`, 22'sine
+  karşı `Stable`** ve yeni deponun hiç etiketlenmiş sürümü yok. Kullanın — tek
+  paylaşılan sözlük onlar — ama sürümü sabitleyin ve sabitlemeyi kaydedin.
+
+- **Span adları serbest metin değil, kalıplıdır.** Bir model çağrısı için
+  `{işlem} {model}`, bir araç çağrısı için `execute_tool {tool.name}`. Bunu doğru
+  yapmak, başkasının panosunun sizin izlerinizde çalışmasını sağlayan şeydir.
+
+- **İstenen modelin yanı sıra cevaplayan modeli de kaydedin.** Tam olarak bir
+  takma ad sessizce yeni bir sürüme çözüldüğünde ayrışıyorlar — @sec-gecit'in
+  problemi — ve iki öznitelik, görünmez bir bağımlılık değişikliğini görünür bir
+  değişikliğe çeviriyor.
+
+- **@sec-servis'in ölçümleri standart metriklerdir.**
+  `gen_ai.server.time_to_first_token` ve `gen_ai.server.time_per_output_token`
+  şartnamede yer alıyor, dolayısıyla prefill/decode ayrımı tek seferlik bir deney
+  değil, bir pano.
+
+- **İçerik kaydını açmadan önce telemetri hacmini tahmin edin.** Burada
+  ölçüldü: **koşu başına 4,8 span ve 3.167 bayt**, bunun **%48,3'ü prompt ve
+  tamamlama metni** — ve bu, 301 token'lık prompt'lardaydı. Yapı sabit tutulup
+  metin @sec-ozetleme'nin gerçekçi 890 token'ına ölçeklendiğinde 10.180 bayt ve
+  **%83,9 içerik**; @sec-servis'in 4.258 token'lık bağlamlarında **%96,2**.
+  [Prompt'ları kütükleyip kütüklemediğiniz, izleme faturanız hakkında altı ilâ
+  yirmi altı katlık bir karardır.]{.hl}
+
+- **İçeriği örneklemek aynı anda bir maliyet ve bir mahremiyet denetimidir.**
+  Her koşuda yapı, küçük bir payda ve her hatada içerik. Dışa aktarmadan önce,
+  bir span işlemcisinde maskeleyin ki bu beş kez farklı farklı değil bir kez
+  olsun — ve telemetrinin, kopyaladığı veri tabanıyla aynı ikametgâh ve saklama
+  yükümlülüklerini devraldığını unutmayın.
+
+- **Kendi boyutlarınızı kök span'e koyun.** Kullanıcı, takım, özellik, ortam ve
+  sonuç. Kaydetmediğiniz bir boyuta göre gruplayamazsınız ve bir bütçe
+  incelemesinin ihtiyaç duyduğu sayı oturum başına maliyet değil, *çözülen görev*
+  başına maliyettir.
+
+- **İzleme size ne olduğunu söyler, iyi olup olmadığını değil.** Kalite, sadakat
+  ve güvenlik değerlendirme katmanına aittir ve izlere puan olarak iliştirilir.
+  Yeşil span'lerle dolu bir pano, kendinden emin biçimde yanlış olan bir ürünle
+  tümüyle uyumludur.
