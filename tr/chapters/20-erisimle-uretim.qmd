@@ -1,0 +1,897 @@
+# Erişimle Zenginleştirilmiş Üretim (RAG) {#sec-rag}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 20. bölüm](../../en/chapters/20-rag.html). Ölçümler 3.397 gerçek
+Türkçe haberi kullanıyor — @sec-ozetleme'nin üzerinde çalıştığı XL-Sum test
+ayrımı — çünkü parçalama yalnızca iç yapısı olan belgelerde ilginçtir.
+@sec-rag-uzun-baglam'ın iğne testi uydurma olgular kullanıyor, dolayısıyla doğru
+bir cevap ancak bağlamdan gelmiş olabilir ve öznel olarak derecelendirilecek bir
+şey yok. Erişim mekaniği @sec-erisim'e ait ve tekrarlanmak yerine atıf veriliyor.
+Yazılım: `ollama` 0.24.0 üzerinden `qwen3.5:9b`, `snowballstemmer` 3.1.1,
+NumPy 2.5.2, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- erişimin neden daha uzun bir prompt'u yendiğini ve alışıldık gerekçelerden
+  hangisinin ölçümden sağ çıktığını söyleyebilirsiniz
+  [@lewis2020rag; @liu2024lost];
+- kanonik hattı tasarlayabilir ve her aşamanın neden sorumlu olduğunu
+  adlandırabilirsiniz;
+- neyi takas ettiğini bilerek bir parça (chunk) boyutu seçebilirsiniz;
+- yanlış bir cevabı, herhangi bir şeyi ayarlamadan önce ona yol açan aşamaya
+  atfedebilirsiniz.
+
+## Neden her şeyi prompt'a yapıştırmıyoruz? {#sec-rag-uzun-baglam}
+
+RAG var, çünkü [modeller donmuştur ve bilginiz değildir]{.hl}. Kalıcı neden
+budur. Ama bağlam pencereleri büyümeyi sürdürdü ve her büyüdüklerinde biri
+problemin ortadan kalktığını savundu: bütün derlem sığıyorsa neden erişim
+yapalım?
+
+Herkesin verdiği üç cevap var — **maliyet**, çünkü her istekte her girdi token'ı
+için ödeme yaparsınız; **erişim kontrolü**, çünkü bir prompt kimin hangi belgeyi
+görebileceğini zorlayamaz; ve **güncellik**, çünkü önbelleklenmiş bir prompt
+bayatlar. Üçü de doğru ve dördüncüsü — en kendinden emin tekrarlanan —
+**bir modelin uzun bir bağlamı eşit kullanmadığıdır**.
+
+O dördüncü iddia, dördü arasında altyapınız hakkında değil model davranışı
+hakkında olgusal bir iddia olan tek iddia; dolayısıyla ölçmeye değer olan o.
+Ölçtüm ve [yeniden üretemedim]{.hl}.
+
+### İğne testi
+
+Tasarımın cömert bir derecelendiriciye yer bırakmaması gerekiyor, o yüzden
+bilerek kaba. Hiçbir modelin bilemeyeceği ya da tahmin edemeyeceği tek bir
+uydurma olgu alın — *ZRG-14 projesinin onaylanan 2025 bütçesi 743.912 liradır*.
+Onu, dikkat dağıtıcı olarak gerçek Türkçe haberlerin yanına bir bağlama koyun.
+Sayıyı sorun ve tam eşleşmeyle puanlayın, böylece derecelendirme belirsizliği
+olmasın. Sonra iki şeyi değiştirin: bağlamda kaç belge olduğu ve **olgunun
+nerede durduğu**.
+
+```text
+qwen3.5:9b, 40 invented facts per cell, temperature 0, exact-match scoring
+
+ documents  position  accuracy  prompt tokens
+         1     start    100.0%            113
+         5     start    100.0%            951
+         5    middle    100.0%            953
+         5       end    100.0%            949
+        10     start    100.0%          2,005
+        10    middle    100.0%          2,007
+        10       end    100.0%          1,987
+        20     start    100.0%          4,106
+        20    middle    100.0%          4,115
+        20       end    100.0%          4,112
+        40     start    100.0%          8,318
+        40    middle    100.0%          8,313
+        40       end    100.0%          8,316
+        80     start    100.0%         16,744
+        80    middle    100.0%         16,720
+        80       end    100.0%         16,775
+
+16 conditions, 640 queries, 0 retrieval failures, 0 errors
+```
+
+**Hiçbir şey.** Ne bir eğim, ne ortada bir çukur, ne 80 belgede ve 16.775
+token'da bir sallanma. Altı yüz kırk sorgu ve model her iğneyi her konumda buldu.
+
+### Bir sıfır sonuç neye değer
+
+İnsan lost-in-the-middle'ın bir efsane olduğu sonucuna varmak istiyor. O sonuç
+bu tablodan çıkarılamaz ve nedenini anlamak tablonun kendisinden daha yararlı.
+
+[Her şeyin geçtiği bir test, test değildir.]{.hl} Kurduğum şey, görevin mümkün
+olan en kolay hâli: tek bir birebir dizgi, ayırt edici bir anahtar (`ZRG-14`),
+sayısal bir cevap ve anahtarı birebir tekrarlayan bir soru. Attention bunda
+*son derece* iyidir.
+
+@liu2024lost'un etkisi, modelin bir dizgi bulmaktan fazlasını yapması
+gerektiğinde ortaya çıkıyor — ilgili pasajın nadir bir token üzerinden
+eşleştirilmek yerine anlam üzerinden belirlenmesi gereken çok belgeli soru
+cevaplamada ve buradakilerin çok ötesindeki bağlam uzunluklarında. Ölçümleri
+ayrıca 2023 kuşağı modellerde alınmıştı ve uzun bağlam işleme, o zamandan beri
+en çok mühendislik ilgisi görmüş şeyin ta kendisi.
+
+Yani ölçtüğüm şeyin dürüst ifadesi dar ve dar-doğru olanı geniş-tanıdık olana
+tercih ederim: **bu modelde, 16.775 token'a kadar, sözcüksel olarak kolay bir
+iğneyle konum hiç önemli olmadı.**
+
+Erişim göreviniz buna benziyorsa konum konusunda endişelenmeyi bırakın.
+Benzemiyorsa bu tablo size sizin durumunuz hakkında hiçbir şey söylemiyor — ve
+öğrenmenin yolu aynı deneyi *sizin* iğnelerinizle çalıştırmak, ki bu bir öğleden
+sonra sürer.
+
+### Ayakta kalan argüman
+
+Doğruluk sütunu yerine token sütununa bakın, çünkü ölçüm asıl orada iniyor.
+
+```text
+  1 document      113 prompt tokens    100.0%
+ 80 documents  16,775 prompt tokens    100.0%
+
+                148x the input, for identical accuracy
+```
+
+[Erişim yapmamanın bedeli modelin yanlış bilmesi değil. Aynı ölçüde haklı olmak
+için 148 kat ödemenizdir.]{.hl} Bunu her istekte, sonsuza kadar ödersiniz ve
+attention maliyeti dizi uzunluğunda doğrusaldan hızlı büyür, dolayısıyla gecikme
+faturası token faturasından hızlı büyür.
+
+Bu, bölümün tamamını yeniden çerçeveliyor. Erişim, uzun girdileri okuyamayan bir
+model için bir geçici çözüm değil — bu model onları gayet iyi okuyor. Erişim,
+[ihtiyacınız olmayan 79 belge için ödemeyi bırakma biçiminizdir]{.hl} ve bir
+bağlam penceresinin yapısal olarak halledemediği iki şeyi halleden tek mekanizma
+olmayı sürdürür: eğitimden sonra değişen bilgi ve belirli bir kullanıcının
+görmesine izin verilmeyen bilgi.
+
+**Neye bakacağız.** Önce hat; aşama aşama adlandırmaya değer olmasının tek
+nedeni her aşamanın kendi başına bozulup aynı belirtiyi üretmesi. Sonra
+parçalama, yani bölümün asıl deneyi: aynı derlemi kesmenin on bir yolu, iki
+biçimde sorgulanmış; bir soru türünde en iyi olan yapılandırmanın diğerinde en
+kötü olduğu ve yerleşik varsayılanın, yazarının hiç görmediği sorular hakkında
+bir tahmin olduğu yer. Sonra üç kusur biçimi ve onları birbirinden ayıran bir
+öğleden sonralık kod — her hafta uzanacağınız ve neredeyse hiç kimsenin ihtiyaç
+duymadan önce kurmadığı şey.
+
+## Kanonik hat {#sec-rag-hat}
+
+Erişim, ihtiyacınız olmayan 79 belge için ödemeyi durduran şeyse, sonraki soru
+makinenin gerçekte nelerden oluştuğudur. Her RAG sistemi aynı yedi aşamadır.
+Onları ayrı ayrı adlandırmak @sec-rag-kusurlar'ı mümkün kılan şeydir, çünkü her
+biri kendi başına bozulabilir.
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Yedi aşama ve hangilerinin kendi başına bozulabildiği</div>
+<svg viewBox="0 0 764 336" style="max-width:744px" role="img"
+     aria-label="İki satır hâlinde bir erişimle zenginleştirilmiş üretim hattının şeması. Üst satır soldan sağa akar ve çevrimdışı gerçekleşir: belgeler, ayrıştır, parçala, göm, indeksle. Ayrıştır kutusunun altındaki bir not, tabloların, sütunların ve taranmış sayfaların burada yok edildiğini ve kusurun sessiz olduğunu söyler. Alt satır sorgu anında gerçekleşir: sorgu, eriş, yeniden sırala, üret, cevap. Kesikli bir dirsek indeks kutusundan aşağı ve sola, eriş kutusuna gider; çevrimdışı kurulan indeksin erişimin okuduğu şey olduğunu gösterir. Bir ayraç eriş, yeniden sırala ve üret kutularını kapsar ve şöyle etiketlenmiştir: recall@k, sağındaki her şeyin tavanıdır. Alt satırın altındaki üç etiket üç kusur biçimini adlandırır: eriş aşamasında bir erişim kaçırması, üret aşamasında bir dayandırma kaçırması ve yine üret aşamasında bir sentez kaçırması.">
+
+  <text x="10" y="18" class="t-xs t-b t-muted">ÇEVRİMDIŞI — BİR KEZ KURULUR, BELGELER DEĞİŞTİĞİNDE YENİDEN</text>
+
+  <rect x="10"  y="28" width="92"  height="40" rx="6" class="chip"/>
+  <text x="56"  y="53" class="t-sm t-mid t-b">belgeler</text>
+  <path d="M106 48 L 130 48" class="ln"/><path d="M130 44 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="142" y="28" width="124" height="40" rx="6" class="box-accent"/>
+  <text x="204" y="45" class="t-xs t-mid t-b t-accent">1. AYRIŞTIR</text>
+  <text x="204" y="60" class="t-xs t-mid t-muted">PDF, HTML, DOCX → metin</text>
+  <path d="M270 48 L 294 48" class="ln"/><path d="M294 44 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="306" y="28" width="124" height="40" rx="6" class="box-accent"/>
+  <text x="368" y="45" class="t-xs t-mid t-b t-accent">2. PARÇALA</text>
+  <text x="368" y="60" class="t-xs t-mid t-muted">erişilebilir birim</text>
+  <path d="M434 48 L 458 48" class="ln"/><path d="M458 44 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="470" y="28" width="114" height="40" rx="6" class="box-accent"/>
+  <text x="527" y="45" class="t-xs t-mid t-b t-accent">3. GÖM</text>
+  <text x="527" y="60" class="t-xs t-mid t-muted">parça başına vektör</text>
+  <path d="M588 48 L 612 48" class="ln"/><path d="M612 44 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="624" y="28" width="130" height="40" rx="6" class="box-navy"/>
+  <text x="689" y="45" class="t-xs t-mid t-b t-navy">4. İNDEKSLE</text>
+  <text x="689" y="60" class="t-xs t-mid t-muted">ANN ya da tam</text>
+
+  <text x="204" y="88" class="t-xs t-mid t-rose t-b">tabloların ve taramaların öldüğü yer</text>
+  <text x="204" y="101" class="t-xs t-mid t-muted">sessizce — aşağı akışta hiçbir şey hata vermez</text>
+
+  <path d="M689 70 L 689 128 L 180 128 L 180 178" class="ln-thin ln-dash"/>
+  <path d="M176 178 l 4 8 l 4 -8 z" class="head"/>
+  <text x="440" y="122" class="t-xs t-mid t-muted">erişimin görebildiği tek şey indekstir</text>
+
+  <text x="10" y="160" class="t-xs t-b t-muted">SORGU ANINDA — İSTEK BAŞINA BİR KEZ</text>
+
+  <rect x="10"  y="170" width="92"  height="40" rx="6" class="chip"/>
+  <text x="56"  y="195" class="t-sm t-mid t-b">sorgu</text>
+  <path d="M106 190 L 130 190" class="ln"/><path d="M130 186 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="142" y="170" width="124" height="40" rx="6" class="box-warm"/>
+  <text x="204" y="187" class="t-xs t-mid t-b t-warm">5. ERİŞ</text>
+  <text x="204" y="202" class="t-xs t-mid t-muted">ilk k, sözcüksel ya da yoğun</text>
+  <path d="M270 190 L 294 190" class="ln"/><path d="M294 186 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="306" y="170" width="124" height="40" rx="6" class="box-warm"/>
+  <text x="368" y="187" class="t-xs t-mid t-b t-warm">6. YENİDEN SIRALA</text>
+  <text x="368" y="202" class="t-xs t-mid t-muted">çapraz kodlayıcı</text>
+  <path d="M434 190 L 458 190" class="ln"/><path d="M458 186 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="470" y="170" width="114" height="40" rx="6" class="box-warm"/>
+  <text x="527" y="187" class="t-xs t-mid t-b t-warm">7. ÜRET</text>
+  <text x="527" y="202" class="t-xs t-mid t-muted">dayandırılmış cevap</text>
+  <path d="M588 190 L 612 190" class="ln"/><path d="M612 186 l 8 4 l -8 4 z" class="head"/>
+
+  <rect x="624" y="170" width="130" height="40" rx="6" class="chip"/>
+  <text x="689" y="195" class="t-sm t-mid t-b">cevap</text>
+
+  <path d="M142 224 L 142 232 L 584 232 L 584 224" class="ln-rose"/>
+  <text x="363" y="248" class="t-xs t-mid t-b t-rose">recall@k, sağındaki her şeyin tavanıdır</text>
+
+  <rect x="142" y="266" width="124" height="46" rx="6" class="box"/>
+  <text x="204" y="283" class="t-xs t-mid t-b">erişim kaçırması</text>
+  <text x="204" y="297" class="t-xs t-mid t-muted">doğru parça hiç</text>
+  <text x="204" y="308" class="t-xs t-mid t-muted">döndürülmedi</text>
+
+  <rect x="306" y="266" width="124" height="46" rx="6" class="box"/>
+  <text x="368" y="283" class="t-xs t-mid t-b">dayandırma kaçırması</text>
+  <text x="368" y="297" class="t-xs t-mid t-muted">geldi ve model</text>
+  <text x="368" y="308" class="t-xs t-mid t-muted">onu yok saydı</text>
+
+  <rect x="470" y="266" width="114" height="46" rx="6" class="box"/>
+  <text x="527" y="283" class="t-xs t-mid t-b">sentez kaçırması</text>
+  <text x="527" y="297" class="t-xs t-mid t-muted">olguların hepsi vardı,</text>
+  <text x="527" y="308" class="t-xs t-mid t-muted">yanlış birleştirildi</text>
+
+  <path d="M204 224 L 204 262" class="ln-thin ln-dash"/>
+  <path d="M527 224 L 420 262" class="ln-thin ln-dash"/>
+  <path d="M527 224 L 527 262" class="ln-thin ln-dash"/>
+</svg>
+```
+
+::: {.fig-cap}
+Üst satır bir kez kurulur; alt satır her istekte çalışır. Yedi aşamanın üçünün
+*aynı* belirtiyi üreten bir kusur biçimi var — yanlış bir cevap — ve
+@sec-rag-kusurlar'ın herhangi birini ayarlamadan önce onları birbirinden ayırmakla
+ilgili olmasının nedeni budur.
+:::
+::::
+
+O şema hakkında yüksek sesle söylemeye değer iki şey var, çünkü ikisi de rutin
+olarak atlanıyor.
+
+::: {.column-margin}
+Hat aynı zamanda her RAG derlemesinin saydığı şeydir — @gao2023rag varyantların
+en eksiksiz haritasıdır ve bir tanesini kendiniz kurduktan sonra bir kez göz
+gezdirmeye değer, böylece sınıflandırma bir şeye tutunur. Şemanın tamamının
+erişimin üretimden önce tam olarak bir kez gerçekleştiğini varsaydığına dikkat
+edin. *Ne zaman* ve *acaba* erişim yapılacağına karar veren ve geleni eleştiren
+sistemler — Self-RAG [@asai2024selfrag] referans tasarımdır — kitabın etmen
+tabanlı RAG bölümünün konusudur ve ancak bu sabit hat çalışıp ölçüldüğünde
+anlam kazanırlar.
+:::
+
+**Gerçek projelerin çoğu asıl 1. aşamada kaybeder.** Bir PDF tablosu birbirinden
+kopuk sayılardan oluşan bir sütuna dönüşür; iki sütunlu bir düzen iç içe geçer;
+taranmış bir sayfa hiçbir şey üretmez. Hiçbir gömme kalitesi, girişte yok edilmiş
+metni geri getirmez ve kusur aşağı akışta görünmezdir — hat çalışır, sayılar
+makul görünür ve cevap kimsenin bakmadığı bir nedenle yanlıştır. Başka bir şeyi
+ayarlamadan önce elli ayrıştırılmış belgeyi elle okuyun.
+
+**5. aşama 7. aşamaya bir tavan koyar.** @sec-erisim bunu ölçtü ve bölümdeki en
+işe yarar olgu bu: modele geçirdiğiniz *k* için recall@k %80 ise, soruların %20'si
+üretim başlamadan cevaplanamazdır ve hiçbir prompt mühendisliği onlara ulaşmaz.
+
+::: {.column-margin}
+Bu yüzden bir RAG sisteminin iki yarısı farklı metrikler ve onlara bakan farklı
+insanlar ister. Erişim yarısı kaçırmamak üzerinden yargılanır; üretim yarısı
+geleni kullanmak ve gelmediğinde reddetmek üzerinden. @sec-rag-kusurlar bu ikisini
+ayırmakla ilgilidir ve kulağa geldiğinden zordur, çünkü ikisi de aynı belirtiyi
+üretir: yanlış bir cevap.
+:::
+
+## Parçalama bir modelleme kararıdır {#sec-rag-parcalama}
+
+2. aşama bu bölümün ölçtüğü aşamadır, çünkü bir sayının bir blog yazısından
+kopyalanıp bir daha gözden geçirilmediği aşama burasıdır. Bir parça, eriştiğiniz
+birimdir. Bu da parça boyutunu bir ön işleme ayrıntısı değil **neyin erişilebilir
+olduğuna** dair bir karar yapar — ve aynı anda iki şeyi zıt yönlere hareket
+ettirir:
+
+- Küçük parçalar daha *isabetli hedeflenir*. Sorguyla eşleşen 50 kelimelik bir
+  parça neredeyse tümüyle sorgu hakkındadır.
+- Küçük parçalar *daha çok parça* demektir, dolayısıyla indeks daha kalabalıktır
+  ve her parça kendini netleştirecek daha az bağlam taşır.
+
+Yerleşik kanı bir sayı seçer — 512 token, 200 kelime, "bir paragraf kadar" — ve
+devam eder. Sayı kendi derleminizde ölçmeye değer, çünkü yukarıdaki takas
+belgelerinizin ne kadar uzun olduğuna ve cevapların onların içinde ne kadar
+yerelleştiğine bağlıdır.
+
+### Deney
+
+Erişimci sabit tutuldu, böylece yalnızca kesme değişiyor. 3.397 Türkçe haber,
+aynı BM25 erişimcisiyle on bir farklı biçimde indekslendi ve **iki tür soruyla**
+sorgulandı — çünkü tek bir tür yanlış şeyi ölçer ve kendinden emin, yanlış bir
+kural üretirdi.
+
+- **A. haber düzeyinde.** Sorgu, haberin profesyonel tek cümlelik özetidir. *Bu
+  belge ne hakkında?*
+- **B. olgu düzeyinde.** Sorgu, haberin **tek bir cümlesinden** alınmış altı
+  içerik kelimesidir; yüzey biçimleri metinden farklı olsun diye gövde
+  arkadaşları üzerinden yeniden çekimlenmiştir. *Bu belirli ayrıntı nerede?*
+
+İsabet, kaynak haberin herhangi bir parçası demektir. Kurma süreleri
+raporlanmıyor: daha önceki bir çalıştırmanın zamanlamaları aynı makinedeki eşzamanlı
+bir işten kirlenmişti ve arkasında duramayacağım bir sayının tabloda yeri yok.
+
+```text
+3,397 articles | A: 400 summary queries | B: 400 fact queries
+
+chunking                    chunks  w/chk   A R@1   A R@5  A MRR    B R@1   B R@5  B MRR
+whole article                3,397    366   71.8%   91.8%   80.2    96.0%   99.8%   97.7
+fixed 50w, no overlap       24,266     51   57.0%   81.8%   67.1    96.5%   99.8%   97.8
+fixed 100w, no overlap      12,390     99   66.5%   86.5%   75.2    95.5%   98.2%   96.7
+fixed 200w, no overlap       6,459    187   70.0%   88.5%   78.3    94.0%   97.2%   95.4
+fixed 400w, no overlap       4,074    297   72.5%   90.2%   80.1    93.8%   97.8%   95.6
+fixed 100w, overlap 25      15,983     98   65.8%   87.0%   74.4    97.5%   99.8%   98.6
+fixed 100w, overlap 50      21,890    101   66.0%   84.8%   73.7    97.2%   99.8%   98.5
+fixed 200w, overlap 50       8,070    184   71.5%   88.0%   78.8    97.0%   99.8%   98.3
+fixed 200w, overlap 100     10,166    192   70.5%   87.5%   77.8    96.2%   99.8%   98.0
+sentence-aligned ~100w      14,500     86   66.0%   85.8%   74.3    97.8%  100.0%   98.8
+sentence-aligned ~200w       7,674    162   69.5%   88.5%   77.9    97.2%  100.0%   98.5
+```
+
+### Ne söylüyor
+
+[Bir koşuldaki en iyi parça boyutu diğerinde en kötüsü.]{.hl} 400 kelimelik
+parçalar A koşulunda **%72,5** ile başı çekiyor ve B koşulunda **%93,8** ile
+sonuncu geliyor. Elli kelimelik parçalar A'da **%57,0** ile sonuncu ve B'de
+**%96,5** ile en üste yakın. İki sütun tek bir sıralamanın gürültülü sürümleri
+değil; aynı on bir sistemin neredeyse zıt sıralamaları.
+
+Yan yana sıralandığında iki sütunu gürültü sanmak zor:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Aynı on bir parçalama, iki kez sıralanmış — her soru türü için bir kez</div>
+<svg viewBox="0 0 764 344" style="max-width:744px" role="img"
+     aria-label="İki sıralı sütunlu bir eğim grafiği. Solda on bir parçalama yapılandırması haber düzeyindeki sorgularda recall@1'e göre sıralanmış; 400 kelimelik sabit parçalarda yüzde 72,5'ten 50 kelimelik sabit parçalarda yüzde 57,0'a. Sağda aynı on biri olgu düzeyindeki sorgularda recall@1'e göre sıralanmış; cümle hizalı 100 kelimelik parçalarda yüzde 97,8'den 400 kelimelik sabit parçalarda yüzde 93,8'e. Çizgiler her yapılandırmayı iki sütun arasında bağlıyor ve yoğun biçimde kesişiyorlar. 400 kelimelik sabit parçalar birincilikten sonunculuğa düşüyor; cümle hizalı 100 kelimelik parçalar dokuzunculuktan birinciliğe çıkıyor; 50 kelimelik sabit parçalar sonunculuktan altıncılığa çıkıyor. Bir not, konumun değer değil sıra olduğunu ve A koşulunun yüzde 57,0 ile 72,5, B koşulununsa yalnızca yüzde 93,8 ile 97,8 arasına yayıldığını kaydediyor.">
+
+  <text x="22" y="42" class="t-xs t-b t-muted">A KOŞULUNA GÖRE SIRALI — HABER DÜZEYİNDE SORGULAR</text>
+  <text x="702" y="42" class="t-xs t-b t-muted t-end">B KOŞULUNA GÖRE SIRALI — OLGU DÜZEYİNDE SORGULAR</text>
+
+  <line x1="160" y1="54" x2="160" y2="302" class="ln-thin"/>
+  <line x1="570" y1="54" x2="570" y2="302" class="ln-thin"/>
+
+  <line x1="160" y1="62"  x2="570" y2="292" class="ln-rose"/>
+  <line x1="160" y1="85"  x2="570" y2="223" class="ln-thin"/>
+  <line x1="160" y1="108" x2="570" y2="154" class="ln-thin"/>
+  <line x1="160" y1="131" x2="570" y2="200" class="ln-thin"/>
+  <line x1="160" y1="154" x2="570" y2="269" class="ln-thin"/>
+  <line x1="160" y1="177" x2="570" y2="131" class="ln-thin"/>
+  <line x1="160" y1="200" x2="570" y2="246" class="ln-thin"/>
+  <line x1="160" y1="223" x2="570" y2="108" class="ln-thin"/>
+  <line x1="160" y1="246" x2="570" y2="62"  class="ln-accent"/>
+  <line x1="160" y1="269" x2="570" y2="85"  class="ln-thin"/>
+  <line x1="160" y1="292" x2="570" y2="177" class="ln"/>
+
+  <text x="96" y="66"  class="t-xs t-end t-b t-rose">400k</text>
+  <text x="144" y="66"  class="t-xs t-end t-b t-rose">%72,5</text>
+  <text x="96" y="89"  class="t-xs t-end t-muted">bütün haber</text>
+  <text x="144" y="89"  class="t-xs t-end t-muted">%71,8</text>
+  <text x="96" y="112" class="t-xs t-end t-muted">200k +50</text>
+  <text x="144" y="112" class="t-xs t-end t-muted">%71,5</text>
+  <text x="96" y="135" class="t-xs t-end t-muted">200k +100</text>
+  <text x="144" y="135" class="t-xs t-end t-muted">%70,5</text>
+  <text x="96" y="158" class="t-xs t-end t-muted">200k</text>
+  <text x="144" y="158" class="t-xs t-end t-muted">%70,0</text>
+  <text x="96" y="181" class="t-xs t-end t-muted">cümle ~200k</text>
+  <text x="144" y="181" class="t-xs t-end t-muted">%69,5</text>
+  <text x="96" y="204" class="t-xs t-end t-muted">100k</text>
+  <text x="144" y="204" class="t-xs t-end t-muted">%66,5</text>
+  <text x="96" y="227" class="t-xs t-end t-muted">100k +50</text>
+  <text x="144" y="227" class="t-xs t-end t-muted">%66,0</text>
+  <text x="96" y="250" class="t-xs t-end t-b t-accent">cümle ~100k</text>
+  <text x="144" y="250" class="t-xs t-end t-b t-accent">%66,0</text>
+  <text x="96" y="273" class="t-xs t-end t-muted">100k +25</text>
+  <text x="144" y="273" class="t-xs t-end t-muted">%65,8</text>
+  <text x="96" y="296" class="t-xs t-end t-b">50k</text>
+  <text x="144" y="296" class="t-xs t-end t-b">%57,0</text>
+
+  <text x="582" y="66"  class="t-xs t-b t-accent">%97,8</text>
+  <text x="626" y="66"  class="t-xs t-b t-accent">cümle ~100k</text>
+  <text x="582" y="89"  class="t-xs t-muted">%97,5</text>
+  <text x="626" y="89"  class="t-xs t-muted">100k +25</text>
+  <text x="582" y="112" class="t-xs t-muted">%97,2</text>
+  <text x="626" y="112" class="t-xs t-muted">100k +50</text>
+  <text x="582" y="135" class="t-xs t-muted">%97,2</text>
+  <text x="626" y="135" class="t-xs t-muted">cümle ~200k</text>
+  <text x="582" y="158" class="t-xs t-muted">%97,0</text>
+  <text x="626" y="158" class="t-xs t-muted">200k +50</text>
+  <text x="582" y="181" class="t-xs t-b">%96,5</text>
+  <text x="626" y="181" class="t-xs t-b">50k</text>
+  <text x="582" y="204" class="t-xs t-muted">%96,2</text>
+  <text x="626" y="204" class="t-xs t-muted">200k +100</text>
+  <text x="582" y="227" class="t-xs t-muted">%96,0</text>
+  <text x="626" y="227" class="t-xs t-muted">bütün haber</text>
+  <text x="582" y="250" class="t-xs t-muted">%95,5</text>
+  <text x="626" y="250" class="t-xs t-muted">100k</text>
+  <text x="582" y="273" class="t-xs t-muted">%94,0</text>
+  <text x="626" y="273" class="t-xs t-muted">200k</text>
+  <text x="582" y="296" class="t-xs t-b t-rose">%93,8</text>
+  <text x="626" y="296" class="t-xs t-b t-rose">400k</text>
+
+  <circle cx="160" cy="62"  r="3.5" class="head-rose"/>
+  <circle cx="570" cy="292" r="3.5" class="head-rose"/>
+  <circle cx="160" cy="246" r="3.5" class="head-accent"/>
+  <circle cx="570" cy="62"  r="3.5" class="head-accent"/>
+  <circle cx="160" cy="292" r="3" class="head"/>
+  <circle cx="570" cy="177" r="3" class="head"/>
+
+  <text x="22" y="322" class="t-xs t-b t-muted">KONUM ON BİRİ ARASINDAKİ SIRADIR; YANINDAKİ SAYI ÖLÇÜLEN RECALL@1'DİR</text>
+  <text x="22" y="336" class="t-xs t-muted">A koşulu %57,0 ile %72,5 arasına yayılıyor. B koşulu yalnızca %93,8 ile %97,8 arasına — aynı yeniden sıralama, aralığın dörtte birinde.</text>
+</svg>
+```
+
+::: {.fig-cap}
+Her çizgi bir parçalama; haber düzeyindeki sorularda bitirdiği yerle olgu
+düzeyindeki sorularda bitirdiği yer arasında çizilmiş. Gül rengi çizgi 400
+kelimelik parçaların birincilikten sonunculuğa gidişi; yeşil olan cümle hizalı
+~100 kelimelik parçaların dokuzunculuktan birinciliğe gidişi. Yine de konumlar
+kadar sayıları da okuyun: B koşulunun bütün yayılımı dört puan, A koşulununki on
+beş — dolayısıyla sağdaki yeniden sıralama gerçek ama yanlış yapması çok daha
+ucuz. Aşağıdaki kenar notunun üreticiniz beş parça tükettiğinde recall@1 okumak
+hakkında yaptığı uyarının aynısı.
+:::
+::::
+
+Ders bunun tamamı ve üzerine hareket edebileceğiniz bir kural olarak
+belirtmeye değer: **parça boyutu, sorunun tanecikliği üzerine bir bahistir.**
+
+Bir belgenin ne hakkında olduğunu sorun; onun yalnızca bir kısmını tutan bir
+parça sorgunuzun yalnızca bir kısmıyla eşleşebilir, dolayısıyla büyük olan
+kazanır. Belirli bir olgunun nerede olduğunu sorun; onu içeren kısa bir parça
+neredeyse tümüyle onun *hakkındadır*, dolayısıyla küçük olan kazanır — bu,
+BM25'in uzunluk normalizasyonunun tam olarak tasarlandığı şeyi yapması; iki
+taraftan görülmüş hâli.
+
+O tablodaki iki sonuç daha, çalıştırmadan önce benim için bariz değildi.
+
+**Örtüşme bedelini hak ediyor, ama yalnızca olgular için.** 100 kelimede 25
+kelimelik bir örtüşme eklemek B koşulunu %95,5'ten **%97,5**'e, A koşulunu ise
+%66,5'ten %65,8'e taşıdı — bir olgunun bir sınırı aşabildiği yerde gerçek bir
+kazanç, sorgunun bütün belgeyi tarif ettiği yerde hiçbir şey. Yani örtüşme genel
+amaçlı bir güvenlik payı değil. Belirli bir kusur için belirli bir onarım ve
+sorularınız olgu biçimli değilse hiçbir getiri karşılığında %29 daha fazla
+indeks ödüyorsunuz.
+
+**Yapı aritmetiği yendi, ölçülmüş hâliyle.** Yaklaşık 100 kelimelik cümle hizalı
+parçalar B koşulunda **%97,8** aldı; sabit 100 kelimelik pencerelerin %95,5'ine
+karşı — ve bunu, ikinci gelen örtüşmeli varyanttan *daha az* parçayla yaptı
+(15.983'e karşı 14.500). Bütün cümleleri paketlemek hiçbir şeye mal olmuyor ve
+hem saf bölmeyi hem dolgulanmış olanı geçiyor, çünkü geçmeyi reddettiği sınır
+olguyu taşıyan sınır.
+
+::: {.column-margin}
+R@1 on beş puan salınırken R@5 ve R@10 sütunlarının ne yaptığına dikkat edin: B
+koşulunda her yapılandırma 5. sırada %97,2 ile %100 arasında. Üreticiniz beş
+parça okuyorsa bu tablonun tamamı bir yuvarlama hatasıdır. Bir tane okuyorsa
+tablo sizin sisteminizdir. @sec-erisim birleştirme hakkında aynı noktayı yaptı ve
+genelleşiyor: [önemli olan metrik, tüketicinizin gerçekten okuduğudur.]{.hl}
+:::
+
+### Yapı aritmetiği yener
+
+Hangi boyuta karar verirseniz verin, **belgenin herhangi bir yapısı varsa yapıya
+göre parçalayın**. Bölümler, maddeler, fıkralar, konuşmacı sıraları, tablo
+satırları. Sabit bir kelime sayısında çizilen bir sınır cümlenin, yan cümlenin,
+argümanın ortasına iner ve her biri yerel olarak makul, birlikte yanlış iki parça
+üretir — @sec-ozetleme'nin map-reduce'ta bulduğu kusur, buraya başka bir kapıdan
+geliyor.
+
+Örtüşme kaba onarımdır: her parçanın son *n* kelimesini bir sonrakinin başında
+tekrarlayın, böylece bir sınırı aşan bir olgu en az bir parçada bütün hâlde
+görünsün.
+
+İndeks boyutuna doğrudan orantılı olarak mal olur ve yukarıdaki tablo, onun
+yapının bir *alternatifi* değil *yerine geçeni* olduğunu söylüyor — cümle hizalı
+parçalar %97,8'e ulaştı, örtüşmeyle dolgulanmış sabit pencereler %97,5'e ve
+cümle hizalı indeks %9 daha küçüktü. Çizmek zorunda olmadığınız bir sınırı
+onarmak için örtüşme ödemek, işin pahalı yoludur.
+
+Sabit boyutlu parçalamanın basitçe başarısız olduğu iki belge türü:
+
+- **Tablolar.** Bir satır başlığı olmadan hiçbir şey ifade etmez. Bir tabloyu
+  satırlara göre parçalayın ve başlığı her parçada tutun ya da indekslemeden
+  önce her satırı bir cümleye dönüştürün.
+- **Çapraz referans içeren her şey.** *4. bölümde anlatıldığı gibi*, 4. bölüm
+  indeksin başka bir yerinde başka bir parça olduğunda anlamsızdır. Referansı ya
+  girişte çözün ya da kaybı kabul edip ölçün.
+
+### Peki ne yapmalısınız?
+
+Kendi derleminizde, alacağınız sorulara benzer sorgularla ölçün. Ama ona sahip
+olmadan önce bir başlangıç noktası gerekiyorsa:
+
+- **Yapıya** göre parçalayın — cümleler, paragraflar, bölümler, fıkralar,
+  satırlar — ve bir hedef boyutta kesmek yerine o boyuta paketleyin.
+- Sorularınız belirli olgular hakkındaysa **kabaca 100–200 kelime** hedefleyin;
+  bir belgenin neyi kapsadığı hakkındaysa bütün belgelere kadar daha büyük.
+- **Örtüşmeyi yalnızca olgu biçimli sorular için** ekleyin ve onu varsayılan
+  değil bir sınır onarımı olarak görün.
+- Sorularınız gerçekten iki türdense, tek bir boyutta uzlaşmak yerine iki
+  taneciklikte indeksleyin — tablo, uzlaşmanın her işte uzmanından kötü
+  olduğunu gösteriyor.
+
+## Kusur biçimleri ve onları atfetmek {#sec-rag-kusurlar}
+
+Bir RAG sistemi yanlış bir cevap veriyor. Üç farklı neden var ve üç farklı
+düzeltmeleri var, dolayısıyla ilk iş herhangi bir şeyi ayarlamak **değil** —
+hangi aşamanın bozulduğunu bulmak.
+
+| kusur | ne oldu | nasıl saptanır |
+|:--|:--|:--|
+| **Erişim kaçırması** | doğru parça hiç döndürülmedi | ilk k içinde olup olmadığını kontrol edin; değilse aşağı akıştaki hiçbir şeyin önemi yok |
+| **Dayandırma kaçırması** | doğru parça döndürüldü ve model onu yok saydı ya da çelişti | parça bağlamda ve cevap parçada değil |
+| **Sentez kaçırması** | gerekli her şey oradaydı, parçalara yayılmıştı ve model onları yanlış birleştirdi | olguların hepsi mevcut, sonuç yanlış |
+
+: Üç kusur, tek belirti {tbl-colwidths="[20,42,38]"}
+
+Teşhis mekaniktir ve kurması bir öğleden sonra sürer:
+
+```python
+for q, gold_doc, answer in evaluation_set:
+    hits = retrieve(q, k=10)
+    if gold_doc not in hits:
+        bucket["retrieval miss"] += 1          # erişimi düzelt
+    elif not answer_supported_by(answer, hits):
+        bucket["grounding miss"] += 1          # prompt'u ya da modeli düzelt
+    elif answer != expected:
+        bucket["synthesis miss"] += 1          # ayrıştırmayı ya da görevi düzelt
+```
+
+[Bunu gömme modeline dokunmadan önce yapın.]{.hl} Bir RAG sistemi hayal
+kırıklığı yarattığında varsayılan refleks gömmeleri değiştirmektir ve
+@sec-erisim'deki ölçüm bunun sıklıkla tümüyle yanlış kaldıraç olduğunu söylüyor —
+gömme modeli seçimi kolay sorgularda 2,4, zor sorgularda 25,3 puan ederken,
+sözcüksel ile yoğun arasındaki seçim, sorgu türünün dikte ettiği yönde
+*altmış* puan ediyordu.
+
+### Ayrı adlandırmaya değer iki kusur
+
+Bir RAG sisteminin bozulma yollarından ikisi o üçlü tabloda rahatsız ediyor,
+çünkü ikisi de bozulan aşamalar değil sizin yaptığınız seçimlerin sonuçları.
+
+**Dikkat dağıtma.** İlgisiz erişilmiş bağlam yalnızca yardımcı olmamakla kalmaz;
+cevapları etkin biçimde bozar [@shi2023large]. Bu, *k*'yı "daha çok daha
+güvenli" kadranı değil gerçek bir takas olarak yeniden çerçeveler: onu
+yükseltmek recall'ü iyileştirir ve gürültü ithal eder, ve bir noktadan sonra
+ikinci etki kazanır.
+
+@sec-rag-uzun-baglam'ın kazandığı aynı uyarıyla ve sessizce üzerinden atıf
+vermek yerine açık olmaya değer: **kendi iğne testim cevabın etrafına 79 ilgisiz
+belge koydu ve hiçbir şeye mal olmadı.** Dikkat dağıtma orada da ortaya çıkmadı.
+@shi2023large'in etkisi, ilgisiz bir yan cümlenin *kullanılabildiği* — akıl
+yürütme zincirine çekilip üzerine hareket edildiği — aritmetik ve akıl yürütme
+problemlerinde ölçülüyor. Bir dizgi bulmak o tür bir görev değil ve çıkarımın
+çoğu da değil.
+
+Yani *k*'yı, erişilen metin üzerinde akıl yürütme içeren görevlerde ölçülmüş bir
+optimumu olan bir parametre olarak görün ve içermeyen görevlerde cezanın var
+olduğunu varsaymayın: **bütçelemeden önce ölçün**, ki @sec-rag-alistirmalar'ın
+beşinci alıştırmasının sizden istediği budur.
+
+**Hiç gerçekleşmeyen reddetme.** *Belgeler bunu cevaplamıyor* demenin yasal bir
+yolu olmayan bir sistem yine de cevap verecektir; parametrik bellekten, akıcı
+biçimde. @sec-promptlama'nın kuralı tam olarak burada geçerli: kusur çıktısını
+adlandırın, üretmesini kolaylaştırın ve sonra modelin onu gerçekten kullandığını
+kontrol edin — derlemin cevaplayamayacağını bildiğiniz sorularda. Kimsenin
+çalıştırmadığı test odur ve çekimser kalan bir sistemle bu seçeneği hiç
+verilmemiş bir sistem arasındaki farktır.
+
+::: {.column-margin}
+Değerlendirme çatıları — RAGAS [@es2024ragas] ve akrabaları — tam olarak bu
+ayrıştırmayı puanlıyor: erişim yarısı için bağlam kesinliği ve recall'ü, üretim
+yarısı için sadakat ve cevap ilgililiği. Onları mutlak sayıları için değil
+dayattıkları yapı için kullanın ve @sec-ozetleme'den şunu not edin: iki otomatik
+sadakat ölçüsü sıralamada anlaştı ve on bir maddeden birinde örtüştü.
+:::
+
+## Sezgi kontrolleri {#sec-rag-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular.
+
+::: {.callout-note collapse="true"}
+## 1. Bağlam pencereleri büyümeyi sürdürüyor. RAG geçici bir çözüm mü?
+
+Hayır — ve bu bölüm bedelin ne kadar büyük olduğunu ölçtü; genellikle
+gösterilmek yerine iddia edilen kısım da bu: önemli olan 1 belge yerine 80
+belgeden cevaplamak **birebir aynı doğruluk için 148 kat girdi token'ına** mal
+oldu. Kalıcı nedenler yine farklı: **model donmuştur ve belgeleriniz değildir**
+— bir erişim adımı, yeni, özel ya da değişen bilginin, o bilgi var olmadan önce
+eğitimini bitirmiş bir modele ulaşma yoludur. Erişim kontrolü ikinci kalıcı
+nedendir: bir prompt kimin hangi belgeyi okuyabileceğini zorlayamaz, bir indeks
+zorlayabilir. Uzun bağlam ve erişim rakip değil tamamlayıcıdır — daha büyük bir
+pencere kaç parçayı karşılayabileceğinizi değiştirir, onları seçmeniz gerekip
+gerekmediğini değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Hangi parça boyutunu kullanmalısınız?
+
+Dürüst cevap, sorularınızın tanecikliğine bağlı olduğudur ve bu bölüm ne kadar
+bağlı olduğunu ölçtü: aynı derlemde 400 kelimelik parçalar haber düzeyindeki
+sorularda **%72,5** recall@1 ile başı çekti ve olgu düzeyindeki sorularda
+**%93,8** ile *sonuncu* geldi; 50 kelimelik parçalar tersini yaptı. Ölçmeden
+önce bir varsayılana ihtiyacınız varsa, bütün cümleleri kabaca 100–200 kelimeye
+paketleyin. Sorularınız gerçekten iki türdense, bir kez uzlaşmak yerine iki kez
+indeksleyin.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Parçalar arasına örtüşme eklemeli misiniz?
+
+Yalnızca sorularınız olgu biçimliyse. Burada ölçüldü: 100 kelimelik parçalarda 25
+kelimelik bir örtüşme olgu düzeyindeki recall@1'i %95,5'ten **%97,5**'e taşıdı ve
+haber düzeyindeki recall@1'i %66,5'ten 65,8'e *indirdi* — üstelik indekse %29
+daha fazla parça ekleyerek. Bir sınırı aşan olgular için bir onarımdır, genel bir
+güvenlik payı değil. Ve cümle sınırlarında parçalamak, örtüşmeli sabit
+pencereleri açıkça yendi; hem de daha küçük bir indeksle.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. RAG sisteminiz yanlış bir cevap verdi. Önce ne yaparsınız?
+
+Herhangi bir şeyi ayarlamadan önce atfedin. Destekleyici parçanın erişilip
+erişilmediğini kontrol edin: erişilmediyse bu bir **erişim kaçırmasıdır** ve
+prompt konu dışıdır. Erişildiyse ve cevap onunla çelişiyorsa bu bir **dayandırma
+kaçırmasıdır**. Gereken her şey mevcutsa ve sonuç yine de yanlışsa bu bir
+**sentez kaçırmasıdır**. Üç neden, üç farklı düzeltme, tek belirti — ve
+varsayılan refleks olan gömme modelini değiştirmek yalnızca birincisini ele
+alır.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Daha çok erişilmiş bağlam her zaman daha mı güvenli?
+
+Hayır. İlgisiz bağlam cevapları etkin biçimde bozar [@shi2023large], dolayısıyla
+*k* bir "daha çok daha güvenli" kadranı değil gerçek bir takastır: onu
+yükseltmek recall'ü iyileştirir ve gürültü ithal eder, ve bir noktadan sonra
+ikinci etki kazanır. *k*'yı dürüst tutmak için ikinci bir neden daha var —
+geçirdiğiniz her parça her istekte ödenir, dolayısıyla batıl inançla seçilmiş bir
+*k* kalıcı bir gider kalemidir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Sisteminiz hiç "bilmiyorum" demiyor. Bu bir promptlama problemi mi?
+
+Genellikle bir *tasarım* problemidir: sistemin çekimser kalmanın yasal bir yolu
+yoktur, dolayısıyla parametrik bellekten, akıcı biçimde ve uyarmadan cevap
+verir. Ona açık bir reddetme çıktısı verin, üretmesini ucuzlatın ve sonra —
+kimsenin atmadığı adım — **derlemin cevaplayamayacağını bildiğiniz sorularda
+sınayın**. O testi çalıştırana kadar çekimser kalan bir sistem mi kurduğunuzu
+yoksa bu seçeneği hiç verilmemiş bir sistem mi olduğunu bilmezsiniz.
+@sec-cozumleme, çekimserliği gerçek ve eşikli bir karar hâline getirmenin
+makinesine sahip.
+:::
+
+## Mülakat soruları {#sec-rag-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+ölçümlerinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Mekanizmayı anlayıp anlamadığınızı sınayanlar
+
+**S: Bir RAG hattını anlatın.**
+
+Aşamaları adlandırın ve her birinin neyi bozabileceğini söyleyin, çünkü yedi
+isimlik bir liste hiçbir şey göstermez. Ayrıştır — tabloların ve taranmış
+sayfaların sessizce yok edildiği yer. Parçala — neyin erişilebilir olduğuna karar
+veren. Göm ve indeksle — yaklaşık bir indeksin recall'ü sessizce sınırladığı yer.
+Eriş, yeniden sırala, üret. Sonra önemli olan ilişkiyi verin: **recall@k aşağı
+akıştaki her şeyin sınırını çizer**, dolayısıyla hattın, model çağrılmadan önce
+belirlenmiş bir tavanı vardır.
+
+**S: Parça boyutunu nasıl seçersiniz?**
+
+Beklediğim sorulara karşı ölçerek; ve iyi cevap evrensel bir sayı olmamasının
+*nedenini* adlandırır: parça boyutu hedeflemeyi bağlama karşı takas eder ve
+hangi tarafın kazandığı, sorunun bütün bir belge hakkında mı yoksa belirli bir
+olgu hakkında mı olduğuna bağlıdır. Bir sayı yerine biçimi anın — bir derlemde
+400 kelimelik parçalar haber düzeyindeki sorular için en iyi, olgu düzeyindekiler
+için en kötüydü; aynı indekste ve aynı erişimcide. Sonra ölçmeden önce ne
+yapacağınızı söyleyin: bütün cümleleri paketleyin, 100–200 kelime hedefleyin,
+örtüşmeyi yalnızca olgu biçimli sorular için ekleyin.
+
+**S: Daha çok erişilmiş bağlam eklemek cevapları neden bazen kötüleştirir?**
+
+Çünkü ilgisiz bağlam nötr değildir — dikkat dağıtır [@shi2023large] — ve çünkü
+modeller uzun bir bağlamı eşit okumazlar [@liu2024lost]. İkisi de *k*'yı bir
+güvenlik payı değil, ölçülmüş bir optimumu olan ayarlanmış bir parametre olarak
+görmek için nedendir. İğne testini kendiniz çalıştırdıysanız ne bulduğunuzu ve
+hangi koşullarda bulduğunuzu söyleyin, çünkü etkinin büyüklüğü modele ve göreve
+büyük ölçüde bağlıdır.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: RAG sisteminiz zamanın %30'unda yanlış. Nedenini nasıl bulursunuz?**
+
+Tahmin etmeyi reddederim ve üçlü atfı kurarım: erişim kaçırması, dayandırma
+kaçırması, sentez kaçırması. Bunu gömme modelini değiştirmeden *önce*
+çalıştıracağımı söylerim, çünkü refleks odur ve üç kovadan yalnızca birini ele
+alır. Gönüllü olarak eklenecek devam, bunun her cevabın yanında erişilen bağlamı
+kaydetmeyi gerektirmesidir — onsuz kusurlar olaydan sonra atfedilemez.
+
+**S: Bir RAG sistemini nasıl değerlendirirsiniz?**
+
+İki yarım hâlinde, çünkü bağımsız bozuluyorlar: erişim yarısını etiketli
+sorgulara karşı recall@k ve nDCG üzerinden, üretim yarısını erişilen bağlama
+sadakat ve cevap doğruluğu üzerinden. RAGAS [@es2024ragas] gibi çatılar tam
+olarak bu ayrıştırmayı dayatıyor ve yapı için kullanmaya değer. Neredeyse
+kimsenin çalıştırmadığı testi ekleyin — derlemin cevaplayamayacağı sorular,
+sistemin çekimser kalıp kalmadığı üzerinden puanlanmış — ve açıkça söyleyin ki
+otomatik sadakat puanlarına güvenmeden önce onların doğrulanması gerekir; bu da
+kitabın LLM değerlendirme bölümünün konusudur.
+
+**S: RAG'i ne zaman kullanmazsınız?**
+
+Bilgi prompt'a sığacak kadar küçük ve durağan olduğunda; görev birkaç pasaj
+yerine bütün derlemi gerektirdiğinde — "bu çeyrekteki her şikâyeti özetle" gibi,
+erişimin yapısal olarak yeterince göremediği yerde; ve gereksinim aslında doğal
+dil kılığına girmiş bir veritabanı sorgusu olduğunda, ki o durumda bir şema
+üzerinde text-to-SQL, satırları gömüp ummayı yener. Tekniğin nerede durduğunu
+bilmek, bir uygulayıcıyı bir mimari şemasını tekrarlayan birinden ayıran kısımdır.
+
+## 2026 alet çantası {#sec-rag-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle tek bir dizüstü bilgisayarda çalıştı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `snowballstemmer` | 3.1.1 | @sec-rag-parcalama'daki her erişim sayısının arkasındaki Türkçe gövdeleme |
+| `numpy` | 2.5.2 | 24.266 parça üzerinde BM25 ve taramanın tamamı |
+| `ollama` | 0.24.0 | iğne testi için yerelde `qwen3.5:9b` sunmak |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `docling` / `unstructured` | 2.123.0 / 0.27.1 | 1. aşama — PDF'leri ve HTML'i sağ çıkan metne dönüştürmek; üzerine harcamaya en değer aşama |
+| `pymupdf` | 1.28.2 | ayrıştırmayı kendiniz kontrol etmek istediğinizde hızlı, düşük düzeyli PDF metin ve düzen çıkarımı |
+| `langchain-text-splitters` | 1.1.2 | herkesin başladığı parçalayıcılar; özyinelemeli ve yapı farkında bölücüler dâhil |
+| `chonkie` | 1.7.0 | yalnızca parçalama kütüphanesi; bölmeyi bir çatının yan etkisi değil ayarlamak istediğiniz şey olarak gördüğünüzde |
+| `llama-index` / `langchain` | 0.14.24 / 1.3.17 | uçtan uca düzenleme; başlamak için yararlı, bağımlı olmadan önce altını anlamaya değer |
+| `haystack-ai` | 3.1.0 | aşamaları açık kılınmış, hat biçimli alternatif |
+| `ragas` | 0.4.3 | @sec-rag-kusurlar'ın iki yarımlı değerlendirmesi, uygulanmış hâli [@es2024ragas] |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: hangi aşamanın bozulduğunu söyleyen bir RAG sistemi {#sec-rag-lab}
+
+Teslim edilecek şey bir sohbet botu değil. Yanlış bir cevap verildiğinde sorumlu
+aşamayı adlandıran bir koşum takımı — çünkü her hafta gerçekten ihtiyaç
+duyacağınız ve neredeyse kimsenin kurmadığı şey odur.
+
+### Adım 1 — herhangi bir koddan önce elli soru
+
+Kendi derleminize karşı elli soru yazın ve her biri için onu cevaplayan belgeyi
+kaydedin. Derlemin cevaplayamayacağı beş tane ekleyin; çekimserliği sınamanın
+tek yolu onlardır. Bunu önce yapın, çünkü sistemin çıktısını gördükten sonra
+yazılan sorular, sistemin zaten cevaplayabildiği sorulardır.
+
+### Adım 2 — bir değil iki parçalama
+
+Derlemi iki kez indeksleyin: bütün belgeler ve yaklaşık 150 kelimelik cümle
+paketli parçalar. Artık @sec-rag-parcalama'nın takasının iki ucu kendi verinizde
+elinizde ve karşılaştırma bir öğleden sonraya mal oluyor.
+
+### Adım 3 — bir şey üretmeden önce recall@k ölçün
+
+Her soru için altın belge ilk k içinde mi? O sayı tavanınızdır. %70 ise durun ve
+erişimi düzeltin; prompt'a yapacağınız hiçbir şey eksik %30'a ulaşmaz.
+
+### Adım 4 — üretin ve bağlamı kaydedin
+
+Her soruyu erişilen parçalar prompt'ta olacak şekilde cevaplayın ve parçaları
+cevabın yanında saklayın. Bağlamı olmayan bir cevap olaydan sonra atfedilemez;
+bu da kaydı tam ona ihtiyacınız olduğunda işe yaramaz kılar.
+
+### Adım 5 — her kusuru atfedin
+
+Her yanlış cevap için @sec-rag-kusurlar'ın üçlü testini sırayla uygulayın: altın
+parça erişildi mi, cevap erişilen tarafından destekleniyor muydu, mevcut olgular
+verildiğinde sonuç doğru muydu. Bir sayım tablosu üretin.
+
+### Adım 6 — reddetmeyi sınayın
+
+Cevaplanamaz beş soruyu çalıştırın. Kaçının yine de kendinden emin bir cevap
+ürettiğini sayın. Labdaki en bilgilendirici sayı budur ve kimsenin ölçmediği
+sayıdır.
+
+### Neyi teslim edeceksiniz
+
+Üç kovalı atıf tablosunu, onu sınırlayan recall@k'yı, aynı sorularda
+karşılaştırılmış iki parçalamayı ve önce hangi aşamayı düzelteceğinizi ve neye
+mal olacağını adlandıran bir paragrafı.
+
+## Alıştırmalar {#sec-rag-alistirmalar}
+
+1. **Ters dönmeyi yeniden üretin.** Kendinize ait 500 belge alın ve iki sorgu
+   kümesi kurun — biri belgenin ne hakkında olduğunu, diğeri belirli bir olgunun
+   nerede olduğunu soran. Parça boyutunu tarayın. Sıralama sizin derleminizde de
+   buradaki gibi ters dönüyor mu? Dönmüyorsa belgelerinizde farklı olan ne?
+2. **Tavanı bulun.** Sisteminizin modele gerçekten geçirdiği *k* için recall@k
+   ölçün. Sonra sisteminizin ulaşabileceği en yüksek uçtan uca doğruluğu
+   hesaplayın. Gerçekte ulaştığıyla karşılaştırın; fark sizin üretim
+   probleminizdir ve üstündeki her şey değildir.
+3. **Bir haftalık kusuru atfedin.** Sisteminizin geçen hafta ürettiği yanlış
+   cevapları alın ve üç kovaya ayırın. Oranları raporlayın. Bakmadan önce hangi
+   kovanın en büyük olacağını öngörün.
+4. **Ayrıştırıcıyı bilerek bozun.** Alanınızdan on PDF alın, metni çıkarın ve
+   okuyun. Kaç tablonun sağ çıktığını sayın. Bu alıştırmanın, onu çalıştıran
+   kişiyi şaşırtma konusunda %100'lük bir sicili var.
+5. **Dikkat dağılmasını ölçün.** Erişimi sabit tutun ve yalnızca *k*'yı 1'den
+   20'ye değiştirin. Doğruluğu çizin. Bağlam eklemenin size mal olmaya başladığı
+   noktayı bulun [@shi2023large].
+6. **Reddetmeyi sınayın.** Derleminizin cevaplayamayacağı yirmi soru yazın.
+   Kendinden emin cevapları sayın. Sonra açık bir çekimserlik yolu ekleyin ve
+   tekrar ölçün.
+7. **İki taneciklik.** Derleminizi hem bütün belge hem cümle paketli
+   tanecikliğinde indeksleyin, her sorguyu birine yönlendirin ve yönlendirmenin
+   iki indeksten birini tek başına yenip yenmediğini ölçün — @sec-erisim'in
+   erişimciler hakkında sorduğu sorunun bir üst düzeyi.
+
+## Daha derine {#sec-rag-derinlesme}
+
+Herhangi bir şey okumadan önce: kendi sisteminizden elli yanlış cevap alın ve üç
+kovaya ayırın. Dağılım size bu literatürün hangi yarısının sizi ilgilendirdiğini
+söyleyecek.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`ragas`](https://github.com/explodinggradients/ragas) | iki yarımlı değerlendirme uygulanmış hâliyle; mutlak sayıları için değil dayattığı ayrıştırma için kullanın |
+| [Eugene Yan — LLM örüntüleri](https://eugeneyan.com/writing/llm-patterns/) | RAG diğer örüntüler arasına yerleştirilmiş, takasları belirtilmiş |
+| [Chip Huyen'in blogu](https://huyenchip.com/blog/) | RAG ve etmen mimarileri üzerine, onları sevk etmiş birinden uzun soluklu uygulamalı yazılar |
+| [`llama-index` belgeleri](https://docs.llamaindex.ai/) | kendiniz kursanız bile giriş ve parçalama bölümlerini okumaya değer |
+| [Stanford CS224N](https://web.stanford.edu/class/cs224n/) | erişimle zenginleştirilmiş modelleri ve değerlendirmelerini kapsayan dersler |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| özgün formülasyon | @lewis2020rag |
+| o zamandan beri her şeyin haritası | @gao2023rag |
+| modellerin uzun bir bağlamı nasıl kullandığı | @liu2024lost |
+| etkin bir zarar olarak ilgisiz bağlam | @shi2023large |
+| iki yarımı ayrı değerlendirmek | @es2024ragas |
+| erişim yapılıp yapılmayacağına karar vermek | @asai2024selfrag |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-rag-ozet}
+
+- **İğne testi hiçbir şey bulmadı ve bölümün ilk dersi bu.** On altı koşul, 640
+  sorgu, 16.775 token'a kadar **her bağlam boyutunda ve her konumda %100**.
+  Lost-in-the-middle burada yeniden üretilmedi — çünkü nadir anahtarlı birebir
+  bir dizgi attention'ın yapabileceği en kolay şeydir, olgu hayal ürünü olduğu
+  için değil. Her şeyin geçtiği bir ölçüt sizin riskinizi ölçmüyordur.
+- **Ayakta kalan şey maliyettir ve muazzamdır.** Önemli olan tek belge yerine
+  seksen belge: **birebir aynı doğruluk için 148 kat girdi token'ı**, her istekte
+  ödenen ve attention maliyeti dizi uzunluğunda doğrusaldan hızlı büyürken.
+  Erişim, okuyamayan bir model için bir koltuk değneği değil; ihtiyacınız olmayan
+  79 belge için ödemeyi bırakma biçiminizdir.
+- **Erişim için iki neden kalıcıdır ve pencere boyutuyla ilgisi yoktur.** Model
+  donmuştur ve belgeleriniz değildir; ve bir prompt kimin hangi belgeyi
+  görebileceğini zorlayamaz.
+- **Parça boyutu, sorunun tanecikliği üzerine bir bahistir.** Bir derlemde 400
+  kelimelik parçalar haber düzeyindeki erişimde **%72,5** recall@1 ile başı çekti
+  ve olgu düzeyindeki erişimde **%93,8** ile *sonuncu* geldi; 50 kelimelik
+  parçalar tersini yaptı. Bir koşuldaki en iyi yapılandırma diğerinde en kötüsü,
+  dolayısıyla bir blog yazısından kopyalanmış bir parça boyutu, yazarının hiç
+  görmediği sorular hakkında bir tahmindir.
+- **Örtüşme bir onarımdır, güvenlik payı değil.** 100 kelimelik parçalarda 25
+  kelimelik bir örtüşme olgu düzeyindeki sorgularda **+2,0 puan**, haber
+  düzeyindekilerde **−0,7** kazandırdı; %29 daha fazla indeks karşılığında. Bir
+  sınırı aşan olguları düzeltir ve başka hiçbir şeyi.
+- **Yapı aritmetiği yendi, ölçülmüş hâliyle.** ~100 kelimelik cümle hizalı
+  parçalar **%97,8**'e ulaştı; sabit 100 kelimelik pencereler %95,5'e — ve
+  örtüşmeli varyantı **%9 daha küçük** bir indeksle yendi. Bir olgunun içinden
+  kesmeyi bırakmanın en ucuz yolu, metnin zaten kırıldığı yerden kesmektir.
+- **Tüketicinizin gerçekten okuduğu metriği izleyin.** Bu yapılandırmalar
+  arasında recall@1 on beş puan salındı; recall@5 ise %97,2 ile %100 arasında
+  kaldı. Üreticiniz beş parça okuyorsa bütün parçalama tablosu bir yuvarlama
+  hatasıdır; bir tane okuyorsa tablo *sizin sisteminizdir*.
+- **Üç kusur, tek belirti.** Yanlış bir cevap ya bir erişim kaçırması, ya bir
+  dayandırma kaçırması, ya da bir sentez kaçırmasıdır ve üç farklı düzeltmeleri
+  vardır. Ayarlamadan önce atfedin — refleks düzeltme olan gömme modelini
+  değiştirmek, üçünden birini ele alır.
+- **Çekimser kalmanın yolu olmayan bir sistem çekimser kalmaz.** Ona açık bir
+  reddetme çıktısı verin ve sonra derlemin cevaplayamayacağı sorularda sınayın.
+  Kimsenin çalıştırmadığı test odur ve reddeden bir sistemle bu seçeneği hiç
+  verilmemiş bir sistem arasındaki farktır.
