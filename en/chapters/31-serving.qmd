@@ -2,12 +2,18 @@
 
 ::: {.callout-note appearance="simple" icon="false"}
 **Chapter status: drafted.** The measurements here are small on purpose —
-about forty short requests against a 3B model on a laptop, a few minutes in
+about 150 short requests against a 3B model on a laptop, a few minutes in
 total. They are enough because the quantities that matter are ratios, and the
 ratios hold across hardware. Everything that needs a GPU fleet to observe is
-cited rather than claimed. Software: `ollama` 0.24.0 serving `llama3.2:3b`
-(Q4_K_M, 28 layers, 24 attention heads, 8 KV heads, head dimension 128), an
-explicit `num_ctx`, `temperature` 0, on Python 3.14.5 and Apple Silicon.
+cited rather than claimed. Every condition is measured five times and reported
+as a median; the conditions are run in shuffled order, so drift cannot pile up
+in the long-prompt rows; and a fixed short prompt is re-timed every fifth call
+as a control. On the run printed here that control held to **2.0%** across the
+whole session, which is what makes the rest of the table worth reading.
+Software: `ollama` 0.24.0 serving `llama3.2:3b` (Q4_K_M, 28 layers, 24
+attention heads, 8 KV heads, head dimension 128), `num_ctx` 8192,
+`temperature` 0, `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0`,
+on Python 3.14.5 and Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -53,32 +59,34 @@ tokens:
 
 ```text
 prompt tokens   prefill   prefill tok/s      decode tok/s
-          100    0.063s            1,577            189.3
-          298    0.145s            2,057            190.3
-          562    0.267s            2,102            190.4
-        1,090    0.523s            2,085            181.9
-        2,146    1.058s            2,028            176.3
-        4,258    2.307s            1,846            105.3
+           96    0.064s            1,433            191.3
+          298    0.153s            2,007            192.2
+          572    0.277s            2,047            190.9
+        1,095    0.520s            2,104            182.9
+        2,156    1.055s            2,043            177.9
+        4,247    2.292s            1,848            161.2
 ```
 
-Prefill runs at roughly **2,000 tokens per second**; decode at roughly **185**.
+Prefill runs at roughly **2,000 tokens per second**; decode at roughly **190**.
 [Reading a token is about eleven times cheaper than writing one]{.hl} — 0.5
-milliseconds against 5.4 — and the ratio, not the absolute numbers, is what
+milliseconds against 5.2 — and the ratio, not the absolute numbers, is what
 transfers to your hardware.
 
 ::: {.column-margin}
-The 1,577 tok/s on the first row is not a slower prefill; it is a fixed
-per-request overhead that a 100-token prompt cannot amortise. The last row's
-105 decode tok/s is a single noisy measurement, corrected below by a proper
-one — it is left in the table because deleting an inconvenient number is how
-you end up believing your own harness.
+The 1,433 tok/s on the first row is not a slower prefill; it is a fixed
+per-request overhead that a 96-token prompt cannot amortise. Five repetitions
+confirm it, and they also make it the noisiest row in the table — 34.5% spread
+against 2–7% everywhere else, because the fixed cost dominates a prompt that
+small. An earlier single-shot version of this table reported **105 decode
+tok/s** on the last row; repeated five times it is 161, with 0.7% spread. That
+is what one measurement buys you.
 :::
 
 So a first, crude latency model, good enough to argue with:
 
 $$
 \text{latency} \;\approx\; \underbrace{\frac{\text{prompt tokens}}{\approx 2{,}000/\mathrm{s}}}_{\text{prefill}}
-\;+\; \underbrace{\frac{\text{output tokens}}{\approx 185/\mathrm{s}}}_{\text{decode}}
+\;+\; \underbrace{\frac{\text{output tokens}}{\approx 190/\mathrm{s}}}_{\text{decode}}
 $$
 
 :::: {.anlp-fig}
@@ -96,8 +104,8 @@ $$
 
   <text x="8" y="20" class="t-xs t-muted t-b">PREFILL &#183; THE WHOLE PROMPT, ONE PASS</text>
   <rect x="8" y="30" width="286" height="66" rx="9" class="box"/>
-  <text x="151" y="56" class="t-sm t-mono t-mid">4,258 tokens</text>
-  <text x="151" y="76" class="t-sm t-mono t-mid t-accent">2.307 s</text>
+  <text x="151" y="56" class="t-sm t-mono t-mid">4,247 tokens</text>
+  <text x="151" y="76" class="t-sm t-mono t-mid t-accent">2.292 s</text>
   <text x="151" y="112" class="t-xs t-muted t-mid">parallel &#183; compute-bound</text>
 
   <path d="M294,63 H330" class="ln" marker-end="url(#sv-a)"/>
@@ -114,14 +122,14 @@ $$
   <path d="M422,63 H428" class="ln-accent" marker-end="url(#sv-b)"/>
   <path d="M508,63 H514" class="ln-accent" marker-end="url(#sv-b)"/>
   <path d="M594,63 H600" class="ln-accent" marker-end="url(#sv-b)"/>
-  <text x="513" y="112" class="t-xs t-muted t-mid">serial &#183; 5.4 ms/token &#183; memory-bound</text>
+  <text x="513" y="112" class="t-xs t-muted t-mid">serial &#183; 5.2 ms/token &#183; memory-bound</text>
 
   <path d="M8,142 H752" class="ln-thin"/>
-  <text x="8" y="136" class="t-xs t-muted t-b">A DIFFERENT REQUEST &#183; 7,455 TOKENS IN, 64 OUT</text>
+  <text x="8" y="136" class="t-xs t-muted t-b">A DIFFERENT REQUEST &#183; 7,427 TOKENS IN, 64 OUT</text>
 
   <rect x="8" y="156" width="672" height="26" rx="4" class="box-accent"/>
   <rect x="680" y="156" width="64"  height="26" rx="4" class="box"/>
-  <text x="344" y="174" class="t-xs t-mid">prefill &#8212; 4.668 s &#183; 90.7%</text>
+  <text x="344" y="174" class="t-xs t-mid">prefill &#8212; 4.715 s &#183; 91.0%</text>
   <text x="712" y="174" class="t-xs t-mid">decode</text>
   <text x="8" y="204" class="t-sm">Nine tenths of the wait happens before the first character appears.</text>
   <text x="8" y="226" class="t-sm t-muted">Streaming does not shorten that bar. It only makes the rest visible.</text>
@@ -129,9 +137,9 @@ $$
 ```
 
 ::: {.fig-cap}
-The two halves at the same scale. Prefill is one pass over 4,258 tokens;
+The two halves at the same scale. Prefill is one pass over 4,247 tokens;
 decode is 32 separate passes over the model, one per output token. The bar
-underneath is a different request — 7,455 tokens of context, 64 tokens out —
+underneath is a different request — 7,427 tokens of context, 64 tokens out —
 measured with streaming on, and it is the shape most production requests
 have: almost all of the wall clock is spent before the first character
 appears.
@@ -163,19 +171,20 @@ each generating 64 tokens:
 
 ```text
 context tokens    TTFT     total    TTFT share
-           89   0.162s   0.523s        31.0%
-        1,887   1.017s   1.397s        72.8%
-        7,455   4.668s   5.145s        90.7%
+           90   0.132s   0.487s        27.1%
+          960   0.506s   0.863s        58.7%
+        3,731   2.061s   2.476s        83.2%
+        7,427   4.715s   5.182s        91.0%
 ```
 
-[At 7,455 tokens of context, 91% of the request is over before the first
+[At 7,427 tokens of context, 91% of the request is over before the first
 character appears.]{.hl} The model is not "slow"; the prompt is long, and the
 user is waiting on prefill.
 
 Two consequences that get missed.
 
 **Streaming does not fix TTFT.** It fixes everything *after* it. Streaming
-converts a 5.1-second wait into a 4.7-second wait followed by text arriving at
+converts a 5.2-second wait into a 4.7-second wait followed by text arriving at
 reading speed, which is a large perceived improvement — but the 4.7 seconds is
 untouched, and no amount of front-end work will touch it. The lever for TTFT
 is the prompt, and @sec-serving-cache is the cheapest version of that lever.
@@ -187,21 +196,26 @@ is already in the window. Measured properly this time — two repetitions,
 
 ```text
 context tokens   decode tok/s   ms per token
-            89          185.5           5.39
-           959          185.3           5.40
-         3,743          157.4           6.35
-         7,455          138.8           7.21
+            83          189.1           5.29
+           965          186.7           5.36
+         3,731          160.6           6.23
+         7,414          140.9           7.10
 ```
 
-A 25% slowdown between an empty window and a 7,500-token one. Worth knowing
+A 25% slowdown between an empty window and a 7,400-token one. Worth knowing
 because it compounds: a long prompt costs you once in prefill and then again,
-quietly, on every token you generate. It is also the correction promised
-above — the single-run 105 tok/s in the first table was noise, and the real
-figure is 139.
+quietly, on every token you generate.
+
+Note what this table does *not* rescue. Earlier printings of this chapter used
+it to correct the first table's 105 tok/s row, and gave the corrected figure as
+139 — but 139 is the rate at **7,400** tokens, and the row being corrected was
+at **4,247**. The two are different context lengths, and the right figure for
+that row is **161**, measured directly. A correction taken from the wrong row
+is still a wrong number; it just looks sourced.
 
 ## The KV cache, and why context has a price in gigabytes {#sec-serving-kv}
 
-Decode would be far worse than 5.4 ms per token if each step recomputed the
+Decode would be far worse than 5.2 ms per token if each step recomputed the
 whole prompt. It does not, because of the
 [**KV cache**](#gloss-kv-cache){#term-kv-cache .term-ref}: the keys and values
 computed for every previous token are kept, so step *n+1* computes one new
@@ -221,9 +235,9 @@ $$
 \text{bytes per token} \;=\; 2 \times L \times H_{kv} \times d_{\text{head}} \times \text{bytes per element}
 $$
 
-For the model measured here — 28 layers, 8 KV heads, head dimension 128, fp16
-— that is $2 \times 28 \times 8 \times 128 \times 2 = 114{,}688$ bytes, or
-**112 KiB per token**. Multiply by the window:
+For this model at fp16 — 28 layers, 8 KV heads, head dimension 128 — that is
+$2 \times 28 \times 8 \times 128 \times 2 = 114{,}688$ bytes, or **112 KiB
+per token**. Multiply by the window:
 
 | context | KV cache | against a 2.0 GB model file |
 |--:|--:|:--|
@@ -233,6 +247,17 @@ For the model measured here — 28 layers, 8 KV heads, head dimension 128, fp16
 
 : What the window costs in memory, llama3.2:3b at fp16
 {tbl-colwidths="[18,20,62]"}
+
+::: {.column-margin}
+That table is fp16, which is the default and the right first calculation. The
+server these timings came from was not: it ran `OLLAMA_KV_CACHE_TYPE=q8_0`, an
+8-bit cache at 1.0625 bytes per element once the block scale is counted, which
+puts it at **59.5 KiB per token** and 7.4 GiB at the full window — a little
+over half the fp16 figure. Quantizing the *cache* is a separate lever from
+quantizing the weights, it is the one that moves the number that actually
+binds, and it is off by default. Check which one your server is running before
+you size a card, because nothing in the output tells you.
+:::
 
 [A 2 GB model with its context window full needs 14 GB of cache — the cache is
 seven times the model.]{.hl} This is why "can I run a 3B model?" is the wrong
@@ -317,17 +342,17 @@ twice:
 
 ```text
 prompt tokens   cold prefill   warm prefill   speedup   cold total   warm total
-          100         0.063s         0.013s        5x       0.338s       0.289s
-          298         0.145s         0.014s       11x       0.421s       0.288s
-          562         0.267s         0.016s       17x       0.540s       0.292s
-        1,090         0.523s         0.014s       36x       0.804s       0.291s
-        2,146         1.058s         0.013s       79x       1.347s       0.297s
-        4,258         2.307s         0.018s      126x       2.720s       0.330s
+           95         0.066s         0.016s        4x       0.300s       0.252s
+          303         0.151s         0.016s       10x       0.386s       0.252s
+          564         0.277s         0.014s       19x       0.514s       0.251s
+        1,090         0.538s         0.016s       34x       0.781s       0.259s
+        2,149         1.060s         0.012s       88x       1.311s       0.261s
+        4,247         2.290s         0.015s      153x       2.562s       0.286s
 ```
 
-Warm prefill is **flat at 13–18 milliseconds regardless of prompt length**,
-because nothing is being recomputed. At 4,258 tokens that is 126× on the
-prefill and **8.2× on the whole request**.
+Warm prefill is **flat at 12–16 milliseconds regardless of prompt length**,
+because nothing is being recomputed. At 4,247 tokens that is 153× on the
+prefill and **9.0× on the whole request**.
 
 The longer the prefix, the larger the win — which is the opposite of how most
 optimisations scale, and it is why this is the first thing to try.
@@ -413,7 +438,7 @@ viewof srvHit = Inputs.range([0, 1], {
 
 ```{ojs}
 //| echo: false
-srvRates = ({prefill: 2000, decode: 185, warm: 0.015})
+srvRates = ({prefill: 2025, decode: 190, warm: 0.015})
 ```
 
 ```{ojs}
@@ -477,7 +502,7 @@ ones with no quality cost, and teams routinely start at the bottom.
 | lever | what it buys | what it costs | reach for it |
 |:--|:--|:--|:--|
 | **Send fewer tokens** | linear on prefill and on the bill | engineering time on prompts and retrieval | [first, always]{.pro} |
-| **Prompt caching** | up to 126× prefill, measured above | a prompt ordered by stability | [first, always]{.pro} |
+| **Prompt caching** | up to 153× prefill, measured above | a prompt ordered by stability | [first, always]{.pro} |
 | **Smaller model** | 3–10× on everything | quality, measurably | when the eval says it holds |
 | **Quantization** | memory and bandwidth | some quality, task-dependent | when memory is the binding constraint |
 | **Speculative decoding** | latency only, not cost | a draft model to host | when TTFT is the complaint and cost is not |
@@ -525,8 +550,8 @@ for quantization.
 At the ratio of prompt tokens to output tokens, before you look at the model.
 
 Prefill and decode run at very different rates — measured here, about 2,000
-against 185 tokens per second — so a request with a long prompt and a short
-answer spends nearly all its time reading. At 7,455 tokens of context, 91% of
+against 190 tokens per second — so a request with a long prompt and a short
+answer spends nearly all its time reading. At 7,427 tokens of context, 91% of
 the wall clock was over before the first character appeared.
 
 If that is your shape, no decoding parameter and no faster model will help
@@ -557,9 +582,10 @@ moves, and only because the client now stops the clock at a different moment.
 Because the weights are not the whole footprint. The KV cache holds a key and a
 value for every token in the window, for every layer and every KV head.
 
-For the model measured here — 28 layers, 8 KV heads, head dimension 128, fp16 —
-that is 112 KiB per token, so a 131,072-token window is 14 GiB of cache against
-a 2.0 GB model file. Seven times the model.
+For this model at fp16 — 28 layers, 8 KV heads, head dimension 128 — that is
+112 KiB per token, so a 131,072-token window is 14 GiB of cache against a
+2.0 GB model file. Seven times the model. An 8-bit cache roughly halves it,
+which is a lever worth knowing about and one that is off by default.
 
 This is why the honest answer to "will it fit?" is a question about context
 length, and why a local server's default window is a memory decision disguised
@@ -579,7 +605,7 @@ performance bug.
 The fix is to order the prompt by stability — instructions, then schemas, then
 examples, then retrieved context, then the user's turn — and the check is to
 send the same request twice and compare prefill times. Cold and warm should
-differ by an order of magnitude or more; measured here, 2.307s against 0.018s.
+differ by an order of magnitude or more; measured here, 2.290s against 0.015s.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -665,7 +691,7 @@ looks exactly like a price change. Only then model or provider changes.
 **Q: How would you cut latency in half without changing the model?**
 
 Establish the split first — if it is 90% prefill, output-side changes cannot
-get you there. Then: prompt caching for the stable prefix, which measured 126×
+get you there. Then: prompt caching for the stable prefix, which measured 153×
 on prefill here; shortening the prompt itself, which is linear; and streaming
 to convert the remaining wait into reading time. Say what you would measure
 after each one, and say that speculative decoding is on the list only if you
@@ -817,18 +843,18 @@ once you know your own ratio.
 
 - **A request is two operations, not one.** Prefill reads the prompt in one
   parallel pass; decode writes the answer one serial token at a time. Measured
-  here at roughly **2,000 against 185 tokens per second** — writing a token
+  here at roughly **2,000 against 190 tokens per second** — writing a token
   costs about **eleven times** what reading one does. Every serving decision
   follows from which half your requests are made of.
 
-- **Latency is usually the prompt.** At 7,455 tokens of context, **90.7% of the
+- **Latency is usually the prompt.** At 7,427 tokens of context, **91.0% of the
   wall clock was over before the first character appeared**. Streaming does not
   change that number; it only makes the rest of the request visible. The lever
   for time-to-first-token is prompt length, and after that, caching.
 
 - **Long context is charged twice.** It costs prefill once, and then slows every
-  generated token: decode fell from **185 to 139 tokens per second** between an
-  empty window and a 7,500-token one.
+  generated token: decode fell from **189 to 141 tokens per second** between an
+  empty window and a 7,400-token one.
 
 - **The KV cache can dwarf the model.** At 112 KiB per token, a 131k window on a
   2.0 GB model is **14 GiB of cache — seven times the weights**. "Will it fit?"
@@ -836,8 +862,8 @@ once you know your own ratio.
   is 14 and not 42.
 
 - **Prompt caching is the first lever and it is not subtle.** Warm prefill was
-  **flat at 13–18 ms regardless of prompt length**: 126× on prefill and 8.2× on
-  the whole request at 4,258 tokens. It requires a byte-identical prefix, so
+  **flat at 12–16 ms regardless of prompt length**: 153× on prefill and 9.0× on
+  the whole request at 4,247 tokens. It requires a byte-identical prefix, so
   order the prompt by stability and put nothing volatile near the top.
 
 - **Batching buys throughput and spends latency.** Decode is memory-bound, so
