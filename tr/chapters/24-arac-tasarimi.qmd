@@ -1,0 +1,754 @@
+# API Tasarımı Olarak Araç Tasarımı {#sec-arac-tasarimi}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 24. bölüm](../../en/chapters/24-tool-design.html). Ölçümler `ollama`
+0.24.0 üzerinden `qwen3.5:9b` çalıştırıyor. Şema deneyinde hiçbir şey
+yürütülmüyor — modelin ürettiği *çağrıyı* puanlıyor, böylece modelin aritmetiği
+şemalarla ilgili bir sonucu kirletemiyor. @sec-ajan-anatomisi döngünün
+sahibidir; bu bölüm döngünün uzandığı şeyin sahibi. Yazılım: NumPy 2.5.2,
+Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- modelin ilk denemede doğru kullandığı araç şemaları yazabilir ve şemanın hangi
+  kısmının işi yaptığını söyleyebilirsiniz;
+- bir modelin toparlanabileceği hata mesajları tasarlayabilir ve toparlanıp
+  toparlanmadığını ölçebilirsiniz;
+- bir aracın ne döndürmesi ve asla ne döndürmemesi gerektiğine karar
+  verebilirsiniz;
+- geniş bir araç yüzeyini kullanılabilir tutabilir ve araç eklemeyi ne zaman
+  bırakacağınızı bilirsiniz.
+
+## Açıklama prompt metnidir {#sec-arac-tasarimi-sema}
+
+Bir [**araç şeması**](#gloss-tool-schema){#term-tool-schema .term-ref}
+belgelendirmeye benzer ve prompt gibi davranır.
+
+::: {#gloss-tool-schema .column-margin .term-gloss}
+**Araç şeması** (tool schema) — modelin bir çağrı seçmeden önce gördüğü ad,
+açıklama, tipler ve enum'lar. Belgelendirme değil prompt metnidir, çünkü model
+ondan tek bir şans alır ve bir tahmini kontrol edemez.
+[↩](#term-tool-schema){.term-back}
+:::
+
+O tek cümle bölümün kendisidir ve aşağıdaki her şey onun sonuçlarıdır.
+
+Ayrım önemlidir, çünkü ikisi farklı içgüdülerle yazılır. Belgelendirme, bir
+meslektaşına sorabilen, kaynağı okuyabilen ya da deneyip görebilen bir okur için
+yazılır.
+
+[Bir model tek bir şans alır, yalnızca şemadan ve kontrol etme imkânı
+olmadan.]{.hl} Kod tabanınızı açamaz. Örnek bir çağrı göremez. Şemanın
+söylemediği ne varsa model onu tahmin eder — ve tip denetiminden geçen bir
+tahmin, anlamaktan ayırt edilemez.
+
+Yani şema dört ayrı iş taşır ve hangisini yaptığınızı adlandırabilmek işe yarar:
+
+| alan | yaptığı iş |
+|:--|:--|
+| **ad** | modele bu aracın *ne zaman* geçerli olduğunu, başka bir şey okumadan önce söyler |
+| **açıklama** | adın belirsiz bıraktığı durumları çözer ve kullanılmaması gereken durumları eler |
+| **parametre tipleri ve enum'lar** | yanlış çağrıları caydırılmış değil temsil edilemez kılar — @sec-cozumleme'nin argümanı, bir üst düzeyde |
+| **parametre açıklamaları** | bir kullanıcının bir şeyi nasıl ifade ettiğinden API'nizin ona ne dediğine giden eşlemeyi taşır |
+
+: Dört iş, tek nesne {tbl-colwidths="[30,70]"}
+
+Son satır insanların atladığıdır ve yanlış kullanımların çoğu oradan gelir.
+Kullanıcılarınız *ne kadar harcadık* der; API'niz ona `budget_allocated` der. Bir
+şeyin bu köprüyü kurması gerekir ve şema kurmazsa model bir köprü uydurur.
+
+**Neye bakacağız.** Önce bir şemanın hangi kısmının ekmeğini gerçekten
+kazandığının ölçümü; cevap, bir araç açıklamasını cilalamaya bir öğleden sonra
+harcamış herkes için rahatsız edici. Sonra aynı muamelenin hata dizgilerine
+uygulanması; ki bunlar yapabileceğiniz diğer her tek değişiklikten değerli
+çıkıyor — ve çoğu aracın varsayılan olarak döndürdüğü biçim, sınanan dördün en
+kötüsü. Sonra bir aracın ne geri vermesi gerektiği; bu, çıktıyla değil ajanın
+belleğiyle ilgili bir soru. Sonra listelenemeyecek kadar çok araç olduğunda ne
+yapılacağı. Ve son olarak bir aracın iyi olup olmadığının nasıl anlaşılacağı; ki
+bu, bir modele sormadan cevaplayamayacağınız bir soru.
+
+### Ölçüldü: şemanın hangi kısmı işi yapıyor?
+
+Tek bir aracın, yalnızca nasıl tarif edildiğiyle ayrışan dört sürümü. Görev, bir
+proje hakkında tek bir sayısal alanı getirmek ve sorular **alanı asla birebir
+adlandırmıyor** — *ne kadar para ayrıldı*, `alan="butce"` olmak zorunda.
+Dolayısıyla eşlemeyi taşıyabilecek tek şey şema. Hiçbir şey yürütülmüyor;
+puanlanan şey modelin ürettiği çağrı.
+
+```text
+qwen3.5:9b, 60 questions, one tool, four descriptions
+
+ variant         called a tool  project right  field right  fully correct
+ A. opaque               58.3%           0.0%         0.0%           0.0%
+ B. named               100.0%         100.0%        25.0%          25.0%
+ C. enum                100.0%         100.0%       100.0%         100.0%
+ D. described           100.0%         100.0%       100.0%         100.0%
+```
+
+[İşin tamamını enum yaptı.]{.hl} Serbest dizgilerden numaralandırılmış bir
+listeye geçmek alan doğruluğunu **%25'ten %100'e** taşıdı ve bunun üstüne özenli
+düzyazı açıklamalar eklemek **ölçülebilir hiçbir şey** eklemedi. Bu, çabanın
+gittiği yerin tam tersi: insanlar açıklamayı yazar ve parametreyi dizgi olarak
+bırakır.
+
+İki satır kendi açıklamasını hak ediyor, çünkü her biri toplamların gizlediği bir
+şey öğretiyor.
+
+**Opak şema yanlış çağrılar yapmadı. Hiç çağrı yapmadı.** `a` ve `b` alan `f1`
+adlı bir araçla model onu zamanın %58,3'ünde çağırdı ve çağırmadığında parametrik
+bellekten cevapladı — `ZRG-14`'ün sözde ne olduğu hakkında bir paragraf
+uydurarak. Bu, bozuk bir çağrıdan çok daha kötü bir kusurdur: yanlış bir çağrı
+hata verir, uydurulmuş bir cevap ise cevaba benzer.
+
+**Enum olmadan model, kullanıcının sözcük dağarcığını API'nize yansıtır.** İşte B
+varyantının tamamı, ifade başına bir satır:
+
+```text
+  MISS  wanted butce     got "bütçe"           ← "ne kadar para ayrildi?"
+  MISS  wanted butce     got "mali buyukluk"   ← "mali buyuklugu nedir?"
+  OK    wanted personel  got "personel"        ← "kac kisi calisiyor?"
+  MISS  wanted personel  got "ekip mevcudu"    ← "ekip mevcudu nedir?"
+  OK    wanted sure      got "sure"            ← "kac ay surüyor?"
+  MISS  wanted sure      got "takvim"          ← "takvimi ne kadar?"
+```
+
+Doğru bildiği ikisi, kullanıcının ifadesinin API'nin kendi kelimesini içerdiği
+ikisi. Diğer her yerde sorunun sözcük dağarcığını doğrudan geçirdi — *mali
+buyukluk*, *ekip mevcudu*, *takvim*. Model kötü tahmin etmiyor; API'nizin
+`butce` dediğini bilmesinin bir yolu yok, o yüzden kullanıcının dediğini
+söylüyor.
+
+Ve ilk satıra dikkat edin; @sec-turkce-nlp'nin yeni bir yerde ortaya çıkışı:
+model, API'nin **`butce`** beklediği yere **`bütçe`** yazdı. Doğru Türkçe,
+yanlış tanımlayıcı. Parametre değerleri gerçek kelimelerin ASCII'ye katlanmış
+hâlleri olan her API'de bu kusur beklemektedir ve bir enum onu tümüyle kaldırır.
+
+:::: {.anlp-fig}
+
+```{=html}
+<div class="fig-title">Şema, iki sözcük dağarcığı arasındaki tek köprüdür</div>
+<svg viewBox="0 0 764 308" style="max-width:744px" role="img" aria-label="Dört kullanıcı ifadesi, serbest dizgili bir parametrenin ürettiği yanlış alan adları ve bir enum'un ürettiği doğru olanlar; her varyantın ölçülen doğruluğuyla birlikte.">
+  <text x="26" y="26" class="t-xs t-b t-muted">KULLANICI NE SORDU</text>
+  <text x="300" y="26" class="t-xs t-b t-rose">SERBEST DİZGİ &#8594; MODEL NE GÖNDERDİ</text>
+  <text x="566" y="26" class="t-xs t-b t-accent">ENUM &#8594; MODEL NE GÖNDERDİ</text>
+  <line x1="26" y1="36" x2="738" y2="36" class="ln-thin"/>
+
+  <text x="26" y="62" class="t-sm">"ne kadar para ayrildi?"</text>
+  <text x="300" y="62" class="t-sm t-mono t-rose">bütçe</text>
+  <text x="566" y="62" class="t-sm t-mono t-accent">butce</text>
+
+  <text x="26" y="96" class="t-sm">"mali buyuklugu nedir?"</text>
+  <text x="300" y="96" class="t-sm t-mono t-rose">mali buyukluk</text>
+  <text x="566" y="96" class="t-sm t-mono t-accent">butce</text>
+
+  <text x="26" y="130" class="t-sm">"ekip mevcudu nedir?"</text>
+  <text x="300" y="130" class="t-sm t-mono t-rose">ekip mevcudu</text>
+  <text x="566" y="130" class="t-sm t-mono t-accent">personel</text>
+
+  <text x="26" y="164" class="t-sm">"takvimi ne kadar?"</text>
+  <text x="300" y="164" class="t-sm t-mono t-rose">takvim</text>
+  <text x="566" y="164" class="t-sm t-mono t-accent">sure</text>
+
+  <line x1="26" y1="182" x2="738" y2="182" class="ln-thin"/>
+
+  <text x="26" y="216" class="t-xs t-b">60 SORUNUN TAMAMINDA</text>
+  <text x="26" y="231" class="t-xs t-muted">yalnızca yukarıdaki dördü değil</text>
+
+  <rect x="300" y="198" width="200" height="44" rx="4" class="box-rose"/>
+  <text x="400" y="216" class="t-xs t-muted t-mid">alan doğru, B varyantı</text>
+  <text x="400" y="233" class="t-sm t-b t-rose t-mid">%25,0</text>
+
+  <rect x="566" y="198" width="172" height="44" rx="4" class="box-accent"/>
+  <text x="652" y="216" class="t-xs t-muted t-mid">alan doğru, C varyantı</text>
+  <text x="652" y="233" class="t-sm t-b t-accent t-mid">%100,0</text>
+
+  <rect x="26" y="256" width="712" height="44" rx="4" class="chip"/>
+  <text x="382" y="274" class="t-xs t-b t-mid">ENUM'UN ÜSTÜNE DÜZYAZI AÇIKLAMALAR HİÇBİR ŞEY DEĞİŞTİRMEDİ</text>
+  <text x="382" y="289" class="t-xs t-muted t-mid">D varyantı da %100,0 aldı — kısıt işi zaten yapıyordu</text>
+</svg>
+```
+
+::: {.fig-cap}
+B varyantının yanlış bildiği dört ifade. Her birinde model kullanıcının kendi
+kelimesini parametreye geçirdi, çünkü şemada hiçbir şey ona API'nin o alana ne
+dediğini söylemiyordu. İlk satır en keskin durum: `bütçe` doğru Türkçedir ve
+yanlış bir tanımlayıcıdır.
+:::
+
+::::
+
+::: {.column-margin}
+Dürüst kapsam: tek model, tek araç, üç alan. Genelleşen şey *sıralamadır* —
+kısıtlar düzyazıyı yener — kesin sayılar değil. Daha büyük bir model `butce`'yi
+bağlamdan çıkarabilir; on iki alanlı bir şema enum'u daha da önemli kılar,
+daha az değil. Varyant taramasını kendi araçlarınızda çalıştırın; bir öğleden
+sonra sürer ve bu bölümdeki en yüksek verimli öğleden sonradır.
+:::
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Hangi değişiklik neyi kazandırıyor — şema varyantları ve hata biçimleri</div>
+```
+
+```{ojs}
+//| echo: false
+toolRows = [
+  {set: "schema", label: "A. opak",        tried: 58.3,  right: 0.0},
+  {set: "schema", label: "B. adlandırılmış", tried: 100.0, right: 25.0},
+  {set: "schema", label: "C. enum",        tried: 100.0, right: 100.0},
+  {set: "schema", label: "D. açıklamalı",  tried: 100.0, right: 100.0},
+  {set: "errors", label: "çıplak Error",   tried: 23.3,  right: 1.7},
+  {set: "errors", label: "yığın izi",      tried: 15.0,  right: 11.7},
+  {set: "errors", label: "belirsiz ifade", tried: 36.7,  right: 3.3},
+  {set: "errors", label: "eyleme dönük",   tried: 100.0, right: 100.0}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof toolWhich = Inputs.radio(
+  new Map([["araç şeması varyantları", "schema"], ["hata mesajı biçimleri", "errors"]]),
+  {value: "schema", label: "Göster"})
+```
+
+```{ojs}
+//| echo: false
+toolLong = toolRows.filter(d => d.set === toolWhich).flatMap(d => [
+  {label: d.label, kind: "hiç denedi", v: d.tried},
+  {label: d.label, kind: "doğrusunu yaptı", v: d.right}])
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 320, marginLeft: 130, marginBottom: 44,
+  x: {label: "görevlerin %'si", domain: [0, 108], grid: true},
+  color: {legend: true, domain: ["hiç denedi", "doğrusunu yaptı"],
+          range: ["#9BB7B6", "#0E7C7B"]},
+  marks: [
+    Plot.barX(toolLong, Plot.groupY({x: "sum"},
+      {y: "kind", x: "v", fy: "label", fill: "kind", sort: {fy: null}})),
+    Plot.text(toolLong, {y: "kind", x: "v", fy: "label", dx: 20, fontSize: 11,
+      text: d => d.v.toFixed(1) + "%"})
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+md`${toolWhich === "schema"
+  ? "Sıçrama tümüyle **B** ile **C** arasında — serbest dizgiden enum'a, %25'ten %100'e. **D**'de eklenen düzyazı açıklamalar hiçbir şey değiştirmedi. Ve **A** korkulacak kusuru gösteriyor: görevlerin %41,7'sinde aracı hiç çağırmadı ve bunun yerine bellekten cevapladı."
+  : "Son satırı diğer üçünden tek bir cümle ayırıyor. Yığın izi — çoğu aracın varsayılan olarak döndürdüğü şey — dördün *en kötüsü*: çıplak bir Error'ın %76,7'sine karşı %81,7 vazgeçme."}`
+```
+:::
+
+### Yani şemaları şu sırayla yazın
+
+Ölçüm bir sıralama veriyor ve bu, çoğu insanın izlediğinin kabaca tersi.
+
+1. **Numaralandırılabilir olan her şeyi numaralandırın.** Sabit değer kümesi olan
+   her parametre bir `enum` olur. Ölçülmüş etkisi olan değişiklik budur.
+2. **Aracı ne zaman geçerli olduğuna göre adlandırın**, neyi sardığına göre
+   değil. `db_query_orders` yerine `find_orders`.
+3. **Parametre açıklamasını bir eşleme olarak yazın**; kullanıcıların kullandığı
+   kelimelerden API'nizin istediği değere: *butce = ayrılan para*.
+4. **Sonra** araç açıklamasını yazın; adın açık bıraktığı durumlar için — aracın
+   ne için *olmadığı* dâhil, ki bir modelin ona yanlışlıkla uzanmasını durduran
+   kısım odur.
+5. **İsteğe bağlı parametreleri nadir tutun.** Her isteğe bağlı parametre,
+   modelin hiçbir bilgi olmadan vermesi gereken bir karardır ve
+   belgelemediğiniz bir varsayılan, her seferinde farklı vereceği bir tahmindir.
+
+## Hata mesajları prompt'tur {#sec-arac-tasarimi-hatalar}
+
+@sec-ajan-anatomisi'nin 6. satırı bir istisnayı bir gözleme çevirdi. Bu, hata
+dizgisini de prompt metni yapar — model onu okur ve sonra ne yapacağına karar
+verir — ve neredeyse hiç kimse onu böyle yazmaz, çünkü hata mesajları bir kayıt
+okuyacak bir insan için yazılır.
+
+İddia sınanabilir. Diğer her şeyi sabit tutun ve yalnızca aracın bozulduğunda ne
+döndürdüğünü değiştirin. Her koşulun tam olarak aynı kusurla karşılaşması için
+ilk araç çağrısı, model ne isterse istesin **koşulsuz** reddediliyor; puan
+*ikinci* çağrı üzerinden.
+
+```text
+qwen3.5:9b, 60 tasks, first call always rejected, four error styles
+
+ error style     retried  valid field  right field   gave up
+ bare              23.3%         1.7%         1.7%     76.7%
+ traceback         15.0%        11.7%        11.7%     81.7%
+ vague             36.7%         3.3%         3.3%     63.3%
+ actionable       100.0%       100.0%       100.0%      0.0%
+```
+
+Dört dizgi şunlardı:
+
+```text
+ bare        "Error"
+
+ traceback   Traceback (most recent call last):
+               File "server.py", line 118, in veri_getir
+                 return RECORDS[proje][alan]
+             KeyError: 'bütçe'
+
+ vague       "HATA: gecersiz alan adi."
+
+ actionable  "HATA: 'bütçe' gecerli bir alan degil.
+              Gecerli alanlar sunlardir: butce, personel, sure."
+```
+
+[Tek bir cümle toparlanmayı %1,7'den %100'e taşıdı.]{.hl} Bir model değişikliği
+değil, bir prompt değişikliği değil, bir yeniden deneme politikası değil — bir
+işlevin döndürdüğü farklı bir dizgi.
+
+O tablodaki üç şey ciddiye alınmaya değer.
+
+**Yığın izi dördün en kötüsü.** Aynı zamanda araçlarınızın bugün büyük olasılıkla
+döndürdüğü şey, çünkü hiçbir şey yapmazsanız olan budur. Çıplak bir `"Error"`dan
+daha kötü: %76,7'ye karşı %81,7 vazgeçti. Bir yığın izi yoğundur, otoriter
+görünür ve neyin işe yarayacağına dair hiçbir ifade içermez; dolayısıyla *şunu
+dene* değil *bu bozuk* diye okunur. Yapılandırılmış işe yaramazlık, sade işe
+yaramazlıktan iyi değildir.
+
+**Baskın kusur döngüye girmek değil vazgeçmektir.** Dört biçimden üçü vakaların
+çoğunluğunda terk üretti — model araç çağırmayı bıraktı ve veriyi almadan
+cevapladı. Bu, en azından kendini transkriptte duyuran bir yeniden deneme
+döngüsünden kötüdür. @sec-ajan-anatomisi zıt kusuru buldu, durmayan bir ajan;
+burada aynı mimari *devam etmiyor* ve belirleyici etken bir cümle.
+
+**"Geçersiz" hiçbir şeyden azıcık iyidir.** `vague` biçimi problemi kelimelerle
+adlandırıyor ve yine de zamanın %3,3'ünde toparlandı. İşe yarayan kısım bir
+şeyin yanlış olduğunu söylemek değil. Neyin doğru olacağını söylemek.
+
+### Bunun size verdiği kural
+
+Bir modelin kullanabileceği bir hata mesajının üç parçası vardır ve önemli olan
+sonuncusudur:
+
+```text
+  1. ne bozuldu        'bütçe' geçerli bir alan değil
+  2. neden             (isteğe bağlı; çoğu zaman gereksiz)
+  3. ne işe yarardı    geçerli alanlar: butce, personel, sure
+```
+
+Üçüncü kısmı yazın, gerisi isteğe bağlı. Onu atlarsanız bir araç değil bir kayıt
+satırı yazmışsınızdır.
+
+İçine kurmaya değer iki sonuç:
+
+- **Geçerli seçenekleri hatada sayın**, tam olarak bir enum'da yapacağınız gibi.
+  Küme listelenemeyecek kadar büyükse en yakın birkaçını listeleyin — `butce'yi
+  mi kastettiniz?` eksiksiz bir toparlanma talimatıdır.
+- **Asla ham bir istisna döndürmeyin.** Yakalayın ve çevirin. Çeviri tek satırlık
+  bir işlevdir ve bu kanıta göre bir araçta yapabileceğiniz diğer her tek
+  değişiklikten değerlidir.
+
+## Bir aracın döndürdüğü şey tasarımının parçasıdır {#sec-arac-tasarimi-sonuclar}
+
+Bir aracın dönüş değeri doğrudan transkripte gider ve @sec-ajan-anatomisi'nin
+ortaya koyduğu gibi transkript ajanın durumunun *kendisidir*. Yani bir dönüş
+değeri çıktı değildir — sonraki her adımın okuyacağı ve bedelini ödeyeceği
+paylaşılan belleğe bir yazmadır.
+
+Üç kural çıkıyor ve üçü de önce insanlar için yazılmış araçlar tarafından rutin
+olarak çiğneniyor.
+
+**50.000 token döndüren bir araç ajanı yavaşlatmamış, bozmuştur.** Sonraki
+adımların ihtiyaç duyduğu bağlamı tüketmiş, daha önceki gözlemleri daha az iyi
+kullanıldıkları ortaya doğru itmiş ve kalan her model çağrısının maliyetini
+çarpmıştır. *Görevin* ihtiyaç duyduğunu döndürün: bütün kaydı değil üç alanı;
+bütün tabloyu değil eşleşen satırları.
+
+**Sayfalayın ve bunu sonuçta söyleyin.** `"247 eşleşmenin 10'u gösteriliyor;
+devamı için offset=10 ile yeniden çağırın"`, modelin üzerine hareket
+edebileceği bir cümledir. Sessizce ona kırpmak yalan söyleyen bir araçtır ve
+modelin bunu öğrenmesinin yolu yoktur.
+
+**Ham biçim kullanılamaz olduğunda araç tarafında özetleyin.** 40 sayfalık bir
+PDF'i saran bir araç 40 sayfa döndürmemeli. Ne döndüreceği, ajanın ne için
+olduğuna dair bir tasarım kararıdır ve bunu aracın içinde vermek, onu aracı
+kullanan her prompt'un dışında tutar.
+
+### Eylemler, aramalardan farklı semantik ister
+
+Yukarıdakilerin hepsi okumakla ilgili. Bir *şey yapan* araçlar, salt okunur
+araçların yok sayabileceği üç özelliğe ihtiyaç duyar ve bunları eklemenin en ucuz
+zamanı ilk olaydan öncedir.
+
+| özellik | bir ajanın buna neden özellikle ihtiyacı var |
+|:--|:--|
+| **Etkisiz (idempotent)** | döngü yeniden deneyecektir. Bir adım bütçesi, bir zaman aşımı ya da sonucu görmemiş bir model, hepsi ikinci bir çağrı üretir — ve "faturayı oluştur" iki fatura oluşturmamalı |
+| **Kuru çalıştırma kipi** | ajanın ya da sizin, taahhüt etmeden önce etkiyi görmenizi sağlar. Birinci sınıf bir `dry_run: true` parametresi, her miktardaki prompt talimatından değerlidir |
+| **Onay kapılı** | bazı eylemler bir modelin sözüyle hiç yürütülmemeli. O kapı prompt'ta değil çalışma zamanında durur — kitabın guardrail bölümü bunun bir bölüme dönüştüğü yerdir |
+
+: Salt okunur araçların atlayabileceği üç özellik {tbl-colwidths="[26,74]"}
+
+Genel ilke @sec-ajan-anatomisi'ninkidir, araç yazarı için yeniden ifade edilmiş:
+model argüman üretir ve çalışma zamanı karar verir. İncelenmemiş bir pull
+request'in otomatik yapmasına izin vermeyeceğiniz hiçbir şeyi bir araç
+çağrısının otomatik yapmasına izin vermeyin.
+
+## Elli aracın ötesine ölçeklenmek {#sec-arac-tasarimi-olcek}
+
+Önceki bölüm, bir aracın çağrıldığında bağlama ne koyduğuyla ilgiliydi. Bu bölüm
+araçların, herhangi biri çağrılmadan *önce* neye mal olduğuyla ilgili.
+
+Her araç tanımı her çağrının bağlamında durur, dolayısıyla elli araçlık düz bir
+liste, herhangi biri ilgili olsun olmasın her adımda ödenen büyük ve sabit bir
+vergidir. Ayrıca *daha az* doğru hâle gelir: daha çok benzer seçenek, komşusunu
+seçmek için daha çok şans demektir.
+
+Mimarinizi ne kadar değiştirdiklerine göre artan sırada üç çıkış yolu:
+
+- **Ad alanlarına ayırın ve budayın.** Geniş araç yüzeylerinin çoğu, tarihsel
+  nedenlerle aynı şeyi yapan üç araç içerir. Onları birleştirmek bedava
+  doğruluktur.
+- **Ara, sonra yükle** —
+  [**kademeli açılım**](#gloss-progressive-disclosure){#term-progressive-disclosure .term-ref}.
+  Tek bir `find_tools(query)` açığa çıkarın ve o adım için yalnızca eşleşen
+  tanımları yükleyin. Bu, @sec-erisim'in kendi API yüzeyinize uygulanmış hâlidir
+  ve kabaca elli aracın üstünde standart cevaptır.
+- **Bunun yerine ona bir yorumlayıcı verin.** Araçlarınız çoğunlukla küçük
+  dönüşümlerse, korumalı bir kod ortamı elli tanımın yerine bir tane geçirir —
+  model bir menüden seçmek yerine ihtiyacı olanı besteler.
+
+::: {#gloss-progressive-disclosure .column-margin .term-gloss}
+**Kademeli açılım** (progressive disclosure) — hepsi yerine yalnızca mevcut
+adımla ilgili araç tanımlarını yüklemek; böylece geniş bir yüzey her çağrıyı
+vergilendirmez. [↩](#term-progressive-disclosure){.term-back}
+:::
+
+### Kod kipi ve neye mal olduğu
+
+Üçüncü seçenek — [**kod kipi**](#gloss-code-mode){#term-code-mode .term-ref} —
+net biçimde adlandırılmayı hak ediyor, çünkü ciddi sistemlerde giderek
+varsayılan hâline geliyor.
+
+::: {#gloss-code-mode .column-margin .term-gloss}
+**Kod kipi** (code mode) — bir ajana sabit bir araç listesi yerine korumalı bir
+yorumlayıcı vermek. Besteleme, döngüler ve ara değişkenler bedava gelir;
+okunabilir bir beyaz liste gelmez. [↩](#term-code-mode){.term-back}
+:::
+
+`filter_rows`, `sum_column` ve `join_tables` yerine bir korumalı alan açığa
+çıkarır ve bestelemeyi modele yazdırırsınız. Gerçekten daha ifade gücü
+yüksektir: besteleme, döngüler ve ara değişkenler bedava gelir ve bunlar tam da
+sabit bir araç listesinin zorlaştırdığı şeylerdir.
+
+Bedeli, [bir beyaz listenin yerine bir yorumlayıcı koymuş olmanızdır]{.hl}. Bir
+araç listesi okuyabildiğiniz bir güvenlik sınırıdır; bir korumalı alan kurmanız
+ve inanmayı sürdürmeniz gereken bir güvenlik sınırıdır. Bu gerçek bir takastır
+ve buradaki bir paragrafa değil kitabın ajan güvenliği bölümüne aittir — ama
+tasarım kararı, hangi yüzeyi açığa çıkaracağınızı seçtiğinizde, bu bölümde
+verilir.
+
+## Bir aracı değerlendirmek {#sec-arac-tasarimi-degerlendirme}
+
+Bir araç çalıştığı için doğru değildir. **Model onu doğru çağırdığında**
+doğrudur; ki bu çiftin bir özelliğidir ve ancak sorarak ölçülebilir.
+
+Değerlendirme bir öğleden sonrada kurulacak kadar küçüktür ve bu bölümün iki
+deneyiyle aynı biçimdedir:
+
+1. **Bu araca ulaşması gereken yirmi gerçek istek toplayın**; API'nizin
+   adlandırıldığı gibi değil, kullanıcıların ifade ettiği gibi. Yanlış kullanım
+   burada saklanır.
+2. **Sonucu değil çağrıyı puanlayın.** Doğru araç seçildi mi; argümanlar doğru
+   mu? Yürütmek bir şema problemini aşağı akıştaki her şeyle karıştırır —
+   yukarıdaki şema deneyi bilerek hiçbir şey yürütmedi.
+3. **Üç kusur türünü ayrı sayın**, çünkü farklı düzeltmeleri vardır:
+
+| kusur | ne demek | neyi düzeltir |
+|:--|:--|:--|
+| **Çağrılmadı** | model araçsız cevapladı ya da komşusunu seçti | *ad* ve açıklamanın "şu durumda kullan" kısmı |
+| **Yanlış çağrıldı** | doğru araç, yanlış argümanlar | tipler ve enum'lar, sonra parametre açıklamaları |
+| **Toparlanamadı** | modelin üzerine hareket edemediği başarısız bir çağrı | hata dizgisi |
+
+: Üç kusur türü, üç farklı düzeltme {tbl-colwidths="[20,44,36]"}
+
+4. **Yirmi isteği regresyon kümenize ekleyin.** Bir araç açıklaması prompt
+   metnidir, dolayısıyla onu değiştirmek sistem davranışında bir değişikliktir ve
+   bir prompt'u değiştirmekle aynı muameleyi hak eder —
+   @sec-llm-degerlendirme bir farkın anlam kazanması için kaç maddeye ihtiyacınız
+   olduğunu boyutlandırdı.
+
+"Çağrılmadı" satırı üretimde ölçülmeye değer olandır, çünkü aksi hâlde
+görünmezdir. Hiç seçilmeyen bir araç ne hata ne kayıt üretir; yalnızca sessizce
+katılmaz ve model bellekten cevaplar — ki opak şemanın zamanın %41,7'sinde,
+cevaba benzeyen bir düzyazıyla yaptığı tam olarak budur.
+
+## Sezgi kontrolleri {#sec-arac-tasarimi-sezgi}
+
+Her birini açmadan önce cevaplayın. Dördü bu bölümün tartışmayla değil ölçümle
+çözdüğü sorular; diğer ikisi savunduğu ve ölçemediği tasarım kararları.
+
+::: {.callout-note collapse="true"}
+## 1. Bir araç şemasında zamanınızı nereye harcamalısınız?
+
+Düzyazıdan önce enum'lara. Burada ölçüldü: bir parametreyi serbest dizgiden
+numaralandırılmış bir listeye taşımak doğru çağrıları **%25'ten %100'e** çıkardı
+ve üstüne özenli açıklamalar eklemek ölçülebilir hiçbir şey eklemedi. Kısıtlar
+yanlış çağrıları temsil edilemez kılar; açıklamalar yalnızca daha az olası kılar
+ve modelin sizin sözcük dağarcığınızı doğru tahmin edip etmediğini kontrol
+etmesinin yolu yoktur.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Aracınızın kötü adlandırılmış, belgesiz bir şeması var. Kusur ne?
+
+Genellikle yanlış bir çağrı değil — **hiç çağrı olmaması**. Opak bir şemayla
+model burada aracı yalnızca zamanın %58,3'ünde çağırdı ve aksi hâlde parametrik
+bellekten cevapladı; bilemeyeceği bir şey hakkında kendinden emin bir paragraf
+üreterek. Yanlış bir çağrı görebileceğiniz bir hata verir; kullanılmayan bir araç
+makul bir cevap ve hiç sinyal üretmez.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. API'niz "butce" isterken model neden "mali buyukluk" gönderiyor?
+
+Çünkü ona aksini söyleyen bir şey yok, o yüzden kullanıcının sözcük dağarcığını
+parametrenize yansıtıyor. Bu bölümün ölçümünde işe yarayan tek ifadeler,
+kullanıcının kelimelerinin API'nin kendi kelimesini içerdiği ikisiydi. Bir durum
+özellikle fark edilmeye değer: model, API'nin `butce` beklediği yere `bütçe`
+yazdı — doğru Türkçe, yanlış tanımlayıcı ve değerleri ASCII'ye katlanmış
+kelimeler olan her API'nin içinde bekleyen bir kusur.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Bir araç bozulduğunda ne döndürmeli?
+
+Neyin işe yarayacağını. Dört biçim üzerinden ölçüldü: toparlanma, yalnızca
+geçersiz değeri adlandırıp geçerlileri listeleyerek **%1,7'den %100'e** çıktı.
+Çarpıcı satır yığın izi: **%81,7 vazgeçmeyle** çıplak bir `"Error"`dan kötüydü,
+çünkü yoğun, otoriter ve ne deneneceğine dair hiçbir ifade içermiyor. Asla ham
+bir istisna döndürmeyin.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Bir araç bütün kaydı döndürüyor — 8.000 token. Problem mi?
+
+Evet ve o adım için değil bütün çalıştırma için bir problem. Dönüş değeri
+transkripte gider; @sec-ajan-anatomisi'nin gösterdiği gibi transkript ajanın
+durumunun *kendisidir*, dolayısıyla sonraki her model çağrısında yeniden
+gönderilir ve sonraki adımların ihtiyaç duyduğu şeyi dışarı iter. Görevin ihtiyaç
+duyduğu alanları döndürün, sayfalamayı sonuçta belirterek sayfalayın ve ham biçim
+kullanılamaz olduğunda araç tarafında özetleyin.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Ne zaman araç eklemeyi bırakıp bir yorumlayıcı açığa çıkarırsınız?
+
+Araçlar çoğunlukla kullanıcıların *bestelemek* istediği küçük dönüşümlerse —
+süz, sonra topla, sonra birleştir — çünkü besteleme tam olarak sabit bir
+listenin zorlaştırdığı ve kodun bedava kıldığı şeydir. Bedeli açıkça söyleyin:
+okuyabildiğiniz bir beyaz listenin yerine, kurmanız ve güvenmeyi sürdürmeniz
+gereken bir korumalı alan koydunuz. Bu, bu bölümde verilen ve kitabın ajan
+güvenliği bölümünde ödenen bir güvenlik kararıdır.
+:::
+
+## Mülakat soruları {#sec-arac-tasarimi-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+ölçümlerinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Mekanizmayı anlayıp anlamadığınızı sınayanlar
+
+**S: İyi bir araç şemasını ne yapar?**
+
+Diğer her şeye karar veren çerçeveden başlayın: şema belgelendirme değil prompt
+metnidir, çünkü model ondan tek bir şans alır ve kontrol edemez. Sonra işi etkiye
+göre sıralayın. Önce enum'lar — burada ölçüldü, tek bir parametreyi
+numaralandırmak doğru çağrıları %25'ten %100'e çıkardı, üstüne düzyazı açıklamalar
+hiçbir şey eklemedi. Sonra aracın *ne zaman* geçerli olduğunu söyleyen bir ad.
+Sonra kullanıcıların kelimelerinden API'nizin kelimelerine bir eşleme olarak
+yazılmış parametre açıklamaları, çünkü aksi hâlde model kullanıcının sözcük
+dağarcığını doğrudan geçirir.
+
+**S: Ajanınız soruyu cevaplayacak bir aracı yok sayıyor. Neden?**
+
+Büyük olasılıkla ad ve açıklama ne zaman geçerli olduğunu söylemiyor, dolayısıyla
+model durumu bu aracın durumu olarak tanımıyor. Cevabın önemli yarısı o kusurun
+neye benzediğidir: bir hata değil, parametrik bellekten bir cevap. Bu bölümün
+ölçümünde opak bir şema zamanın %41,7'sinde çağrılmadı ve bunun yerine kendinden
+emin, uydurulmuş bir düzyazı üretti. Yani yalnızca kusurları değil *seçimi* de
+ölçün.
+
+**S: Bir araç hata durumunda ne döndürmeli?**
+
+Neyin işe yarayacağını söyleyen bir cümle, geçerli seçenekler numaralandırılmış
+olarak. Dört biçim üzerinden ölçüldü, bu toparlanmayı %1,7'den %100'e taşıdı. Ve
+sezgiye aykırı kısmı söyleyin, çünkü işe yarayan o: bir yığın izi dördün *en
+kötüsüydü* — çıplak bir "Error"dan kötü — çünkü otoriter görünür ve ileri bir yol
+içermez. İstisnayı yakalayın ve çevirin.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Bir aracı nasıl değerlendirirsiniz?**
+
+Modelin onu doğru çağırıp çağırmadığına bakarak; ki bu çiftin bir özelliğidir.
+Kullanıcıların ifadesiyle yirmi istek, bir şema probleminin aşağı akıştaki her
+şeyle karışmaması için sonuç yerine üretilen çağrı üzerinden puanlanmış ve
+çağrılmadı / yanlış çağrıldı / toparlanamadı diye kovalanmış — çünkü bunların üç
+farklı düzeltmesi var. Sonra yirmiyi regresyon kümesinde tutun, çünkü bir açıklama
+değişikliği bir davranış değişikliğidir.
+
+**S: Seksen aracınız var ve doğruluk düşüyor. Ne yaparsınız?**
+
+Önce birleştirir ve budarım, çünkü geniş yüzeyler benzerler biriktirir ve her
+fazladan komşu, yanlışını seçmek için başka bir şanstır. Sonra düz bir listeden
+ara-sonra-yükle'ye geçerim, böylece bağlamı yalnızca ilgili tanımlar işgal eder —
+@sec-erisim'in kendi API'nize uygulanmış hâli. Araçlar çoğunlukla küçük ve
+bestelenebilir dönüşümlerse onları korumalı bir yorumlayıcıyla değiştirmeyi
+düşünün ve okunabilir bir beyaz listeyi artık sürdürmeniz gereken bir güvenlik
+sınırıyla takas ettiğinizi açıkça söyleyin.
+
+## 2026 alet çantası {#sec-arac-tasarimi-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle yerelde çalıştı ve şema deneyi hiçbir
+şey yürütmedi — yalnızca çağrıları puanladı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | araç çağırmayla `qwen3.5:9b` sunmak |
+| `numpy` | 2.5.2 | görev üretimi ve puanlama |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `pydantic-ai` | 2.35.3 | doğrulama hatasının zaten iyi bir hata mesajı olduğu tipli araçlar |
+| `outlines` | 1.3.3 | şemayı ummak yerine çözümleme anında zorlamak |
+| `jsonschema` | 4.26.0 | yürütmeden önce argümanları doğrulamak; çalışma zamanı sınırının yaşadığı yer |
+| `openai-agents` | 0.22.0 | guardrail'leri iliştirilmiş araç tanımları |
+| `smolagents` | 1.26.0 | aynı görevde bir araç listesini kod kipiyle karşılaştırmak |
+| `mcp` | 2.1.1 | araçları standart bir protokol üzerinden açığa çıkarmak |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: bir aracı ölçerek düzeltin {#sec-arac-tasarimi-lab}
+
+Altı adım, bir öğleden sonra ve dizinin amacı, her seferinde tek bir şeyi
+değiştirmeniz — böylece sonunda hangi değişikliğin neyi kazandırdığını
+söyleyebilirsiniz.
+
+### Adım 1 — modelin yanlış kullandığı bir araç seçin
+
+Hangisi olduğunu bilmiyorsanız ilk görevi bulmuşsunuzdur: bir gün boyunca araç
+çağrılarını argümanlarıyla kaydedin.
+
+### Adım 2 — kullanıcıların kelimeleriyle yirmi istek yazın
+
+API'nizin kelimeleriyle değil. İkisi arasındaki boşluk ölçülen şeydir.
+
+### Adım 3 — hiçbir şey yürütmeden çağrıyı puanlayın
+
+Doğru araç, doğru argümanlar, ikisi ya da hiçbiri. Baseline'ı kaydedin.
+
+### Adım 4 — tek bir şeyi değiştirin: enum ekleyin
+
+Sabit değer kümesi olan her parametreye. Yeniden ölçün. Bu bölümün aracında o tek
+değişiklik 75 puan etti.
+
+### Adım 5 — şimdi açıklamaları yeniden yazın
+
+Yeniden ölçün. Farkı dürüstçe raporlayın; buradaki gibi sıfırsa bile.
+
+### Adım 6 — bilerek bozun ve hata dizgisini düzeltin
+
+Başarısız olan bir çağrı zorlayın. Önce çıplak hatayı, sonra eyleme dönük olanı
+deneyin. Modelin ne sıklıkla toparlandığını sayın.
+
+### Neyi teslim edeceksiniz
+
+Kendinize ait dört satırlık tabloyu — baseline, enum'lar, açıklamalar, hata
+dizgisi — ve hangi değişikliğin en büyük olacağını öngöreceğinizi ve haklı olup
+olmadığınızı söyleyen bir cümleyi.
+
+## Alıştırmalar {#sec-arac-tasarimi-alistirmalar}
+
+1. **Enum taraması.** Sabit değer kümesi olan serbest dizgili bir parametresi
+   olan bir araç alın. Doğru çağrıları ölçün, enum'u ekleyin, yeniden ölçün. İki
+   sayıyı da raporlayın.
+2. **Sizin değil kullanıcıların kelimeleri.** Araçlarınızdan biri için,
+   kullanıcılarınızın gerçekten kullandığı sözcük dağarcığıyla yirmi istek yazın.
+   Kaçının doğru argümanlar ürettiğini sayın. Fark, parametre açıklamalarınızın
+   işidir.
+3. **En kötü hatayı yeniden yazın.** Araçlarınızdan birinin döndürebileceği en
+   çirkin hata dizgisini bulun. Üç parçalı biçimde yeniden yazın. Toparlanmayı
+   öncesi ve sonrasıyla ölçün.
+4. **Sessiz aracı bulun.** Hangi araçların hiç seçilmediğini ölçün. Her biri için
+   gereksiz mi yoksa kötü mü adlandırıldığına karar verin — ikisi de
+   düzeltilebilir ve ikisi de ölçüm olmadan görünmez.
+5. **Bir dönüş değerini bütçeleyin.** Bütün bir kaydı döndüren bir araç alın ve
+   on adımlık bir çalıştırmada neye mal olduğunu hesaplayın. Sonra bunun yerine ne
+   döndürmesi gerektiğine karar verin.
+6. **Kuru çalıştırma.** Bir şey yazan bir araca `dry_run` parametresi ekleyin.
+   Dikkatli olması istendiğinde ajanın onu kullanıp kullanmadığını ve parametre
+   var olduğunda talimatın gerekli olup olmadığını ölçün.
+7. **ASCII tuzağı.** API'niz aksanlı bir dildeki kelimelerden türetilmiş ASCII'ye
+   katlanmış tanımlayıcılar kullanıyorsa, `bütçe`/`butce`'yi bir kullanıcıdan önce
+   yakalayan testi yazın.
+
+## Daha derine {#sec-arac-tasarimi-derinlesme}
+
+Herhangi bir şey okumadan önce şunu yapın: bir araç alın, sabit değer kümesi olan
+her parametreye enum ekleyin ve değişimi ölçün. Yirmi dakika sürer.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Writing tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents) — Anthropic | bu bölümün konusunun bir şartnameye en yakın hâli; araç yanlış kullanımını ölçekte izleyen insanlardan |
+| [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) — Anthropic | çevreleyen argüman: araçlara hiç ihtiyaç duymadan önce ne kurmalı |
+| [`pydantic-ai`](https://github.com/pydantic/pydantic-ai) | tipli işlevler olarak araçlar, doğrulama hataları zaten model tarafından okunabilir — hata mesajı bulgusu yerleşik hâlde |
+| [`outlines`](https://github.com/dottxt-ai/outlines) | @sec-cozumleme'nin kısıtlı üretimi; bir enum'u öneri değil garanti yapan mekanizma |
+| [`smolagents`](https://github.com/huggingface/smolagents) | kod kipli ajanlar içerir, böylece iki yüzeyi kendi görevinizde karşılaştırabilirsiniz |
+| [JSON Schema belgeleri](https://json-schema.org/understanding-json-schema) | gerçekte içinde yazdığınız kısıt sözcük dağarcığı; çoğu insan onda birini kullanıyor |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| modellerin işlev çağırmayı öğrenmesi | @schick2023toolformer |
+| araç kullanımıyla iç içe geçmiş akıl yürütme | @yao2023react |
+| şemayı katı bir kısıt yapmak | @willard2023efficient |
+| kendini düzeltmenin neyi düzeltip düzeltmediği | @huang2024large |
+| ölçekte araç kullanımı ve kusur biçimleri | @qin2024toolllm |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-arac-tasarimi-ozet}
+
+- **Bir araç şeması belgelendirme değil prompt metnidir.** Model ondan tek bir
+  şans alır, kaynağınızı okuyamaz ve bir tahmini kontrol edemez. Şemanın
+  söylemediği ne varsa uydurur.
+- **İşi enum'lar yapar, düzyazı yapmaz.** Bir parametreyi serbest dizgiden
+  numaralandırılmış bir listeye taşımak doğru çağrıları **%25'ten %100'e**
+  çıkardı ve üstüne özenli açıklamalar eklemek **ölçülebilir hiçbir şey**
+  eklemedi. Zamanı ölçümün olduğu yere harcayın.
+- **Kötü bir şema yanlış çağrı değil hiç çağrı üretir.** Opak varyant zamanın
+  **%41,7'sinde** çağrılmadı ve bunun yerine parametrik bellekten cevapladı —
+  kendinden emin, uydurulmuş bir paragraf; ki bu bir hatadan kötüdür, çünkü
+  cevaba benzer.
+- **Kısıt olmadan model kullanıcının sözcük dağarcığını API'nize yansıtır.**
+  *mali buyukluk*, *ekip mevcudu*, *takvim* — ve API'nin `butce` istediği yerde
+  `bütçe`; ki bu, @sec-turkce-nlp'nin probleminin bir işlev imzasının içinde
+  ortaya çıkışıdır.
+- **Hata dizgisi diğer her tek değişiklikten değerlidir.** Toparlanma, geçersiz
+  değeri adlandırıp geçerlileri listeleyerek **%1,7'den %100'e** çıktı. Neyin işe
+  *yarayacağını* yazın; gerisi isteğe bağlıdır.
+- **Bir yığın izi hiçbir şeyden kötüdür.** **%81,7 vazgeçmeyle** işe yaramazlıkta
+  çıplak bir `"Error"`ı geçti, çünkü otoriter görünür ve ileri bir yol sunmaz.
+  Yakalayın ve çevirin.
+- **Bir hatadan sonra baskın kusur döngüye girmek değil vazgeçmektir.** Dört hata
+  biçiminden üçü modeli araç çağırmayı bırakıp veriyi almadan cevaplamaya itti —
+  bir yeniden deneme döngüsünden daha sessiz ve daha kötü bir kusur.
+- **Bir aracın döndürdüğü şey, ajanın durumuna bir yazmadır.** Görevin ihtiyaç
+  duyduğu alanları döndürün, sayfalamayı sonuçta belirtin ve araç tarafında
+  özetleyin. 50.000 token döndüren bir araç ajanı yavaşlatmamıştır; sonraki
+  adımların ihtiyaç duyduğu bağlamı almıştır.
