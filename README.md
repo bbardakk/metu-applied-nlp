@@ -81,7 +81,9 @@ make render && make serve             # iki dili birleştirip localhost:4200'de 
 - **Sözlüğe terim ekleme:** `en/appendices/glossary.csv`'yi düzenle (grup
   sırası korunur, grup içinde alfabetik), sonra `make glossary`.
   `en/appendices/c-glossary.qmd` ve `tr/appendices/c-sozluk.qmd` içindeki
-  tablolar üretilmiştir — elle düzenleme.
+  tablolar üretilmiştir — elle düzenleme. `notes` sütunu İngilizce sayfaya,
+  `notes_tr` Türkçe sayfaya gidiyor; `make check` birini doldurup diğerini
+  boş bırakmayı reddeder.
 - **İmza stiller:** vurgu için `[önemli ifade]{.hl}` (fosforlu kalem
   efekti); interaktifleri `::: {.anlp-widget}` bloğu içine al.
 - **Çapraz referans:** başlık çapasıyla `@sec-transformers`; kaynakça için

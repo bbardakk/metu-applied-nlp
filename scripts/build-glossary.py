@@ -53,11 +53,13 @@ TARGETS = (
         "path": ROOT / "en" / "appendices" / "c-glossary.qmd",
         "headers": ("English", "Türkçe", "Notes"),
         "group": lambda g: g,
+        "notes": "notes",
     },
     {
         "path": ROOT / "tr" / "appendices" / "c-sozluk.qmd",
         "headers": ("İngilizce", "Türkçe", "Notlar"),
         "group": lambda g: TR_GROUPS[g],
+        "notes": "notes_tr",
     },
 )
 
@@ -66,12 +68,12 @@ def row(cells):
     return "|" + "|".join(f" {c} " if c else " " for c in cells) + "|"
 
 
-def render(entries, headers, group_name):
+def render(entries, headers, group_name, notes_key):
     out = []
     for group in dict.fromkeys(e["group"] for e in entries):
         out += [f"## {group_name(group)}", "", row(headers), "|---|---|---|"]
         out += [
-            row((e["english"], e["turkish"], e["notes"]))
+            row((e["english"], e["turkish"], e[notes_key]))
             for e in entries
             if e["group"] == group
         ]
@@ -80,8 +82,16 @@ def render(entries, headers, group_name):
 
 
 def check_order(entries):
-    """Groups must be contiguous and terms alphabetized within each group."""
+    """Groups contiguous, terms alphabetized, and every note translated.
+
+    The Turkish page prints notes_tr, so a term added with an English note
+    and no Turkish one would render a blank cell in a published edition
+    rather than fail anywhere visible.
+    """
     problems = []
+    for i, e in enumerate(entries):
+        if e["notes"].strip() and not e.get("notes_tr", "").strip():
+            problems.append(f"row {i + 2}: {e['english']!r} has no notes_tr")
     seen = []
     for i, e in enumerate(entries):
         if e["group"] not in seen:
@@ -106,7 +116,7 @@ def main():
         entries = list(csv.DictReader(f))
 
     if problems := check_order(entries):
-        print(f"{CSV_PATH.name} is out of order:", file=sys.stderr)
+        print(f"{CSV_PATH.name} needs fixing:", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
@@ -123,7 +133,7 @@ def main():
             status = 1
             continue
 
-        body = render(entries, target["headers"], target["group"])
+        body = render(entries, target["headers"], target["group"], target["notes"])
         updated = f"{head}{BEGIN}\n{body}\n\n{END}{tail}"
 
         if args.check:
