@@ -1,54 +1,745 @@
 # Governance, Compliance, and FinOps {#sec-governance}
 
 ::: {.callout-note appearance="simple" icon="false"}
-**Chapter status: skeleton.**
+**Chapter status: drafted.** One measurement: the same 100-item extraction
+suite from @sec-production-eval run across a four-model ladder at temperature 0,
+then evaluated as a **cascade** — answer with the cheapest model, escalate only
+what a runtime validator rejects. It exists to put a number on the cost lever
+everyone recommends and nobody measures. The legal dates below were read off
+the current instruments in September 2026 rather than recalled, because two of
+them moved in July 2026. Software: `ollama` 0.24.0 serving `llama3.2:3b`,
+`qwen2.5:7b`, `qwen3.5:9b` and `gemma3:27b`; Python 3.14.5, Apple Silicon.
 :::
 
 **Learning objectives.** After this chapter you can:
 
-- identify the lawful basis for processing personal data through an LLM under KVKK and GDPR;
-- map EU AI Act obligations onto a system you are actually building;
-- produce audit logs that answer which agent touched which data under whose authority;
-- compute unit economics per session, per task, and per resolved ticket.
+- identify the lawful basis for running personal data through an LLM under
+  KVKK and GDPR, and what transferring it abroad requires;
+- map EU AI Act obligations onto a system you are building, with the dates as
+  they now stand;
+- use ISO/IEC 42001 and the NIST AI RMF as checklists without buying a
+  certification;
+- produce audit logs that answer which agent touched which data under whose
+  authority;
+- compute cost per session, per task and per resolved ticket, and say which
+  one a budget review needs;
+- measure what a small-model cascade saves, and say precisely what its
+  router can and cannot see.
 
-## KVKK and GDPR for LLM systems
+::: {.callout-warning appearance="simple"}
+**This chapter states law; it is not legal advice.** Dates and obligations here
+were checked in September 2026 and two of them had changed two months earlier.
+Verify against the current instrument before relying on any of it, and involve
+counsel for anything that matters.
+:::
 
-<!-- TODO(draft): lawful basis, DPIA, data-subject rights; the Turkish
-    specifics alongside the European ones. -->
+## KVKK and GDPR when the processor is a model {#sec-governance-kvkk}
 
-## Data residency, no-training flags, retention and deletion
+Both regimes ask the same first question, and it is not a question about AI: on
+what lawful basis are you processing this personal data? The LLM changes the
+answer's difficulty in three specific ways.
 
-<!-- TODO(draft): what a provider contract actually promises; deletion
-    that propagates to embeddings and caches. -->
+**You usually cannot rely on consent.** A customer messaging support has not
+consented to their message being sent to a third-party model provider, and
+burying it in terms of service is exactly the pattern both regimes were written
+against. Most production systems run on legitimate interest or contractual
+necessity instead — which means writing down the balancing test, not asserting
+it.
 
-## EU AI Act: obligations, risk tiers, timeline
+**Purpose limitation is where LLM projects fail.** Data collected to fulfil an
+order and then reused to fine-tune a model is a new purpose, and a new purpose
+needs its own basis. [The most common compliance failure in LLM products is not
+a leak; it is training on data collected for something else.]{.hl}
 
-<!-- TODO(draft): which tier a typical enterprise agent falls into and
-    what that requires. Dated — keep the changelog discipline. -->
+**Data-subject rights have to reach the model layer.** A deletion request must
+propagate to the vector store, the trace backend (@sec-observability), the eval
+set (@sec-production-eval), the cache and the token mapping of
+@sec-guardrails — most of which nobody thought of as a database. Erasure from a
+*fine-tuned model* is genuinely unsolved; the practical answer is to not put
+personal data into training sets, which is a design decision made once rather
+than a request handled repeatedly.
 
-## ISO/IEC 42001 and NIST AI RMF as operating frameworks
+### The Turkish specifics
 
-<!-- TODO(draft): using them as checklists rather than certifications. -->
+KVKK is Law 6698, and the part that matters most for LLM work was rewritten
+recently. **Law 7499**, published 12 March 2024, amended it, and the
+KVKK-amending provisions entered into force on **1 June 2024**. The rewrite
+brought transfer abroad — Article 9 — much closer to the GDPR's structure:
 
-## Audit logging: which agent touched which data under whose authority
+| tier | what it is | what you must do |
+|:--|:--|:--|
+| **Adequacy decision** | the Authority has declared a country or sector adequate | transfer on that basis |
+| **Appropriate safeguards** | four of them, below | pick one, and meet its conditions |
+| **Exceptional cases** | narrow derogations | do not build a product on these |
 
-<!-- TODO(draft): the log schema that satisfies an auditor; built on
-    @sec-observability. -->
+: Article 9 as amended, in the order you try them {tbl-colwidths="[24,40,36]"}
 
-## Unit economics: cost per session, per task, per resolved ticket
+The four appropriate safeguards are an international agreement between public
+bodies (with Authority permission), **approved binding corporate rules** within
+a group of undertakings, an **Authority-published standard contract**, and a
+written undertaking approved by the Authority.
 
-<!-- TODO(draft): the only cost metric a business cares about; how to
-    compute it honestly. -->
+The operational detail engineers most often miss: **a standard contract must be
+notified to the Authority within five business days of signature** (Article
+9(5), and Article 14(5) of the implementing Regulation, published 10 July 2024
+in Official Gazette 32598). A Standard Contract Notification Module has existed
+since October 2024. [This is a calendar obligation attached to a procurement
+decision, and it is missed because the person signing the contract and the
+person deploying the model are not the same person.]{.hl}
 
-## Cost levers: caching, batch APIs, small-model routing, distillation
+Why this lands on engineers at all: choosing a US-hosted model provider *is* a
+transfer abroad. It is not a platform detail; it is the Article 9 question, and
+it needs answering before the integration is written rather than after.
 
-<!-- TODO(draft): each lever with a measured saving and the quality cost. -->
+## What a provider contract actually promises {#sec-governance-residency}
 
-## Organizational shape: agent registry, self-service onboarding, golden paths
+Vendor pages are written to reassure. The contract is the artefact, and four
+things in it decide whether the deployment is lawful.
 
-<!-- TODO(draft): how a platform team makes the safe path the easy path. -->
+**Where the inference happens, and where it may fail over to.** A region
+commitment with an unrestricted failover clause is not a region commitment.
 
-## Exercises
+**Whether your data trains their model, and how that is switched off.** The
+default differs between a vendor's consumer tier, its API and its enterprise
+agreement — for the same company. Read the tier you are actually on, and record
+which one it is next to the integration.
 
-1. Compute cost per resolved ticket for an agent, including retries and human escalations. Compare to the human-only baseline.
-2. Write the DPIA section covering what happens to a user's message after it reaches a third-party model provider.
+**Retention.** "We retain inputs for 30 days for abuse monitoring" is a
+statement that your prompts exist somewhere for 30 days, which is a fact your
+DPIA needs and which most integrations never wrote down.
+
+**Sub-processors.** The model provider's own infrastructure suppliers are in
+scope, and the list changes; the contract should oblige them to tell you when
+it does.
+
+Then the deletion question that a diagram will not answer: when a user asks to
+be erased, what actually happens to the embeddings derived from their text, the
+prompt caches (@sec-serving), the traces, and the golden set? Each is a copy.
+Write the answer per store before you need it, because the deadline starts when
+the request arrives.
+
+## The EU AI Act, and the dates that moved {#sec-governance-aiact}
+
+The Act applies by risk tier, and it reaches Turkish companies through the same
+extraterritorial logic as the GDPR: if your system's output is used in the EU,
+you are in scope.
+
+The tiers, briefly. **Prohibited** practices — social scoring, certain
+biometric categorisation, manipulative techniques — are out regardless of care.
+**High-risk** is the tier with real engineering consequences: risk management,
+data governance, technical documentation, logging, human oversight, accuracy
+and robustness, and a conformity assessment. **Limited risk** carries
+transparency duties — telling people they are talking to a machine, marking
+synthetic content. **Minimal risk** is everything else, which is most products.
+
+[Most support agents are not high-risk, and the ones that are usually became so
+by touching employment, credit, education or essential services.]{.hl} That
+sentence is the whole classification exercise for most teams, and it is worth
+doing explicitly rather than assuming either answer.
+
+### The timeline, as it now stands
+
+This is the part to check rather than remember, because it changed in July
+2026. **Regulation (EU) 2026/1744** — the Digital Omnibus on AI — was published
+in the Official Journal on 24 July 2026 and entered into force on **27 July
+2026**, deferring the high-risk obligations:
+
+| obligation | applies from | changed in 2026? |
+|:--|:--|:--|
+| Prohibited practices, AI literacy | 2 February 2025 | no |
+| GPAI model obligations | 2 August 2025 | no |
+| Article 50 transparency duties | 2 August 2026 | no |
+| GPAI models placed before Aug 2025 | 2 August 2027 | no |
+| **High-risk under Annex III** (standalone) | **2 December 2027** | **yes — deferred from 2 August 2026** |
+| **High-risk under Annex I** (in regulated products) | **2 August 2028** | **yes — deferred** |
+
+: EU AI Act application dates after Regulation (EU) 2026/1744
+{tbl-colwidths="[42,24,34]"}
+
+Two things to take from the table rather than the dates themselves. The
+deferral applied **only** to the high-risk tiers: prohibitions, GPAI duties and
+Article 50 transparency all kept their original dates, so a team that heard
+"the AI Act was delayed" and stopped work heard it wrong. And the December 2027
+date is binding law now, not a proposal — changing it again would need another
+legislative act.
+
+::: {.column-margin}
+The general lesson outlives the specific dates: regulatory timelines move, and
+a compliance plan pinned to remembered dates is a plan that will be wrong at
+some point without anyone noticing. Put the instrument's URL and the date you
+checked it next to the plan, exactly as @sec-observability argues for pinning
+convention versions.
+:::
+
+## Frameworks as checklists, not certifications {#sec-governance-frameworks}
+
+Two artefacts are worth reading even if you never pursue a certificate, because
+both are essentially structured lists of things teams forget.
+
+**ISO/IEC 42001:2023** is the first international standard for an AI management
+system — the ISO 27001 pattern applied to AI: policy, roles, risk assessment,
+lifecycle controls, supplier management, continual improvement. It is voluntary
+and certifiable, and it is increasingly asked for in enterprise procurement,
+which is usually the reason it arrives on an engineering roadmap.
+
+**The NIST AI Risk Management Framework 1.0** (AI 100-1) organises work into
+four functions — Govern, Map, Measure, Manage — and its **Generative AI
+Profile** (NIST AI 600-1, released 26 July 2024) is the more directly useful
+document: twelve risk categories specific to or amplified by generative AI, with
+over two hundred suggested actions.
+
+The honest way to use them: [read the risk categories as a list of things to
+have an answer for, and notice which ones your team has never discussed.]{.hl}
+That exercise takes an afternoon and finds real gaps. Pursuing certification is
+a separate, much larger decision, driven by whether customers require it.
+
+## Audit logging: who did what, to whose data, under whose authority {#sec-governance-audit}
+
+@sec-observability's tracing answers *what happened technically*. An audit log
+answers a different question — *who authorised this* — and the two have
+different retention, different access controls and different readers.
+
+The fields an auditor asks for, none of which can be added retrospectively:
+
+```text
+  when            timestamp, and the time zone it is in
+  who             the human principal, not just the service account
+  on behalf of    the user whose data was processed
+  what            the action, and the tool that performed it
+  which data      identifiers or categories touched — not the content
+  authority       the lawful basis, or the approval that permitted it
+  where           region of processing, and the model provider
+  outcome         succeeded, failed, refused, escalated
+```
+
+Three properties separate an audit log from an application log. **It is
+append-only**, because a log an operator can edit answers nothing. **It records
+the authority, not just the action** — "issued a refund" is an event; "issued a
+refund under approval #4821 by user X" is an audit record. And **it is
+retained on its own schedule**, usually longer than traces and shorter than the
+business record, which means it is a separate store with a separate policy.
+
+For agents specifically, one addition: log the **decision to act** as well as
+the act. When an agent chose a tool, what did it have in context? That is the
+question every incident review asks, and @sec-agent-security is why it matters
+— the answer is how you find out whether the instruction came from your user or
+from a document.
+
+## Unit economics: which number a budget review needs {#sec-governance-unit}
+
+Cost per request is the number you have and the wrong one to report. Three
+levels, and only the last survives contact with a budget-holder:
+
+| metric | what it flatters | when it is right |
+|:--|:--|:--|
+| **cost per request** | verbose systems that answer in many steps | capacity planning |
+| **cost per session** | a feature nobody completes | comparing feature usage |
+| **cost per resolved task** | nothing — it is the honest one | any budget conversation |
+
+: Three unit costs {tbl-colwidths="[26,40,34]"}
+
+Computing the third honestly means including what teams routinely leave out:
+retried calls, the runs that hit a ceiling (@sec-deployment), the judge calls in
+online evaluation (@sec-production-eval), the embedding calls, and **the cost of
+the human who handled the escalation**. That last one is usually the largest
+single term and the one omitted, because it sits in a different budget.
+
+[The comparison that matters is against the human-only baseline, on the same
+definition of resolved.]{.hl} An agent that resolves 60% of tickets at €0.08
+each and escalates the rest to a human at €4.00 costs €1.65 per ticket; the
+human-only baseline is €4.00. That arithmetic is the business case, and it is
+sensitive almost entirely to the resolution rate rather than to the token price
+— which is why @sec-production-eval's measurement discipline is a cost
+discipline too.
+
+## What a cascade actually saves {#sec-governance-cascade}
+
+"Route the easy requests to a smaller model" is the most-recommended cost lever
+in this field and the least-measured. So here it is measured, on
+@sec-production-eval's 100-item Turkish extraction suite, at temperature 0, with
+four local models.
+
+First the ladder alone:
+
+```text
+100 items, 500 field decisions, temperature 0
+
+model            field acc   exact   passes validator   output tokens
+llama3.2:3b         92.40%      65             80/100            4,205
+qwen2.5:7b          95.20%      80             96/100            5,105
+qwen3.5:9b          97.80%      90            100/100            6,173
+gemma3:27b         100.00%     100            100/100            4,921
+```
+
+Two things before the cascade. `gemma3:27b` got **every field of every item
+right** — a perfect 100/100 exact match, which is worth noting because it means
+the ceiling here is real rather than asymptotic. And note that the biggest model
+used *fewer* output tokens than the 9B one: verbosity is not a function of size,
+so a token-based cost estimate cannot be derived from parameter count.
+
+### The cascade: answer cheap, escalate on a validator
+
+The router is not a difficulty predictor. It is the schema-and-format check of
+@sec-decoding, run on the small model's output: does it parse, does it have all
+five fields, does the order code match its pattern, is the month a real month,
+is the amount formatted like an amount. **It uses no ground truth** — it is
+exactly what you could run in production.
+
+```text
+small -> big              escalated   field acc   exact
+llama3.2:3b -> qwen2.5:7b       20%      96.20%      81
+llama3.2:3b -> qwen3.5:9b       20%      96.20%      82
+llama3.2:3b -> gemma3:27b       20%      97.00%      85
+qwen2.5:7b  -> qwen3.5:9b        4%      96.20%      82
+qwen2.5:7b  -> gemma3:27b        4%      96.60%      84
+qwen3.5:9b  -> gemma3:27b         0%      97.80%      90
+```
+
+The headline is the third row. [Sending **20%** of requests to the large model
+recovers most of the quality gap: 92.40% alone, 97.00% cascaded, 100.00% if
+everything went to the large model.]{.hl} That is 61% of the gap closed for one
+request in five.
+
+The economics follow from the escalation rate and need no invented prices. You
+pay the small model on everything and the large model on the escalated share, so
+if the large model costs *K* times the small one, the cascade costs
+$(1 + 0.20K)/K$ of large-model-only:
+
+```text
+  K = 10   ->  30% of the large-model bill
+  K = 30   ->  23%
+```
+
+The 7B→27B row is the same lever at a different setting: **4% escalation** for
+96.60%, which is a 1.4-point gain over the 7B alone at almost no additional
+spend.
+
+### The row that teaches the most is the last one
+
+`qwen3.5:9b -> gemma3:27b` escalates **0%** of requests, so the cascade is just
+the 9B model and buys exactly nothing. That is not a failure of the idea; it is
+the idea's boundary, stated precisely.
+
+The 9B model passes the validator on **100 of 100** items while being correct on
+only **97.80%** of fields. [The validator checks well-formedness, and
+well-formedness stops correlating with correctness as soon as the model is good
+enough to always be well-formed.]{.hl} A perfectly formatted JSON object with
+the wrong city in it is invisible to every check that does not know the right
+answer.
+
+Three consequences worth carrying:
+
+**Measure the escalation rate, not the predicted difficulty.** @sec-gateway
+measured a difficulty router at AUROC 0.667 — real signal, not enough to route
+on. A validator is a fact about the output you already have rather than a
+prediction about a request you have not run.
+
+**The cascade's ceiling is what your router can see.** If your only signal is
+schema validity, you can only escalate malformedness. Adding a signal the
+router *can* see — a confidence score, a retrieval-grounding check, a
+disagreement between two cheap models — is what raises the ceiling, and each
+costs something.
+
+**Do not report the saving without the quality column.** 3B→27B is a 3.0-point
+drop in field accuracy and a **15-point** drop in exact match against
+large-model-only. Whether that is acceptable is a product decision, and it can
+only be made if both numbers are on the table.
+
+::: {.column-margin}
+Wall-clock timings were recorded but are not reported as costs: this ran on a
+shared laptop where the same work varied by an order of magnitude between runs.
+The escalation rate and token counts are the load-bearing numbers, and they are
+the ones that transfer to your prices.
+:::
+
+### The other levers, in the order to try them
+
+@sec-serving established the ordering and this chapter's measurement completes
+it. Fewer tokens and prompt caching first, because they carry no quality risk —
+@sec-serving measured warm prefill flat at 13–18 ms and an 8.2× whole-request
+improvement at 4,258 tokens. Then batch APIs where latency is not user-facing.
+Then the cascade, which does carry quality risk and now has a number attached.
+Then distillation and quantisation, which are projects rather than settings.
+
+## Making the safe path the fast path {#sec-governance-org}
+
+Governance that depends on a review queue fails at the same point every time:
+when a team has a deadline. The alternative is to put the controls in the
+default path.
+
+**An agent registry**, as @sec-capstone argued: one row per agent listing its
+tools, its data access, its owner, its lawful basis and its reversibility
+profile. It is the artefact every audit, incident and cost review needs, and it
+cannot be reconstructed after the fact.
+
+**A golden path**, meaning a template repository where the eval gate
+(@sec-production-eval), tracing with cost dimensions (@sec-observability), the
+PII boundary (@sec-guardrails) and tool classification are already wired. The
+measure of success is that the compliant way is the fastest way to ship.
+
+**Cost attribution from the first agent**, because @sec-observability's
+dimensions cannot be added retrospectively, and because the unit economics above
+are impossible without them.
+
+**A model registry with pinned versions** (@sec-gateway), which is
+simultaneously a cost control, a quality control and — since the AI Act asks
+what model version produced an output — a compliance artefact.
+
+## Intuition checks {#sec-governance-intuition}
+
+Answer each before opening it. The first three are legal facts that changed or
+are commonly misremembered; the last three carry the measurement.
+
+::: {.callout-note collapse="true"}
+## 1. "The EU AI Act was delayed, so we have more time." Is that right?
+
+Only for the high-risk tiers, and it is a common and expensive
+misreading.
+
+Regulation (EU) 2026/1744 — the Digital Omnibus, in force 27 July 2026 —
+deferred Annex III high-risk obligations from 2 August 2026 to **2 December
+2027**, and Annex I ones to **2 August 2028**. Everything else kept its date:
+prohibited practices and AI literacy since 2 February 2025, GPAI obligations
+since 2 August 2025, and Article 50 transparency duties from 2 August 2026.
+
+So if your obligation is transparency — telling people they are talking to a
+machine, marking synthetic content — nothing was delayed at all. And the
+December 2027 date is binding law now, not a proposal.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. You pick a US-hosted model provider. Whose problem is that?
+
+Yours, at design time. Choosing that provider *is* a transfer of personal data
+abroad under KVKK Article 9, not a platform detail to sort out later.
+
+The amended Article 9 — rewritten by Law 7499, in force 1 June 2024 — gives a
+tiered structure: an adequacy decision, or one of four appropriate safeguards
+(an international agreement between public bodies, approved binding corporate
+rules, an Authority-published standard contract, or an approved written
+undertaking), or a narrow derogation you should not build a product on.
+
+The detail that gets missed: a standard contract must be **notified to the
+Authority within five business days of signature**. That is a calendar
+obligation attached to a procurement decision, and it is missed because the
+person signing and the person integrating are different people.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. A user asks to be deleted. What actually has to happen?
+
+Far more than deleting the row, and the list is the reason to design for it
+rather than handle it.
+
+Their data is also in the vector store, the trace backend
+(@sec-observability), the eval set (@sec-production-eval), the prompt cache
+(@sec-serving) and the token mapping of @sec-guardrails — none of which anyone
+thinks of as a database.
+
+And if it reached a fine-tuned model, erasure is genuinely unsolved. The
+practical answer is not a better deletion pipeline; it is not putting personal
+data into training sets, which is one design decision instead of a recurring
+request. Write down what happens per store before the first request arrives,
+because the deadline starts when it does.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. How much does routing easy requests to a small model actually save?
+
+Measured on a 100-item extraction suite with four local models: sending **20%**
+of requests to the large model took field accuracy from **92.40%** (3B alone) to
+**97.00%**, against **100.00%** for the large model on everything — 61% of the
+gap for one request in five.
+
+The economics need no invented prices. You pay the small model on everything
+and the large one on the escalated share, so at a cost ratio *K* the cascade
+costs $(1 + 0.20K)/K$ of large-model-only: **30%** of the bill at K = 10, **23%**
+at K = 30.
+
+Report the quality column too: that cascade is 3.0 points of field accuracy and
+**15 points of exact match** below large-model-only. A saving quoted without it
+is not a result.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Should the router predict which requests are hard?
+
+Prefer a validator over a predictor.
+
+@sec-gateway measured a difficulty router at **AUROC 0.667** — real signal, not
+enough to route on blindly. The cascade here instead runs the cheap model and
+checks its output: does it parse, are all fields present, does each match its
+expected format. That is a fact about an output you already have rather than a
+guess about a request you have not run, and it uses no ground truth, so it runs
+in production unchanged.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Your cascade escalates 0% of requests. Great news?
+
+No — it means the cascade is doing nothing, and it shows you the limit of the
+whole technique.
+
+Measured: `qwen3.5:9b` passed the format validator on **100 of 100** items while
+being correct on only **97.80%** of fields. So nothing escalated, the cascade
+collapsed to the 9B model, and it saved nothing over just using that model.
+
+The lesson generalises. A validator checks well-formedness, and well-formedness
+stops correlating with correctness as soon as the model is reliably
+well-formed — a perfectly formatted JSON object with the wrong city in it is
+invisible to any check that does not know the answer. Raising the ceiling means
+adding a signal the router *can* see: a confidence score, a grounding check, or
+disagreement between two cheap models. Each costs something.
+:::
+
+## Interview questions {#sec-governance-interview}
+
+::: {.callout-warning appearance="simple"}
+**On sourcing — the same caveat as @sec-text-as-data.** The questions below
+recur in the two credible open sources this book uses throughout, plus the ones
+this chapter's own measurement makes answerable.
+:::
+
+### Testing whether you understand the obligations
+
+**Q: What is the lawful basis for sending customer messages to an LLM
+provider?**
+
+Start by saying it is not usually consent — a customer contacting support has
+not consented to third-party processing, and burying it in terms of service is
+the pattern the regimes were written against. Most systems run on legitimate
+interest or contractual necessity, which means documenting the balancing test.
+Then name the two traps: purpose limitation, because reusing order data to
+fine-tune is a new purpose needing its own basis; and transfer abroad, because
+choosing a US-hosted provider is the Article 9 question and needs answering
+before the integration is written.
+
+**Q: Is your system high-risk under the EU AI Act?**
+
+Most support agents are not; the ones that are usually became so by touching
+employment, credit, education or essential services. Then show you know the
+timeline as it now stands rather than as it was drafted: Regulation (EU)
+2026/1744 deferred Annex III high-risk to 2 December 2027 and Annex I to
+2 August 2028, while prohibitions, GPAI duties and Article 50 transparency kept
+their original dates. Saying "the Act was delayed" without that distinction is
+the wrong answer.
+
+**Q: What goes in an audit log that is not in a trace?**
+
+The authority. A trace says a refund was issued; an audit record says it was
+issued on behalf of this user, under this approval, by this principal, in this
+region, under this lawful basis. It is append-only, it has its own retention
+schedule, and for agents it should record the decision to act as well as the
+act — what was in context when the agent chose a tool is the question every
+incident review asks (@sec-agent-security).
+
+### Testing whether you have run one
+
+**Q: Your CFO asks what the AI feature costs. What do you report?**
+
+Cost per resolved task, not per request or per session — the first flatters
+verbose systems and the second flatters features nobody completes. Include what
+teams leave out: retries, ceiling hits, online judge calls, embeddings, and the
+cost of the human handling escalations, which is usually the largest term and
+sits in someone else's budget. Then give the comparison that makes it a business
+case: the human-only baseline on the same definition of resolved. The arithmetic
+is far more sensitive to resolution rate than to token price.
+
+**Q: How would you cut inference cost by half without losing quality?**
+
+In order of quality risk. Fewer tokens and prompt caching first, because they
+carry none — measured in @sec-serving as warm prefill flat at 13–18 ms and 8.2×
+on the whole request at 4,258 tokens. Then batch APIs where latency is not
+user-facing. Then a cascade, with a number: escalating 20% of requests recovered
+61% of the quality gap here, costing 30% of the large-model bill at a 10×
+price ratio. Then quantisation and distillation, which are projects.
+
+**Q: Your cascade's router is a schema validator. What are you blind to?**
+
+Everything that is well-formed and wrong. Measured here, the 9B model passed the
+validator on 100 of 100 items while being correct on 97.8% of fields, so the
+cascade escalated nothing and saved nothing. The general statement is that a
+validator's ceiling is what it can see, and well-formedness decouples from
+correctness as models improve. To go further you need a signal about
+correctness — confidence, grounding, or disagreement between two cheap models —
+and each of those costs something you should measure before adopting.
+
+## The 2026 toolbox {#sec-governance-tools}
+
+The measurement needed four models and the standard library. The second table
+is split between cost tooling and the compliance artefacts worth reading.
+
+| library | version used | what it is for here |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | serving all four models of the cascade ladder |
+| Python standard library | 3.14.5 | the harness and the validator; no dependencies |
+
+: The stack these numbers came from. Apple Silicon
+{tbl-colwidths="[30,16,54]"}
+
+Worth knowing about, not used above:
+
+| project | version | when you would reach for it |
+|:--|:--|:--|
+| `litellm` | 1.99.0 | the gateway of @sec-gateway; per-key budgets and spend attribution are what make unit economics computable |
+| `tiktoken` | 0.14.0 | counting tokens before you send them, which is how a cost estimate becomes a pre-flight check |
+| `langfuse` | 4.15.1 | traces with cost attached, so cost per resolved task is a query rather than a spreadsheet |
+| `presidio-analyzer` | 2.2.364 | the PII boundary that has to exist before data reaches a provider (@sec-guardrails) |
+
+: The wider ecosystem, versions as of writing {tbl-colwidths="[24,12,64]"}
+
+## Lab: the compliance and cost pass {#sec-governance-lab}
+
+### Step 1 — write the data flow, including the copies
+
+One page: what personal data enters, which stores hold it, which leave your
+region, and how long each keeps it. Include the trace backend, the eval set, the
+cache and the token mapping. The copies people forget are the finding.
+
+### Step 2 — answer the transfer question
+
+For each provider, name the Article 9 basis you are relying on. If it is a
+standard contract, find out whether it was notified to the Authority within five
+business days — and if nobody knows, that is the deliverable.
+
+### Step 3 — classify your system under the AI Act
+
+Prohibited, high-risk, limited or minimal, with the reasoning written down.
+Then check the current dates against the instrument rather than against this
+chapter, and record the date you checked.
+
+### Step 4 — walk a deletion request through every store
+
+Pick a real user id and trace what would have to happen in each store from step
+1. Time it. Anything you cannot answer is a design task, not a process gap.
+
+### Step 5 — compute cost per resolved task
+
+Include retries, ceiling hits, judge calls, embeddings and the human escalation
+cost. Compare against the human-only baseline on the same definition of
+resolved. Then compute how sensitive the result is to the resolution rate.
+
+### Step 6 — measure your own cascade
+
+Run your suite on two models, build a runtime validator that uses no ground
+truth, and measure the escalation rate and the resulting quality. Report the
+saving as a function of your price ratio, and report the quality drop next to
+it.
+
+### Step 7 — find your validator's blind spot
+
+Take the items your validator accepted and count how many were actually wrong.
+That number is the ceiling on what a cascade can do for you, and it is the one
+that decides whether to invest in a better signal.
+
+### What to hand in
+
+The data-flow page with every copy listed; the Article 9 basis per provider and
+its notification status; your AI Act classification with the date you checked
+the dates; the deletion walk-through with its gaps; cost per resolved task
+against the human baseline; and your cascade's escalation rate, quality drop and
+validator blind-spot count.
+
+## Exercises {#sec-governance-exercises}
+
+1. **The copies inventory.** List every store in your system that holds a copy
+   of user text. Rank them by whether a deletion request currently reaches them.
+
+2. **Read one contract.** Take your model provider's actual terms — the tier you
+   are on, not the marketing page — and extract four facts: processing region
+   and failover, training on your data, retention period, sub-processor
+   notification. Note which you could not find.
+
+3. **Classify honestly.** Write your AI Act classification and then argue the
+   opposite case in a paragraph. If the opposite case is easy to argue, get
+   advice.
+
+4. **Cost per resolved task.** Compute it including the human escalation cost,
+   then recompute at resolution rates 10 points higher and lower. Report which
+   input the business case is most sensitive to.
+
+5. **Your escalation rate.** Build a schema validator for your own output and
+   measure what fraction of a small model's responses it rejects. Convert that
+   to a saving at your own price ratio.
+
+6. **The blind spot.** Of the outputs your validator accepted, hand-check fifty
+   for correctness. Report the rate, and say whether a better router is worth
+   building.
+
+7. **Date drift.** Take three regulatory dates your compliance plan depends on
+   and verify each against the current instrument. Record the URL and the date
+   you checked, then set a reminder to do it again.
+
+## Where to go deeper {#sec-governance-deeper}
+
+Before reading: write down, from memory, which lawful basis your product relies
+on and where its data is processed. Then check. The gap between those two is
+this chapter's subject.
+
+This chapter cites no papers, so there is one table. Every source below is a
+primary instrument or its official guidance, because on this material secondary
+summaries go stale silently — as the July 2026 amendment demonstrates.
+
+| resource | what it is |
+|:--|:--|
+| [EU AI Act implementation timeline](https://artificialintelligenceact.eu/implementation-timeline/) | the dates as they currently stand, including the 2026 deferrals; check it rather than trusting any summary, this one included |
+| [KVKK — transfer abroad](https://www.kvkk.gov.tr/Icerik/2053/Yurtdisina-Aktarim) | the Authority's own page on amended Article 9, with the standard contracts and the notification module |
+| [NIST AI Risk Management Framework](https://www.nist.gov/itl/ai-risk-management-framework) | AI RMF 1.0 and the Generative AI Profile (AI 600-1); the twelve risk categories are the most useful checklist in this chapter |
+| ISO/IEC 42001:2023 | the AI management system standard; voluntary and certifiable, and increasingly asked for in enterprise procurement |
+| [FinOps Framework](https://www.finops.org/framework/) | the cost-management vocabulary this chapter borrows — inform, optimise, operate — applied to a new kind of variable cost |
+| [`litellm`](https://github.com/BerriAI/litellm) | per-key budgets and spend attribution; the practical route from @sec-gateway's choke point to unit economics |
+
+: Beyond this chapter {tbl-colwidths="[34,66]"}
+
+## What to remember {#sec-governance-summary}
+
+- **The lawful basis is rarely consent, and purpose limitation is where LLM
+  projects fail.** Data collected to fulfil an order and reused to fine-tune is
+  a new purpose needing its own basis. [The most common compliance failure in
+  LLM products is not a leak; it is training on data collected for something
+  else.]{.hl}
+
+- **Choosing a model provider is a transfer decision, made at design time.**
+  KVKK Article 9, as rewritten by Law 7499 (in force 1 June 2024), gives
+  adequacy, then four appropriate safeguards, then narrow derogations. A
+  standard contract must be **notified to the Authority within five business
+  days of signature** — a calendar obligation attached to a procurement
+  decision.
+
+- **The AI Act's high-risk dates moved and the rest did not.** Regulation (EU)
+  2026/1744, in force 27 July 2026, deferred Annex III to **2 December 2027**
+  and Annex I to **2 August 2028**; prohibitions (Feb 2025), GPAI duties (Aug
+  2025) and Article 50 transparency (Aug 2026) were unchanged. "The Act was
+  delayed" is wrong for most teams' actual obligations.
+
+- **Deletion reaches more stores than anyone lists.** Vector store, traces, eval
+  set, prompt cache, token mapping — and a fine-tuned model, where erasure is
+  unsolved. Design for it once instead of handling it repeatedly.
+
+- **An audit log records authority, not just action**, is append-only, keeps its
+  own retention schedule, and for agents should capture the decision to act as
+  well as the act.
+
+- **Report cost per resolved task**, including retries, ceiling hits, judge
+  calls and the human escalation cost — usually the largest term and in someone
+  else's budget. The business case is far more sensitive to resolution rate than
+  to token price.
+
+- **A cascade is a real lever with a measured size.** Escalating **20%** of
+  requests to the large model took field accuracy from **92.40%** to **97.00%**
+  against **100.00%** for large-model-only — 61% of the gap for one request in
+  five, costing $(1+0.2K)/K$ of the large-model bill, or **30%** at a 10× price
+  ratio. Report the quality drop with it: 3.0 points of field accuracy and
+  **15 points of exact match**.
+
+- **Route on a validator, not on predicted difficulty.** @sec-gateway's
+  difficulty router reached AUROC 0.667; a schema-and-format check is a fact
+  about an output you already have, uses no ground truth, and runs unchanged in
+  production.
+
+- **A validator's ceiling is what it can see.** The 9B model passed the format
+  check on **100 of 100** items while being correct on **97.80%** of fields, so
+  its cascade escalated **0%** and saved nothing. [Well-formedness stops
+  correlating with correctness as soon as the model is reliably
+  well-formed]{.hl} — going further needs a signal about correctness, and each
+  one costs something.
