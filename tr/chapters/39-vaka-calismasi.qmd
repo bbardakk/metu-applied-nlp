@@ -1,0 +1,587 @@
+# Vaka Çalışması: Kurumsal Bir Ajan Platformu Kurmak {#sec-vaka}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 39. bölüm](../../en/chapters/39-capstone.html). Bu bölümün kendi
+ölçümü yok. Belirli bir şirketin dağıtımına dair bir rapor değil, kitabın kendi
+ölçümlerinin üzerine düşeceği biçimde kurulmuş bir işlenmiş örnek. Aşağıdaki her
+sayı daha önceki bir bölümde ölçüldü ve ona atıf veriliyor; buradaki hiçbir şey
+dünya hakkında yeni bir iddia değil. Onu, zaten elinizde olanı bir araya getirme
+alıştırması olarak okuyun — bitirme projesinin sizden istediği de bu.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- tek bir sistemi gereksinimlerden mimariye ve oradan üretime izleyebilir, her
+  kararın arkasındaki bölümü adlandırabilirsiniz;
+- reddedilen alternatifleri de içeren bir mimari karar kaydı yazabilirsiniz;
+- bir sistemi kurmadan önce onun için maliyet, gecikme ve risk bütçesi
+  kurabilirsiniz;
+- ikinci takımda ve onuncu ajanda beliren arızaları öngörebilirsiniz;
+- bitirme projesini kapsamlandırıp teslim edebilirsiniz.
+
+## Sistem ve yapmayacağı dört şey {#sec-vaka-gereksinimler}
+
+Örnek, orta ölçekli bir Türk e-ticaret şirketi için bir destek platformu.
+Ajanlar müşterilerin sipariş, kargo ve iade sorularını Türkçe olarak, ayda
+kabaca 40.000 konuşma üzerinden cevaplıyor. Üç araç: bir siparişi bul, bir
+gönderiyi kontrol et, bir iade başlat. Bir insana yükseltme her zaman mevcut.
+
+Her şeyi biçimlendiren gereksinimler:
+
+| gereksinim | nereye çarpıyor |
+|:--|:--|
+| Türkçe, naif tokenlaştırmayı bozan biçimbilim dâhil | @sec-turkce-nlp ve aşağıdaki her değerlendirme kümesi |
+| Müşteri mesajları TC kimlik numaraları, IBAN'lar ve adresler içeriyor | @sec-korkuluklar, @sec-yonetisim |
+| Bir iade, şirketten çıkan paradır | @sec-korkuluklar'ın geri alınabilirlik sınıflandırması |
+| Cevaplar bir politika belgesine izlenebilmeli | @sec-rag, @sec-gozlemlenebilirlik |
+| Bir platform takımı, ajan isteyen beş ürün takımı | @sec-vaka-platform |
+
+: Gereksinimlerin gerçekte kısıtladıkları {tbl-colwidths="[46,54]"}
+
+[Yapılmayacaklar yapılacaklardan daha değerli ve önce onlar yazılmalı.]{.hl} Bu
+sistem şunları yapmayacak: pazarlama metni üretmek, sipariş ve kargo dışındaki
+soruları cevaplamak, bir insanın bir iş günü içinde geri alamayacağı hiçbir
+eylemi yapmak ya da insana yükseltme yolu olmadan çalışmak. Her biri bütün bir
+arıza sınıfını kaldıran bir karar — ve her birine, bir özellik daha isteyen biri
+tarafından karşı çıkılacak; kimse yatırım yapmadan önce yazılmalarının nedeni de
+bu.
+
+## Altı karar ve neyin reddedildiği {#sec-vaka-kararlar}
+
+Bir mimari karar kaydı, ancak alternatifi dürüstçe kaydediyorsa yazmaya değer.
+Sıkıştırılmış hâli:
+
+| karar | seçilen | reddedilen ve nedeni |
+|:--|:--|:--|
+| **Model erişimi** | tüm sağlayıcıların önünde tek bir geçit | servis başına doğrudan SDK çağrıları — başlaması ucuz ve sonra atıf, sabitleme ve hız sınırları beş uygulamaya sahip oluyor (@sec-gecit) |
+| **Döngünün yeri** | denetim noktalı durumla dayanıklı yürütme | bir istek işleyicisinin arkasında bellek içi döngü — bir dağıtım konuşmanın ortasına düşene kadar sorunsuz (@sec-dagitim) |
+| **Erişim** | politika derlemi üzerinde atıflı melez arama | tüm politikaların tam bağlama doldurulması — daha basit ve @sec-servis'in prefill maliyeti onu baskın gecikme terimi yapıyor |
+| **Kişisel veri** | sınırda saptayıp geri döndürülebilir biçimde token'laştırmak | yıkıcı maskeleme — güvenli ve sipariş aramasını bozuyor (@sec-korkuluklar) |
+| **İadeler** | ajan önerir, servis tavanı zorunlu kılar, üstünde insan onaylar | ajan iade API'sini prompt'ta bir sınırla çağırır — prompt'taki bir sınır bir ricadır (@sec-ajan-guvenligi) |
+| **Değerlendirme** | depoda altın küme, her prompt değişikliğinde kapı | sürümden önce elle nokta kontrolleri — @sec-uretim-degerlendirme neyin kaçtığını ölçtü |
+
+: Altı karar; okunacak sütun reddedilenler sütunu
+{tbl-colwidths="[16,34,50]"}
+
+Bunlardan ikisinin gerekçesinin açıkça yazılması gerekiyor, çünkü takımların en
+sık ters anladıkları ikisi onlar.
+
+**Uzun bağlam yerine erişim.** Her politika belgesini prompt'a doldurmak
+gerçekten daha basit ve sayılarda kaybediyor: @sec-servis 7.455 token bağlamda
+duvar saatinin %90,7'sinin ilk karakterden önce geçtiğini ve pencere doldukça
+decode'un saniyede 185'ten 139 token'a düştüğünü ölçtü. Uzun bağlamın bedeli iki
+kez alınıyor. Erişim bir bileşen ekliyor ve baskın gecikme terimini kaldırıyor.
+
+**İade tavanı iade servisinde yaşıyor.** Tasarımdaki en önemli tek satır bu ve
+nedeni @sec-ajan-guvenligi: müşteri mesajlarını okuyan bir ajan, saldırgan
+denetimindeki girdiyi okuyor ve yerleştirilmiş bir yönerge, **25 koşunun
+25'inde** bir ajana hiç istenmemiş bir aracı çağırttı. Tavan prompt'taysa tavan
+bir öneridir.
+
+## İlk ajan, bölüm bölüm {#sec-vaka-ilk}
+
+Not defterinden üretime giden yol, her adımı yöneten bölümle birlikte:
+
+1. **Ajanı yazmadan önce görevi bir değerlendirme olarak yazın**
+   (@sec-llm-degerlendirme). Elli gerçek konuşma, iyi bir cevabın ne olacağıyla
+   etiketlenmiş.
+2. **Erişim katmanını kurun ve tek başına ölçün** (@sec-erisim, @sec-rag). Doğru
+   politika belgesi ilk beşte değilse hiçbir promptlama cevabı düzeltmez.
+3. **Araçları prompt olarak değil, API olarak yazın** (@sec-arac-tasarimi), her
+   birine geri alınabilirlik sınıfı iliştirilmiş olarak (@sec-korkuluklar).
+4. **İşe yarayan en küçük döngüyü kurun** (@sec-ajan-anatomisi), üç tavanın üçü de
+   baştan konmuş olarak (@sec-dagitim).
+5. **Yapılandırılmış çıktı ekleyin ve doğrulayın** (@sec-cozumleme) —
+   doğrulayıcı aynı zamanda @sec-vaka-butce'deki yükseltme sinyali.
+6. **Bir probleminiz olmadan ölçüm düzeneği kurun** (@sec-gozlemlenebilirlik);
+   konuşma kimliği, iki model alanı, token sayıları ve kendi boyutlarınız dâhil.
+7. **Prompt'u değerlendirme süitiyle kapılayın** (@sec-uretim-degerlendirme),
+   eşiği yuvarlak bir sayıdan değil ölçülmüş bir gürültü tabanından belirlenmiş
+   olarak.
+8. **Sevk etmeden önce kendiniz saldırın** (@sec-ajan-guvenligi) ve oranı yazın.
+
+1. ve 8. adımlar takımların atladıkları ve geri kalanın buna değip değmediğine
+karar veren ikisi.
+
+## Kitabın sayıları bunun neye mal olduğunu söylüyor {#sec-vaka-butce}
+
+Kurmadan önceki yararlı disiplin, zaten elinizde olan ölçümlerden bir araya
+getirilmiş bir bütçe. Aşağıdaki her rakam daha önceki bir bölümden alıntı ve tek
+yeni şey aritmetik.
+
+**Gecikme.** @sec-servis'in ayrımı — saniyede kabaca 2.000 token prefill'e karşı
+185 decode — cevabın uzunluğunun neredeyse hiç önemi olmadığı ve prompt'un
+uzunluğunun neredeyse her şey olduğu anlamına geliyor. Erişim bağlamı yedi bin
+yerine bin token civarında tutarken eniyilenecek terim ilk token'a kadar geçen
+süre ve ilk kol prompt önbellekleme: sıcak prefill **prompt uzunluğundan bağımsız
+olarak 13–18 ms'de sabit** ölçüldü ve 4.258 token'da tüm istekte 8,2×
+iyileşme. Bu kalite riskinden bağımsız, önce gelmesinin nedeni de bu.
+
+**Token hacmi.** @sec-servis'in kendi özetleme ölçümü — **890 prompt token'ına
+karşı 53 üretilmiş** — planlanacak biçim. [Daha kısa cevaplar istemek neredeyse
+hiçbir şey kazandırmaz; daha az göndermek neredeyse her şeyi kazandırır.]{.hl}
+Ayda 40.000 konuşma ve her birinde birkaç model çağrısıyla, sistem prompt'unuzdaki
+şablon metin seçtiğiniz modelden daha büyük bir kalem.
+
+**Telemetri.** @sec-gozlemlenebilirlik 301 token'lık prompt'larda **koşu başına
+4,8 span ve 3.167 bayt** ölçtü; bunun **%48,3'ü prompt ve tamamlama metni** — ve
+890 token'lık prompt'larda aynı yapı **%83,9 içerikle 10.180 bayt**. Ayda 40.000
+koşuda bu kabaca 190.000 span ve içerik kaydedilirse yaklaşık 0,4 GB. Küçük. Bir
+milyon koşuda 10 GB ve içeriği kaydetme kararı altı katlık bir fark. Kasıtlı
+olarak karar verin ve her hatada tutarken içeriği örnekleyin.
+
+**Değerlendirme.** @sec-llm-degerlendirme'nin boyutlandırması 100 maddenin 13,4
+puanlık, 1.000 maddenin 4,8 puanlık bir farkı çözdüğünü söylüyor — dolayısıyla yüz
+maddelik bir altın küme bozuğu bulur, daha iyiyi değil. Küçük gerilemeleri yine de
+görünür kılan şey @sec-uretim-degerlendirme'nin eşleştirilmiş kapısı: **0,60
+puanlık** bir gürültü tabanı, 1 puanlık bir eşik, 100 maddede **%4,3** yanlış
+engelleme ve incelemede görünmeyen bir prompt gerilemesinin yine de zamanın
+**%99,4'ünde** yakalanması.
+
+**Korkuluklar.** @sec-korkuluklar'ın dedektör sayıları yükseltme oranını
+belirliyor: tek başına on bir haneli bir örüntü **%40 kesin** ve örüntü artı
+sağlama-toplamı-ya-da-bağlam **%93,6 duyarlılıkta %99,1 kesinliğe** ulaşıyor.
+Kalan önemli — gerçek tanımlayıcıların kabaca on beşte biri birleşim tarafından
+yakalanmıyor, ki bu gizlenecek değil veri koruma etki değerlendirmesine
+konulacak bir sayı.
+
+**Güvenlik.** @sec-ajan-guvenligi'nin dışa dönük aracı olan bir ajana karşı
+**%92–100** saldırı başarısı ve en iyi durumda **%14,7** saptaması, mimarinin
+bilet okuyan ajanı para hareket ettirebilen ajandan ayırmasının nedeni. Bu, kalan
+oranı olan bir hafifletme değil; kırılmış bir çift.
+
+**Yönlendirme.** @sec-gecit bir zorluk yönlendiricisini **AUROC 0,667**'de ölçtü
+— gerçek sinyal ve körlemesine yönlendirmeye yetmiyor. Sağ çıkan yönlendirme
+sürümü @sec-yonetisim'in şelalesi: küçük modelle cevapla, öngörülen zorlukla
+değil bir doğrulayıcı arızasıyla yükselt.
+
+[Bütçenin neyi gerektirmediğine dikkat edin: tek bir yeni deneyi.]{.hl} Sekiz
+bölümlük ölçüm, bir araya getirildiğinde sayıları ekli bir tasarım üretiyor — ve
+sayıların eksik olduğu yerler tam olarak ilk ölçümlerinizin gitmesi gereken
+yerler.
+
+## İkinci takım ve onuncu ajan {#sec-vaka-platform}
+
+Yukarıdaki her şey tek bir ajan. Sonradan beliren arızalar örgütsel ve bir
+takvimle geliyorlar.
+
+**İkinci takımda** paylaşılan şey prompt'lar ve araçlar ve ilk platform arızası,
+bir takımın değiştirdiği bir aracın başka bir takımın ajanını bozması. Çare
+yazılımdan gelen: araçlar sahipleri olan sürümlenmiş arayüzlerdir
+(@sec-arac-tasarimi) ve bir araç tanımı değişikliği bir bağımlılık yükseltmesi
+gibi incelenir (@sec-ajan-guvenligi).
+
+**Beşinci ajanda** kimse "kaç ajan işletiyoruz ve neye ulaşabiliyorlar" sorusunu
+cevaplayamıyor. Bir **ajan kaydı** — ajan başına bir satır, araçlarını, veri
+erişimini, sahibini ve geri alınabilirlik profilini listeleyen — gösterişsiz ve
+her denetimin, olayın ve maliyet incelemesinin ihtiyaç duyacağı ürün
+(@sec-yonetisim).
+
+**Onuncu ajanda** platform takımı darboğaz oluyor ve çözüm bir inceleme kuyruğu
+değil bir altın yol: değerlendirme kapısının, izlemenin, kişisel veri sınırının ve
+araç sınıflandırmasının zaten bağlanmış olduğu bir şablon depo; böylece uyumlu
+yol en hızlı yol oluyor. [Her şeyi inceleyen bir platform takımı doğrusal
+ölçeklenir ve sonra durur; güvenli yolu kolay yol yapan durmaz.]{.hl}
+
+**Baştan sona**, maliyet atfı ilk ajandan itibaren var olmalı, çünkü
+@sec-gozlemlenebilirlik'in boyutları geriye dönük eklenemez — kaydetmediğiniz bir
+boyuta göre gruplayamazsınız — ve bir bütçe incelemesinin istediği sayı oturum
+başına değil çözülen bilet başına maliyet.
+
+## Ne bozulur {#sec-vaka-geridonus}
+
+Savaş hikâyeleri olarak değil, bu kitabın ölçümlerinin öngördüğü arızalar olarak
+yazılmış dürüst geriye dönüş. Her biri olacak bir şey.
+
+**Değerlendirme kümesi fazla küçük ve fazla kolay olacak.** Birinin bir öğleden
+sonrada yazdığı elli vaka olarak başlıyor, içindekileri düzelttikçe kolaylaşıyor
+ve sabit puanı kararlılık diye okunacak. @sec-uretim-degerlendirme: altı aydır
+değişmemiş bir küme bayattır ve yine de yeşil bir onay işareti üretir.
+
+**Biri kapıyı koşmadan bir prompt'u düzenleyecek**, çünkü değişiklik apaçık
+kozmetik. @sec-uretim-degerlendirme saf bir yeniden sıralamanın alan doğruluğunda
+3,40 puana — gürültü tabanının neredeyse altı katı — mal olduğunu ve gerilemenin
+tamamının tek bir alanın içinde olduğunu ölçtü.
+
+**Kişisel veri dedektörü duyarlılığa göre ayarlanacak ve ürünü bozacak.** %40
+kesinlikte ajanların ihtiyaç duyduğu sipariş numaralarını maskeliyor ve karşılık,
+kesinliği düzeltmek değil onu kapatmak olacak (@sec-korkuluklar).
+
+**İlk ciddi olay, kimsenin hiçbir şeyi reddetmediği bir onay kuyruğu olacak.**
+%99 onay, gözetimin kılığına girmiş bir gecikme ve biri reddetme oranını ölçene
+kadar görünmez.
+
+**Biri, bir sıçramayı kaldırmak için bilet okuyan ajana iade aracını vermeyi
+önerecek.** Cevap @sec-ajan-guvenligi'nde ve bir argüman değil bir ölçüm — kendi
+saldırı başarı oranınız — olması gerekiyor.
+
+**Model altınızdan yükseltilecek.** @sec-gecit'in takma ad problemi: yalnızca
+istenen modeli kaydederseniz haftalar sonra bir kalite gerilemesinden
+öğrenirsiniz. İki öznitelik bunu önlüyor (@sec-gozlemlenebilirlik).
+
+Neyin farklı yapılacağı, tek satırda: **ajanı yazmadan önce değerlendirmeyi ve
+saldırıyı yazın.** İkisi de başlangıçta ucuz ve sistem çalıştıktan sonra ikisi de
+yazılmıyor.
+
+## Bitirme projesi {#sec-vaka-proje}
+
+Bitirme projeniz bu bölümün küçük sürümü: bir ajan, en az bir gerçek araç,
+yanında sevk edilen bir değerlendirme düzeneği ve verdiğiniz kararlar için
+yazılmış bir gerekçe.
+
+Görev tanımı, teslimatlar, değerlendirme ölçütleri ve takvim bitirme projesi
+ekinde. Burada söylenmeye değen şey, iyi giden projeleri ayıran şey:
+
+- **Erken kapsam daraltıyorlar.** Düzgün yapılmış tek bir görev, gösterilmiş üç
+  görevi yener. Yapılmayacaklar listesi son değil ilk üründür.
+- **Bir şey ölçüyorlar.** Dürüst tek bir sayısı olan bir proje — olumsuz bir
+  sonuç dâhil — cilalı bir gösterimi olandan güçlüdür ve bu kitap otuz sekiz
+  bölüm boyunca bu savı yaptı.
+- **İşe yaramayanı raporluyorlar.** @sec-llm-degerlendirme'nin asimetrisi ödevler
+  için de geçerli: kötü bir sayı soruşturuluyor, iyi bir sayı yayımlanıyor.
+  Denediğiniz ve başarısız olan şeyi söyleyin.
+- **İddiayı kanıttan ayırıyorlar.** "Ajanımız biletlerin %80'ini çözüyor"un bir
+  kümeye, çözülmenin bir tanımına ve bir aralığa ihtiyacı var.
+
+Bilgisayar bilimi öğrencisi olmayanlar kod zarafetine göre değil akıl yürütmeye
+göre notlandırılıyor. Bir yaklaşımın neden seçildiğine dair açık bir argüman ve
+onu çürütebilecek bir ölçüm, teslim edilecek şeydir.
+
+## Sezgi kontrolleri {#sec-vaka-sezgi}
+
+Her birini açmadan önce cevaplayın. Bunlar sentez soruları: her biri iki üç
+bölümü bir araya getiriyor, ki bitirme projesinin sizden isteyeceği de bu.
+
+::: {.callout-note collapse="true"}
+## 1. Politikaya dayalı bir destek ajanı için uzun bağlam mı erişim mi?
+
+Erişim ve neden bir zevk meselesi değil gecikme aritmetiği.
+
+@sec-servis 7.455 token bağlamda duvar saatinin **%90,7'sinin** ilk karakterden
+önce geçtiğini ve pencere doldukça decode'un **saniyede 185'ten 139 token'a**
+düştüğünü ölçtü. Uzun bağlamın bedeli iki kez alınıyor: bir kez prefill'de, sonra
+üretilen her token'da yeniden.
+
+Tüm politikaları doldurmak daha basit ve baskın gecikme terimini olabildiğince
+büyük yapıyor. Erişim, ayrıca değerlendirmeniz gereken bir bileşen ekliyor
+(@sec-erisim) ve o terimi kaldırıyor — üstelik gereksinimin zaten istediği
+atıfları da veriyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. İade tavanı nerede yaşıyor?
+
+İade servisinde, kodda zorunlu kılınmış olarak.
+
+Müşteri mesajlarını okuyan bir ajan saldırgan denetimindeki girdiyi okuyor ve
+@sec-ajan-guvenligi, yerleştirilmiş bir yönergenin **25 koşunun 25'inde** bir
+ajana dışa dönük bir araç çağırttığını, işaretlemeye gizlenmiş bir varyantın da
+**25'te 23** işe yaradığını ölçtü. Prompt'a yazılmış bir tavan, saldırganın da
+yazabildiği bir bileşene yapılmış bir ricadır.
+
+Daha güçlü hamle yapısal: bilet okuyan ajana iade aracını hiç vermeyin. Bu, onu
+hafifletmek yerine çifti kırıyor ve maliyeti — fazladan bir sıçrama — bu yıl
+satın alacağınız en ucuz güvenlik.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. Altın kümenizde 100 madde var. Size ne söyleyebilir?
+
+Bir şeyin bozuk olduğunu, bir şeyin daha iyi olduğunu değil.
+
+@sec-llm-degerlendirme'nin boyutlandırması: %80 doğru bir sistemde %80 güçte 100
+madde **13,4 puanlık**, 1.000 madde **4,8 puanlık** bir farkı çözüyor. Gerçek
+iyileştirmelerin çoğu 2–5 puan, dolayısıyla yüz maddelik bir küme —
+eşleştirilmemiş bir karşılaştırma olarak — görmek üzere kurulduğu şeyi göremiyor.
+
+Ama @sec-uretim-degerlendirme'nin kapısı eşleştirilmiş; iki koşuyu *aynı* maddeler
+üzerinde karşılaştırıyor ve orada 100 madde, 1 puanlık bir eşikle 3,4 puanlık bir
+gerilemeyi zamanın **%99,4'ünde** yakaladı. Aynı küme, farklı soru: onu bir kapı
+olarak kullanın, popülasyonda B sürümünün A'dan daha iyi olduğunun kanıtı olarak
+değil.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Ajandan önce ne kurarsınız?
+
+Değerlendirmeyi ve saldırıyı.
+
+İkisi de hiçbir şey çalışmadan önce ucuz ve ikisi de sonradan yazılmıyor.
+Değerlendirme size bir bitmişlik tanımı ve onu koruyan kapıyı veriyor
+(@sec-uretim-degerlendirme); saldırı taşıdığınız risk için bir sayı veriyor
+(@sec-ajan-guvenligi), ki o riskin bir paydaşla yapılan konuşmadan sağ çıktığı
+tek biçim o.
+
+Diğer her şey — erişim, araçlar, döngü, izleme — herhangi bir sırayla
+kurulabilir. Bu ikisi kurulamaz, çünkü sistem çalıştıktan sonra onları yazma
+güdüsü kayboluyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Beş takım ajan istiyor. Platform takımı ne kurar?
+
+Bir inceleme kuyruğu değil, bir altın yol.
+
+Her ajanı incelemek takım sayısıyla doğrusal ölçekleniyor ve sonra duruyor.
+Değerlendirme kapısının, izlemenin, kişisel veri sınırının ve araç
+sınıflandırmasının zaten bağlanmış olduğu bir şablon depo, uyumlu yolu en hızlı
+yol yapıyor, ki bu da yönetişimin bir son tarihle temastan sağ çıkan tek sürümü.
+
+Artı kimsenin sahiplenmek istemediği bir ürün: bir **ajan kaydı** — ajan başına
+bir satır, araçları, veri erişimi, sahibi ve geri alınabilirlik profiliyle. Her
+denetimin, olayın ve maliyet incelemesinin ona ihtiyacı var ve
+@sec-gozlemlenebilirlik'in maliyet boyutları gibi o da olay sonrasında yeniden
+kurulamıyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Panonuz yeşil, kapı geçiyor, kullanıcılar memnun değil. Nereye bakarsınız?
+
+Sırayla, her aletin göremediğine.
+
+Kapı **sizin süitiniz** hakkında yeşil, ki bu kapsam hakkında bir iddia — izlere
+gidin, şikâyet edilen koşuları bulun ve arıza sınıfının kümede hiç var olup
+olmadığını kontrol edin (@sec-uretim-degerlendirme). Pano **taşıma** hakkında
+yeşil: @sec-gozlemlenebilirlik'in saptaması, `status=OK` olan bir span'in
+kendinden emin yanlış bir cevabı memnuniyetle içerdiği.
+
+Sonra ilginç nedenlerden önce sıkıcı olanı eleyin: gürültü tabanından az kımıldayan
+bir metrik kımıldamıyordur. @sec-uretim-degerlendirme o tabanı **0,60 puanda**
+ölçtü, ki soruşturulacak bir şey olup olmadığını size söyleyen sayı odur.
+:::
+
+## Mülakat soruları {#sec-vaka-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Aşağıdaki sorular
+bu kitabın baştan sona kullandığı iki güvenilir açık kaynakta tekrar ediyor. Bu
+bölümün cevapları, kitapta daha önce yapılmış ölçümlerin sentezleri.
+:::
+
+### Bir sistem tasarlayabilir misiniz diye sınayanlar
+
+**S: Bir Türk e-ticaret şirketi için bir müşteri destek ajanı tasarlayın.**
+
+Yapılmayacaklarla başlayın, çünkü arıza sınıflarını kaldırıyorlar: bir iş günü
+içinde geri alınamayan eylem yok, sipariş ve kargo dışında kapsam yok, her zaman
+insana yükseltme yolu. Sonra biçim — gecikme nedeniyle uzun bağlam yerine politika
+belgeleri üzerinde erişim; atıf ve sabitleme için bir geçit; konuşmanın ortasında
+bir dağıtımın atlatılabilmesi için dayanıklı durum; aramaların çalışmaya devam
+etmesi için sınırda geri döndürülebilir biçimde token'laştırılmış kişisel veri; ve
+iade servisinde zorunlu kılınan iade tavanı, bilet okuyan ajan o aracı hiç
+tutmadan.
+
+**S: Kurmadan önce ne ölçerdiniz?**
+
+Başlangıçta yeni bir şey değil — bilineni bir araya getirin. Gecikmenizin hangi
+yarıda olduğunu bulmak için prefill'e karşı decode; prompt ve tamamlama token
+sayıları, çünkü parasını yazmanın değil okumanın ödüyorsunuz; içerik kütüklemesini
+açmadan önce koşu başına span ve bayt; hedeflediğiniz iyileştirmenin gerektirdiği
+değerlendirme kümesi boyutu; kişisel veri dedektörünüzün duyarlılığı kadar
+kesinliği; ve kendi saldırı başarı oranınız. Bir araya getirilmiş bütçenin
+deliği olduğu yer, ilk deneyin gittiği yer.
+
+**S: Daha küçük bir model kullanıp kullanmayacağınıza nasıl karar verirsiniz?**
+
+Bir ölçüt tablosundan değil. Bunu kendi süitiniz üzerinde bir ölçüm yapın ve bir
+yönlendirme kararı yerine bir şelaleyi tercih edin: küçük modelle cevaplayın ve
+bir çalışma zamanı geçerlilik kontrolüyle yükseltin, çünkü bir doğrulayıcı istek
+zamanında gerçekten elinizde olan bir sinyal, öngörülen zorluk ise bir tahmin —
+@sec-gecit bir zorluk yönlendiricisini AUROC 0,667'de ölçtü, ki bu gerçek sinyal
+ve körlemesine yönlendirmeye yetmiyor.
+
+### Bir platform işletip işletmediğinizi sınayanlar
+
+**S: Beş takım ajan kurmak istiyor. Neyi merkezîleştirirsiniz?**
+
+Darboğaz noktasını ve altın yolu. Atıf, sabitleme ve sınırlar için tek bir geçit;
+değerlendirme kapısı, izleme, kişisel veri sınırı ve araç sınıflandırması önceden
+bağlanmış bir şablon depo; ve her ajanın araçlarını, veri erişimini ve sahibini
+listeleyen bir ajan kaydı. İncelemeyi merkezîleştirmeyin — her şeyi inceleyen bir
+platform takımı kuruluş gereği bir darboğazdır. Onun yerine güvenli yolu hızlı yol
+yapın.
+
+**S: Ölçekte örgütsel olarak ilk bozulan şey nedir?**
+
+Bir takımın değiştirdiği bir aracın başka bir takımın ajanını bozması, çünkü araç
+tanımları paylaşılan bağlam ve kimse onlara bir arayüz gibi davranmadı.
+Sürümleyin, sahip verin ve değişiklikleri bağımlılık yükseltmeleri gibi
+inceleyin. Kısa süre sonra: kimse hangi ajanların var olduğunu ve neye
+ulaşabildiklerini cevaplayamıyor, ki bu kaydın işi ve geriye dönük yeniden
+kurulamıyor.
+
+**S: Ajan platformunuzun maliyetleri üçe katlandı. Nedenini nasıl bulursunuz?**
+
+Yalnızca boyutları önceden kaydettiyseniz — kullanıcı, takım, özellik, ortam ve
+sonuç — çünkü kaydetmediğiniz şeye göre gruplayamazsınız. Sonra alışıldık sırayı
+kontrol edin: bir yerde açılmış içerik kütüklemesi, bir bozulmayı büyüten yeniden
+denemeler, sizi önbelleğin bayt bayt aynı önekinden düşüren prompt büyümesi ya da
+hiçbir tavana çarpmayan bir döngü. Oturum başına değil çözülen bilet başına
+maliyet raporlayın, yoksa kimsenin tamamlamadığı bir özellik ucuz görünecek.
+
+## 2026 alet çantası {#sec-vaka-araclar}
+
+Bu bölüm hiçbir şey koşmuyor, dolayısıyla bir ölçüm yığını yok. İkinci tablo bir
+araya getirilmiş küme — Kısım VI ve VII boyunca adlandırılan araçlar, bir
+platformun onları benimseme sırasıyla.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| — | — | bu bölüm hiçbir ölçüm yapmıyor; her sayı, onu yapan bölüme atıflı |
+
+: Yeni yığın yok {tbl-colwidths="[24,16,60]"}
+
+Platformun biçimi, daha önceki bölümlerin önerdiklerinin okuma listesi olarak:
+
+| katman | temsilî seçenekler | bölüm |
+|:--|:--|:--|
+| servis | `vllm`, `sglang`, yerel iş için `ollama` | @sec-servis |
+| geçit | atıf ve sabitleme için `litellm` ve eşdeğerleri | @sec-gecit |
+| dayanıklı yürütme | denetim noktalı durumu olan bir iş akışı motoru | @sec-dagitim |
+| izleme | `opentelemetry-sdk` artı `arize-phoenix` ya da `langfuse` gibi bir arayüz | @sec-gozlemlenebilirlik |
+| değerlendirme kapısı | CI'da `promptfoo`, `inspect-ai` ya da `deepeval` | @sec-uretim-degerlendirme |
+| güvenlik sınaması | `agentdojo`, `PyRIT`, `garak` | @sec-ajan-guvenligi |
+| korkuluklar | kişisel veri için `presidio`; kodda politika zorunlu kılma | @sec-korkuluklar |
+
+: Bir araya getirilmiş platform, katman katman {tbl-colwidths="[20,50,30]"}
+
+## Lab: sistemden önce bütçeyi kurun {#sec-vaka-lab}
+
+### Adım 1 — yapılmayacakları yazın
+
+Bitirme projenizin ne yapmayacağını söyleyen dört ilâ altı cümle. Dolaştırın.
+Her anlaşmazlık şimdi, onları değiştirmenin bedava olduğu anda yüzeye çıkar.
+
+### Adım 2 — ajandan önce değerlendirmeyi yazın
+
+İyi bir cevabın ne olacağıyla birlikte elli gerçek vaka. Ne kadar sürdüğünü not
+edin; o sayı, sisteminizin çalışıp çalışmadığını bilmenin dürüst maliyeti.
+
+### Adım 3 — bütçeyi bu kitabın sayılarından bir araya getirin
+
+Gecikme, token hacmi, telemetri baytları, değerlendirme kümesi boyutu, korkuluk
+kesinliği, saldırı başarısı. Her birine bölümüyle atıf verin. Bir hücreyi
+dolduramadığınız yer ilk deneyiniz — onu ölçmenin ne gerektireceğini yazın.
+
+### Adım 4 — reddedilen alternatifiyle birlikte üç mimari karar kaydı yazın
+
+Karar, alternatifler, sonuçlar. Reddedilenler sütunu bir korkuluk değil, gerçek
+bir argüman içermeli. Diğer tarafı savunamıyorsanız, kararı düşünmeyi
+bitirmemişsinizdir.
+
+### Adım 5 — araçlarınızı sınıflandırın ve bir sınırı modelin dışında zorunlu kılın
+
+Her aracı @sec-korkuluklar'ın geri alınabilirlik sınıflarına koyun, sonra aracın
+uygulamasına sayısal ya da izin listesi tabanlı bir sınır ekleyin ve ikna edici
+bir prompt'un onu kımıldatamadığını kanıtlayan bir test yazın.
+
+### Adım 6 — kendi sisteminize saldırın ve oranı kaydedin
+
+Dört yük çerçevelemesi, her biri yirmi beş koşu, temiz bir denetimle
+(@sec-ajan-guvenligi). Ne söylerse söylesin sayıyı raporunuza koyun.
+
+### Adım 7 — kapınızın gürültü tabanını ölçün ve bir eşik belirleyin
+
+Beş özdeş koşu, en geniş açıklık, üstünde bir eşik (@sec-uretim-degerlendirme).
+Sonra hiçbir şey yapmayan bir değişiklik gönderin ve kapının onu engellemediğini
+doğrulayın.
+
+### Teslim edilecekler
+
+Yapılmayacaklarınız; ne kadar sürdüğüyle birlikte değerlendirme kümesi; her
+hücresi atıflı ya da boşluk olarak işaretlenmiş bütçe tablosu; üç mimari karar
+kaydı; zorunlu kılınmış bir sınır ve testiyle birlikte araç sınıflandırması;
+temiz denetimle birlikte saldırı başarı oranlarınız; ve seçtiğiniz eşikle
+birlikte ölçtüğünüz gürültü tabanı.
+
+## Alıştırmalar {#sec-vaka-alistirmalar}
+
+1. **Size sorulacak mimari karar kaydı.** Bitirme projenizdeki en sonuç doğuran
+   karar için kaydı yazın; reddettiğiniz alternatifi ve onun lehine bulduğunuz,
+   çürütmesi en zor argümanı dâhil ederek.
+
+2. **100× maliyet modeli.** Sisteminizin maliyet modelini trafiğinin yüz katında
+   üretin. İlk neyin bozulduğunu ve bunun para mı, gecikme mi yoksa birinin
+   dikkati mi olduğunu adlandırın.
+
+3. **Delikli bütçe.** Kendi sisteminiz için @sec-vaka-butce'nin bütçe tablosunu
+   kurun. Kaç hücreyi bu kitaptan, kaçını kendi ölçümlerinizden
+   doldurabildiğinizi ve kaçının hâlâ tahmin olduğunu raporlayın.
+
+4. **Bir çifti kırın.** Tasarımınızda güvenilmeyen içerik okuyan ve dışa dönük
+   bir araç tutan bir ajan bulun. Bölün ve hangi yeteneği yitirdiğinizi
+   raporlayın (@sec-ajan-guvenligi).
+
+5. **Kayıt.** İşlettiğiniz bir sistem için ajan kaydını yazın — araçlar, veri
+   erişimi, sahip, geri alınabilirlik profili. Birine sormadan neyi
+   cevaplayamadığınızı raporlayın.
+
+6. **Altın yol.** Kurumunuzda yeni bir ajan için uyum gereksinimlerini alın ve
+   onları varsayılan olarak karşılayan şablonu tasarlayın. Sonra şablonsuz yolun
+   kaç gün sürdüğünü tahmin edin.
+
+7. **Önceden yazılmış geriye dönüş.** Sisteminizde en olası bulduğunuz olay için
+   postmortemi, o olmadan önce yazın. Sonra onu önleyecek tek denetimi uygulayın.
+
+## Daha derine {#sec-vaka-derinlesme}
+
+Okumadan önce: sisteminizin bütçe tablosunu ezberden yazmayı deneyin.
+Dolduramadığınız hücreler yeniden okunacak bölümler.
+
+Bu bölüm hiçbir yeni kaynağa atıf vermiyor — kitabın kendi kaynaklarını bir araya
+getiriyor. Aşağıdaki tablo bir kaynakça değil, bir okuma sırası.
+
+| şurada takıldıysanız | şunu yeniden okuyun |
+|:--|:--|
+| kurmadan önce ne ölçüleceği | @sec-llm-degerlendirme ve @sec-ajan-degerlendirme, sonra kapı için @sec-uretim-degerlendirme |
+| gecikmenin prompt mu cevap mı olduğu | @sec-servis ve özellikle prefill/decode ayrımı |
+| bir sınırın nerede yaşaması gerektiği | sınıflandırma için @sec-korkuluklar, prompt'un neden bir yer olmadığı için @sec-ajan-guvenligi |
+| kalite neden kımıldadı ve hiçbir şey değişmedi | gürültü tabanları için @sec-uretim-degerlendirme, cevaplayan model için @sec-gozlemlenebilirlik |
+| yükümlülüklerinizin ne olduğu | @sec-yonetisim ve tarihlerin kaydığına dikkat |
+| güvenli yolu hızlı yol yapmak | yukarıdaki @sec-vaka-platform ve darboğaz noktası için @sec-gecit |
+
+: Bitirme projesi için bir okuma sırası {tbl-colwidths="[42,58]"}
+
+## Akılda kalması gerekenler {#sec-vaka-ozet}
+
+- **Önce yapılmayacakları yazın.** Her biri bir arıza sınıfını kaldırıyor ve her
+  birine sonradan, bir özellik daha isteyen biri tarafından karşı çıkılacak.
+  Onlara kimse yatırım yapmadan karar vermek yapacağınız en ucuz mimari iş.
+
+- **Gerçek bir reddedilen alternatifi olmayan bir mimari karar kaydı bir basın
+  bültenidir.** Diğer tarafı savunamıyorsanız karar henüz verilmemiştir.
+
+- **Bir sistemi kurmadan önce, zaten elinizde olan ölçümlerden
+  bütçeleyebilirsiniz.** @sec-servis'in prefill/decode ayrımından gecikme, **890
+  prompt token'ına karşı 53 üretilmiş**ten token hacmi, **koşu başına 4,8 span ve
+  3.167 bayt**tan telemetri, @sec-llm-degerlendirme'nin **100 maddede 13,4
+  puanı**ndan değerlendirme boyutu, **%40 yalnızca-örüntü**den korkuluk kesinliği
+  ve @sec-ajan-guvenligi'nin **%92–100** saldırı başarısından risk. [Bütçenin
+  deliği olan yer, ilk deneyinizin gittiği yerdir.]{.hl}
+
+- **Erişim, uzun bağlamı zevkle değil aritmetikle yener.** @sec-servis 7.455
+  token'da duvar saatinin **%90,7'sinin** ilk karakterden önce geçtiğini ve
+  decode'un **saniyede 185'ten 139 token'a** düştüğünü ölçtü.
+
+- **Önemli olan her sınır modelin dışında zorunlu kılınır.** Prompt'taki bir
+  tavan bir ricadır ve daha güçlü hamle, güvenilmeyen girdi alan ajana tehlikeli
+  aracı hiç vermemek — onu hafifletmek yerine çifti kırmak.
+
+- **Değerlendirmeyi ve saldırıyı ajandan önce yazın.** İkisi de başlangıçta ucuz,
+  ikisi de sistem çalıştıktan sonra yazılmıyor ve geri kalanın kurulmaya değip
+  değmediğine karar veren iki şey onlar.
+
+- **Platform arızaları bir takvimle geliyor.** İkinci takımda paylaşılan bir araç
+  birini bozuyor; beşinci ajanda kimse neyin var olduğunu bilmiyor; onuncuda
+  platform takımı darboğaz. Sahipleri olan sürümlenmiş araçlar, bir ajan kaydı ve
+  bir altın yol — bu sırayla.
+
+- **Her şeyi inceleyen bir platform takımı doğrusal ölçeklenir ve sonra durur.**
+  Onun yerine uyumlu yolu en hızlı yol yapın, çünkü bir son tarihten sağ çıkan
+  tek yönetişim o.
+
+- **İddiayı kanıtıyla raporlayın.** "Biletlerin %80'ini çözüyor"un bir kümeye,
+  çözülmenin bir tanımına ve bir aralığa ihtiyacı var. Bu kitabın
+  @sec-llm-degerlendirme'den beri savunduğu standart bu ve bitirme projesinin
+  notlandırıldığı şey de bu.
