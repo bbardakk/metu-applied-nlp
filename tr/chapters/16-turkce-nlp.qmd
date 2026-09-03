@@ -1,0 +1,1075 @@
+# Türkçe ve Morfolojik Olarak Zengin Diller {#sec-turkce-nlp}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 16. bölüm](../../en/chapters/16-turkish-nlp.html). Bu bölüme özgü
+ölçümler WMT16/17/18 Türkçe–İngilizce test kümelerinde yapıldı — 9.007
+profesyonelce çevrilmiş cümle çifti; aynı içeriği iki dilde verdikleri için
+alışıldık tek dilli derlemlerin izin vermediği karşılaştırmalara imkân
+tanıyorlar. Daha önceki bir bölümde ölçülmüş bir sayı tekrarlanmıyor, atıf
+veriliyor. Yazılım: `sacrebleu` 2.6.0, `snowballstemmer` 3.1.1,
+`transformers` 5.15.1, PyTorch 2.13.0, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- eklemeliliğin sözlük büyüklüğüne ne yaptığını açıklayabilir ve etkiyi iddia
+  etmek yerine bir derlem üzerinde gösterebilirsiniz;
+- morfolojik olarak zengin bir dilin bir NLP hattının hangi parçalarını
+  bozacağını öngörebilir ve bunları doğru sırayla kontrol edebilirsiniz;
+- Türkçe metni bozmadan normalize edebilir ve her kod incelemesinden sağ çıkan
+  iki hatayı adlandırabilirsiniz;
+- çok dilli ve tek dilli bir model arasında tercihle değil ölçümle karar
+  verebilirsiniz;
+- bu kitabın defalarca çarptığı genel örüntüyü tanıyabilirsiniz: İngilizce
+  dışında sessizce yanlış çalışan standart bir araç ve onu yakalayan kontrol
+  türü.
+
+## Eklemelilik gerçekte neye mal oluyor {#sec-turkce-nlp-eklemeli}
+
+Türkçe [**eklemeli**](#gloss-agglutinative){#term-agglutinative .term-ref} bir
+dildir: kelimeleri bir gövdeye ekler yığarak kurar; her ek bir dilbilgisi
+parçası ekler, sıra kuralla sabittir ve ünlüler gövdeyle uyumlanır —
+[**ünlü uyumu**](#gloss-vowel-harmony){#term-vowel-harmony .term-ref}, aynı
+ekin neden kimi zaman *-ler* kimi zaman *-lar* olarak göründüğünün nedeni.
+
+::: {#gloss-agglutinative .column-margin .term-gloss}
+**Eklemeli** — kelimeleri, her biri tek bir dilbilgisi parçası taşıyan ekleri
+uç uca ekleyerek kuran dil; kaynaştırma ya da ayrı kelimeler kullanma yerine.
+Türkçe, Fince ve Macarca; bir Türkçe sözlüğün asla kapanmamasının nedeni.
+[↩](#term-agglutinative){.term-back}
+:::
+
+::: {#gloss-vowel-harmony .column-margin .term-gloss}
+**Ünlü uyumu** — bir ekin ünlülerinin gövdenin son ünlüsüyle eşleşecek şekilde
+seçilmesi kuralı; böylece tek bir ekin birkaç yüzey biçimi olur (*evler* ama
+*kitaplar*). Bir tokenizer'ın hesaba katması gereken farklı dizgi sayısını
+çarpar. [↩](#term-vowel-harmony){.term-back}
+:::
+
+*Ev*, *evler*, *evlerimiz*, *evlerimizden*. İngilizce sonuncusu için dört
+kelimeye ihtiyaç duyar.
+
+Bunu herkes bilir. *Neye mal olduğu* ise nadiren ölçülür ve ölçüm, iki dilin de
+aynı şeyi söylediği bir derlem gerektirir — profesyonel bir çeviri tam olarak
+budur.
+
+### Aynı içerik üzerinde sözlük büyümesi
+
+O yüzden bir tane alalım. Dokuz bin haber cümlesi, profesyonellerce çevrilmiş;
+her iki taraftaki farklı kelime biçimlerini sayalım:
+
+```text
+WMT16/17/18 tr-en, 9,007 aligned sentence pairs
+
+  Turkish   141,412 tokens   32,866 distinct forms
+  English   182,429 tokens   16,652 distinct forms
+```
+
+[Türkçe, token'ların %78'inden sözlüğün iki katını üretiyor.]{.hl} Aynı
+içerik, aynı olgular, aynı haberler. Ve oran sabit değil — derlemle birlikte
+büyüyor:
+
+```text
+   tokens seen     TR forms    EN forms    ratio
+         5,000        2,471       1,655     1.49
+        10,000        4,192       2,575     1.63
+        25,000        9,342       5,016     1.86
+        50,000       15,963       7,827     2.04
+       100,000       25,664      11,848     2.17
+       141,412       32,866      14,251     2.31
+```
+
+Bu altı satır iki eğridir ve eğrilerin biçimleri farklıdır:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Aynı içerik üzerinde iki sözlük ve açılmayı sürdüren fark</div>
+<svg viewBox="0 0 764 332" style="max-width:744px" role="img"
+     aria-label="Aynı 9.007 çevrilmiş cümle üzerinde Türkçe farklı kelime biçimleri 5.000 token'da 2.471'den 141.412 token'da 32.866'ya çıkıyor; İngilizce aynı token sayılarında 1.655'ten 14.251'e çıkıyor. Aralarındaki oran 1,49'dan 2,31'e yükseliyor.">
+
+  <text x="16" y="20" class="t-xs t-muted">OKUNAN TOKEN'A KARŞI FARKLI KELİME BİÇİMLERİ — AYNI 9.007 CÜMLE ÇİFTİ, İKİ TARAFTA DA SAYILDI</text>
+
+  <line x1="76" y1="44" x2="76" y2="228" class="ln-thin"/>
+  <line x1="76" y1="228" x2="492" y2="228" class="ln-thin"/>
+  <g class="ln-thin ln-dash">
+    <line x1="76" y1="175.4" x2="492" y2="175.4"/>
+    <line x1="76" y1="122.9" x2="492" y2="122.9"/>
+    <line x1="76" y1="70.3" x2="492" y2="70.3"/>
+  </g>
+  <g class="t-xs t-muted t-end">
+    <text x="68" y="232">0</text><text x="68" y="179">10b</text>
+    <text x="68" y="127">20b</text><text x="68" y="74">30b</text>
+  </g>
+  <g class="t-xs t-muted t-mid">
+    <text x="90.7" y="246">5b</text><text x="149.5" y="246">25b</text>
+    <text x="223.1" y="246">50b</text><text x="370.2" y="246">100b</text>
+    <text x="492" y="246">141b</text>
+  </g>
+
+  <polyline points="90.7,215.0 105.4,206.0 149.5,178.9 223.1,144.1 370.2,93.1 492,55.2" class="ln-accent"/>
+  <g class="head-accent">
+    <circle cx="90.7" cy="215.0" r="3.5"/><circle cx="105.4" cy="206.0" r="3.5"/>
+    <circle cx="149.5" cy="178.9" r="3.5"/><circle cx="223.1" cy="144.1" r="3.5"/>
+    <circle cx="370.2" cy="93.1" r="3.5"/><circle cx="492" cy="55.2" r="3.5"/>
+  </g>
+  <text x="486" y="48" class="t-sm t-accent t-b t-end">32.866</text>
+
+  <polyline points="90.7,219.3 105.4,214.5 149.5,201.6 223.1,186.9 370.2,165.7 492,153.1" class="ln"/>
+  <g class="head">
+    <circle cx="90.7" cy="219.3" r="3.5"/><circle cx="105.4" cy="214.5" r="3.5"/>
+    <circle cx="149.5" cy="201.6" r="3.5"/><circle cx="223.1" cy="186.9" r="3.5"/>
+    <circle cx="370.2" cy="165.7" r="3.5"/><circle cx="492" cy="153.1" r="3.5"/>
+  </g>
+  <text x="486" y="146" class="t-sm t-b t-end">14.251</text>
+
+  <line x1="100" y1="93" x2="128" y2="93" class="ln-accent"/>
+  <text x="136" y="97" class="t-sm t-accent t-b">Türkçe</text>
+  <line x1="100" y1="113" x2="128" y2="113" class="ln"/>
+  <text x="136" y="117" class="t-sm">İngilizce</text>
+
+  <rect x="516" y="44" width="232" height="184" rx="9" class="box"/>
+  <text x="532" y="70" class="t-sm t-b">İki biçimin anlamı</text>
+  <g class="t-sm">
+    <text x="532" y="96">İngilizce düzleşiyor — sık</text>
+    <text x="532" y="114">kelimeler tükeniyor ve eğri</text>
+    <text x="532" y="132">bükülüyor.</text>
+    <text x="532" y="158">Türkçe düzleşmiyor: biçimleri</text>
+    <text x="532" y="176">bir listeden çekilmiyor,</text>
+    <text x="532" y="194">kuralla üretiliyor.</text>
+  </g>
+
+  <path d="M14 264 L 750 264" class="ln-thin"/>
+  <text x="16" y="286" class="t-xs t-muted">AYNI ŞEY BİR KAT OLARAK — YUKARIDAKİ HER NOKTADA TÜRKÇE BİÇİM SAYISI BÖLÜ İNGİLİZCE</text>
+  <g class="t-sm t-muted">
+    <text x="20" y="312">5b</text><text x="140" y="312">10b</text>
+    <text x="260" y="312">25b</text><text x="380" y="312">50b</text>
+    <text x="500" y="312">100b</text><text x="620" y="312">141b</text>
+  </g>
+  <g class="t-sm t-mono t-b t-accent">
+    <text x="82" y="312">1,49</text><text x="202" y="312">1,63</text>
+    <text x="322" y="312">1,86</text><text x="442" y="312">2,04</text>
+    <text x="562" y="312">2,17</text><text x="682" y="312">2,31</text>
+  </g>
+</svg>
+```
+
+::: {.fig-cap}
+İki eğri de eşit token sayılarında sayıldı, dolayısıyla fark bir dilin aynı
+şeyi söylemek için daha çok kelimeye ihtiyaç duymasının yapaylığı değil.
+İngilizce, sık sözcük dağarcığı tükendikçe bükülüyor; Türkçe daha önce
+kullanmadığı biçimler üretmeyi sürdürüyor ve aradaki kat, derlem bittiğinde
+hâlâ büyüyor.
+:::
+::::
+
+Asıl önemli olan o açılmadır. İngilizce sözlük büyümesi sık kelimeler
+tükendikçe düzleşir; **Türkçe daha önce kullanmadığı biçimler üretmeyi
+sürdürür**, çünkü biçimler bir listeden çekilmiyor, kuralla üretiliyor. Sözlük
+bir listedir ve üretken morfoloji bir listeye sığmaz.
+
+Kuyruk da aynı şeyi gösteriyor:
+
+```text
+  forms occurring exactly once     Turkish   58.6%      English   44.1%
+```
+
+::: {.column-margin}
+@sec-karsilastirma tümüyle farklı bir Türkçe derlemde — haber değil ürün
+yorumları — %58,6 hapax ölçmüştü. İlgisiz iki derlemin aynı rakama düşmesi
+üçüncü hanede bir tesadüftür, ama ilk iki hanedeki uyuşma değildir: üretken bir
+morfolojinin seçeceğiniz herhangi bir Türkçe metne yaptığı şeydir.
+:::
+
+### Tek gövde, çok kelime
+
+Sözlük büyüklüğü maliyetin bir görünümü. Diğeri arkasında ne olduğudur — o
+farklı biçimlerin kaçının farklı ekler giymiş aynı kelime olduğu. Derlemi
+gövdeleyip her gövdenin ürettiği biçimleri saydığımızda:
+
+```text
+  32,866 distinct forms  ->  17,891 stems       mean 1.84 forms per stem
+
+  arkadaş   39 forms   arkadaş, arkadaşı, arkadaşım, arkadaşın, arkadaştı, ...
+  ülke      35 forms   ülke, ülkem, ülkede, ülkeyi, ülkeye, ülkeden, ülkeler, ...
+  el        34 forms   el, eli, ele, elim, elde, elin, elimi, ...
+  çocuk     31 forms   çocuk, çocuğu, çocuğa, çocukla, çocuğun, çocukta, ...
+```
+
+1,84 ortalaması aşağı yönde yanıltıcı — bu büyüklükte bir derlemde gövdelerin
+%75'i yalnızca bir kez geçiyor ve gövdeleyici eksik birleştiriyor. Bilgi veren
+satır en üsttekidir: **141.000 token içinde sıradan bir ismin otuz dokuz
+biçimi** ve liste tükenmeye hiç yakın değil. @sec-karsilastirma daha büyük bir
+derlemde *kulla* gövdesini paylaşan 895 biçim bulmuştu.
+
+### Bunun ortaya çıktığı yerler
+
+Eklemelilik tek bir problem değildir; aynı problemin beş yerde ortaya
+çıkmasıdır ve kitap bunların her birini artık ölçmüştür:
+
+| nerede | ne olur | nerede ölçüldü |
+|:--|:--|:--|
+| Tokenization | kelime başına daha çok token, yani daha çok maliyet ve daha az etkin bağlam | @sec-on-egitim |
+| Sözlük | iki kat tür, daha uzun kuyruk, daha çok sözlük dışı kelime | burada |
+| Sözcüksel erişim | belgedekinden farklı bir sorgu biçimi hiçbir şeyle eşleşmez | @sec-turkce-nlp-erisim |
+| Kelime düzeyinde metrikler | cümle başına daha az token, yani her hata daha pahalı | @sec-makine-cevirisi |
+| Büyük-küçük harf dönüşümü | tek bir karakter bütün hattı bozar | @sec-turkce-nlp-normalizasyon |
+
+: Tek bir özellik, beş sonuç {tbl-colwidths="[22,52,26]"}
+
+**Neye bakacağız.** Önce normalizasyon; iki adımın tercih değil doğruluk hatası
+olduğu ve ikisinin de kod incelemesinden sağ çıktığı yer, çünkü kod doğru
+görünüyor. Sonra alt kelime tokenizer'larının büyük ölçüde yerini aldığı
+morfolojik çözümleme ve onun hâlâ doğru araç olduğu dört iş. Sonra arama; tek
+bir ön işleme adımının recall@1'i %28'den %95'e taşıdığı yer. Sonra bu kitabın
+sürekli içine yürüdüğü örüntü — İngilizce dışında sessizce yanlış çalışan
+standart bir araç; kaynağı okunarak değil bir kontrolle yakalanan. Ve son
+olarak tek dilliye karşı çok dilli; ikisi de çalıştırılarak çözülmüş ve
+beklemediğim bir sonuçla.
+
+## Türkçe normalizasyon ve incelemeden sağ çıkan iki hata {#sec-turkce-nlp-normalizasyon}
+
+İngilizcede normalizasyon bir ön işleme kararıdır. Türkçede adımlarından ikisi
+doğruluk hatasıdır ve ikisi de kod incelemesinde görünmezdir, çünkü kod doğru
+görünür.
+
+### Birinci hata: `str.lower()` iki yönde de yanlış
+
+Türkçede İngilizcenin tek harfi olan yerde iki harf vardır —
+[**noktalı ve noktasız i**](#gloss-dotted-and-dotless-i){#term-dotted-and-dotless-i .term-ref}.
+Noktalı `İ`/`i` ile noktasız `I`/`ı` farklı seslere sahip farklı harflerdir ve
+aralarındaki büyük-küçük harf eşlemesi ASCII eşlemesi değildir:
+
+```text
+        English rules          Turkish rules
+  I  →  i                      ı
+  İ  →  i + combining dot      i
+```
+
+::: {#gloss-dotted-and-dotless-i .column-margin .term-gloss}
+**Noktalı ve noktasız i** — Türkçede İngilizcenin iki harfi olan yerde dört
+harf vardır: `i`/`İ` ve `ı`/`I`. Bunlar ayrı harflerdir, dolayısıyla
+aralarındaki büyük-küçük harf dönüşümü ASCII kuralını izlemez ve `str.lower()`
+hepsini yanlış yapar. [↩](#term-dotted-and-dotless-i){.term-back}
+:::
+
+Aksi söylenmedikçe her yaygın `lower()` İngilizce kuralları uygular. WMT16
+Türkçe kaynağında:
+
+```text
+  words containing I or İ                                    438
+  where str.lower() differs from Turkish lowercasing         438   (100%)
+
+    'İtiraf'      str.lower() 'i̇tiraf'       Turkish 'itiraf'
+    'İngilizce'   str.lower() 'i̇ngilizce'    Turkish 'ingilizce'
+    'İşlerin'     str.lower() 'i̇şlerin'      Turkish 'işlerin'
+```
+
+**Tek tek hepsi.** Uzun bir kuyruk değil — büyük noktalı İ ile başlayan her
+kelimede tam bir başarısızlık; Türkçede buna özel adların büyük bir kısmı ve
+*i* ile başlayan her cümle başı kelime dâhildir.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Kendiniz küçük harfe çevirin — İngilizce kurallara karşı Türkçe kurallar</div>
+```
+
+```{ojs}
+//| echo: false
+viewof trCaseInput = Inputs.text({
+  label: "Türkçe metin",
+  value: "İSTANBUL İtiraf IŞIK Iğdır",
+  width: 420,
+  placeholder: "deneyin: İzmir, IRMAK, İŞLERİN, KIZILAY"})
+```
+
+```{ojs}
+//| echo: false
+trCaseRows = trCaseInput.split(/\s+/).filter(w => w.length > 0).map(w => {
+  const naive = w.toLowerCase();                  // str.lower()'ın yaptığı
+  const proper = w.toLocaleLowerCase("tr");       // yerele duyarlı, doğrusu
+  return {
+    word: w,
+    naive: naive,
+    proper: proper,
+    agree: naive === proper,
+    // birleşen işaret \w karakteri değildir, bu yüzden token'ı ikiye böler
+    pieces: naive.normalize("NFC").split(/[^\p{L}\p{N}]+/u).filter(x => x).length
+  };
+})
+```
+
+```{ojs}
+//| echo: false
+Inputs.table(trCaseRows, {
+  columns: ["word", "naive", "proper", "agree", "pieces"],
+  header: {word: "girdi", naive: "str.lower()", proper: "Türkçe lower()",
+           agree: "aynı mı?", pieces: "\\w+ sonrası token"},
+  format: {agree: a => a ? "evet" : "HAYIR", pieces: n => n > 1 ? `${n} ⚠` : `${n}`},
+  width: {word: 130, naive: 150, proper: 150, agree: 70, pieces: 110},
+  rows: 12})
+```
+
+```{ojs}
+//| echo: false
+md`${trCaseRows.length} kelimenin ${trCaseRows.filter(r => !r.agree).length}
+tanesi iki kural altında farklı küçültülüyor${
+trCaseRows.some(r => r.pieces > 1)
+  ? " ve en az biri tokenization'dan tek kelime olarak sağ çıkamıyor"
+  : ""}.`
+```
+:::
+
+Tarayıcınızda doğru eşleme yerleşik olarak var — `toLocaleLowerCase("tr")` — ve
+diğer her platformda da var. Hata hiçbir zaman düzeltmenin bulunmaması değil;
+varsayılanın yanlış ve sessiz olması.
+
+### İkinci hata: sonuç artık tek bir kelime bile değil
+
+Birinci hata yanlış bir dizgi. İkincisi daha kötü ve @sec-kumeleme-konu'nun
+üretimde bulduğu hata bu:
+
+```text
+  'İSTANBUL'.lower()  =  'i̇stanbul'
+
+    code points  U+0069 U+0307 U+0073 U+0074 U+0061 U+006E U+0062 U+0075 U+006C
+                   i     ̇      s      t      a      n      b      u      l
+    categories   Ll     Mn     Ll     Ll     Ll     Ll     Ll     Ll     Ll
+
+  re.findall(r"\w+", 'İSTANBUL'.lower())   →   ['i', 'stanbul']
+```
+
+`U+0307 COMBINING DOT ABOVE` bir *boşluksuz işarettir*, kelime karakteri
+değildir. Bu yüzden `\w+` üzerine kurulu her tokenizer kelimeyi o noktada ikiye
+böler. [`İstanbul`, `i` artı `stanbul` oluyor ve aşağı akıştaki hiçbir
+modelleme bundan kurtaramıyor]{.hl} — model kelimeyi hiç görmüyor.
+
+Ve normalize ettiğinizde de geçmiyor:
+
+```text
+  unicodedata.normalize("NFC",  'İSTANBUL'.lower())   →   ['i', 'stanbul']
+  'TAVSİYE'.lower()                                   →   ['tavsi', 'ye']
+```
+
+NFC yeniden birleştirmez, çünkü `i` + birleşen nokta, `i` ile kanonik olarak
+eşdeğer değildir — birleşik karakter `i̇` tek bir kod noktası olarak yoktur.
+Unicode düzeyinde bir çözüm yok. Çözüm problemi hiç yaratmamak:
+
+```python
+def tr_lower(s):
+    return s.replace("İ", "i").replace("I", "ı").lower()
+
+def tr_upper(s):
+    return s.replace("i", "İ").replace("ı", "I").upper()
+```
+
+Dört satır; metne başka hiçbir şey dokunmadan önce uygulanır.
+
+::: {.column-margin}
+Hatanın sağ çıkmasının nedeni bu: ona yol açan kod `text.lower()`, yani doğru
+görünen, her yerde bulunan ve yazmadığınız her kütüphanenin içinde olan şey.
+@sec-kumeleme-konu bunu bir küme %94,7 oranında tek bir yapaylıkla dolu geldiği
+için buldu — kimse aradığı için değil. `İ` içeren bir kelimeyi küçültüp kod
+noktalarını yazdırarak kontrol edin.
+:::
+
+### Aksanlar: deasciification ve neyi birleştirdiği
+
+Türkçe klavyeler evrensel değildir ve gerçek Türkçenin büyük bir kısmı
+aksansız yazılır — *güzel* yerine *guzel*, *çok* yerine *cok*. Bunu ele almak
+ya aksanları geri koymak
+([**deasciification**](#gloss-deasciification){#term-deasciification .term-ref})
+ya da iki biçim de eşleşsin diye her yerde silmek demektir.
+
+::: {#gloss-deasciification .column-margin .term-gloss}
+**Deasciification** — aksansız yazılmış metne Türkçe aksanları geri koymak
+(*guzel* → *güzel*). Tersi, yani iki biçim eşleşsin diye aksanları silmek daha
+kolaydır ve gerçekten farklı olan kelime çiftlerini birleştirir.
+[↩](#term-deasciification){.term-back}
+:::
+
+Silmek, cazip tek satırlık çözümdür. Aynı derlemde ölçüldü:
+
+```text
+  words containing a Turkish-specific character   19,318 / 46,243   (41.8%)
+  distinct forms                                          15,173
+  distinct forms after stripping diacritics               15,101
+  ascii forms now ambiguous between 2+ real words             72
+
+     'oldu'   <-  oldu, öldü          (it happened / he died)
+     'bas'    <-  bas, baş            (press / head)
+     'once'   <-  once, önce          (once / before)
+     'mi'     <-  mi, mı              (two different question particles)
+```
+
+Yalnızca 72 çakışma; okuyana kadar zararsız geliyor. *Oldu* ile *öldü* "vuku
+buldu" ile "vefat etti"dir. [Birleşme oranı düşük ve birleşme başına maliyet
+tam]{.hl} — bir ön işleme kararının alabileceği en kötü biçim: toplam
+metriklerde görünmeyecek ve tek tek felaket hatalar üretecek.
+
+Karşılayabiliyorsanız silmek yerine geri koyun. Silmek zorundaysanız hem
+*sorguyu* hem *belgeyi* silin ve o çiftleri ayırt edilemez hâle getirdiğinizi
+bilin.
+
+## Morfolojik çözümleme ve hâlâ gerekli olup olmadığı {#sec-turkce-nlp-cozumleme}
+
+Alt kelime tokenizer'larından önce Türkçeyi ele almak onu *çözümlemek*
+demekti: *evlerimizden*'i alıp *ev* gövdesini artı üzerine yığılmış
+dilbilgisel işlevlerin sıralı listesini döndürmek. Türkçenin burada alanın
+büyük başarı hikâyelerinden biri var — @oflazer1994two dilin morfolojisini
+düzgün kapsayan iki düzeyli sonlu durum çözümleyicisi kurdu ve torunları hâlâ
+çalışıyor.
+
+Çözümlemeyi kulağa geldiğinden zor kılan iki şey:
+
+**Belirsizlik.** *Yüzü*, hangi çözümlemeyi aldığınıza göre *onun yüzü*, *yüzen
+kişi* ya da *onun yüzü (100)* olabilir. Morfolojik bir çözümleyici hepsini
+döndürür; doğrusunu seçmek *morfolojik belirsizlik giderme*dir ve cümle bağlamı
+ister. Yani düzenli hattın — çözümle, sonra modelle — daha ilk adımının içinde
+cümle düzeyinde bir model vardır.
+
+**Kapsam.** Bir çözümleyici kendisiyle birlikte kurulan gövdeleri bilir. Yeni
+kelimeler, marka adları ve Türkçenin serbestçe yaptığı üretken birleştirme onun
+dışında kalır ve kusur biçimi serttir: hiç çözümleme yok.
+
+### Peki 2026'da gerekli mi?
+
+Çoğu modelleme için hayır. Alt kelime tokenization'ı (@sec-metin-veri)
+morfolojiyi dilbilimsel değil *istatistiksel* olarak ele alır:
+*-lerimizden*'in dört ek olduğunu bilmez, ama parçanın tekrar ettiğini öğrenir
+ve bir modelin ihtiyacının çoğu budur. BERTurk'ün yığında hiçbir yerde
+morfolojik çözümleyici olmadan çalışmasının nedeni budur.
+
+Alt kelime modelinin vermediği bir şeye ihtiyacınız olduğunda gerçek bir
+çözümleyiciye uzanın:
+
+- **Sözcüksel erişim**; indeksleyeceğiniz gövdeye ihtiyacınız olan yer —
+  @sec-turkce-nlp-erisim bunun tam olarak neye değdiğini ölçüyor.
+- **Dilbilimsel etiketleme**; dilbilgisel çözümlemenin *kendisinin* çıktı
+  olduğu yer.
+- **Kural güdümlü ürünler** — dilbilgisi denetleyicileri, yazım düzeltme,
+  sözlük araması — yanlış bir cevabın açıklanabilir olması gereken yerler.
+- **Çok düşük veri rejimleri**; *evlerimizden* ile *evimiz*'in bir gövdeyi
+  paylaştığını bilmenin tümevarımsal önyargısının, sahip olmadığınız veriden
+  daha değerli olduğu yer.
+
+::: {.column-margin}
+Çoğu projenin vardığı uzlaşı çözümleyici değil gövdeleyicidir: kaba, hızlı,
+giderilecek belirsizliği yok ve — @sec-turkce-nlp-erisim'in gösterdiği gibi —
+erişim faydasının çoğunu taşıyor. Bu bölümde kullanılan Snowball Türkçe
+gövdeleyicisi yüz satırlık kuraldır. Eksik birleştirir, fazla birleştirir ve
+recall@1'i %28,0'dan %95,3'e çıkarır.
+:::
+
+## Türkçe erişim: farkın ne kadarı morfoloji {#sec-turkce-nlp-erisim}
+
+Türkçede arama İngilizcede aramadan zordur ve uygulayıcılar bunu genellikle
+bilir. Bilinmeye değer olan, zorluğun *ne kadarının* yalnızca morfoloji
+olduğudur — çünkü o kısmın ucuz bir çözümü var, gerisinin yok.
+
+Deney bunu yalıtıyor. 7.165 Türkçe cümleyi belge olarak alın, BM25 ile
+indeksleyin ve hedef bir belgeden alınan üç içerik kelimesiyle sorgulayın —
+ama **belgenin kullandığından farklı bir yüzey biçiminde**. Gerçek durum budur:
+kullanıcı *İstanbul* yazar, belgede *İstanbul'da* geçer.
+
+```text
+7,165 Turkish documents (sentences of 8+ words)
+1,481 queries of 3 terms each
+69% of query terms are a different inflection than the document uses
+
+index / query scheme      recall@1   recall@10   terms/doc
+surface form                 28.0%       54.4%        15.7
+5-char prefix                74.6%       92.6%        15.7
+Snowball stem                95.3%       99.8%        15.7
+character 4-grams            74.9%       94.9%        55.7
+```
+
+[Yüzey biçimli BM25 doğru belgeyi zamanın %28'inde buluyor. Gövdeleme onu
+%95,3'e taşıyor.]{.hl} Tek bir ön işleme adımı, 3,4 kat iyileşme ve işin içinde
+hiç model yok.
+
+Başlığı bir yere taşımadan önce kurulumu okuyun: sorgu terimlerinin %69'u
+bilerek farklı bir çekim olacak şekilde seçildi ve bir sorgu ancak üç
+teriminden yeterlisi eşleşirse başarılı sayılıyor. Bu, ortalama bir sorgudan
+sert, en kötüsünden yumuşaktır — Türkçe bir derlemde arama yapan kullanıcı
+sözlük biçimini yazar ve derlemde o biçim neredeyse hiç bulunmaz.
+
+Üç pratik sonuç:
+
+1. **Türkçe sözcüksel aramada gövdeleme isteğe bağlı değildir.** İngilizcede
+   bir iki puanlık marjinal bir ince ayardır. Burada çalışan bir arama kutusuyla
+   çalışmayan arasındaki farktır.
+2. **Karakter n-gram'ları gürbüz yedektir.** Hiçbir dilbilimsel bilgi olmadan
+   %74,9 recall@1; bedeli 3,5 kat indeks boyutu (belge başına 15,7'ye karşı
+   55,7 terim). Bir dil için gövdeleyiciniz yoksa yapılacak hamle budur.
+3. **Ön ek kırpma şaşırtıcı derecede iyi bir yaklaşımdır.** İlk beş karakteri
+   tutmak %74,6 veriyor — karakter n-gram'larıyla neredeyse aynı, üstelik
+   indeks maliyeti yok. Kabadır, kısa kelimelerde yanlıştır ve gerçek bir
+   gövdeleyici yokken uzanılacak şeydir.
+
+::: {.column-margin}
+Bu aynı zamanda Türkçede yoğun (dense) erişim için en güçlü tek argümandır:
+*İstanbul'da*'nın gömmesiyle *İstanbul*'un gömmesi, tokenizer ne yapmış olursa
+olsun birbirine yakındır, çünkü model onları dizgi eşleştirerek değil bağlamdan
+öğrendi. Kitabın erişim bölümü bunu düzgün kuruyor. Buradaki ölçüm, melez bir
+erişimcinin seyrek (sparse) yarısının payına düşeni yapabilmesi için gerekli
+olan şeydir — ve işlenmemiş hâliyle yapmıyor.
+:::
+
+## Beş bölümlük örüntü {#sec-turkce-nlp-oruntu}
+
+Bu kitapta bir şey defalarca oldu ve bunu birkaç anekdot olarak bırakmak
+yerine bir örüntü olarak adlandırmaya değer. Her seferinde standart, yaygın
+kullanılan bir araç Türkçede sessizce yanlış bir sayı üretti ve her seferinde
+onu açığa çıkaran şey daha iyi bir model değil bir *kontrol ölçümü* oldu.
+
+| bölüm | araç | Türkçede ne yaptı | nasıl ortaya çıktı |
+|:--|:--|:--|:--|
+| @sec-karsilastirma | `str.lower()` | `IYI` İngilizce kuralla `iyi`, Türkçe kuralla `ıyı` | iki büyük-küçük harf eşlemesini yan yana karşılaştırmak |
+| @sec-kumeleme-konu | `str.lower()` | `İ`, `i` artı birleşen işaret oluyor ve kelimeyi bölüyor | %94,7'si tek bir yapaylık olan bir küme |
+| @sec-dizi-etiketleme | WikiANN | test kümesinin %13,06'sı eğitimde birebir duruyor | test girdilerini eğitim girdilerine karşı hash'lemek |
+| @sec-ozetleme | `rouge-score` | Türkçe kelimelerin %44,4'ü tokenizer'ı tarafından sakatlandı | tek bir metriğin iki uygulamasının ayrışması |
+| @sec-ozetleme | bir sadakat vekili | insan gazetecileri %56 sadakatsiz raporladı | kopyalanmış metni puanlamak; kopya sadakatsiz olamaz |
+| @sec-makine-cevirisi | BLEU | cümle başına %29 daha az token, yani her hata daha pahalı | aynı anlamsal hatayı iki dilde çalıştırmak |
+
+: Altı sessiz kusur ve her birini yakalayan kontrol {tbl-colwidths="[20,14,38,28]"}
+
+Üç şey genelleşiyor ve hiçbiri özellikle Türkçeyle ilgili değil.
+
+**Araçlar bozuk değildi; varsayımlarının dışında sınanmamıştı.** `rouge-score`
+özgün Perl davranışını sadakatle yeniden üretiyor. BLEU tanımının söylediğini
+tam olarak yapıyor. WikiANN anlatıldığı gibi kurulmuş. Her biri doğrulandığı
+dilde doğrudur ve her biri belgelerinin belirtmediği bir varsayım taşır.
+
+**Her biri incelemeyle değil bir kontrolle yakalandı.** Kusursuz puan alması
+gereken kopyalanmış metin; çoğunluk sınıfı tabanı; iki dilde aynı hata; eğitime
+karşı hash'lenmiş test girdileri. [Bir metriği doğrudan doğrulayamıyorsanız,
+ona doğru cevabını zaten bildiğiniz bir girdi verin.]{.hl} Bu alışkanlık
+hepsini buldu, kodu okumak hiçbirini bulmadı.
+
+**Kusurlar yapıları gereği sessizdi.** İstisna yok, uyarı yok, eksik alan yok —
+yalnızca %60 fazla çıkan bir sayı ya da %13'ü ezber olan bir ölçüt. Gürültülü
+biçimde çöken bir hat düzelteceğiniz hattır. Endişelenmeniz gerekenler makul
+bir ondalık sayı döndürenlerdir.
+
+::: {.column-margin}
+İngilizce olmayan bir dilde çalışıyorsanız bunu bekleyin ve bütçeleyin. Pratik
+hâli: bir aracı dilinizde kullanmadan önce cevabı bilinen bir girdide
+çalıştırın — birebir aynı dizgiler, boş dizgiler, kopyalanmış bir belge, tek
+token'lık bir değişiklik — ve sayının olması gereken sayı olduğunu kontrol
+edin. On dakika ve İngilizce olmayan bir NLP projesindeki en yüksek getirili on
+dakika.
+:::
+
+## Türkçe derlemler, modeller ve ölçütler {#sec-turkce-nlp-ekosistem}
+
+::: {.callout-warning appearance="simple"}
+Bu bölüm kitaptaki her şeyden hızlı eskir. Adları bir sıralama tablosu değil,
+kaynak *türlerinin* haritası olarak görün ve birine bağlanmadan önce güncel
+durumu kontrol edin.
+:::
+
+Neye güvenmeyeceğini bilmek işin yarısı. Diğer yarısı neyin var olduğunu
+bilmek ve Türkiye dışındakilerin çoğunun sandığından daha fazla Türkçe altyapı
+var.
+
+**Encoder'lar.** BERTurk [@schweter2020berturk] varsayılan Türkçe encoder
+olmayı sürdürüyor ve @sec-dizi-etiketleme ile @sec-siniflandirma'nın ince ayar
+yaptığı model bu. Cased ve uncased sürümleri var; Türkçe için neredeyse her
+zaman **cased** olan doğrudur — uncasing adımının `İ`'ye ne yaptığı için
+@sec-turkce-nlp-normalizasyon'a bakın.
+
+**Çok dilli encoder'lar.** mBERT ve XLM-R [@conneau2020unsupervised] Türkçeyi
+yüz başka dille birlikte kapsıyor. @sec-turkce-nlp-karar bunun neye mal
+olduğunu ölçüyor.
+
+**Üretici modeller.** Türkçeye özgü üretici manzara — TURNA, Kanarya,
+Trendyol'un ve Cosmos'un LLM'leri, Türkçeye uyarlanmış Llama ve Qwen türevleri
+— birkaç ayda bir değişiyor. Değişmeyen şey her birine sorulacak soru: *ne
+üzerinde eğitildi ve kullanabilir misiniz?* Bölgesel yayımlanan modellerde
+lisans koşulları büyük uluslararası yayımlardakinden çok daha fazla değişkenlik
+gösteriyor ve ticari olarak dağıtamayacağınız bir model aday değildir.
+
+**Ölçütler.** Mukayese [@safaya2022mukayese] görevler arasında Türkçe
+baseline'ları tam da alan birbiriyle karşılaştırılamayan Türkçe sayılar
+raporlamayı sürdürdüğü için derledi. Standart süitlerin Türkçe sürümleri —
+soru cevaplama, çok görevli bilgi — mevcut ve kullanılıyor.
+
+Hepsi hakkında iki uyarı; ikisini de kitap başka derlemlerde zaten gösterdi:
+
+1. **Çeviri yapaylıkları.** İngilizceden çevrilmiş bir ölçüt Türkçe yetkinliği
+   değil çevrilmiş-İngilizce yetkinliğini sınar. Çeviri dili farklı kelime
+   sırasına, farklı cümle uzunluğuna ve bir çeviri sistemince seçilmiş sözcük
+   dağarcığına sahiptir. Ölçütün Türkçe yazılmış mı yoksa Türkçeye çevrilmiş mi
+   olduğunu kontrol edin.
+2. **Bulaşma.** @sec-dizi-etiketleme, standart bir Türkçe NER ölçütünün test
+   kümesinin %13,06'sını kendi eğitim kümesinde birebir buldu — yüzlerce
+   makalenin kullandığı bir kaynakta. Bir puana inanmadan önce test
+   girdilerinizi eğitime karşı, yapabiliyorsanız modelin ön eğitim derlemine
+   karşı hash'leyin.
+
+## Çok dilli mi tek dilli mi: bir ölçümle karar vermek {#sec-turkce-nlp-karar}
+
+Soru her Türkçe projede karşınıza çıkar ve genellikle tercihle cevaplanır.
+Burada ikisi de çalıştırılarak cevaplanıyor.
+
+`bert-base-multilingual-cased` ile `dbmdz/bert-base-turkish-cased`
+karşılaştırılabilir modeller — aynı mimari, aynı dönem, aynı ince ayar tarifi —
+ve yalnızca ne üzerinde ön eğitildiklerinde ayrışıyorlar.
+@sec-dizi-etiketleme'nin NER kurulumu, diğer her açıdan aynı, karşılaştırmayı
+veriyor.
+
+```text
+WikiANN Turkish NER, 20,000 training sentences, identical recipe
+
+model                     span P  span R  span F1   macro   train s   infer s
+BERTurk (monolingual)      91.49   92.35    91.92   91.82     476.6      10.3
+mBERT  (multilingual)      92.25   93.27    92.76   92.67     537.5       8.8
+```
+
+**Çok dilli model kazandı, 0,84 span F1 farkla.** Bu, bu bölümün göstermek
+üzere kurulduğu şeyin tam tersi ve açıklayıp geçmek yerine üzerinden gitmeye
+değer.
+
+### Birincisi, karşılaştırma göründüğünden adil
+
+Bariz itiraz büyüklük — mBERT'in 177,3M parametresine karşı BERTurk'ün 110,0M'i.
+Ama farkın nerede olduğuna bakın:
+
+```text
+model                    total    embeddings   transformer body
+BERTurk                 110.0M         24.6M              85.5M
+mBERT                   177.3M         91.8M              85.5M
+```
+
+[Transformer gövdeleri birebir aynı.]{.hl} On iki katman, aynı genişlik, asıl
+hesaplamayı yapan aynı 85,5M parametre. Farkın tamamı, sözlük büyüklüğüyle
+indekslenen bir arama tablosu olan gömme tablosunda — 32.000 girdiye karşı
+119.547. mBERT daha büyük bir *model* değil; daha büyük bir sözlük taşıyan aynı
+model.
+
+Ve Türkçe için **daha kötü bir tokenizer'a rağmen** kazanıyor; aynı test
+kümesinde ölçüldü:
+
+```text
+model                     vocab    subwords/word   mean sequence length
+BERTurk                  32,000             1.66                   14.5
+mBERT                   119,547             1.97                   16.8
+```
+
+mBERT aynı Türkçe metne %19 daha fazla token harcıyor; üstelik 3,7 kat büyük
+bir sözlükle — çünkü o sözlüğün çoğu başka dillere ait.
+
+### İkincisi, sonucu büyük olasılıkla açıklayan karıştırıcı
+
+**WikiANN Wikipedia'dan kuruluyor. mBERT Wikipedia üzerinde ön eğitildi.**
+
+Bu küçük bir tesadüf değil; ölçütle bir modelin ön eğitim derlemi arasında bir
+alan eşleşmesi ve sonucun en makul nedeni bu. BERTurk daha geniş bir Türkçe
+karışım üzerinde eğitildi, dolayısıyla bu belirli derlemde alan dışında çalışan
+model o.
+
+[Dürüst okuma bu yüzden "çok dilli modeller Türkçe için daha iyidir" değil.]{.hl}
+Şu: *Wikipedia türevi bir görevde, Wikipedia üzerinde ön eğitilmiş model — dili
+daha kötü token'lamasına rağmen — 0,84 puan farkla kazandı.*
+
+### Yani bu bölümün size verdiği şey bir protokol
+
+Burada genel bir hüküm yok ve bir hüküm sunan herkes bir şey satıyordur. Olan
+şey bir karar yordamı — dört ölçüm, bu sırayla, çünkü ucuz olanlar pahalı olan
+çalışmadan önce çoğu zaman kararı veriyor:
+
+1. **Kendi metninizde doğurganlık (fertility).** Her aday için kendi alanınızda
+   kelime başına token. Maliyete ve etkin bağlam uzunluğuna çevirin
+   (@sec-on-egitim). Bu bir saatlik iştir ve bazen tartışmayı bitirir.
+2. **Alan örtüşmesi.** Her model ne üzerinde ön eğitildi ve verinize ne kadar
+   yakın? Yukarıdaki ölçüm çoğunlukla bunun ne kadar önemli olduğunun bir
+   gösterimi.
+3. **Görevin kendisi, iki model, aynı tarif.** Aynı veri, aynı hiperparametre,
+   aynı seed. Başka her şey karşılaştırma değildir.
+4. **Operasyonel sütunlar.** Eğitim süresi, çıkarım gecikmesi, bellek. Burada
+   mBERT %13 daha yavaş eğitildi ve — daha uzun dizilere rağmen — çıkarımı biraz
+   daha hızlı çalıştı; bu da verim (throughput) hakkında akıl yürütmek yerine
+   ölçmek gerektiğinin bir hatırlatıcısı.
+
+@rust2021good bu sorunun sistematik hâlidir: tek dilli avantajın ne kadarı
+model değil tokenizer. Diller genelinde cevapları *epeyce büyük bir kısmı* —
+ki bu da 1. adımı başlanacak doğru yer yapıyor.
+
+::: {.column-margin}
+Sonucun neyi *çürütmediğine* dikkat edin. mBERT Türkçeyi hâlâ %19 daha kötü
+parçalıyor; bu, hiçbir doğruluk sayısının kaldırmadığı, maliyet ve bağlam
+üzerinde kalıcı bir vergidir. Bu görev, span üzerinden puanlanan bir etiketleme
+görevi değil de token başına faturalanan bir üretim görevi olsaydı, aynı iki
+model aynı ölçümlerden farklı bir hüküm üretirdi.
+:::
+
+## Sezgi kontrolleri {#sec-turkce-nlp-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular.
+
+::: {.callout-note collapse="true"}
+## 1. Türkçe arama kutunuz işe yarar bir şey döndürmüyor. Önce nereye bakarsınız?
+
+Sıralayıcıya değil, gömmelere de değil. Yüzey biçimlerini indeksleyip
+indekslemediğinize bakın.
+
+Terimleri belgelerden farklı çekimlenmiş sorgularla 7.165 Türkçe belge üzerinde
+ölçüldü: yüzey biçimli BM25 **%28,0** recall@1, Snowball gövdeleme **%95,3**
+alıyor. Kullanıcı sözlük biçimini yazar; derlemde çekimli bir biçim vardır; tam
+dizgi eşleştirme hiçbir şey bulmaz.
+
+Türkçe gövdeleyiciniz yoksa karakter 4-gram'ları 3,5 kat indeks boyutuyla %74,9
+veriyor; beş karaktere kırpmak ise bedava %74,6.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. `text.lower()` neden bir üslup tercihi değil doğruluk hatası?
+
+İki neden ve ikincisi daha kötü.
+
+Türkçede İngilizcenin iki harfi olan yerde dört harf var — `İ i I ı` — ve
+büyük-küçük harf eşlemesi ASCII eşlemesi değil. WMT16 Türkçe kaynağında `I` ya
+da `İ` içeren kelimelerin **438'de 438'i** İngilizce kurallar altında farklı
+çıkıyor.
+
+Sonra: `'İSTANBUL'.lower()`, `i`'yi ve ardından boşluksuz işaret olan, kelime
+karakteri olmayan `U+0307 COMBINING DOT ABOVE`'ı üretiyor. Bu yüzden
+`re.findall(r"\w+", ...)` `['i', 'stanbul']` döndürüyor — kelime ikiye
+bölünüyor ve NFC normalizasyonu onu geri getirmiyor. Model `istanbul`'u hiç
+görmüyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. `guzel`, `güzel` ile eşleşsin diye Türkçe aksanları silmeli misiniz?
+
+Yalnızca gözünüz açıkken. WMT16 kaynağında 15.173 biçimi 15.101'e indiriyor —
+yalnızca **72 çakışma** — ve okuyana kadar bedava bir kazanç gibi görünüyor:
+*oldu* / *öldü* "vuku buldu" / "vefat etti". *bas* / *baş* "bastır" / "kafa".
+
+O takasın biçimi mevcut en kötüsü: toplam bir metrikte görünmeyecek kadar
+seyrek ve her tek vakada felaket. Karşılayabiliyorsanız aksanları geri koyun.
+Silmek zorundaysanız iki tarafı da silin ve o çiftlerin artık ayırt edilemez
+olduğunu belgeleyin.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Türkçe sözlük gerçekte ne kadar büyük?
+
+Birebir aynı içerikte — 9.007 profesyonelce çevrilmiş cümle çifti — Türkçe
+**141.412 token'dan 32.866 farklı biçim** üretti; İngilizce **182.429'dan
+16.652**. Token'ların %78'inden sözlüğün iki katı.
+
+Daha önemli olan sayı, oranın *büyümesi*: 5.000 token'da 1,49, 141.000'de 2,31.
+İngilizce sözlük doyuma ulaşır; Türkçe kuralla biçim üretmeyi sürdürür. Bir
+sözlüğün sayılabileceğini varsayan her tasarım — sabit bir kelime listesi,
+kapalı bir öznitelik kümesi, tam eşleşen bir indeks — bununla savaşıyordur.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Bir meslektaşınız 85'lik bir Türkçe ölçüt puanı bildiriyor. Ne sorarsınız?
+
+Sırayla üç soru.
+
+**Ölçüt Türkçe mi yazılmış, Türkçeye mi çevrilmiş?** Çevrilmiş bir ölçüt çeviri
+dilindeki yetkinliği ölçer.
+
+**Test kümesi eğitim kümesinde mi?** @sec-dizi-etiketleme, yaygın kullanılan bir
+Türkçe NER ölçütünün test kümesinin %13,06'sını kendi eğitim ayrımında birebir
+buldu. Hash'lemek dört satır.
+
+**Tokenizer ne yaptı?** @sec-ozetleme, standart ROUGE uygulamasının Türkçe
+kelimelerin %44,4'ünü sakatladığını buldu. Puan İngilizce üzerinde doğrulanmış
+bir araçtan çıktıysa puan bir hipotezdir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Türkçe için çok dilli model ne zaman doğru tercih?
+
+Pek çok dil için tek bir dağıtıma ihtiyacınız olduğunda, daha çok etiketli
+verisi olan bir dilden diller arası aktarım istediğinizde ya da diliniz için
+tek dilli bir model olmadığında.
+
+Vazgeçtiğiniz şey gizemli değil ölçülebilir: çok dilli bir tokenizer Türkçe
+kelime başına daha çok token harcar; bu paraya ve bağlama mal olur
+(@sec-on-egitim) ve kullanmadığınız dillere sözlük harcar.
+
+Ama doğruluğun buna uyacağını varsaymayın. @sec-turkce-nlp-karar ikisini de
+aynı görevde çalıştırdı ve **çok dilli model 0,84 span F1 farkla kazandı**;
+üstelik aynı metin için %19 daha çok token gerekirken — çünkü ölçütün alanı
+onun ön eğitim derlemiyle eşleşiyordu. Önce doğurganlığı, sonra alanı, sonra
+görevi ölçün.
+:::
+
+## Mülakat soruları {#sec-turkce-nlp-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.**
+:::
+
+### Dili anlayıp anlamadığınızı sınayanlar
+
+**S: Türkçe `i` problemini hiç görmemiş birine anlatın.**
+
+Türkçede İngilizcenin iki harfi olan yerde dört harf vardır: noktalı `i`/`İ` ve
+noktasız `ı`/`I`. Bunlar tek bir harfin farklı hâlleri değil farklı harflerdir,
+dolayısıyla aralarındaki eşleme ASCII eşlemesi değildir — `I` küçülünce `ı`,
+`i` büyüyünce `İ` olur. Sonuç, mülakatçının duymak istediği kısımdır:
+`str.lower()` Türkçede bir üslup tercihi değil bir **doğruluk hatasıdır**.
+`IŞIK`'ı, Türkçenin `ışık` gerektirdiği yerde `işik` yapar ve — bu bölümde
+ölçüldü — bu harflerden birini içeren kelimelerin **438'de 438'inde** bir Türkçe
+okurun kabul etmeyeceği bir şey üretti. İkinci bir biçimde de bozulur:
+`'İstanbul'.lower()`, `i` artı bir *birleşen üst nokta* döndürür; `istanbul`'un
+sekiz kod noktası olduğu yerde dokuz — yani ekranda birebir aynı görünürken
+karşılaştırmada eşitsiz çıkarlar ve `\w+` tokenizer'ı onu `['i', 'stanbul']`
+diye böler; `NFC` normalizasyonu bunu onarmaz. Çözüm, metrik kodunuzun içi
+dâhil her yerde uygulanan, yerele duyarlı bir küçük harf dönüştürücüdür.
+
+**S: Alt kelime tokenizer'ları Türkçede neden zorlanır ve bu neye mal olur?**
+
+Çünkü eklemelilik kelime biçimlerini listelemek yerine birleşimsel olarak
+üretir: bir gövde artı bir ek yığını, öyle ki tek bir derlemde `arkadaş` **39
+farklı biçimde** göründü. Çoğunlukla İngilizce üzerinde eğitilmiş bir
+tokenizer'ın o ekler için parçası yoktur ve onları kırıntılara böler. Maliyet
+somuttur ve üç yerde adlandırmaya değer: aynı metin için daha çok token, yani
+para; bağlam penceresine daha az içerik, yani yetenek; ve doyuma ulaşmayan bir
+sözlük — bu bölüm Türkçe/İngilizce tür oranının 5.000 token'da **1,49**'dan
+141.000'de **2,31**'e *büyüdüğünü* ölçtü; İngilizce ise düzleşiyor.
+
+**S: Türkçe için gövdeleme mi morfolojik çözümleme mi?**
+
+Gövdeleyiciyle başlayın ve ne kadar ileri gittiğine şaşırın: Snowball kabadır,
+fazla ve eksik birleştirir ve yine de bu bölümün erişim görevinde recall@1'i
+**%28,0'dan %95,3'e** çıkardı — tek bir ön işleme adımından 3,4 kat iyileşme,
+işin içinde hiç model yok. Eşleştirme anahtarı yerine çözümlemenin kendisine
+ihtiyacınız olduğunda gerçek bir morfolojik çözümleyiciye uzanın: kimin kime ne
+yaptığına karar vermek için hâl bilgisini geri kazanmak, `yüzü`'yü (yüz / 100 /
+yüzmek) netleştirmek ya da biçim üretmek. Mühendislik cevabı şu: gövdeleyici
+varsayılandır, çözümleyici ise gerekçelendirebilmeniz gereken bir gerekliliktir.
+
+### Bir şey sevk edip etmediğinizi sınayanlar
+
+**S: Testi olmayan bir Türkçe NLP sistemi devraldınız. Önce ne yaparsınız?**
+
+Hiçbir şey eğitmem. Kontrolleri çalıştırırım, çünkü bu bölümün argümanının
+tamamı araçların İngilizce dışında *sessizce* bozulduğudur. I ve İ içeren bir
+kelime listesini küçültüp doğru bir küçültücüyle diff'leyin. Metriğinize
+referansın bir kopyasını verip tam puan verdiğini kontrol edin — @sec-ozetleme,
+tokenizer'ı Türkçe kelimelerin %44,4'ünü yok eden bir ROUGE uygulaması ve
+profesyonel gazetecileri %56 sadakatsiz diyen kendi sadakat vekilim buldu.
+Sonra gerçek üretim metninde doğurganlığı ölçün. Her biri bir öğleden sonra ve
+her biri tarihsel olarak gerçek bir hata buldu.
+
+**S: Türkçe bir LLM özelliğini nasıl bütçelersiniz?**
+
+İngilizce bir tahmini çevirerek değil, kendi metnimde doğurganlığı ölçüp
+çarparak. Faturalama birimi token'dır, dolayısıyla 1,5–2 kat doğurganlık oranı
+aynı içerik için 1,5–2 kat faturadır — ve aynı oran etkin bağlam penceresini
+daraltır ki asıl özellikleri bozan kısıt budur. Model tercihinin bu sayıyı
+oynattığını söyleyin: dile özgü bir tokenizer tek başına en büyük kaldıraçtır
+ve ön eğitim anında sabitlenir, dolayısıyla sonradan ayarlanacak bir şey değil
+bir tedarik kararıdır.
+
+**S: Türkçe ölçütünüz 92 gösteriyor. Güvenir misiniz?**
+
+Kontrolün ne dediğini sorarım. Bu bölüm aynı Türkçe görevde tek dilli ve çok
+dilli bir modeli ince ayarladı ve çok dilli olan **92,76**'ya **91,92** F1 ile
+kazandı — halk bilgisine ve benim beklentime karşı — ama ikisi aynı büyüklükte
+bir transformer gövdesini paylaşıyor, dolayısıyla dürüst okuma karşılaştırmanın
+mimariyle değil ön eğitim verisiyle ilgili olduğu ve tek bir görevin hüküm
+olmadığıdır. Güven kazandıran şey bir protokoldür: kendi metninizde ölçülmüş
+doğurganlık, kontrol edilmiş alan örtüşmesi, kendi verinizde ince ayarlanmış
+iki model ve herhangi bir sayı alıntılanmadan önce bir bulaşma denetimi.
+
+## 2026 alet çantası {#sec-turkce-nlp-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle tek bir dizüstü bilgisayarda çalıştı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `snowballstemmer` | 3.1.1 | %28,0 → %95,3 erişim sonucunun arkasındaki Türkçe gövdeleyici |
+| `transformers` | 5.15.1 | @sec-turkce-nlp-karar'da BERTurk ve mBERT'in ince ayarı |
+| `datasets` | 5.0.1 | baştan sona kullanılan Türkçe ayrımlar |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[26,14,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kaynak | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `zeyrek` | 0.1.3 | saf Python morfolojik çözümleyici — gövde yetmediğinde tam çözümlemeler |
+| `zemberek-python` | 0.2.3 | referans Türkçe NLP araç seti Zemberek'e bağlar; daha ağır ve daha eksiksiz |
+| `turkish-morphology` | 1.2.5 | Google'ın sonlu durum çözümleyicisi; bir çözümleme için ikinci bir görüş isterseniz |
+| `trnlp` | 0.2.3a0 | çözümleme artı üretim; çekimli biçimleri *üretmeniz* gerektiğinde |
+| BERTurk / mBERT | Hub'da | yukarıda karşılaştırılan iki model; birinden değil ikisinden başlayın |
+| Mukayese | GitHub'da | Türkçe ölçüt süiti — standartlaştırdığı görevler için kullanın ve bir puanı alıntılamadan önce her görevin gerçekte neyi ölçtüğünü okuyun |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[24,16,60]"}
+
+## Lab: güvenebileceğiniz bir Türkçe değerlendirme süiti {#sec-turkce-nlp-lab}
+
+Bu labın amacı modelleri sıralamak değil. Araçların üzerinde doğrulanmadığı bir
+dilde, savunabileceğiniz bir değerlendirme kurmak.
+
+### Adım 1 — üç görevi kendiniz, Türkçe yazın
+
+Her birinden ellişer madde. Sınıflandırma, çıkarım ve üretici bir şey.
+İngilizceden çevirmek yerine Türkçe yazın, çünkü çevrilmiş bir süit çeviri
+dilini ölçer. Sıkıcı ve tek anlamlı tutun — bir zorluk kümesi değil bir ölçüm
+aleti kuruyorsunuz.
+
+### Adım 2 — bir şey puanlamadan önce puanlayıcıyı doğrulayın
+
+Her metriğe **kusursuz bir tahmin** verin ve kusursuz puan döndürdüğünü teyit
+edin. Sonra kopyalanmış bir girdi, boş bir tahmin ve tek karakter farklı bir
+tahmin verin. Çalıştırmadan önce her birinin ne döndürmesi *gerektiğini* yazın.
+
+Labın tamamı bu adımdır. @sec-ozetleme standart bir metriğin Türkçe kelimelerin
+%44,4'ünü sakatladığını buldu; tam olarak böyle yakalandı, başka hiçbir şeyle
+değil.
+
+### Adım 3 — kendi metninizi iki normalizasyon hatasına karşı kontrol edin
+
+Süitinizi küçültün ve `U+0307` arayın. `İ` içeren kelimeleri sayın ve her
+birinde `str.lower()` ile `tr_lower()`'ı karşılaştırın. Süitiniz hatayı zaten
+içeriyorsa değerlendireceğiniz her model bozuk girdi üzerinden puanlanacaktır.
+
+### Adım 4 — doğurganlığı ölçün ve paraya çevirin
+
+Sınamayı planladığınız her model için kendi metninizde Türkçe kelime başına
+token. İstek hacminizle çarpın. Bu sayı tercihe çoğu zaman doğruluktan önce
+karar verir.
+
+### Adım 5 — biri çok dilli olmak üzere üç model çalıştırın
+
+Türkçeye özgü bir model, çok dilli bir model ve bir LLM. Doğruluk, istek başına
+token, gecikme ve bin istek başına maliyeti raporlayın — dört sütun, çünkü ilki
+tek başına hiçbir zaman bir dağıtıma karar vermedi.
+
+### Adım 6 — bulaşma denetimi yapın
+
+Süitinizin maddelerini modellerin eğitim verisi hakkında bildiğiniz her şeye
+karşı hash'leyin. Bir ön eğitim derlemini genellikle kontrol edemezsiniz; bunu
+ima etmek yerine açıkça söyleyin.
+
+### Neyi teslim edeceksiniz
+
+Dört sütunlu tabloyu, 2. adımın öngörülen-gerçekleşen sütunlu puanlayıcı
+doğrulama kaydını ve hangi modeli sevk edeceğinizi ve fikrinizi neyin
+değiştireceğini adlandıran bir paragrafı.
+
+## Alıştırmalar {#sec-turkce-nlp-alistirmalar}
+
+1. **Kendi dilinizde sözlük büyümesi.** Profesyonelce çevrilmiş herhangi bir
+   paralel derlem alın ve iki taraf için de farklı biçimleri token'a karşı
+   çizin. Üç derlem büyüklüğünde oranı raporlayın ve açılıp açılmadığını
+   söyleyin.
+
+2. **Küçük harf dönüştürücüyü kırın.** `str.lower()`'ın,
+   `re.findall(r"\w+", ...)`'ın ikiye böldüğü bir şey ürettiği bir Türkçe
+   kelime bulun. Kod noktalarını yazdırın. Sonra kendi yığınınızdaki
+   kütüphanelerin aynı probleme sahip olup olmadığını kontrol edin.
+
+3. **Erişim düzeltmesi, kendi verinizde.** Bir Türkçe derlemi BM25 ile iki kez
+   indeksleyin: yüzey biçimleri ve gövdeler. Sözlük biçimleriyle sorgulayın.
+   İkisi için recall@1 raporlayın ve arama kutunuzun ne yapması gerektiğine
+   karar verin.
+
+4. **Aksan çakışma listesi.** Bir Türkçe sözlükten aksanları silin ve artık iki
+   veya daha fazla gerçek kelimeye eşlenen her ascii biçimi listeleyin.
+   Karışıklığın alanınızda ne kadar kötü olacağına göre sıralayın.
+
+5. **Doğurganlıktan faturaya.** Bir Türkçe belgeyi ve İngilizce çevirisini alın,
+   ikisini de ürününüzün gerçekten kullandığı tokenizer'la token'layın ve farkı
+   istek hacminizde aylık faturaya çevirin. Sonra aynısını Türkçe doğal bir
+   tokenizer'la yapın ve farkı raporlayın (@sec-on-egitim yöntemi veriyor).
+
+6. **Bir Türkçe ölçütü denetleyin.** Kullanacağınız birini seçin. Çeviri
+   yapaylıklarını kontrol edin, test kümesini eğitim kümesine karşı hash'leyin
+   ve puanlama betiğini kusursuz bir tahmin üzerinde çalıştırıp kusursuz puan
+   döndürdüğünü teyit edin. Bulduklarınızı raporlayın; cevap "hiçbir sorun yok"
+   olsa bile.
+
+7. **Kontrol alışkanlığı.** Güvendiğiniz herhangi bir metriği alın ve ona doğru
+   cevabını kesin olarak bildiğiniz bir girdi verin — birebir aynı dizgiler,
+   kopyalanmış bir belge, boş bir tahmin. Ne döndürmesi gerektiğini ve ne
+   döndürdüğünü yazın. Bu alıştırmanın isabet oranı düşük, getirisi muazzamdır.
+
+## Daha derine {#sec-turkce-nlp-derinlesme}
+
+I ve İ içeren bir Türkçe kelime listesi üzerinde `str.lower()` çalıştırıp
+yerele duyarlı bir küçültücüyle diff'leyerek başlayın. Bu bölümdeki her şey o
+sonuca inanmanın ardından geliyor.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Zemberek](https://github.com/ahmetaa/zemberek-nlp) | referans Türkçe NLP araç seti — morfoloji, yazım, tokenization; gövdeleyici yetmediğinde uzanılacak şey |
+| [Mukayese](https://github.com/alisafaya/mukayese) | baseline'larıyla bir Türkçe ölçüt süiti; bir puanı alıntılamadan önce her görevin neyi ölçtüğünü okuyun |
+| [BERTurk](https://github.com/stefan-it/turkish-bert) | burada kullanılan tek dilli modeller; derlemleri ve eğitimleri belgelenmiş |
+| [TDD — Türkçe Doğal Dil İşleme](https://tdd.ai/) | Türkçe derlemler, modeller ve araçlar tek bir yerde toplanmış |
+| [Speech and Language Processing](https://web.stanford.edu/~jurafsky/slp3/) — Jurafsky & Martin | eklemeliliğin altındaki kuram için morfoloji ve FST bölümleri, çevrimiçi ve ücretsiz |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| Türkçe morfoloji, düzgün yapılmış hâli | @oflazer1994two |
+| Türkçe ölçüt süiti | @safaya2022mukayese |
+| baştan sona kullanılan tek dilli encoder | @schweter2020berturk |
+| dile özgü bir tokenizer'ın değeri | @rust2021good |
+| karşısında ölçülen çok dilli model | @conneau2020unsupervised |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-turkce-nlp-ozet}
+
+- **Eklemelilik ölçülebilir ve birikimlidir.** Birebir aynı içerikte Türkçe
+  **141.412 token'dan 32.866 farklı biçim**, İngilizce **182.429'dan 16.652**
+  üretti — token'ların %78'inden sözlüğün iki katı. Oran derlem büyüdükçe
+  büyüyor (1,49 → 2,31), çünkü Türkçe biçimleri bir listeden çekmiyor, kuralla
+  üretiyor. Bir sözlüğün sayılabileceğini varsayan her tasarım bununla
+  savaşıyor.
+
+- **`str.lower()` Türkçede iki kez birden doğruluk hatasıdır.** WMT16
+  kaynağında `I` ya da `İ` içeren kelimelerin **438'de 438'i** İngilizce
+  kurallar altında yanlış çıkıyor. Ve `'İSTANBUL'.lower()`, `i` artı bir
+  birleşen işaret üretiyor; `\w+` `['i', 'stanbul']` döndürüyor — kelime
+  bölünüyor ve NFC onarmıyor. Metne başka hiçbir şey dokunmadan önce dört
+  satırlık `tr_lower`.
+
+- **Türkçe sözcüksel aramada gövdeleme isteğe bağlı değildir.** Yüzey biçimli
+  BM25: **%28,0** recall@1. Snowball gövdeleme: **%95,3**. Karakter 4-gram'ları
+  hiçbir dilbilimsel bilgi olmadan 3,5 kat indeksle %74,9 veriyor. İngilizcede
+  bu bir ince ayardır; burada arama kutusunun çalışıp çalışmamasıdır.
+
+- **Aksanları silmek 72 biçimi birleştiriyor ve her birleşme tamdır.** *oldu*
+  ile *öldü* — "vuku buldu" ile "vefat etti" — aynı dizgi oluyor. Her toplam
+  metrikten geçecek kadar seyrek, her seferinde önemli olacak kadar ağır.
+
+- **Bu görevde çok dilli model tek dilliyi yendi**, 92,76'ya 91,92 span F1 —
+  transformer gövdeleri birebir aynıyken (her biri 85,5M; parametre farkının
+  tamamı gömme tablosu) ve Türkçeyi %19 daha kötü token'lamasına *rağmen*.
+  Muhtemel neden alan: ölçüt Wikipedia'dan kuruluyor ve mBERT Wikipedia
+  üzerinde ön eğitildi. Burada genel bir hüküm yok, yalnızca bir protokol var —
+  kendi metninizde doğurganlık, alan örtüşmesi, kendi görevinizde aynı tarifle
+  iki model, sonra operasyonel sütunlar.
+
+- **Alt kelime tokenization'ı morfolojik çözümlemenin yerini modelleme için
+  aldı, her şey için değil.** Dilbilgisi çıktının kendisi olduğunda, yanlış bir
+  cevabın açıklanabilir olması gerektiğinde ya da indeksleyeceğiniz gövdeye
+  ihtiyacınız olduğunda gerçek bir çözümleyiciye uzanın — ve yüz satırlık bir
+  gövdeleyicinin erişim faydasının çoğunu taşıdığını not edin.
+
+- **Örüntü, beş bölüm boyunca: standart araçlar İngilizce dışında sessizce
+  bozulur.** `str.lower()`, `rouge-score`, BLEU, bir ölçütün kendi ayrımları ve
+  bu kitap için yazılmış bir sadakat vekilinin her biri Türkçede makul ama
+  yanlış bir sayı üretti. Hiçbiri hata vermedi. Her biri bir **kontrol ölçümüyle**
+  — doğru cevabı önceden bilinen bir girdiyle — yakalandı, hiçbiri kod okunarak
+  değil. O listedeki son madde bize ait; mesele de bu: kusur biçimi başkalarının
+  dikkatsizliği değil.
+
+- **O yüzden önce kontrolü kurun.** Bir aracı dilinizde kullanmadan önce ona
+  cevabı şüpheye yer bırakmayan bir şey verin: birebir aynı dizgiler,
+  kopyalanmış metin, kusursuz bir tahmin, çoğunluk sınıfı tabanı. On dakika ve
+  İngilizce olmayan bir NLP projesindeki en yüksek getirili on dakika.
