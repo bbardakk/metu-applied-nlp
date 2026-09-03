@@ -1,0 +1,870 @@
+# Servis ve Çıkarım Altyapısı {#sec-servis}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 31. bölüm](../../en/chapters/31-serving.html). Buradaki ölçümler
+bilerek küçük — bir dizüstünde 3B'lik bir modele karşı kırk kadar kısa istek,
+toplam birkaç dakika. Yeterliler, çünkü önemli olan nicelikler oranlar ve
+oranlar donanımlar arasında korunuyor. Gözlemlenmesi için bir GPU filosu
+gereken her şey iddia edilmek yerine kaynak gösteriliyor. Yazılım: `ollama`
+0.24.0, `llama3.2:3b` servis ediyor (Q4_K_M, 28 katman, 24 dikkat başlığı,
+8 KV başlığı, başlık boyutu 128), açıkça verilmiş bir `num_ctx`, `temperature`
+0, Python 3.14.5 ve Apple Silicon üzerinde.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- bir isteği prefill ve decode diye ikiye ayırabilir ve gecikmenizin gerçekte
+  hangi yarıdan oluştuğunu söyleyebilirsiniz;
+- KV önbelleğini üretimi hızlandıran ve uzun bağlamı pahalılaştıran şey olarak
+  okuyabilir, donanımı kiralamadan önce gigabayt cinsinden boyutlandırabilirsiniz;
+- batch'lemenin işletmeciye ne kazandırdığını ve tek tek kullanıcıya neye mal
+  olduğunu açıklayabilirsiniz;
+- prompt önbelleklemeyi ilk kol olarak kullanabilir ve onu işlevsiz bırakan
+  prompt düzenlerini tanıyabilirsiniz;
+- bugün ölçebileceğiniz token sayılarından bir istek başına maliyet çizelgesi
+  kurabilirsiniz;
+- kalan kolları — daha küçük model, nicemleme, spekülatif çözümleme — her
+  birinin gerçekte neyi feda ettiğine göre sıralayabilirsiniz.
+
+## Bir istek, birbirinden çok farklı iki yarı {#sec-servis-yarilar}
+
+Bu bölümün ardından gelen her şey — önünüzdeki geçit katmanı, izler, fatura —
+bir isteğin tek bir işlem değil, farklı maliyetleri ve farklı darboğazları olan
+*iki* işlem olduğunu gördüğünüzde çok daha kolay düşünülür.
+
+::: {#gloss-prefill-decode .column-margin .term-gloss}
+**prefill / decode** — bir isteğin iki yarısı: prompt tek bir paralel geçişte
+okunur, sonra çıktı token'ları her biri bir öncekine bağlı olarak teker teker
+üretilir. [↩](#term-prefill-decode){.term-back}
+:::
+
+Ayrım
+[**prefill / decode**](#gloss-prefill-decode){#term-prefill-decode .term-ref}
+ayrımıdır. **Prefill** prompt'u okur. Her token aynı anda elde olduğu için tüm
+prompt ağdan tek bir batch'li matris çarpımı olarak geçer — donanım meşguldür ve
+iş hesap sınırlıdır.
+
+**Decode** cevabı yazar. *n+1*'inci token, *n*'inci token var olmadan
+hesaplanamaz; dolayısıyla her biri modelin tamamı üzerinden ayrı bir geçiştir ve
+makine zamanının çoğunu çarpma yapmaktan çok ağırlıkları bellekten taşımakla
+geçirir.
+
+Bu asimetri bölümün temeli ve ölçmesi kolay. Altı prompt uzunluğu, hiçbir şey
+önbelleğe girmesin diye her biri kendi metniyle, 32 token üretiliyor:
+
+```text
+prompt tokens   prefill   prefill tok/s      decode tok/s
+          100    0.063s            1,577            189.3
+          298    0.145s            2,057            190.3
+          562    0.267s            2,102            190.4
+        1,090    0.523s            2,085            181.9
+        2,146    1.058s            2,028            176.3
+        4,258    2.307s            1,846            105.3
+```
+
+Prefill saniyede kabaca **2.000 token**, decode ise kabaca **185** hızında
+çalışıyor. [Bir token okumak yazmaktan yaklaşık on bir kat ucuz]{.hl} — 0,5
+milisaniyeye karşı 5,4 milisaniye — ve donanımınıza taşınan şey mutlak sayılar
+değil, bu oran.
+
+::: {.column-margin}
+İlk satırdaki 1.577 tok/s daha yavaş bir prefill değil; 100 token'lık bir
+prompt'un amorti edemediği, istek başına sabit bir ek yük. Son satırdaki 105
+decode tok/s tek ve gürültülü bir ölçüm — aşağıda düzgün bir ölçümle
+düzeltiliyor. Tabloda bırakıldı, çünkü işinize gelmeyen bir sayıyı silmek
+kendi ölçüm düzeneğinize inanmaya başlamanın yoludur.
+:::
+
+Öyleyse tartışmaya yetecek kadar iyi, kaba bir ilk gecikme modeli:
+
+$$
+\text{gecikme} \;\approx\; \underbrace{\frac{\text{prompt token'ları}}{\approx 2{,}000/\mathrm{s}}}_{\text{prefill}}
+\;+\; \underbrace{\frac{\text{çıktı token'ları}}{\approx 185/\mathrm{s}}}_{\text{decode}}
+$$
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Bir istek: bir paralel geçiş, sonra seri bir döngü</div>
+<svg viewBox="0 0 760 250" role="img" aria-label="Bir isteğin bir prefill geçişi ile bir decode döngüsüne ayrıldığını gösteren şema">
+  <defs>
+    <marker id="sv-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+    <marker id="sv-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="head-accent"/>
+    </marker>
+  </defs>
+
+  <text x="8" y="20" class="t-xs t-muted t-b">PREFILL &#183; T&#220;M PROMPT, TEK GE&#199;İŞ</text>
+  <rect x="8" y="30" width="286" height="66" rx="9" class="box"/>
+  <text x="151" y="56" class="t-sm t-mono t-mid">4.258 token</text>
+  <text x="151" y="76" class="t-sm t-mono t-mid t-accent">2,307 s</text>
+  <text x="151" y="112" class="t-xs t-muted t-mid">paralel &#183; hesap sınırlı</text>
+
+  <path d="M294,63 H330" class="ln" marker-end="url(#sv-a)"/>
+
+  <text x="346" y="20" class="t-xs t-accent t-b">DECODE &#183; TOKEN BAŞINA BİR GE&#199;İŞ</text>
+  <rect x="346" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="432" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="518" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <rect x="604" y="30" width="76" height="66" rx="9" class="box-accent"/>
+  <text x="384" y="68" class="t-sm t-mono t-mid">t&#8321;</text>
+  <text x="470" y="68" class="t-sm t-mono t-mid">t&#8322;</text>
+  <text x="556" y="68" class="t-sm t-mono t-mid">t&#8323;</text>
+  <text x="642" y="68" class="t-sm t-mono t-mid">&#8230;</text>
+  <path d="M422,63 H428" class="ln-accent" marker-end="url(#sv-b)"/>
+  <path d="M508,63 H514" class="ln-accent" marker-end="url(#sv-b)"/>
+  <path d="M594,63 H600" class="ln-accent" marker-end="url(#sv-b)"/>
+  <text x="513" y="112" class="t-xs t-muted t-mid">seri &#183; 5,4 ms/token &#183; bellek sınırlı</text>
+
+  <path d="M8,142 H752" class="ln-thin"/>
+  <text x="8" y="136" class="t-xs t-muted t-b">BAŞKA BİR İSTEK &#183; 7.455 TOKEN GİRDİ, 64 &#199;IKTI</text>
+
+  <rect x="8" y="156" width="672" height="26" rx="4" class="box-accent"/>
+  <rect x="680" y="156" width="64"  height="26" rx="4" class="box"/>
+  <text x="344" y="174" class="t-xs t-mid">prefill &#8212; 4,668 s &#183; %90,7</text>
+  <text x="712" y="174" class="t-xs t-mid">decode</text>
+  <text x="8" y="204" class="t-sm">Beklemenin onda dokuzu ilk karakter belirmeden önce yaşanıyor.</text>
+  <text x="8" y="226" class="t-sm t-muted">Akış o çubuğu kısaltmıyor. Yalnızca geri kalanını görünür kılıyor.</text>
+</svg>
+```
+
+::: {.fig-cap}
+İki yarı aynı ölçekte. Prefill 4.258 token üzerinden tek bir geçiş; decode ise
+model üzerinden, çıktı token'ı başına bir tane olmak üzere 32 ayrı geçiş.
+Alttaki çubuk başka bir istek — 7.455 token bağlam, 64 token çıktı — akış açık
+hâlde ölçüldü ve üretimdeki isteklerin çoğunun aldığı biçim bu: duvar saatinin
+neredeyse tamamı ilk karakter belirmeden önce harcanıyor.
+:::
+::::
+
+**Neye bakacağız.** Önce duvar saatinin gerçekte nereye gittiğine — ki üretim
+prompt uzunluklarında bu neredeyse tümüyle prefill'dir — ve akışın buna neden
+dokunamadığına. Sonra decode'u hızlandıran ve uzun bağlamı pahalılaştıran şey
+olan KV önbelleğine, hem de hiçbir şey kiralamadan önce hesaplayabileceğiniz
+gigabaytlar cinsinden. Sonra işletmeciye iş hacmi kazandıran ve bunun bedelini
+tek tek kullanıcıya ödeten batch'lemeye. Sonra bu bölümdeki kalite maliyeti
+olmayan tek kola ve en büyük ölçülmüş kazanca, prompt önbelleklemeye. Sonra dört
+sayı ve bir çarpmadan ibaret olan maliyet çizelgesine. Ve en sonunda kalan
+kollara — önerildikleri sıraya göre değil, başvurulması gereken sıraya göre.
+
+## Duvar saati gerçekte nereye gidiyor {#sec-servis-ttft}
+
+::: {#gloss-time-to-first-token-ttft .column-margin .term-gloss}
+**ilk token'a kadar geçen süre (TTFT)** — okuyucunun bir şey belirmeden önce ne
+kadar beklediği. Prefill'in baskın olduğu ve akışın iyileştirmesi beklenen sayı.
+[↩](#term-time-to-first-token-ttft){.term-back}
+:::
+
+Kullanıcılar toplam gecikmeyi deneyimlemez. Onların deneyimlediği
+[**ilk token'a kadar geçen süre (TTFT)**](#gloss-time-to-first-token-ttft){#term-time-to-first-token-ttft .term-ref}
+ve ardından gelen bir akıştır. Akış açıkken, üç bağlam uzunluğunda, her biri 64
+token üreterek ölçüldüğünde:
+
+```text
+context tokens    TTFT     total    TTFT share
+           89   0.162s   0.523s        31.0%
+        1,887   1.017s   1.397s        72.8%
+        7,455   4.668s   5.145s        90.7%
+```
+
+[7.455 token bağlamda isteğin %91'i, ilk karakter belirmeden önce
+bitmiştir.]{.hl} Model "yavaş" değil; prompt uzun ve kullanıcı prefill'i
+bekliyor.
+
+Gözden kaçan iki sonuç.
+
+**Akış TTFT'yi düzeltmez.** Ondan *sonrasını* düzeltir. Akış, 5,1 saniyelik bir
+beklemeyi 4,7 saniyelik bir beklemeye ve ardından okuma hızında gelen bir metne
+çevirir; bu algıda büyük bir iyileşmedir — ama o 4,7 saniyeye dokunulmamıştır ve
+hiçbir ön yüz çalışması ona dokunamaz. TTFT'nin kolu prompt'tur ve bu kolun en
+ucuz sürümü @sec-servis-onbellek'tir.
+
+**Uzun bağlam yalnızca prefill'i değil, decode'u da yavaşlatır.** Üretilen her
+token kendinden öncekilerin tümüne dikkat eder, dolayısıyla token başına maliyet
+pencerede zaten bulunanla birlikte büyür. Bu kez düzgün ölçüldü — iki yineleme,
+her birinde 64 çıktı token'ı, ki hız kararlı olsun:
+
+```text
+context tokens   decode tok/s   ms per token
+            89          185.5           5.39
+           959          185.3           5.40
+         3,743          157.4           6.35
+         7,455          138.8           7.21
+```
+
+Boş bir pencere ile 7.500 token'lık bir pencere arasında %25'lik bir yavaşlama.
+Bilmeye değer, çünkü bileşik etki yapıyor: uzun bir prompt size bir kez
+prefill'de, sonra da sessizce ürettiğiniz her token'da yeniden mal oluyor. Bu
+aynı zamanda yukarıda söz verilen düzeltme — ilk tablodaki tek çalıştırmalık
+105 tok/s gürültüydü, gerçek değer 139.
+
+## KV önbelleği ve bağlamın gigabayt cinsinden bedeli {#sec-servis-kv}
+
+Her adım tüm prompt'u yeniden hesaplasaydı decode token başına 5,4 ms'den çok
+daha kötü olurdu. Öyle olmuyor, çünkü
+[**KV önbelleği**](#gloss-kv-cache){#term-kv-cache .term-ref} var: önceki her
+token için hesaplanan anahtarlar ve değerler saklanıyor, böylece *n+1*'inci adım
+tek bir yeni sütun hesaplayıp gerisini okuyor.
+
+::: {#gloss-kv-cache .column-margin .term-gloss}
+**KV önbelleği** — önceki token'lardan saklanan anahtarlar ve değerler; böylece
+üretim her adımda tüm prompt'u yeniden hesaplamaz. Hızlıdır ve uzun bağlamın
+belleğe mal olmasının nedenidir. [↩](#term-kv-cache){.term-back}
+:::
+
+Bu doğrudan bir bellek-zaman takası ve bellek, siz herhangi bir şey kiralamadan
+önce hesaplanabilir. Önbellek her token için, her katmanda, her KV başlığında
+bir anahtar ve bir değer tutar:
+
+$$
+\text{token başına bayt} \;=\; 2 \times L \times H_{kv} \times d_{\text{head}} \times \text{eleman başına bayt}
+$$
+
+Burada ölçülen model için — 28 katman, 8 KV başlığı, başlık boyutu 128, fp16 —
+bu $2 \times 28 \times 8 \times 128 \times 2 = 114{,}688$ bayt, yani **token
+başına 112 KiB** eder. Pencereyle çarpın:
+
+| bağlam | KV önbelleği | 2,0 GB'lık model dosyasına karşı |
+|--:|--:|:--|
+| 8.192 | 0,88 GiB | ağırlıkların yarısından az |
+| 32.768 | 3,50 GiB | [ağırlıkların 1,8 katı]{.con} |
+| 131.072 | **14,00 GiB** | [**ağırlıkların 7 katı**]{.con} |
+
+: Pencerenin bellekte maliyeti, fp16'da llama3.2:3b
+{tbl-colwidths="[18,20,62]"}
+
+[2 GB'lık bir modelin bağlam penceresi dolduğunda 14 GB önbelleğe ihtiyacı var —
+önbellek modelin yedi katı.]{.hl} "3B'lik bir model çalıştırabilir miyim?"in
+yanlış, "hangi bağlam uzunluğunda?"nın doğru soru olmasının nedeni bu; yerel bir
+sunucudaki varsayılan `num_ctx`in bu kadar önemli olmasının nedeni de: 131k'lık
+tam pencereyi isteyin, daha ilk istekten önce 14 GB taahhüt etmiş olun.
+
+O aritmetikteki 24 dikkat başlığına karşı 8 KV başlığı **gruplanmış sorgu
+dikkati** (grouped-query attention) ve sayının 42 değil 14 GiB olmasının
+nedeni onlar — her anahtar-değer çiftini üç başlık paylaşıyor. Bir servis
+maliyeti olarak görünen bir bellek bant genişliği optimizasyonu bu ve tekrar
+eden bir biçim: @sec-transformerlar'daki mimari seçimleri burada satır kalemi
+olarak yeniden beliriyor.
+
+Filo ölçeğinde aynı basınç **PagedAttention**'ı doğurdu; bu yöntem önbelleği
+istek başına tek bir bitişik rezervasyon yerine sanal bellek gibi sabit boyutlu
+bloklar hâlinde yönetiyor [@kwon2023pagedattention]. Ortadan kaldırdığı israf iç
+parçalanma — 2.000 token'a yer ayırıp 200 üreten bir istek — ve onu kaldırmak,
+bir sunucunun aynı kart üzerinde çok daha fazla eşzamanlı diziyi tutabilmesini
+sağlıyor.
+
+## Batch'leme: tek tek kullanıcının hissedemediği iş hacmi {#sec-servis-batchleme}
+
+Decode bellek sınırlıdır: donanım zamanını çarpma yaparak değil, ağırlıkları
+taşıyarak geçirir. Bu da ikinci bir isteğin *neredeyse hiç ek maliyeti olmaması*
+demektir, çünkü bir dizi için taşınan ağırlıklar aynı anda birkaç diziye hizmet
+edebilir. Batch'leme bu boşluğu iş hacmine çevirir.
+
+::: {#gloss-continuous-batching .column-margin .term-gloss}
+**sürekli batch'leme** — yeni istekler, tüm batch'in bitmesini beklemek yerine
+yer açıldıkça çalışan bir batch'e katılır. Her modern sunucudaki iş hacmi kolu.
+[↩](#term-continuous-batching){.term-back}
+:::
+
+Naif batch'leme dolu bir batch bekler ve sonra onu sonuna kadar çalıştırır;
+dolayısıyla tek bir uzun üretim tüm batch'i rehin alır.
+[**Sürekli batch'leme**](#gloss-continuous-batching){#term-continuous-batching .term-ref}
+— yineleme düzeyinde çizelgeleme, Orca ile tanıtıldı [@yu2022orca] ve o zamandan
+beri standart — biten bir dizinin ayrılmasına ve kuyruktaki bir dizinin bir
+sonraki adımda onun yerini almasına izin verir.
+
+Bunu ölçmedim ve bunu açıkça söylemeliyim: tek akışlı yerel bir sunucu yanlış
+alettir ve burada bir sayı uydurmak, bir sayıya kaynak göstermekten daha kötü
+olurdu. Literatürün bildirdiği rakamlar büyük: Orca'nın yazarları aynı gecikme
+bütçesinde naif batch'lemeye göre büyüklük mertebesinde iş hacmi kazançları
+ölçüyor [@yu2022orca] ve vLLM, sürekli batch'lemeyi sayfalı önbellek yönetimiyle
+birleştirerek kendinden önceki servis sistemlerine göre 2–4× bildiriyor
+[@kwon2023pagedattention].
+
+İçselleştirmeye değen kısım kat sayısı değil, takas:
+
+| | iş hacmi | tek istek gecikmesi |
+|:--|:--|:--|
+| Batch'leme yok | [en kötü]{.con} | [en iyi]{.pro} |
+| Statik batch'leme | daha iyi | [en kötü — en yavaş diziyi bekler]{.con} |
+| Sürekli batch'leme | [en iyi]{.pro} | batch'lemesizden biraz kötü, statikten çok daha iyi |
+
+: Batch'lemenin her bir sayıya yaptığı {tbl-colwidths="[28,24,48]"}
+
+[Batch'leme, bedelini tek tek kullanıcıların gecikmeyle ödediği bir iş hacmi
+optimizasyonudur.]{.hl} Her istek makineyi batch arkadaşlarıyla paylaşır;
+dolayısıyla meşgul bir sunucu, istek başına daha ucuz bir sunucu olduğu hâlde
+istek başına daha yavaş bir sunucudur. Ürününüzün bir gecikme SLO'su varsa, bu
+batch boyutu üzerinde bir kısıttır ve o sayının bir sahibi olmalıdır.
+
+## Prompt önbellekleme: ilk başvurulacak kol {#sec-servis-onbellek}
+
+Gecikmeye prefill hâkimse ve prompt her seferinde aynı binlerce token'la
+başlıyorsa — bir sistem prompt'u, bir araç şeması, birkaç örneklik bir blok,
+üstüne üstüne defalarca soru sorulan erişilmiş bir belge — o önekin KV önbelleği
+bir kez hesaplanıp yeniden kullanılabilir.
+
+::: {#gloss-prompt-caching .column-margin .term-gloss}
+**prompt önbellekleme** — bir prompt önekinin KV önbelleğini istekler arasında
+yeniden kullanmak; böylece tekrarlanan bir sistem prompt'u yeniden hesaplanmaz.
+[↩](#term-prompt-caching){.term-back}
+:::
+
+[**Prompt önbellekleme**](#gloss-prompt-caching){#term-prompt-caching .term-ref}
+ince bir optimizasyon değil. İlk tablodaki aynı altı prompt, her biri iki kez
+gönderildi:
+
+```text
+prompt tokens   cold prefill   warm prefill   speedup   cold total   warm total
+          100         0.063s         0.013s        5x       0.338s       0.289s
+          298         0.145s         0.014s       11x       0.421s       0.288s
+          562         0.267s         0.016s       17x       0.540s       0.292s
+        1,090         0.523s         0.014s       36x       0.804s       0.291s
+        2,146         1.058s         0.013s       79x       1.347s       0.297s
+        4,258         2.307s         0.018s      126x       2.720s       0.330s
+```
+
+Sıcak prefill, hiçbir şey yeniden hesaplanmadığı için **prompt uzunluğundan
+bağımsız olarak 13–18 milisaniyede sabit**. 4.258 token'da bu, prefill'de 126×
+ve **tüm istekte 8,2×** demek.
+
+Önek ne kadar uzunsa kazanç o kadar büyük — ki bu, çoğu optimizasyonun
+ölçeklenme biçiminin tam tersi ve ilk denenecek şey olmasının nedeni de bu.
+
+Üç koşul var ve üçü de yapılandırma değil, tasarım kararı:
+
+**Önek bayt bayt aynı olmalı.** Prompt'un tepesine yakın bir zaman damgası, bir
+kullanıcı adı ya da bir oturum kimliği kendinden sonraki her şeyi geçersiz kılar.
+Önbellekteki önekler önek olarak eşleşir; 12. konumdaki bir değişen token diğer
+4.000'i çöpe atar.
+
+**Prompt'u kararlılığa göre sıralayın.** Önce sistem yönergeleri, sonra araç
+şemaları, sonra birkaç örnek, sonra erişilmiş bağlam, sonra kullanıcının sırası.
+Çoğu takım prompt'ları akıllarına geldikleri sırada yazar; bu da oynak kısmı öne
+koyar ve kimsenin fark etmediği bir biçimde önbelleklemeyi kapatır.
+
+**Ya isabet oranını ölçersiniz ya da bir isabet oranınız yoktur.** Ölçüm
+düzeneği kurmadığınız bir önbellek bir inançtır. Bu ölçümün yeri gözlemlenebilirlik
+katmanıdır ve metrik, rota başına önbellekten karşılanan prompt token'larının
+payıdır.
+
+::: {.column-margin}
+Barındırılan API'ler bunu farklı biçimlerde sunuyor — bazıları asgari bir önek
+uzunluğunun üstünde otomatik önbellekliyor, bazıları açık bir işaret istiyor ve
+önbelleklenmiş girdi token'larındaki indirim sağlayıcıya göre değişiyor.
+Mekanizma yukarıda ölçülenin aynısı; değişen şey ne zaman uygulanacağına kimin
+karar verdiği. Prompt'u ona göre tasarlamadan önce sağlayıcınızın kuralını
+okuyun; özellikle asgari önek uzunluğu, kısa sistem prompt'larının bundan hiç
+yararlanıp yararlanmayacağını belirliyor.
+:::
+
+## Maliyet çizelgesi {#sec-servis-maliyet}
+
+Gecikme argümanın ilk yarısıydı. Fatura ikinci yarısı ve ikisi de aynı
+token'lardan yapılıyor — bu yüzden ilk saptanacak şey *hangi* token'lar olduğu.
+
+@sec-ozetleme'de 300 kelimelik bir haber metnini özetlemek **890 prompt
+token'ına karşı 53 üretilmiş token** ölçmüştü — neredeyse 17'ye 1'lik bir oran.
+Bu biçim, bir sistem prompt'u, bir şema ve erişilmiş bağlamı olan her şeyin
+tipik biçimi, ki bu da üretimdeki LLM özelliklerinin çoğu demek.
+
+[Parasını ödediğiniz şey yazmak değil okumak]{.hl} ve bu, nerede optimizasyon
+yapılacağına dair alışıldık sezgiyi tersine çeviriyor. Daha kısa cevaplar
+istemek çok az tasarruf sağlar. Daha az göndermek çok tasarruf sağlar.
+
+Çizelgenin dört satırı ve bir çarpması var:
+
+| satır | nereden geliyor | örnek |
+|:--|:--|--:|
+| prompt token'ları | sayın; tahmin etmeyin | 890 |
+| bunun önbellekli olanı | isabet oranını ölçün | %60 |
+| çıktı token'ları | sayın | 53 |
+| aylık istek sayısı | mühendislik değil, ürün | 2.000.000 |
+
+: Bir maliyet tahmininin ihtiyaç duyduğu her şey {tbl-colwidths="[26,44,30]"}
+
+Sağlayıcınızın üç fiyatıyla — önbelleksiz girdi, önbellekli girdi, çıktı —
+çarpın; elinizde, oynatabileceğiniz bir önbellek isabet oranı terimi içeren
+aylık bir fatura olsun. Aşağıdaki araç tam olarak bu aritmetik ve ikisi birlikte
+hareket etsin diye @sec-servis-yarilar'daki gecikme modeline bağlı.
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">Yukarıda ölçülen sayılar üzerinde gecikme ve maliyet — prompt'u oynatın, ne olduğuna bakın</div>
+```
+
+```{ojs}
+//| echo: false
+viewof srvPrompt = Inputs.range([100, 32000], {
+  value: 4000, step: 100, label: "prompt token'ı"})
+```
+
+```{ojs}
+//| echo: false
+viewof srvOutput = Inputs.range([16, 2000], {
+  value: 200, step: 16, label: "çıktı token'ı"})
+```
+
+```{ojs}
+//| echo: false
+viewof srvHit = Inputs.range([0, 1], {
+  value: 0.6, step: 0.05, label: "prompt önbelleği isabet oranı"})
+```
+
+```{ojs}
+//| echo: false
+srvRates = ({prefill: 2000, decode: 185, warm: 0.015})
+```
+
+```{ojs}
+//| echo: false
+srvCalc = {
+  const uncached = srvPrompt * (1 - srvHit);
+  const prefill  = uncached / srvRates.prefill + srvRates.warm;
+  const decode   = srvOutput / srvRates.decode;
+  return ({
+    uncached,
+    prefill,
+    decode,
+    total: prefill + decode,
+    share: prefill / (prefill + decode),
+    coldPrefill: srvPrompt / srvRates.prefill
+  });
+}
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 680, height: 132, marginLeft: 118, marginBottom: 34,
+  x: {label: "saniye", grid: true, domain: [0, Math.max(srvCalc.coldPrefill + srvCalc.decode, 0.5)]},
+  y: {domain: ["önbelleksiz", "önbellekli"], label: null},
+  color: {domain: ["prefill", "decode"], range: ["#1F4E79", "#B3453E"], legend: true},
+  marks: [
+    Plot.barX([
+      {row: "önbelleksiz", part: "prefill", t: srvCalc.coldPrefill},
+      {row: "önbelleksiz", part: "decode",  t: srvCalc.decode},
+      {row: "önbellekli",  part: "prefill", t: srvCalc.prefill},
+      {row: "önbellekli",  part: "decode",  t: srvCalc.decode}
+    ], {x: "t", y: "row", fill: "part", inset: 2.5}),
+    Plot.ruleX([0])
+  ]
+})
+```
+
+```{ojs}
+//| echo: false
+html`<p style="font-size:0.88rem; color:var(--fig-muted); margin-top:0.5rem;">
+  İstek başına
+  <b style="color:var(--fig-ink);">${srvCalc.total.toFixed(2).replace(".", ",")} s</b>
+  — bunun %${(srvCalc.share * 100).toFixed(0)}'i prefill ve okuyucunun ilk
+  karakterden önce beklediği kısım o.
+  ${srvHit > 0 ? html`Önbellekleme,
+  ${(srvPrompt * srvHit).toLocaleString("tr-TR")} prompt token'ını atlayarak
+  <b style="color:var(--fig-ink);">${(srvCalc.coldPrefill - srvCalc.prefill).toFixed(2).replace(".", ",")} s</b>
+  kazandırıyor.`
+  : html`Önbellek yokken tüm prompt her seferinde yeniden hesaplanıyor.`}
+  Ayda 2 milyon istekte bu,
+  <b style="color:var(--fig-ink);">${((srvCalc.total * 2e6) / 3600).toLocaleString("tr-TR",
+  {maximumFractionDigits: 0})} makine saati</b> servis demek.
+</p>`
+```
+:::
+
+## Kollar, başvurulacak sırayla {#sec-servis-kollar}
+
+Sıra listeden daha önemli, çünkü ucuz kollar aynı zamanda kalite maliyeti
+olmayanlar ve takımlar rutin olarak en alttan başlıyor.
+
+| kol | ne kazandırır | neye mal olur | ne zaman başvurulur |
+|:--|:--|:--|:--|
+| **Daha az token göndermek** | prefill'de ve faturada doğrusal | prompt'lar ve erişim üzerinde mühendislik zamanı | [her zaman, ilk]{.pro} |
+| **Prompt önbellekleme** | prefill'de 126×'e kadar, yukarıda ölçüldü | kararlılığa göre sıralanmış bir prompt | [her zaman, ilk]{.pro} |
+| **Daha küçük model** | her şeyde 3–10× | kalite, ölçülebilir biçimde | değerlendirme dayandığını söylediğinde |
+| **Nicemleme** | bellek ve bant genişliği | bir miktar kalite, göreve bağlı | bağlayıcı kısıt bellek olduğunda |
+| **Spekülatif çözümleme** | yalnızca gecikme, maliyet değil | barındırılacak bir taslak model | şikâyet TTFT'ken ve kısıt maliyet değilken |
+| **Sürekli batch'leme** | iş hacmi | kullanıcı başına gecikme | sunucu meşgulken, öncesinde değil |
+
+: Altı kol ve her birinin feda ettiği {tbl-colwidths="[22,26,28,24]"}
+
+İkisi birer cümleyi hak ediyor, çünkü ikisi de yaygın biçimde yanlış anlaşılıyor.
+
+**Nicemleme** (quantization) ağırlıkları düşürülmüş hassasiyette saklar — bu
+bölümde ölçülen model Q4_K_M, dört bit ve biraz fazlası. Modern eğitim sonrası
+yöntemler tekdüze yuvarlamak yerine *hangi* ağırlıkların hassas kalacağını
+seçiyor: GPTQ katman düzeyinde bir yeniden kurma problemi çözüyor
+[@frantar2023gptq], AWQ ise etkinleştirme dağılımının en önemli dediği küçük
+ağırlık kesrini koruyor [@lin2024awq]. İkisi de naif yuvarlamadan çok daha az
+bozulma bildiriyor ve ikisi de hâlâ bozulma. Bu, kalite maliyeti olan bir bellek
+optimizasyonu ve maliyet göreve bağlı — yani yeri bir blog yazısının ölçüt
+tablosu değil, sizin değerlendirme süitiniz.
+
+**Spekülatif çözümleme** doğrudan seri kısma saldırıyor. Küçük bir taslak model
+birkaç token öneriyor; büyük model bunları tek bir paralel geçişte doğrulayıp en
+uzun doğru öneki kabul ediyor [@leviathan2023speculative]. Çıktı dağılımının
+değişmediği kanıtlanmış durumda — bu bir yaklaşıklama değil — ve kazanç duvar
+saatinde, taslak model sık sık aynı fikirde olduğunda tipik olarak 2–3×.
+*Yapmadığı* şeye dikkat edin: büyük model hâlâ her token'ı işliyor, dolayısıyla
+FLOP ve dolayısıyla maliyet düşmüyor. Para değil, gecikme satın alıyor.
+
+Bütün bunların altındaki ölçekteki aritmetik için — model boyutu, batch boyutu
+ve yonga bellek bant genişliğinin neyin ulaşılabilir olduğunu birlikte nasıl
+belirlediği — Pope ve arkadaşları konuyu düzgünce işliyor [@pope2023efficiently];
+@sec-on-egitim'deki $6ND$ ise eğitim tarafındaki karşılığı.
+
+## Sezgi kontrolleri {#sec-servis-sezgi}
+
+Her birini açmadan önce cevaplayın. Dördü bu bölümdeki ölçümlerle çözülüyor —
+iki hız, TTFT payı, KV önbelleği aritmetiği ve soğuk bir prefill'in sıcak birine
+karşı maliyeti — son ikisi ise bu bölümün bilerek ölçmediği şeyler, çünkü tek
+akışlı bir dizüstü batch'leme için yanlış alet ve genel bir ölçüt nicemleme
+için yanlış alet.
+
+::: {.callout-note collapse="true"}
+## 1. Özelliğiniz "çok yavaş". Önce nereye bakarsınız?
+
+Modele bakmadan önce, prompt token'larının çıktı token'larına oranına.
+
+Prefill ve decode çok farklı hızlarda çalışıyor — burada ölçüldüğü hâliyle
+saniyede yaklaşık 2.000'e karşı 185 token — dolayısıyla uzun prompt'lu ve kısa
+cevaplı bir istek zamanının neredeyse tamamını okuyarak geçirir. 7.455 token
+bağlamda duvar saatinin %91'i, ilk karakter belirmeden önce bitmişti.
+
+Biçiminiz buysa, hiçbir çözümleme parametresi ve hiçbir daha hızlı model pek
+işe yaramaz; kollar prompt uzunluğu ve prompt önbellekleme olur. Buna karşılık
+binlerce token üretiyorsanız cevap tam tersi olur — oranın en son değil en önce
+ölçülecek şey olmasının nedeni de bu.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. Akış gecikmeyi azaltır mı?
+
+Hayır. İlk token'dan *sonraki* algılanan gecikmeyi azaltır ve öncesinde hiçbir
+şeyi değiştirmez.
+
+Akış, prefill bitmeden başlayamaz; dolayısıyla TTFT akışla da akışsız da
+aynıdır. Akışın kazandırdığı şey, kalan saniyelerin beklenerek değil okunarak
+geçmesi — gerçek ve büyük bir ürün iyileştirmesi, ama bir performans
+iyileştirmesi değil.
+
+Bir takımın bu ikisini karıştırdığının işareti, akış devreye alındığında
+iyileşen bir gecikme panosudur. İyileşmemesi gerekirdi; yalnızca toplam süre
+metriği kımıldar ve o da yalnızca istemci artık saati farklı bir anda durdurduğu
+için.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. 2 GB'lık bir modelin neden 14 GB belleğe ihtiyacı var?
+
+Çünkü ayak izi ağırlıklardan ibaret değil. KV önbelleği penceredeki her token
+için, her katmanda ve her KV başlığında bir anahtar ve bir değer tutuyor.
+
+Burada ölçülen model için — 28 katman, 8 KV başlığı, başlık boyutu 128, fp16 —
+bu token başına 112 KiB eder; yani 131.072 token'lık bir pencere, 2,0 GB'lık bir
+model dosyasına karşı 14 GiB önbellek. Modelin yedi katı.
+
+"Sığar mı?" sorusunun dürüst cevabının bağlam uzunluğuyla ilgili bir soru
+olmasının ve yerel bir sunucunun varsayılan penceresinin, kolaylık ayarı kılığına
+girmiş bir bellek kararı olmasının nedeni bu.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Prompt önbelleği isabet oranınız sıfıra yakın ve nedenini göremiyorsunuz.
+
+Prompt'un tepesine yakın oynak bir şey var.
+
+Önek önbellekleri önek olarak eşleşir: 12. konumdaki tek bir farklı token
+kendinden sonraki her şeyi geçersiz kılar. Bir zaman damgası, bir kullanıcı
+kimliği, bir oturum tanımlayıcısı ya da yeni karılmış birkaç örneklik bir blok
+bunu yapar ve hiçbiri bir performans hatasına benzemez.
+
+Çözüm prompt'u kararlılığa göre sıralamak — yönergeler, sonra şemalar, sonra
+örnekler, sonra erişilmiş bağlam, sonra kullanıcının sırası — ve kontrol, aynı
+isteği iki kez gönderip prefill sürelerini karşılaştırmak. Soğuk ile sıcak bir
+büyüklük mertebesi ya da daha fazla farklı olmalı; burada ölçüldüğü hâliyle
+2,307 s'ye karşı 0,018 s.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Sürekli batch'leme iş hacmini 3× artırdı. Gecikme iyileşti mi?
+
+Neredeyse kesinlikle hayır ve muhtemelen istek başına biraz kötüleşti.
+
+Batch'leme, decode'un bellek sınırlı olmasından yararlanıyor: tek bir dizinin
+ihtiyaç duyduğu ağırlık taşımasını birkaç dizi paylaşabiliyor. Bu, sunucu
+genelinde saniyedeki token sayısını yükseltiyor; her bir dizi ise daha hızlı
+ilerlemiyor — üstelik artık makineyi paylaşıyor.
+
+Yani iki sayı zıt yönlerde hareket ediyor ve yalnızca iyileşenini raporlamak,
+bir değerlendirme toplantısını yanıltmanın yaygın bir yolu. Bir gecikme SLO'nuz
+varsa, o batch boyutu üzerinde bir tavandır ve birinin sahibi olması gerekir.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Nicemleme ne zaman yanlış cevaptır?
+
+Bağlayıcı kısıtınız bellek değilken ya da onu sizin görevinizde kimse
+değerlendirmemişken.
+
+Nicemleme kaliteyi bellek ve bant genişliğiyle takas eder. Modern yöntemler naif
+yuvarlamadan çok daha azını kaybediyor — GPTQ da AWQ da her şeyi tekdüze
+ölçeklemek yerine hangi ağırlıkların korunacağını seçiyor — ama "çok daha azı"
+"hiç" değildir ve kayıp, genel bir ölçütün size söylemeyeceği biçimlerde göreve
+bağlıdır.
+
+Kısıtınız prompt uzunluğuysa nicemleme bunun için hiçbir şey yapmaz: KV
+önbelleği ağırlıklardan ayrı bir tahsistir. Model sığmıyorsa başvurun ve bir
+model değişimi için kullanacağınız değerlendirmenin aynısından geçirin.
+:::
+
+## Mülakat soruları {#sec-servis-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Aşağıdaki sorular
+bu kitabın baştan sona kullandığı iki güvenilir açık kaynakta ve bu bölümün
+kendi ölçümlerinin cevaplanabilir kıldığı yerlerde tekrar ediyor.
+:::
+
+### Makineyi anlayıp anlamadığınızı sınayanlar
+
+**S: Bir istek bir LLM sunucusuna geldiğinde ne olduğunu anlatın.**
+
+Farklı özellikleri olan iki aşama. Prefill tüm prompt'u tek bir paralel, hesap
+sınırlı geçişte okur. Decode çıktı token'larını teker teker üretir; her biri
+model üzerinden ayrı, bellek sınırlı bir geçiştir ve KV önbelleğini yeniden
+kullandığı için önceki token'lar yeniden hesaplanmaz. Hız farkını söyleyin — bu
+bölümün ölçümlerinde token başına yaklaşık on bire bir — ve size sorulan istek
+biçiminde hangi yarının baskın olduğunu belirtin. Ayrışmamış tek bir "çıkarım"
+anlatan adaylar bakmamıştır.
+
+**S: KV önbelleği neden eşzamanlılığı sınırlayan şeydir?**
+
+Çünkü model boyutuyla değil, token çarpı dizi sayısıyla ölçekleniyor. Ağırlıklar
+bir kez yüklenir ve karttaki her istek tarafından paylaşılır; önbellek ise dizi
+başınadır ve üretilen her token'la büyür. Aritmetiği verin — token başına
+$2 \times L \times H_{kv} \times d_{\text{head}}$ — ve gruplanmış sorgu
+dikkatinin büyük ölçüde onu küçültmek için var olduğunu belirtin. PagedAttention
+sistem tarafındaki cevap: bloklar hâlinde yönetin ki 2.000 token'a yer ayırıp
+200 kullanan bir dizi gerisini israf etmesin.
+
+**S: Batch'leme nerede yardım eder, nerede zarar verir?**
+
+İş hacmine yardım eder, çünkü decode bellek sınırlıdır ve ağırlık taşıması
+paylaşılır. İstek başına gecikmeye zarar verir, çünkü her dizi artık makineyi
+paylaşmaktadır. Sürekli batch'leme takasın en kötü sürümünü — statik
+batch'lemedeki kuyruk başı tıkanmasını — ortadan kaldırır ama takasın kendisini
+kaldırmaz. Batch'lemenin bedava olduğunu söyleyen bir aday hiç gecikme SLO'su
+işletmemiştir.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: Geçen ay fatura ikiye katlandı, trafik katlanmadı. Teşhis edin.**
+
+Önce girdi token'ları, çünkü baskın olan onlar: bu kitabın özetleme ölçümünde
+53'e karşı 890. Büyümüş bir prompt arayın — daha fazla parça döndüren bir erişim
+adımı, bir bölüm kazanmış bir sistem prompt'u, kırpılması durmuş bir konuşma
+geçmişi. Sonra önbellek isabet oranına bakın, çünkü prompt'un tepesine taşınmış
+oynak bir token önbelleklemeyi sessizce kapatır ve tıpkı bir fiyat değişikliği
+gibi görünür. Ancak ondan sonra model ya da sağlayıcı değişiklikleri.
+
+**S: Modeli değiştirmeden gecikmeyi nasıl yarıya indirirsiniz?**
+
+Önce ayrımı saptayın — %90'ı prefill'se çıktı tarafındaki değişiklikler sizi
+oraya götüremez. Sonra: kararlı önek için prompt önbellekleme, ki burada
+prefill'de 126× ölçüldü; prompt'un kendisini kısaltmak, ki doğrusaldır; ve kalan
+beklemeyi okuma süresine çevirmek için akış. Her birinden sonra neyi ölçeceğinizi
+söyleyin ve spekülatif çözümlemenin listede yalnızca bir taslak model
+barındırabiliyorsanız ve kısıt maliyet değilse yer aldığını belirtin.
+
+**S: 99'uncu yüzdelik bir gecikme SLO'su istiyoruz. Neye ihtiyacınız var?**
+
+Bir batch boyutu tavanına, kuyruk uzadığında ne olacağına dair bir kabul
+politikasına, uzun bağlamlı isteklerin kısa olanların önünde oturamaması için
+ayrı bir rotaya ve tek bir küresel sayı yerine rota başına TTFT ölçüm düzeneğine.
+Sonra rahatsız edici kısmı söyleyin: bir p99 SLO'su ile azami iş hacmi doğrudan
+çatışır ve birine hangisini satın aldığı söylenmelidir.
+
+## 2026 alet çantası {#sec-servis-araclar}
+
+Bir dizüstünde 3B'lik bir modele karşı kırk kısa istek tam olarak iki şeye
+ihtiyaç duyuyor; birinci tablo o. İkincisi gerçekte üstünde servis yapacağınız
+şey ve hiçbiri burada kullanılmadı — bu bölümdeki sayılar oranlar ve gerçek bir
+karta geçişte hayatta kalan kısım oranlar.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | yerel sunucu; `/api/generate` ucu istek başına prefill ve decode ayrımını bildiriyor, bu ölçümleri ucuzlatan şey de o |
+| `llama3.2:3b` | Q4_K_M | sınanan model; ısıl kısıtlamaya girmeden bir dizüstünde ölçülebilecek kadar küçük |
+
+: Bu sayıların geldiği yığın. Python 3.14.5, Apple Silicon
+{tbl-colwidths="[24,16,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| proje | güncel sürüm | ne zaman başvurursunuz |
+|:--|:--|:--|
+| `vllm` | 0.28.0 | referans açık kaynak sunucu: sürekli batch'leme, sayfalı KV önbelleği, önek önbellekleme [@kwon2023pagedattention] |
+| `sglang` | 0.5.18 | yapılandırılmış programlar ve agresif önek yeniden kullanımı çevresinde kurulmuş bir servis çalışma zamanı |
+| `text-generation-inference` | 3.3.7 | HuggingFace'in sunucusu, onların ekosistemine en yakın olanı |
+| `llama.cpp` | b10690 (yuvarlanan) | CPU ve Apple Silicon çıkarımı; `ollama`nın altındaki motor. Yapı başına etiketleniyor, bir tanesini sabitleyin |
+| `tensorrt-llm` | 1.2.1 | iş hacminin son %20'si önemliyse NVIDIA'nın derleyici tabanlı çalışma zamanı |
+| `llmcompressor` | 0.13.0 | servis etmeyi düşündüğünüz bir modele GPTQ ve AWQ nicemlemesi uygulamak [@frantar2023gptq; @lin2024awq] |
+
+: Daha geniş ekosistem, yazım anındaki sürümler {tbl-colwidths="[24,18,58]"}
+
+## Lab: kendi iki yarınızı ölçün {#sec-servis-lab}
+
+Zamanlama bildiren herhangi bir yerel sunucu iş görür; amaç benim sayılarımı
+yeniden kullanmak değil, kendi sayılarınızı üretmek.
+
+### Adım 1 — modelinizin prefill ve decode hızlarını alın
+
+Altı prompt uzunluğu, hiçbir şey önbelleğe girmesin diye her biri ayrı metinle,
+sabit ve kısa bir çıktı. Prompt token'ı, prefill saniyesi, çıktı token'ı, decode
+saniyesi kaydedin. İki hız düşer ve akılda tutulacak sayı onların oranıdır.
+
+### Adım 2 — TTFT eğrinizi bulun
+
+Akışı açın ve üç bağlam uzunluğunda ilk token'a kadar geçen süreyi kaydedin.
+TTFT'yi toplamın payı olarak çizin. Dik biçimde yükselmiyorsa prompt'larınız
+üretimdeki prompt'ların çoğundan kısadır ve gerçekçi bir tanesiyle yeniden
+sınamalısınız.
+
+### Adım 3 — önbelleğinizi ölçün, sonra bozun
+
+Aynı uzun prompt'u iki kez gönderip ikisini de kaydedin. Sonra prompt'un
+*tepesine* bir zaman damgası ekleyip iki kez daha gönderin. İkinci çift
+hızlanmayı tümüyle yitirmeli. İki sayıyı da saklayın; aradaki fark prompt
+sıralamasının değeridir.
+
+### Adım 4 — KV önbelleğini gigabayt cinsinden boyutlandırın
+
+Modelinizin üstverisinden katman sayısını, KV başlığı sayısını ve başlık boyutunu
+alıp token başına baytı hesaplayın. Az önce yapılandırmak üzere olduğunuz bağlam
+uzunluğuyla çarpın. Cevap sizi şaşırtıyorsa, adımın amacı zaten oydu.
+
+### Adım 5 — çizelgeyi kurun
+
+Prompt token'ları, önbellekli pay, çıktı token'ları, aylık istek sayısı, üç
+fiyat. Aylık bir rakam üretin; sonra prompt'ta %50'lik bir azalmanın ve %60'lık
+bir önbellek isabet oranının ayrı ayrı ne kazandırdığını hesaplayın. Sıralayın.
+
+### Adım 6 — bir değişikliği savunun
+
+İlk çekeceğiniz tek kolu, adım 5'ten onu haklı çıkaran sayıyla ve kabul ettiğiniz
+kalite riskiyle birlikte adlandıran bir paragraf.
+
+### Teslim edilecekler
+
+İki hızınız ve oranları; gerçekçi bağlam uzunluğunuzdaki TTFT payı; aynı prompt
+için önbellekli ve önbelleksiz prefill; yapılandırdığınız pencere için KV
+önbelleği boyutu; ve adım 6'daki paragraf.
+
+## Alıştırmalar {#sec-servis-alistirmalar}
+
+1. **İki hızınız.** Çalıştırabileceğiniz bir model için prefill ve decode
+   saniyedeki token sayısını ölçün. Oranı raporlayın ve ölçmeden *önce* 4.000
+   token'lık bir prompt ile 100 token'lık bir cevabın toplam gecikmesini tahmin
+   edin. Sonra ölçün.
+
+2. **Önbelleği bilerek bozun.** Uzun ve kararlı bir öneki olan bir prompt alıp
+   soğuk ve sıcak prefill'i ölçün. Bir zaman damgasını prompt'un altından tepesine
+   taşıyıp tekrarlayın. İki sayıyı da ve takımınız için yazacağınız tasarım
+   kuralını raporlayın.
+
+3. **Bir pencereyi boyutlandırın.** Dağıtmayı düşünebileceğiniz üç model için
+   üstverilerinden token başına KV önbelleği baytını hesaplayın ve bağlam
+   uzunluğuna karşı bellek tablosu üretin. 24 GB'lık bir kartta 32k bağlamda
+   hangi modeli çalıştıracağınızı söyleyin.
+
+4. **Çizelge, dürüstçe.** Gerçekten sevk ettiğiniz ya da tarifini yazdığınız bir
+   özelliği alın. Gerçek prompt ve çıktı token'larını sayın — tahmin değil, sayın
+   — ve kendi trafiğinizde aylık faturayı hesaplayın. Sonra prompt %40 kısayken
+   yeniden hesaplayın ve prompt'un hangi kısımlarını keseceğinizi söyleyin.
+
+5. **Bağlama karşı TTFT.** Kendi kurulumunuz için en az beş uzunlukta, prompt
+   uzunluğuna karşı ilk token'a kadar geçen süreyi çizin. Bir doğru uydurun.
+   Eğimi kullanarak sınamadığınız bir bağlam uzunluğundaki TTFT'yi tahmin edin,
+   sonra sınayın.
+
+6. **Çıktı uzunluğu miti.** Birinin modelden daha kısa cevaplar isteyerek para
+   tasarrufu önerdiği bir yer bulun. Ölçtüğünüz girdi/çıktı oranını kullanarak o
+   değişikliğin gerçekte ne kazandıracağını hesaplayın.
+
+## Daha derine {#sec-servis-derinlesme}
+
+Okumadan önce: kendi ürününüzden gerçek bir istek alın ve prompt token'ı ile
+çıktı token'ı sayılarını yazın. Aşağıdakilerin neredeyse hepsi, kendi oranınızı
+bildiğinizde çok daha kolay değerlendirilir.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [`vllm`](https://github.com/vllm-project/vllm) | referans açık kaynak sunucu; kodu okunabilir ve çizelgeleyici sürekli batch'lemenin somutlaştığı yer |
+| [vLLM'in sayfalı dikkat tasarım notu](https://docs.vllm.ai/en/latest/design/paged_attention.html) | KV önbelleği sayfalar hâlinde, uygulayan insanlar tarafından anlatılıyor [@kwon2023pagedattention] |
+| [Transformer Inference Arithmetic](https://kipp.ly/transformer-inference-arithmetic/) | prefill/decode asimetrisinin nereden geldiği, iddia edilerek değil türetilerek |
+| [How To Scale Your Model](https://jax-ml.github.io/scaling-book/) | bellek bant genişliği ve aritmetik yoğunluk özenle işlenmiş; @pope2023efficiently'nin kitap boyundaki sürümü |
+| [Databricks'in çıkarım performansı yazısı](https://www.databricks.com/blog/llm-inference-performance-engineering-best-practices) | gerçek donanımda ölçülmüş batch'leme, TTFT ve iş hacmi — bir dizüstünün gösteremeyeceği şey |
+| [`llama.cpp`](https://github.com/ggml-org/llama.cpp) | bu bölümdeki sayıların altındaki motor; CPU ya da Apple Silicon üzerinde servis yapıyorsanız KV önbelleği işleyişini okuyun |
+| [`tensorrt-llm`](https://github.com/NVIDIA/TensorRT-LLM) | iş hacminin son %20'sinin yapı karmaşıklığında neye mal olduğu, ki isteyip istemediğinize karar verebilesiniz |
+| [`llm-compressor`](https://github.com/vllm-project/llm-compressor) | servis etmeyi düşündüğünüz bir modele nicemleme uygulamak, değerlendirme döngüsü de ekli |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| sayfalı bellek olarak KV önbelleği | @kwon2023pagedattention |
+| sürekli batch'leme ve statik batch'lemenin bir kartı neden israf ettiği | @yu2022orca |
+| 4 bite eğitim sonrası nicemleme | @frantar2023gptq |
+| etkinleştirme duyarlı ağırlık nicemlemesi | @lin2024awq |
+| spekülatif çözümleme | @leviathan2023speculative |
+| büyük modeller için çıkarım aritmetiği | @pope2023efficiently |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-servis-ozet}
+
+- **Bir istek tek değil, iki işlemdir.** Prefill prompt'u tek bir paralel geçişte
+  okur; decode cevabı seri biçimde teker teker token yazar. Burada kabaca
+  **saniyede 2.000'e karşı 185 token** ölçüldü — bir token yazmak, bir token
+  okumanın yaklaşık **on bir katına** mal oluyor. Her servis kararı isteklerinizin
+  hangi yarıdan yapıldığından çıkar.
+
+- **Gecikme genellikle prompt'tur.** 7.455 token bağlamda **duvar saatinin
+  %90,7'si ilk karakter belirmeden önce bitmişti**. Akış o sayıyı değiştirmez;
+  yalnızca isteğin geri kalanını görünür kılar. İlk token'a kadar geçen sürenin
+  kolu prompt uzunluğu, ondan sonra da önbelleklemedir.
+
+- **Uzun bağlamın bedeli iki kez alınır.** Bir kez prefill'de, sonra da üretilen
+  her token'ı yavaşlatarak: decode boş bir pencere ile 7.500 token'lık bir pencere
+  arasında **saniyede 185'ten 139 token'a** düştü.
+
+- **KV önbelleği modeli cüce bırakabilir.** Token başına 112 KiB'de, 2,0 GB'lık
+  bir modelde 131k'lık bir pencere **14 GiB önbellek — ağırlıkların yedi katı**
+  demek. "Sığar mı?" bir bağlam uzunluğu sorusudur. O sayının 42 değil 14 olması
+  gruplanmış sorgu dikkati sayesinde.
+
+- **Prompt önbellekleme ilk koldur ve ince bir şey değildir.** Sıcak prefill
+  **prompt uzunluğundan bağımsız olarak 13–18 ms'de sabitti**: 4.258 token'da
+  prefill'de 126× ve tüm istekte 8,2×. Bayt bayt aynı bir önek gerektiriyor;
+  öyleyse prompt'u kararlılığa göre sıralayın ve tepesine yakın oynak hiçbir şey
+  koymayın.
+
+- **Batch'leme iş hacmi alır, gecikme öder.** Decode bellek sınırlıdır, dolayısıyla
+  diziler ağırlık taşımasını paylaşabilir; sürekli batch'leme en yavaş diziyi
+  beklemek yerine yuvaları dolu tutar [@yu2022orca; @kwon2023pagedattention]. İş
+  hacmi kazancını gecikme maliyeti olmadan raporlamak, bir değerlendirmenin
+  yanıltılma biçimidir.
+
+- **Parasını yazmanın değil, okumanın ödüyorsunuz.** Bu kitabın kendi özetleme
+  ölçümünde 53 üretilmiş token'a karşı 890 prompt token'ı. Daha kısa cevaplar
+  istemek neredeyse hiçbir şey kazandırmaz; daha az göndermek neredeyse her şeyi
+  kazandırır. Şablon metni ayıklamak model seçmeyi yener.
+
+- **Kolları size neye mal olduklarına göre sıralayın.** Daha az token ve prompt
+  önbellekleme kalite riski taşımaz ve önce gelir. Daha küçük bir model, nicemleme
+  [@frantar2023gptq; @lin2024awq] ve spekülatif çözümleme
+  [@leviathan2023speculative] her biri belirli bir şeyi takas eder — sırasıyla
+  kalite, kalite ve gecikme karşılığı para — ve yerleri başkasının çalıştırdığı
+  bir ölçüt tablosu değil, bir değerlendirmedir.
