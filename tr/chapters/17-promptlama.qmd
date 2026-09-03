@@ -1,0 +1,840 @@
+# Prompting ve Bağlam İçi Öğrenme {#sec-promptlama}
+
+::: {.callout-note appearance="simple" icon="false"}
+**Bölüm durumu: çevrildi.** Kaynak metin:
+[İngilizce 17. bölüm](../../en/chapters/17-prompting.html). Buradaki ölçümler
+@sec-karsilastirma ve @sec-siniflandirma ile aynı Türkçe ürün yorumu derleminde
+yapıldı — 233.508 tekilleştirilmiş yorum — ama doğal %93,7 olumlu dağılım
+yerine **dengeli** bir örneklem üzerinde; böylece doğruluk %50'lik bir tabana
+karşı okunabiliyor ve ölçülen etki sınıf öncülü değil prompt oluyor. Yazılım:
+`ollama` 0.24.0 üzerinden `qwen3.5:9b`, Python 3.14.5.
+:::
+
+**Öğrenme hedefleri.** Bu bölümün sonunda:
+
+- bağlam içi öğrenmenin ne olduğunu ve prompt'a örnek koymanın tek bir ağırlığı
+  değiştirmeden davranışı neden değiştirdiğini açıklayabilirsiniz;
+- örüntü kütüphanesini — rol, yapı, gösterim, ayrıştırma — uygulayabilir ve her
+  birinin gerçekte ne işe yaradığını söyleyebilirsiniz;
+- bir prompt'u istek olarak değil, çıktı sözleşmesi olan bir *şartname* olarak
+  yazabilirsiniz;
+- puanınızın ne kadarının model değil prompt olduğunu ölçebilir ve prompt
+  değişikliklerini incelenebilir kılan değerlendirmeyi kurabilirsiniz.
+
+## Prompting neden işe yarıyor {#sec-promptlama-neden}
+
+Ön eğitilmiş bir model bir sonraki token'ı tahmin eder. Bu amaçta bir talimatı
+izlemesi gerektiğini söyleyen hiçbir şey yoktur ve ilk büyük modeller çoğunlukla
+izlemedi de — onları kandırmanız gerekiyordu; doğal devamı istediğiniz cevap olan
+bir ön ek yazarak.
+
+@reynolds2021prompt o dönemin tarihsel belgesidir ve bugün okumak "prompt
+mühendisliği"nin ne kadarının eksik bir yeteneğin etrafından dolaşmak olduğunun
+iyi bir hatırlatıcısıdır.
+
+İki şey değişti. **Ölçek**, modelleri bağlamdaki örneklerden görevi çıkarabilir
+hâle getirdi [@brown2020language] ve **talimat ayarı** (@sec-egitim-sonrasi)
+onları bir talimatı devam ettirilecek metin olarak değil talimat olarak görmeye
+eğitti. İkincisi, modern promptlamanın kandırmak değil sormak gibi hissettirmesinin
+nedenidir.
+
+::: {#gloss-in-context-learning .column-margin .term-gloss}
+**bağlam içi öğrenme** (in-context learning) — modelin bir görevde daha iyi
+olması, çünkü o görevin örnekleri prompt'un içinde duruyor. Hiçbir ağırlık
+güncellenmez ve çağrıdan sonra hiçbir şey kalmaz; *öğrenme* kelimesinin bunun
+için biraz yanıltıcı olmasının nedeni budur.
+[↩](#term-in-context-learning){.term-back}
+:::
+
+[Bağlam içi öğrenme](#gloss-in-context-learning){#term-in-context-learning .term-ref}
+bunların ilki: prompt'a girdi-çıktı çiftleri koyarsınız ve model bir sonraki
+girdide daha iyi olur; **hiçbir ağırlık güncellenmeden ve çağrıdan sonra hiçbir
+şey saklanmadan**.
+
+Yani @sec-egitim-sonrasi'nın kelimeyi kullandığı anlamda bir öğrenme değil. Daha
+iyi bir tarif *görev çıkarımı*: örnekler, modelin zaten yapmayı bildiği pek çok
+görev arasından hangisini istediğinizi daraltır.
+
+Bu çerçeve tuhaf bir şey öngörüyor ve öngörü tutuyor. @min2022rethinking
+gösterimlerdeki etiketleri **rastgele** olanlarla değiştirdi ve performansın
+çoğunlukla hayatta kaldığını buldu. Örneklerin esas ilettiği şey görevin
+*biçimiydi* — etiket uzayı, format, girdilerin dağılımı — girdiden etikete
+eşleme değil.
+
+Kusursuz örnekler derlemek için bir hafta harcamadan önce bunu bilmeye değer.
+
+::: {.column-margin}
+Kusur biçimini de öngörüyor. Gösterimler esas olarak formatı iletiyorsa, formatı
+zaten bilen bir model onlardan az şey kazanır — @sec-siniflandirma'nın ölçtüğü
+tam olarak budur: sekiz örnek bir modelde +7,17 makro-F1 değerindeyken daha
+güçlü bir modelde +0,51 ($p = 0,62$) etti. Teknik çalışmayı bırakmadı; modeller
+ona ihtiyaç duymayı bıraktı.
+:::
+
+### Bu bölümün üzerine kurulduğu iddia
+
+[Prompt modelin bir parçasıdır.]{.hl} Ona gönderilen bir mesaj değil — sistemin
+bir bileşeni; @sec-karsilastirma'nın hattında bir öznitelik çıkarma işlevinin
+durduğu konumda duruyor. Sürümü vardır, sözleşmesi vardır, regresyonları vardır
+ve onu değiştirmek çıktı dağılımınızı checkpoint'i değiştirmek kadar kesin
+biçimde değiştirir.
+
+Bölümün geri kalanı bunu ciddiye almanın sonuçlarıdır ve
+@sec-promptlama-kirilgan bundan kaçınmayı zorlaştıran ölçümdür.
+
+**Neye bakacağız.** Önce örüntü kütüphanesi — işe yarayan beş şey ve her birinin
+gerçekte yaptığı iş; böylece bir örüntünün ne zaman yardımcı olmayacağını
+anlayabilirsiniz. Sonra istek yazmaktan şartname yazmaya geçiş; bir prompt'u
+denetlenebilir kılan şey budur. Sonra bölümün döndüğü ölçüm: aynı şeyi söyleyen
+on iki prompt, tek bir model ve tek bir görevde neredeyse on beş puanlık bir
+doğruluk aralığına yayılıyor ve rol ön eki on ikinin on birincisi oluyor. Ve son
+olarak, sayıyı kabul ettiğinizde gelen makine: yeniden üretilebilirlik,
+dondurulmuş bir küme, eşli testler ve bir sürüm dizgisi.
+
+## Bir örüntü kütüphanesi {#sec-promptlama-oruntuler}
+
+Prompt bir bileşense, bunlar onun parçalarıdır. Beş örüntü işe yarayanların
+çoğunu kapsıyor ve hiçbiri sihirli bir kelime değil — her biri tanımlanabilir
+bir iş yapıyor ve işi adlandırmak, örüntünün ne zaman yardımcı olmayacağını size
+söyleyen şey.
+
+**Rol.** *Sen deneyimli bir müşteri geri bildirimi analistisin.* İş, modelin
+dağılımının bir bölgesini seçmek — sözcük dağarcığı, üslup, neyin ilgili bir
+ayrıntı sayıldığı. Modelin sahip olmadığı bir uzmanlığı istediğinde en zayıftır
+(bir rol ön eki modeli doktor yapmaz) ve gerçek ve sık bir ihtiyaç olan *üslubu*
+netleştirdiğinde en güçlüdür.
+
+**Yapı.** Bölümler, ayraçlar, girdi için açık bir yer. İş, sizin talimatınızla
+kullanıcının verisi arasındaki sınırı belirsizlikten kurtarmak — hem model için
+hem de kitabın güvenlik bölümünün ele aldığı enjeksiyon nedenleriyle.
+`<yorum>...</yorum>` süs değildir; veriyle talimat arasındaki farktır.
+
+**Gösterimler.** Girdi-çıktı çiftleri. @min2022rethinking'e göre iş, esas olarak
+*formatı ve etiket uzayını* sabitlemek. Çıktı biçimi alışılmadık ya da tarif
+etmesi zor olduğunda kullanın; modelin açıkça görmüş olduğu bir görevde onlardan
+daha azını bekleyin.
+
+**Ayrıştırma.** Bir seferde tek bir şey isteyin ya da cevaptan önce ara sonuçlar
+isteyin. İş, çalışmayı tek bir ileri geçişten çıkarıp token'lara taşımak —
+@sec-akil-yuruten'in konusu ve ne zaman yardımcı olduğunun ölçümünün bulunduğu
+yer. Bu bölümün katkısı pratik sonuç: **aynı anda dört şey isteyen bir prompt
+en az birini kötü yapacaktır** ve onu bölmek düzeltmekten genellikle ucuzdur.
+
+**Çıktı sözleşmesi.** Cevabın tam biçimini belirtin ve modelin üretmesi en kolay
+şey o olsun. En çok kaldıraca sahip örüntü budur ve kendi bölümü var.
+
+::: {.callout-note collapse="true"}
+## Peki "adım adım düşün"?
+
+@sec-akil-yuruten'e aittir; orada düzgün ölçülüyor ve kısa cevap ifadenin bir
+kalıntı olduğudur. @kojima2022large onun akıl yürütmeye eğitilmemiş modellerde
+işe yaradığını buldu; akıl yürütmeye *eğitilmiş* modeller izi siz istemeseniz de
+üretir ve bir akıl yürütme modeline ifadeyi eklemek çoğunlukla token israfıdır.
+
+Kalıcı olan kısım ifade değil mekanizma: cevaptan önce daha çok token, onu
+üretmek için daha çok hesaplama demektir. Görev gerektirdiğinde ara sonuç
+isteyin ve sihirli sözü atlayın.
+:::
+
+## Şartname olarak prompt'lar {#sec-promptlama-sartname}
+
+Bu bölümdeki en işe yarar kayma dilbilgiseldir: prompt'ları *istek* olarak
+yazmayı bırakıp *şartname* olarak yazmaya başlayın.
+
+Bir istek ne istediğinizi söyler. Bir şartname geçerli bir çıktının ne olduğunu
+söyler — yani kontrol edilebilir ve çıktısı kontrol edilebilen bir prompt, test
+edebileceğiniz bir prompt'tur.
+
+```text
+request         "Summarise the customer's complaint."
+
+specification   "Return one JSON object with keys `issue` (string, max 15
+                 words), `severity` (one of: low, medium, high) and
+                 `product` (string, copied exactly from the review, or null
+                 if no product is named). Return nothing else."
+```
+
+İkinci sürüm size birincinin vermediği üç şeyi verir: ya başaran ya da gürültülü
+biçimde çöken bir ayrıştırıcı, doğrulayabileceğiniz bir değerler kümesi ve
+*yok*'u *bilinmiyor*'dan ayıran bir `null` — ki bu, @sec-dizi-etiketleme'nin LLM
+çıkarımcılarının sessizce yok ettiğini bulduğu ayrımdır.
+
+Bundan çıkan üç kural:
+
+1. **Kusur çıktısını adlandırın.** Model uyamıyorsa ne döndürmeli? Kaçış
+   deliği olmayan bir prompt, itiraf yerine uydurulmuş bir cevap alır, çünkü
+   modele hayır demenin yasal bir yolunu bırakmadınız.
+2. **Kısıtı bağladığı yere koyun.** Girdinin 800 token üstündeki bir talimat
+   dikkat için girdiyle yarışır. Tutması gereken kısıtlar sona yakın durur.
+3. **Sözleşmeyi makinece kontrol edilebilir yapın, sonra kontrol edin.**
+   Doğrulamadığınız bir şema bir yorum satırıdır. Kitabın yapılandırılmış çıktı
+   bölümü zorlama makinesinin — gramerler, JSON Schema — ve kısıtlamanın neye
+   mal olduğunun ölçümünün bulunduğu yerdir.
+
+::: {.column-margin}
+Ve @sec-ozetleme'den bir uyarı; şemanın zorlandığı bölümde değil yazıldığı
+bölümde tekrarlamaya değer: bir şema *biçimi* garanti eder, asla *doğruluğu*
+değil. Gramerle kısıtlanmış bir çağrı, Fransa'nın başkenti için memnuniyetle
+`{"answer": 1}` döndürdü. Sözleşmeyi doğrulamak size çıktının iyi biçimli
+olduğunu söyler, başka bir şey değil.
+:::
+
+## Puanınızın ne kadarı prompt? {#sec-promptlama-kirilgan}
+
+Yukarıdakilerin hepsi zanaat. Bu bölüm zanaatı önemli kılan ölçüm ve elinizdeki
+hiçbir sayıya güvenmeden önce kendi görevinizde çalıştırmanız gereken şey.
+
+Aynı görev için on iki prompt yazıldı — bir Türkçe ürün yorumunun olumlu mu
+olumsuz mu olduğuna karar vermek. **Yetkin bir okur bunlara aynı talimat
+derdi.**
+
+Biçimlendirmede, etiketlerin yüzey biçiminde, yorumun talimata göre durduğu
+yerde, ayraçlarda ve nezakette ayrışıyorlar. Hiçbiri görevi, ölçütleri ya da iki
+etiketten birinin anlamını değiştirmiyor.
+
+On ikisi de aynı 150 dengeli yorumda, aynı modelde, 0 sıcaklıkta ve sabit
+seed'le çalıştı. Her yanıt ayrıştırıldı; hiçbiri atılmadı.
+
+```text
+variant                        acc      95% CI (Wilson)
+label positive/negative     90.00%   [ 84.2,  93.8]
+label A/B                   88.67%   [ 82.6,  92.8]
+bulleted                    87.33%   [ 81.1,  91.7]
+numbered                    87.33%   [ 81.1,  91.7]
+label 1/0                   86.67%   [ 80.3,  91.2]
+triple quotes               82.00%   [ 75.1,  87.3]
+baseline                    79.33%   [ 72.2,  85.0]
+label olumlu/olumsuz        78.00%   [ 70.7,  83.9]
+xml delimiters              77.33%   [ 70.0,  83.3]
+polite                      76.67%   [ 69.3,  82.7]
+role prefix                 76.00%   [ 68.6,  82.1]
+review first                75.33%   [ 67.9,  81.5]
+
+spread 75.33% – 90.00% = 14.67 points     mean 82.06   sd 5.57
+```
+
+::: {.anlp-widget}
+```{=html}
+<div class="widget-title">On iki prompt, tek görev, tek model — sıralanmış</div>
+```
+
+```{ojs}
+//| echo: false
+promptData = [
+  {variant: "label positive/negative", acc: 90.00, lo: 84.2, hi: 93.8, kind: "etiket yüzey biçimi"},
+  {variant: "label A/B",               acc: 88.67, lo: 82.6, hi: 92.8, kind: "etiket yüzey biçimi"},
+  {variant: "bulleted",                acc: 87.33, lo: 81.1, hi: 91.7, kind: "biçimlendirme"},
+  {variant: "numbered",                acc: 87.33, lo: 81.1, hi: 91.7, kind: "biçimlendirme"},
+  {variant: "label 1/0",               acc: 86.67, lo: 80.3, hi: 91.2, kind: "etiket yüzey biçimi"},
+  {variant: "triple quotes",           acc: 82.00, lo: 75.1, hi: 87.3, kind: "ayraç"},
+  {variant: "baseline",                acc: 79.33, lo: 72.2, hi: 85.0, kind: "baseline"},
+  {variant: "label olumlu/olumsuz",    acc: 78.00, lo: 70.7, hi: 83.9, kind: "etiket yüzey biçimi"},
+  {variant: "xml delimiters",          acc: 77.33, lo: 70.0, hi: 83.3, kind: "ayraç"},
+  {variant: "polite",                  acc: 76.67, lo: 69.3, hi: 82.7, kind: "nezaket"},
+  {variant: "role prefix",             acc: 76.00, lo: 68.6, hi: 82.1, kind: "persona"},
+  {variant: "review first",            acc: 75.33, lo: 67.9, hi: 81.5, kind: "sıralama"}
+]
+```
+
+```{ojs}
+//| echo: false
+viewof promptShowCI = Inputs.toggle({label: "%95 Wilson aralıklarını göster", value: true})
+```
+
+```{ojs}
+//| echo: false
+Plot.plot({
+  width: 700, height: 380, marginLeft: 175, marginBottom: 40,
+  x: {label: "doğruluk (%)", domain: [65, 96], grid: true},
+  color: {legend: true, scheme: "Tableau10"},
+  marks: [
+    Plot.barX(promptData, {
+      y: "variant", x: "acc", fill: "kind",
+      sort: {y: "x", reverse: true}}),
+    promptShowCI
+      ? Plot.ruleX(promptData, {y: "variant", x1: "lo", x2: "hi", stroke: "#333"})
+      : null,
+    Plot.text(promptData, {y: "variant", x: "acc", dx: 22, fontSize: 11,
+      text: d => d.acc.toFixed(2)}),
+    Plot.ruleX([79.33], {stroke: "#C1666B", strokeDasharray: "4,3"})
+  ].filter(m => m)
+})
+```
+
+```{ojs}
+//| echo: false
+md`Kesikli çizgi sade \`baseline\` prompt'u. Dikkat edin: en iyi üç varyant
+ondan *yalnızca* iki etiketin nasıl yazıldığında ya da talimatın nasıl
+dizildiğinde ayrışıyor — ve dolaşımdaki en çok tekrarlanan örüntü olan rol ön
+eki on ikinin on birincisi geliyor.`
+```
+:::
+
+[Aynı şeyi söyleyen iki prompt arasında on dört buçuk puan doğruluk.]{.hl}
+
+### Bu gerçek mi, yoksa 150 belgelik gürültü mü?
+
+Güven aralıkları örtüşüyor, dolayısıyla bariz sonraki soru bunun herhangi
+birinin istatistikle temas ettiğinde ayakta kalıp kalmadığı. Kalıyor, çünkü
+karşılaştırma **eşli** — aynı belgeler iki prompt'tan da geçiyor — ve eşli bir
+test, iki bağımsız oranı karşılaştırmaktan çok daha güçlüdür.
+
+```text
+best  'label positive/negative'  90.00%
+worst 'review first'             75.33%
+
+  documents where they disagree            42
+    best right, worst wrong                32
+    worst right, best wrong                10
+  McNemar exact test                    p = 0.0009
+```
+
+Fark gürültü değil. Ve daha güçlü istatistik, doğrulukla hiç ilgisi olmayanı:
+
+```text
+all 12 variants give the same answer on   104/150 = 69.3% of reviews
+the prompt decides the answer on           46/150 = 30.7%
+
+two variants disagree on: median 12.0% of reviews, max 28.7%
+```
+
+**On yorumdan üçünde cevabı yorum değil prompt'un biçimlendirmesi belirliyor.**
+Modelin bu derlemin %69,3'ünde bir görüşü var; geri kalanında ne alacağınız
+madde işaretli bir liste mi yoksa paragraf mı yazdığınıza bağlı.
+
+Bu iki okuma da aynı 150 yorumu iki farklı şekilde kesiyor:
+
+:::: {.anlp-fig}
+```{=html}
+<div class="fig-title">Aynı 150 yorum, iki farklı kesit — ve soruyu belirleyen 42 tanesi</div>
+<svg viewBox="0 0 764 308" style="max-width:744px" role="img"
+     aria-label="150 dengeli yorumun 104'ünde (%69,3) on iki varyantın hepsi aynı cevabı veriyor, 46'sında (%30,7) ayrışıyor. Yalnızca en iyi ve en kötü varyant karşılaştırıldığında 108 yorumda ikisi de aynı cevabı veriyor, 42'sinde ayrışıyor; o 42'nin 32'sinde en iyi prompt, 10'unda en kötüsü doğru ve McNemar bunları p = 0,0009 ile ayırıyor.">
+
+  <text x="16" y="20" class="t-xs t-muted">ON İKİ VARYANT AYNI 150 YORUMDA — NEREDE ANLAŞIYORLAR, NEREDE PROMPT KARAR VERİYOR</text>
+
+  <rect x="16" y="32" width="507.52" height="42" rx="5" class="box"/>
+  <text x="269.76" y="49" class="t-b t-mid">104 yorum — on iki varyantın hepsi aynı cevabı veriyor</text>
+  <text x="269.76" y="66" class="t-sm t-muted t-mid">%69,3 — modelin bir görüşü var</text>
+
+  <rect x="523.52" y="32" width="224.48" height="42" rx="5" class="box-accent"/>
+  <text x="635.76" y="49" class="t-b t-accent t-mid">46 yorum</text>
+  <text x="635.76" y="66" class="t-sm t-accent t-mid">%30,7 — prompt karar veriyor</text>
+
+  <line x1="16" y1="100" x2="748" y2="100" class="ln-thin"/>
+
+  <text x="16" y="122" class="t-xs t-muted">AYNI 150 YORUM, EN İYİ VARYANTA KARŞI EN KÖTÜ — VE EŞLİ TESTİN GERÇEKTE KULLANDIĞI 42 TANESİ</text>
+
+  <rect x="16" y="134" width="527.04" height="42" rx="5" class="box"/>
+  <text x="279.52" y="151" class="t-b t-muted t-mid">108 yorum — iki prompt da aynı cevabı veriyor</text>
+  <text x="279.52" y="168" class="t-sm t-muted t-mid">bunlar fark hakkında hiçbir bilgi taşımıyor</text>
+
+  <rect x="543.04" y="134" width="204.96" height="42" rx="5" class="box-accent"/>
+  <text x="645.52" y="159" class="t-b t-accent t-mid">42'si ayrışıyor</text>
+
+  <line x1="543.04" y1="176" x2="543.04" y2="192" class="ln-thin"/>
+  <line x1="748" y1="176" x2="748" y2="192" class="ln-thin"/>
+
+  <rect x="543.04" y="192" width="156.16" height="32" rx="5" class="box-accent"/>
+  <text x="621.12" y="212" class="t-sm t-b t-accent t-mid">32'si en iyide doğru</text>
+  <rect x="699.2" y="192" width="48.8" height="32" rx="5" class="box"/>
+  <text x="723.6" y="212" class="t-sm t-b t-muted t-mid">10</text>
+  <text x="748" y="242" class="t-sm t-muted t-end">42'nin 32'si en iyi prompt'a, 10'u en kötüsüne</text>
+
+  <rect x="16" y="192" width="404" height="96" rx="9" class="box"/>
+  <text x="32" y="216" class="t-sm t-b">Eşlemenin önemi</text>
+  <g class="t-sm">
+    <text x="32" y="240">108 gri yorumu atmak, örtüşen iki</text>
+    <text x="32" y="258">güven aralığını McNemar p = 0,0009'a</text>
+    <text x="32" y="276">dönüştüren şeydir.</text>
+  </g>
+</svg>
+```
+
+::: {.fig-cap}
+Her blok aynı ölçekte çizildi, dolayısıyla bir yorum iki bantta da aynı
+genişlikte. Üst bant bölümün manşet sayısının farklı bir hâli: model 150'nin
+104'ünü kendi başına çözüyor ve kalan 46'sını biçimlendirme çözüyor. Alt bant
+istatistiğin neden işlediği — eşli bir test yalnızca iki prompt'un ayrıştığı 42
+yoruma bakar ve güven aralıkları örtüşen puanları böyle ayırır.
+:::
+::::
+
+### Bu, ölçtüğünüz her şey için ne anlama geliyor
+
+Bunu @sec-siniflandirma'nın aynı model ailesindeki sonucunun yanına koyun.
+Orada talimatı Türkçe yerine İngilizce yazmak — dolaşımdaki en çok tekrarlanan
+promptlama halk bilgisi — **+0,54 makro-F1, $p = 0,54$** değerindeydi; yani
+hiçbir şeyden ayırt edilemez. Burada *madde işareti biçimlendirmesini*
+değiştirmek sekiz puan ediyor.
+
+[Herkesin tartıştığı değişken gürültü çıktı, kimsenin sözünü etmediği değişken
+ise deneydeki en büyük etki.]{.hl}
+
+Üç sonuç ve üçüncüsü çalışma biçiminizi değiştiren:
+
+1. **Tek prompt'lu bir model karşılaştırması güvenilmezdir.** Tek bir modeldeki
+   prompt varyansı 14,67 puansa, her birinde tek bir prompt'la ölçülmüş "A
+   modeli B'yi 5 puan yendi" bir prompt ifadesidir. Modelleri bir prompt
+   *kümesi* üzerinde karşılaştırıp dağılımı raporlayın ya da modelleri
+   karşılaştırmadığınızı kabul edin.
+2. **Raporladığınız doğruluğun hesaplamadığınız bir hata payı var.** 150
+   belgedeki örnekleme aralığı yaklaşık ±6 puan. Aynı veride *prompt* aralığı
+   14,67. İkincisi daha büyük ve neredeyse hiç raporlanmıyor.
+3. **Prompt değişiklikleri inceleme değil regresyon testi ister.** "Yorumu
+   talimatın üstüne taşıdım" ifadesini okuyan hiçbir inceleyici −4 puan
+   öngörmez, çünkü değişiklik anlamsal olarak boştur. Bunu yalnızca bir ölçüm
+   yakalar; bunu bir yazma problemi değil bir test problemi yapan da budur.
+
+::: {.column-margin}
+@sclar2024quantifying bu deneyin görevler ve modeller genelinde sistematik
+hâlidir ve ölçekte aynı şeyi buluyor: sahte biçimlendirme öznitelikleri puanları
+gerçek model farklarıyla kıyaslanabilir miktarlarda oynatıyor.
+@lu2022fantastically aynısını gösterimlerin *sırası* için buldu. Literatür
+yıllardır bu konuda açık; pratik yetişmedi, çünkü prompt hâlâ bir bileşenden çok
+bir mesaj gibi hissettiriyor.
+:::
+
+### Kaybeden örüntüler
+
+O tablodaki iki sonuç, yaygın olarak öğretilen tavsiyeyle çeliştikleri için
+adlandırmaya değer.
+
+**Rol ön eki on ikinin on birincisi geldi** (%76,00; onsuz aynı prompt için
+%79,33). *Sen deneyimli bir müşteri geri bildirimi analistisin* dolaşımdaki en
+çok tekrarlanan promptlama örüntüsüdür ve bu görevde üç puana mal oldu.
+
+**Nezaket 2,66 puana mal oldu.** *Lütfen… Teşekkürler* zararsız görünüyor ve
+bedava değil.
+
+İkisi de genellenmiyor — mesele de bu. Yetkin bir okurun ilgisiz diyeceği,
+modelin ise demediği iki değişken daha. Ders "asla rol ön eki kullanmayın"
+değil; [hangi prompt'un daha iyi olduğunu okuyarak anlayamayacağınız]{.hl} ve
+anlayabileceğiniz inancının bu bölümün tümüyle karşı çıktığı şey olduğudur.
+
+## Prompt çalışmasını incelenebilir kılmak {#sec-promptlama-degerlendirme}
+
+Prompt bir bileşense ve etkisi 14,67 puansa, başka her bileşenin aldığı makineyi
+alması gerekir. Karşılığını verme sırasına göre dört parça.
+
+### 1. Önce yeniden üretilebilirliği saptayın
+
+Herhangi bir şey ölçmeden önce kurulumunuzun aynı cevabı iki kez verip
+vermediğini öğrenin. Otuz yorum, her biri on tekrar:
+
+```text
+setting                          identical output   documents that varied
+temperature 0, fixed seed              100.0%              0 / 30
+temperature 0, no seed                 100.0%              0 / 30
+temperature 0.7, fixed seed            100.0%              0 / 30
+temperature 0.7, no seed                 3.3%             29 / 30
+```
+
+İyi haber ve bir tuzak. **Sıcaklık 0 burada seed'li ya da seed'siz
+belirlenimciydi ve sabit bir seed sıcaklık 0,7'yi bile belirlenimci yaptı.**
+Ama ikisi de yokken 30 belgenin 29'u on çalıştırmada farklı cevap verdi — yani
+varsayılan ayarlarda yapılan bir değerlendirme prompt'u ölçtüğü kadar
+örnekleyiciyi de ölçüyor.
+
+::: {.callout-warning appearance="simple"}
+O tablo, tek seferde bir isteğe cevap veren yerel bir sunucu. **Barındırılan
+API'ler sıcaklık 0'da bile sıklıkla belirlenimci değildir**, çünkü istekler
+gruplanır ve grup bileşimi kayan nokta indirgemelerinin sırasını değiştirir.
+Varsaymayın; on tekrarlı kontrolü gerçekten sevk edeceğiniz uç noktada
+çalıştırın ve belirlenimci değilse değerlendirmeniz tek bir sayı değil tekrarlar
+ve bir aralık ister.
+:::
+
+### 2. Küçük bir değerlendirme kümesi kurun ve dondurun
+
+Kurulumun aynı cevabı iki kez verdiğini bildiğinizde, *hakkında* cevap
+verilecek bir şeye ihtiyacınız olur. Elli ile iki yüz arası madde, kendi
+etiketlediğiniz, halihazırda gördüğünüz kusur biçimlerini kapsayan. Büyük olması
+gerekmiyor — *sabit* olması gerekiyor ki iki prompt sürümü karşılaştırılabilsin.
+
+@sec-siniflandirma'nın disiplini aynen geçerli: ayrı tutun, olabildiğince az
+bakın ve bir prompt'u asla raporladığınız maddelerin üzerinde ayarlamayın.
+
+Değerlendirme kümesi üzerinde ayarlanmış bir prompt, test kümesi üzerinde
+ayarlanmış bir model kadar aşırı uyumludur ve kazara yapması çok daha kolaydır —
+çünkü bir prompt üzerinde yinelemek uydurmaktan çok yazmak gibi hissettirir.
+
+### 3. Bağımsız değil eşli karşılaştırın
+
+@sec-promptlama-kirilgan'ın döndüğü istatistiksel nokta buydu. *Aynı* maddelerde
+çalıştırılan iki prompt eşli bir karşılaştırmadır, dolayısıyla eşlemeyi
+kullanın: ayrıştıkları belgeleri sayın ve o sayıyı test edin.
+
+```text
+prompt A right, B wrong     32
+prompt B right, A wrong     10
+                            --
+McNemar exact            p = 0.0009
+```
+
+Güven aralıkları örtüşen iki doğruluk rakamını karşılaştırmak bunu sonuçsuz
+sayardı. Eşli test aynı 150 belgeden kesin biçimde karar veriyor, çünkü iki
+prompt'un da aynı fikirde olduğu 108 maddeyi atıyor — onlar fark hakkında hiçbir
+bilgi taşımıyor.
+
+### 4. Dizgiyi değil şablonu sürümleyin
+
+Şablonu yuvalarıyla birlikte, depoda, bir sürümle saklayın. Her çıktıyı hangi
+sürümün ürettiğini kaydedin. Bir şey geriye gittiğinde *bu hangi prompt'tu*
+sorusunun bir cevabı olmalı ve "not defterindeki" bir cevap değildir.
+
+```python
+PROMPTS = {
+    "sentiment/v3": "...",     # madde işaretli, etiketler positive/negative
+    "sentiment/v4": "...",     # + açık null durumu
+}
+```
+
+Bundan iki alışkanlık çıkıyor: birleştirilmiş prompt bir *derleme çıktısıdır* ve
+elle düzenlenmemelidir; ve bir prompt değişikliği, bir kod değişikliğinin
+testleriyle sevk edilmesi gibi değerlendirme farkıyla sevk edilir.
+
+## Sezgi kontrolleri {#sec-promptlama-sezgi}
+
+Her birini açmadan önce cevaplayın. Altısı da bu bölümün tartışmayla değil
+ölçümle çözdüğü sorular.
+
+::: {.callout-note collapse="true"}
+## 1. A modeli değerlendirmenizde B'yi 5 puan yendi. Hangisi daha iyi?
+
+Bilmiyorsunuz, çünkü modeli prompt'tan ayırmadınız. Tek bir modelde, tek bir
+görevde ve anlamsal olarak birebir on iki prompt üzerinde ölçüldü: aralık
+**14,67 puan** — yorumlamaya çalıştığınız farkın üç katı.
+
+İki modeli de bir prompt *kümesi* üzerinde çalıştırıp dağılımları
+karşılaştırın. Bu çok pahalıysa, en azından her modeli iki üç prompt'ta
+çalıştırıp aralığı raporlayın. Tek prompt'lu bir karşılaştırma prompt'lar
+hakkında bir ifadedir.
+:::
+
+::: {.callout-note collapse="true"}
+## 2. İnceleyiciniz "girdiyi talimatın üstüne taşımak hiçbir şey değiştirmez" diyor. Haklı mı?
+
+Anlamsal olarak evet, ampirik olarak hayır: burada **4,00 puana** mal oldu
+(%79,33 → %75,33).
+
+Prompt'ları test edilebilir bileşenler olarak görmenin bütün gerekçesi budur.
+Hiçbir inceleyici bunu okuyarak öngöremez, çünkü okunacak bir şey yok —
+değişiklik anlamı koruyor. Onu yakalayan tek şey değerlendirmeyi çalıştırmak; bu
+da prompt değişikliklerini bir yazma probleminden bir test problemine
+dönüştürüyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 3. "Sen bir uzmansın…" işe yarıyor mu?
+
+Bu görevde on ikinin on birincisi geldi; %76,00'a karşı onsuz aynı prompt için
+%79,33.
+
+Bunu da fazla okumayın — tek bir görev ve tek bir model ve mesele rol
+ön eklerinin kötü olduğu değil. Mesele, promptlamadaki en çok tekrarlanan
+örüntünün burada kendi baseline'ına yenilmesi ve işaretini kimsenin tahmin
+edememesi. Kendi görevinizde ölçün; fazladan tek bir çalıştırma sürer.
+:::
+
+::: {.callout-note collapse="true"}
+## 4. Few-shot örneklerinizin etiketleri yanlış. Bu ne kadar kötü?
+
+Sandığınızdan az kötü ve bu size gösterimlerin ne işe yaradığı hakkında bir şey
+söylüyor. @min2022rethinking gösterimlerdeki etiketleri rastgeleleştirdi ve
+faydanın çoğu hayatta kaldı, çünkü örneklerin esas ilettiği şey eşleme değil
+*format ve etiket uzayı*.
+
+Pratik okumalar: örneklerin hiç yardımcı olup olmadığını kontrol etmeden bir
+hafta elle örnek derlemeyin; ve görevinizin zorluğu formatta değil eşlemedeyse
+gösterimlerin beklentiyi karşılamamasını bekleyin.
+
+Sayıyı oynatan şey *hangi* örnekleri gösterdiğiniz — @liu2022makes girdiye
+anlamsal olarak yakın gösterimleri getirmenin sabit ve elle seçilmiş bir kümeyi
+yendiğini buldu; bu da örnek seçimini bir erişim problemine dönüştürüp kitabın
+erişim bölümünün makinesine devrediyor.
+:::
+
+::: {.callout-note collapse="true"}
+## 5. Sıcaklık 0 yeniden üretilebilir mi?
+
+Yerelde, burada, evet — on tekrarda %100 birebir aynı; seed'li ya da seed'siz.
+Barındırılan bir API'de çoğu zaman değil, çünkü gruplama kayan nokta indirgeme
+sırasını değiştirir ve isteğiniz grubu yabancılarla paylaşır.
+
+Varsaymak yerine kontrolü çalıştırın: aynı prompt, aynı girdi, on kez, sevk
+edeceğiniz uç noktada. Değişiyorsa değerlendirmenizdeki her sayı tekrarlar ve
+bir aralık ister.
+:::
+
+::: {.callout-note collapse="true"}
+## 6. Bir prompt ne zaman prompt olmayı bırakmalı?
+
+Bir istek yazmak yerine bir şartname sürdürüyorsanız. İşaretler: prompt'un bir
+sürüm geçmişi var, çıktısı kodla ayrıştırılıyor, ona yapılan bir değişiklik aşağı
+akıştaki bir tüketiciyi bozabiliyor ve bir şey çalıştırmadan onu güvenle
+düzenleyemiyorsunuz.
+
+O noktada sisteminizin bir bileşenidir ve kodunuzun geri kalanıyla aynı
+disipline aittir — depo, sürüm, sözleşme, regresyon testi. Çıktı sözleşmesinin
+istenmek yerine *zorlandığı* yer kitabın yapılandırılmış çıktı bölümüdür.
+:::
+
+## Mülakat soruları {#sec-promptlama-mulakat}
+
+::: {.callout-warning appearance="simple"}
+**Kaynak konusunda — @sec-metin-veri'deki uyarının aynısı.** Bunlar bu kitabın
+kullandığı iki güvenilir açık kaynakta tekrar eder; ayrıca bu bölümün
+ölçümlerinin cevaplanabilir kıldığı sorular vardır.
+:::
+
+### Mekanizmayı anlayıp anlamadığınızı sınayanlar
+
+**S: Prompt'a örnek koyduğunuzda gerçekte ne oluyor?**
+
+Eğitim anlamında hiçbir şey öğrenilmiyor — hiçbir ağırlık değişmiyor ve
+çağrıdan sonra hiçbir şey kalmıyor. Örnekler modelin hangi görevi yapacağını
+daraltıyor; bunun öğrenmeden çok görev çıkarımı diye tarif edilmesinin nedeni
+bu. Sonra öğreticinin ötesini okuduğunuzu gösteren sonucu verin:
+@min2022rethinking gösterim etiketlerini rastgeleleştirdi ve faydanın çoğu
+hayatta kaldı; yani örneklerin büyük ölçüde ilettiği şey eşleme değil format ve
+etiket uzayı.
+
+**S: Promptlama neden bir numara gibi hissettirmeyi bıraktı?**
+
+Çünkü talimat ayarı gerçekleşti. Temel bir model metni devam ettirir, dolayısıyla
+erken promptlama doğal devamı cevap olan bir ön ek kurmak demekti. Talimat ayarı
+(@sec-egitim-sonrasi) modelleri bir talimatı talimat olarak görmeye eğitti.
+"Model büyüdü" ile "model talimat izlemeye eğitildi"yi ayıramayan adaylar
+yeteneğin nereden geldiğini düşünmemiştir.
+
+### Bir tane sevk edip etmediğinizi sınayanlar
+
+**S: İki prompt; hangisi daha iyi?**
+
+İkisini de aynı dondurulmuş değerlendirme kümesinde çalıştırın ve **eşli** bir
+test kullanın — ayrıştıkları maddeleri sayın ve o sayıyı test edin, iki doğruluğu
+değil. Burada ölçüldü: güven aralıkları örtüşen iki prompt McNemar tarafından
+$p = 0,0009$ ile ayrıldı, çünkü eşleme ikisinin de doğru bildiği maddeleri atıyor.
+
+Cevap "ikisini okudum, ikincisi daha net" ise aday bir prompt ölçmemiştir.
+
+**S: Raporladığınız doğruluğun ne kadarı prompt?**
+
+Dürüst cevap çoğu ekibin bilmediğidir ve ölçüm bir sabahlık iş: anlamsal olarak
+birebir birkaç prompt yazın ve hepsini çalıştırın. Burada on ikisi **14,67
+puana** yayıldı ve on ikisi maddelerin yalnızca **%69,3'ünde** anlaştı — yani on
+maddeden üçünde çıktıyı biçimlendirme belirledi. Bu, neredeyse hiç raporlanmayan
+ve genellikle örnekleme aralığından büyük olan bir hata payıdır.
+
+**S: Prompt değişikliklerinin üretimi bozmasını nasıl engellersiniz?**
+
+Prompt'u sürümlenmiş bir bileşen olarak görerek: şablon depoda, sürüm her
+çıktıyla kaydedilmiş, dondurulmuş bir değerlendirme kümesi ve her değişiklikle
+raporlanan bir fark. Sonra incelemenin neden yetmediğini söyleyin — anlamsal
+olarak boş bir düzenleme burada 4 puana mal oldu ve hiçbir inceleyici işaretini
+öngöremezdi.
+
+**S: Değerlendirme sonuçlarınız değişti ve hiçbir şey dağıtılmadı. Ne oldu?**
+
+Her şeyden önce yeniden üretilebilirliği kontrol edin. Aynı prompt, aynı girdi,
+on tekrar. Yerelde sıcaklık 0 burada tümüyle belirlenimciydi; 0,7'de seed'siz
+30 maddenin 29'u değişti. Ve barındırılan uç noktalar sıcaklık 0'da bile
+sıklıkla belirlenimci değildir, çünkü gruplama kayan nokta indirgeme sırasını
+değiştirir — dolayısıyla cevap, hiçbir şey olmadığı ve değerlendirmenizin zaten
+hiç aralığı olmadığı olabilir.
+
+## 2026 alet çantası {#sec-promptlama-araclar}
+
+Bu bölümdeki her şey aşağıdaki sürümlerle tek bir dizüstü bilgisayarda çalıştı.
+
+| kütüphane | kullanılan sürüm | burada ne işe yarıyor |
+|:--|:--|:--|
+| `ollama` | 0.24.0 | bu bölümdeki her ölçüm için `qwen3.5:9b`'yi sunmak |
+| Python stdlib | 3.14.5 | deney, prompt'lar üzerinde bir `for` döngüsü ve bir eşli test; hiçbir çatıya ihtiyaç duymadı |
+
+: Bu sayıların çıktığı yığın {tbl-colwidths="[24,16,60]"}
+
+Bilmeye değer, yukarıda kullanılmadı:
+
+| kütüphane | güncel sürüm | ne zaman uzanırsınız |
+|:--|:--|:--|
+| `promptfoo` | 0.122.0 (npm) | prompt A/B testleri ve regresyon süitleri bir yapılandırma dosyası olarak — @sec-promptlama-degerlendirme'nin araç hâli ve bunu not defterlerinde yapmayı bırakmanın en hızlı yolu |
+| `dspy` | 3.3.1 | prompt dizgisi yazmayı tümüyle bıraktırır: imzayı bildirin, prompt'u bir metriğe karşı derlesin. Kırılgan bir eserin elle ayarlanmasının bir haftanın kötü bir kullanımı olduğunu kabul ettiğinizde doğru cevap |
+| `instructor` / `pydantic` | 1.15.4 / 2.13.4 | @sec-promptlama-sartname'nin çıktı sözleşmesi bir Python tipi olarak, gelişte doğrulanır |
+| `guidance` | 0.3.1 | üretimi bir şablona ya da gramere kısıtlar — yapılandırılmış çıktı makinesi, prompt katmanında uygulanmış |
+| `jinja2` | 3.1.6 | yuvalı prompt şablonları, dosya olarak sürümlenir. Gösterişsiz ve "bu çıktıyı hangi prompt üretti" problemini doğrudan çözer |
+| `langsmith` | 0.11.1 | hat bir hesap tablosunu aştığında izleme ve veri kümesi yönetimi |
+| `pytest` | 9.1.1 | mesele şu ki bir prompt regresyon süiti sadece testlerdir ve başlamak için LLM'e özgü bir çatıya ihtiyaç duymaz |
+
+: Daha geniş ekosistem, yazıldığı andaki sürümler {tbl-colwidths="[22,16,62]"}
+
+::: {.column-margin}
+`dspy`, konumunun vermediği ikinci bir bakışı hak ediyor. Öncülü tam olarak bu
+bölümün bulgusu: prompt sözcükleri puanı öngöremeyeceğiniz miktarlarda
+oynatıyorsa, prompt'ları elle yazmak tahminle optimizasyondur ve metrikli bir
+derleyici sizi yener. Bedeli, prompt'larınızın okunabilir eserler olmayı
+bırakması; bu bedava bir kazanç değil gerçek bir takas.
+:::
+
+## Lab: bir prompt'u bileşene dönüştürün {#sec-promptlama-lab}
+
+Gerçekten yaptığınız bir görevi alın — bir prompt üzerinde sezgiyle
+yinelediğiniz bir görev. Lab onu sürümü ve hata payı olan bir şeye dönüştürüyor.
+
+### Adım 1 — elli maddeyi dondurun
+
+Kendiniz etiketleyin. Halihazırda bildiğiniz kusurları dâhil edin; kümeyi
+dekoratif değil işe yarar kılan budur. Bir dosyaya yazın ve düzenlemeyi bırakın.
+
+### Adım 2 — her şeyden önce yeniden üretilebilirliği ölçün
+
+Aynı prompt, aynı girdi, on tekrar, sevk edeceğiniz uç noktada. Cevaplar
+değişiyorsa aşağıdaki her sayı tekrarlar ve bir aralık ister; bunu kafa
+karıştırıcı bir haftadan sonra değil şimdi bilmeniz gerekir.
+
+### Adım 3 — aynı şeyi söyleyen altı prompt yazın
+
+Altı *daha iyi* prompt değil — bir meslektaşınızın birebir aynı diyeceği altı
+tane. Biçimlendirmeyi, etiket yüzey biçimini, ayraçları, girdinin konumunu ve
+bir rol ön ekini değiştirin. Altısını da çalıştırın.
+
+Aldığınız aralık prompt'unuzun hata payıdır. Yazın; o güne kadar yaptığınız her
+karşılaştırmayı ne kadar ciddiye alacağınızı söyleyen sayı budur.
+
+### Adım 4 — kazananı eşli bir testle seçin
+
+En iyiye karşı en kötü, ayrışmalarda McNemar. İki doğruluğu değil, ayrıştıkları
+madde sayısını raporlayın.
+
+### Adım 5 — kazananı şartname olarak yeniden yazın
+
+Çıktı sözleşmesi, açık kusur değeri, sona yakın kısıtlar. Yeniden çalıştırın.
+Puanın oynayıp oynamadığını ve *ayrıştırma* hatalarının sıfıra inip inmediğini
+raporlayın; ikincisi genellikle daha büyük kazançtır.
+
+### Adım 6 — sürüm denetimine koyun ve bilerek bozun
+
+Yuvalı şablon bir dosyada, sürüm dizgisi her çıktıyla kaydedilsin. Sonra
+anlamsal olarak boş bir düzenleme yapın — iki cümleyi yer değiştirin — ve
+değerlendirmeyi çalıştırın. Sayı oynuyorsa bunun neden bir test problemi
+olduğunu kendinize göstermiş oldunuz.
+
+### Neyi teslim edeceksiniz
+
+Altı prompt'luk aralığı, kazananınız için eşli testi, şartname yeniden yazımının
+öncesi-sonrasını ve prompt'unuzun hata payının en son inandığınız model
+karşılaştırması için ne anlama geldiğine dair bir paragrafı.
+
+## Alıştırmalar {#sec-promptlama-alistirmalar}
+
+1. **Kendi kırılganlık sayınız.** Anlamsal olarak birebir altı prompt, tek görev,
+   tek model. Aralığı ve altısının da anlaştığı madde oranını raporlayın. Aralığı,
+   aralarında seçim yaptığınız iki modelin farkıyla karşılaştırın.
+
+2. **Eşliye karşı eşsiz.** Güven aralıkları örtüşen iki prompt alın. Aynı veride
+   eşsiz bir karşılaştırma ve bir McNemar testi hesaplayın. İkisini de
+   raporlayın ve hangisini bir rapora koyacağınızı ve nedenini söyleyin.
+
+3. **Gösterim etiketlerini rastgeleleştirin.** @min2022rethinking'i kendi
+   görevinizde yeniden üretin: doğru etiketli few-shot, karıştırılmış etiketli
+   ve zero-shot. Faydanın ne kadarı rastgeleleştirmeden sağ çıkıyor? Cevap size
+   örneklerinizin ne yaptığı hakkında ne söylüyor?
+
+4. **Rol ön eki, kendi görevinizde.** Aynı prompt'u *Sen bir uzmansın…* ile ve
+   onsuz çalıştırın. Çalıştırmadan önce işareti tahmin edin. İkisini de
+   raporlayın.
+
+5. **Kendi uç noktanızda yeniden üretilebilirlik.** Barındırılan bir API'ye ve
+   yerel bir modele karşı sıcaklık 0'da on tekrar. Farklılarsa mekanizmayı bir
+   meslektaşınıza iki cümlede açıklayın.
+
+6. **İstekten şartnameye.** İstek olarak yazılmış bir prompt'u alın, açık bir
+   kusur değeri olan bir sözleşme olarak yeniden yazın ve ayrıştırma hatalarını
+   öncesi ve sonrasıyla sayın. Sonra kusur değerinin doğru cevap olduğu bir girdi
+   bulun ve modelin onu gerçekten döndürdüğünü kontrol edin.
+
+7. **Göremediğiniz regresyon.** Üretimdeki bir prompt'a anlamı koruyan bir
+   düzenleme yapın — cümleleri yer değiştirin, madde işaretlerini düz metne
+   çevirin. Değerlendirmenizi çalıştırın. Hiçbir şey oynamadıysa, göreviniz
+   gürbüz demeden önce üç düzenleme daha deneyin.
+
+## Daha derine {#sec-promptlama-derinlesme}
+
+Buradaki her okumadan iyi olan tek bir alıştırma var: prompt'unuzu yalnızca
+biçimlendirmeyi değiştirerek iki kez yazın ve ikisini de aynı yüz maddede
+puanlayın. Sonra okuyacağınız her şey, kendi aralığınızı gördükten sonra farklı
+oturacak.
+
+| kaynak | ne olduğu |
+|:--|:--|
+| [Anthropic prompt mühendisliği rehberi](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview) | üretici belgesi, ama alışılmadık ölçüde somut ve neyin taşınıp neyin taşınmadığı konusunda dürüst |
+| [OpenAI Cookbook](https://cookbook.openai.com/) | çalıştırılabilir tarifler; tam da her birinin *sizin* görevinizde yardımcı olup olmadığını ölçebildiğiniz için işe yarar |
+| [`promptfoo`](https://github.com/promptfoo/promptfoo) | aynı değerlendirmeyi prompt varyantları ve modeller genelinde çalıştırır; bu bölümün deneyini rutin kılan araç |
+| [Hamel Husain — değerlendirme üzerine](https://hamel.dev/blog/posts/evals/) | ölçümsüz prompt çalışmasının neden tahmin olduğuna dair en iyi uygulamalı yazı |
+| [Stanford CME 295](https://cme295.stanford.edu/) | transformer'lar ve LLM'ler; promptlama modelin gerçekte nasıl çalıştığı bağlamına yerleştirilmiş |
+| [Intro to Large Language Models](https://www.youtube.com/watch?v=zjkBMFhNj_g) — Andrej Karpathy | prompt'un neden ona gönderilen bir mesaj değil sistemin bir bileşeni olduğunu açıklayan bir saat |
+
+: Makalelerin ötesi {tbl-colwidths="[42,58]"}
+
+| konu | kaynak |
+|:--|:--|
+| bağlam içi öğrenme, ilk raporlandığı hâliyle | @brown2020language |
+| yalnızca biçimlendirme puanı oynatıyor | @sclar2024quantifying |
+| örnek sırası da öyle | @lu2022fantastically |
+| gösterimlerin gerçekte ne ilettiği | @min2022rethinking |
+| hangi örneklerin gösterileceği | @liu2022makes |
+| tek bir cümleden zero-shot akıl yürütme | @kojima2022large |
+| arayüz olarak promptlama, erken düşünülmüş hâli | @reynolds2021prompt |
+
+: Birincil kaynaklar {tbl-colwidths="[46,54]"}
+
+## Akılda kalması gerekenler {#sec-promptlama-ozet}
+
+- **Bağlam içi öğrenme öğrenme değil görev çıkarımıdır.** Hiçbir ağırlık
+  değişmez ve çağrıdan sonra hiçbir şey kalmaz. @min2022rethinking gösterimlerdeki
+  etiketleri rastgeleleştirdi ve faydanın çoğu kaldı; bu da örneklerin esas
+  olarak eşlemeyi değil format ve etiket uzayını ilettiğini söylüyor.
+
+- **Prompt modelin bir parçasıdır.** Yetkin bir okurun aynı talimat diyeceği on
+  iki prompt, tek bir model ve tek bir görevde **14,67 doğruluk puanına**
+  yayıldı — %75,33'ten %90,00'a. Bu bir yazma farkı değil; etki büyüklüğü olan
+  bir bileşen.
+
+- **Maddelerin %30,7'sinde cevaba prompt karar verdi.** On iki varyantın hepsi
+  yorumların yalnızca %69,3'ünde anlaştı; iki varyant ortanca %12 ve en çok
+  %28,7 oranında ayrıştı. Modelinizin çoğu maddede bir görüşü var ve gerisine
+  biçimlendirme karar veriyor.
+
+- **Aralık gerçek ve eşli test bunu gösterme yolunuz.** En iyiye karşı en kötü:
+  örtüşen güven aralıkları, 42 ayrışma, McNemar **$p = 0,0009$**. İki doğruluğu
+  karşılaştırmak bunu sonuçsuz sayardı; eşleme hiçbir bilgi taşımayan 108
+  maddeyi atıp sinyali buluyor.
+
+- **Yani tek prompt'lu bir model karşılaştırması güvenilmezdir.** Prompt varyansı
+  14,67 puansa, her birinde tek prompt'la ölçülmüş "A modeli B'yi 5 puan yendi"
+  prompt'lar hakkında bir ifadedir. Bir prompt kümesi üzerinde karşılaştırıp
+  dağılımı raporlayın.
+
+- **Halk bilgisi değişkeni gürültüydü, göz ardı edilen değişken ise etki.**
+  @sec-siniflandirma bu model ailesinde İngilizceye karşı Türkçe talimatı
+  **+0,54, $p = 0,54$** olarak ölçtü. Burada madde işareti biçimlendirmesi sekiz
+  puan etti. Dolaşımdaki en çok tekrarlanan örüntü olan rol ön eki on ikinin on
+  birincisi geldi ve kendi baseline'ına karşı 3,33 puana mal oldu.
+
+- **Hangi prompt'un daha iyi olduğunu okuyarak anlayamazsınız.** Prompt
+  değişikliklerini bir test problemi olarak görmenin bütün gerekçesi budur:
+  anlamsal olarak boş bir düzenleme 4,00 puana mal oldu ve hiçbir inceleyici
+  işaretini öngöremezdi.
+
+- **Bir şey ölçmeden önce yeniden üretilebilirliği kontrol edin.** Yerelde
+  sıcaklık 0 seed'li ya da seed'siz tümüyle belirlenimciydi ve sabit bir seed
+  sıcaklık 0,7'yi bile belirlenimci yaptı — ama ikisi de yokken 30 maddenin
+  29'u on çalıştırmada değişti. Barındırılan API'ler sıcaklık 0'da bile sıklıkla
+  belirlenimci değildir, çünkü gruplama kayan nokta indirgeme sırasını
+  değiştirir. On tekrarlı kontrolü sevk edeceğiniz uç noktada çalıştırın.
+
+- **Prompt'ları şartname olarak yazın.** Çıktı sözleşmesini adlandırın, kusur
+  değerini adlandırın ve kısıtları bağladıkları yere koyun. Sonra sözleşmeyi
+  doğrulayın — kontrol etmediğiniz bir şema bir yorum satırıdır ve @sec-ozetleme
+  bir şemanın biçimi garanti ettiğini, asla doğruluğu garanti etmediğini zaten
+  göstermişti.
