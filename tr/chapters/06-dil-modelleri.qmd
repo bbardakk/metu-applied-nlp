@@ -83,7 +83,7 @@ a: kalite iyi        7     b: kalite kötü       1
 
 Model 858.000 token içinde ne `kötü fiyat` *ne de* `fiyat kötü` görmüş;
 yani kötü fiyatlar hakkında hiç doğrudan kanıtı yok — iki cümle de bir
-bigram üzerinden backoff cezası ödüyor. Terazinin dengesini bozan şey
+bigram için tümüyle ara değerlenmiş alt-mertebe terimine yaslanıyor. Terazinin dengesini bozan şey
 büyük ölçüde `iyi fiyat`ın 112 kez görülmüş kalıplaşmış bir Türkçe ifade
 olması, aynadaki karşılığınınsa olmaması. [Model bir anlam değil, bir eş
 dizim öğrendi]{.hl} — `a` cümlesini tercih ediyor, çünkü o kelime sırası
@@ -349,6 +349,14 @@ $$
 \mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N} \log P(w_i \mid h_i)\right)
 $$
 
+Tutarlı olduğunuz sürece taban önemli değil: $\mathrm{PPL} = \exp(H_e) = 2^{H_2}$,
+burada $H$ token başına ortalama negatif log olasılık — yani modelin ayrılmış
+metne karşı **çapraz entropisi**. Dolayısıyla perplexity'yi küçültmek, ayrılmış
+log-olabilirliği büyütmek ve çapraz entropiyi küçültmek tek bir işlemin üç adı ve
+bu kitabın geri kalanındaki her modelin eğitim kaybı, üstel alınmadan önceki
+aynı nicelik. Aşağıdaki araç $H_2$'yi bit cinsinden, token token raporluyor;
+tablolar ise $\exp(H_e)$'yi.
+
 Bu, $1/P(w_i \mid h_i)$ ifadesinin geometrik ortalaması — modelin,
 gerçekten sonra gelen kelimeye verdiği tipik olasılığın çarpmaya göre
 tersi.
@@ -384,7 +392,8 @@ Bundan, pratikte önemli olan iki özellik çıkıyor.
 
 **Perplexity bir geometrik ortalamadır, dolayısıyla tek bir felaket
 token her şeye hükmeder.** Üçüncü olasılığı $10^{-6}$ ile değiştirin,
-perplexity 4,0'tan 158'e sıçrasın. 0 ile değiştirin, model derlemdeki
+perplexity 4,0'tan **200**'e sıçrasın — 2, 4 ve $10^{6}$ sayılarının geometrik
+ortalaması. Üç token'ın ikisi hâlâ iyi tahmin edilmişti ve skor elli kat oynadı. 0 ile değiştirin, model derlemdeki
 diğer her token'da ne kadar iyi iş çıkarmış olursa olsun perplexity
 sonsuz olur. Sonraki bölüm tamamen bu olguyla ilgili.
 
@@ -668,10 +677,14 @@ trigram     13,221.2
 
 **Add-one smoothing'li bigram model, bağlamı tümden yok saymaktan iki
 buçuk kat kötü.** Aritmetik sebebini gösteriyor. `kargo` sonrasında
-$c(h) = 2{.}472$ ve $V = 29{.}773$ iken add-one, olasılık kütlesinin
-$29{.}773/(2{.}472 + 29{.}773) = \%92{,}3$'ünü hiç gözlenmemiş devamların
-üstüne koyuyor. Model `kargo`dan sonra ne geldiğine dair 2.472 örnek
-gördü ve add-one ona bu kanıtın %92'sini yok saymasını söylüyor. Daha
+$c(h) = 2{.}472$, $V = 29{.}773$ ve yalnızca 516 devam gözlenmişken add-one, o
+516 devama olasılık kütlesinin yalnızca
+$(2{.}472 + 516)/32{.}245 = \%9{,}3$'ünü bırakıyor ve kalan
+$29{.}257/32{.}245 = \%90{,}7$'yi hiç görülmemiş kelime çiftlerine dağıtıyor.
+(Tanıdık $V/(c(h)+V) = \%92{,}3$ değeri eklenen *toplam* sözde sayım kütlesidir
+ve bir kısmı gözlenmiş devamların üstüne geri düşer; önemli olan sayı %90,7.)
+Model `kargo`dan sonra ne geldiğine dair 2.472 örnek gördü ve add-one ona
+kütlenin onda dokuzunu başka yere harcamasını söylüyor. Daha
 uzun bağlamlarda $c(h)$ daha da küçük ve hasar tam.
 
 Sözde sayımı aşağı çekmek yardımcı oluyor ve bu ayarın dev kümesinde
@@ -736,6 +749,26 @@ sabit bir $d$ indirimi düşüyor ve aldığını yeniden dağıtıyor:
 $$
 P_{\text{KN}}(w \mid h) = \frac{\max(c(h,w) - d,\ 0)}{c(h)} + \lambda(h)\, P_{\text{KN}}(w \mid h')
 $$
+
+Orada yazılan varyant **ara değerlenmiş** (interpolated) Kneser-Ney: sayım sıfır
+olduğunda geri çekilmek yerine her zaman kısa bağlam kestiriminden bir pay
+ekliyor. Bu ayrım önemli, çünkü bu paragrafın yanındaki kenar notu backoff'u
+öteki şey olarak tanımlıyor.
+
+Formülün gizlediği iki nicelik. Birincisi, $\lambda(h)$ serbest bir parametre
+değil — dağılım hâlâ bire toplansın diye, tam olarak indirimin aldığı kütle:
+
+$$\lambda(h) = \frac{d \cdot N_{1+}(h\bullet)}{c(h)},$$
+
+burada $N_{1+}(h\bullet)$, $h$'den sonra görülen *farklı* kelimeleri sayıyor. Çok
+sayıda farklı devamı olan bir bağlam alt mertebeye daha çok ağırlık veriyor; tek
+bir devamı tekrarlayan bir bağlam neredeyse hiç vermiyor. İkincisi, en alt
+mertebe dağılımı bir unigram frekansı değil, **devam** dağılımı:
+
+$$P_{\text{KN}}(w) = \frac{N_{1+}(\bullet w)}{N_{1+}(\bullet\bullet)},$$
+
+yani $w$'nin ardından geldiği farklı kelime sayısının, toplam farklı bigram tipi
+sayısına oranı. `Francisco` kuralının yazıya dökülmüş hâli bu.
 
 ::: {#gloss-backoff .column-margin .term-gloss}
 **backoff** (geri çekilme) — uzun bağlam hiç görülmemişse baştan bir
@@ -1165,7 +1198,7 @@ modeli **kaybediyor**, hem de az farkla değil: 526,7'ye karşı 554,4.
 
 [Genelleme anlatısı bu derlemde tersine dönüyor.]{.hl} Yeni bağlamlarla
 daha iyi başa çıkan taraf, smoothing uygulanmış sayım modeli; çünkü
-Kneser-Ney'in backoff'u tam olarak bu duruma verilmiş, özenle
+Kneser-Ney'in alt-mertebe terimi tam olarak bu duruma verilmiş, özenle
 tasarlanmış bir cevap — elinizde kanıt yoksa, bir kelimenin kaç *farklı*
 bağlamı tamamladığına geri çekilirsiniz. Yapay sinir ağı modeli ise hiç görmediği
 bir bağlamla karşılaştığında, kendisi de seyrek ve gürültülü sayımlardan
@@ -1277,9 +1310,18 @@ tabanı var.
 
 ```text
 ### 8-word spans found verbatim in the training corpus
-5-gram model    91.6%
-neural, ctx=2    0.0%   (of 2,989 spans generated)
+trigram model  (2 kelime bağlam)    5.8%
+5-gram model   (4 kelime bağlam)   91.6%
+neural, ctx=2  (2 kelime bağlam)    0.0%   (2.989 span'ın 0'ı)
 ```
+
+Yüzdelerden önce bağlam sütununu okuyun. %91,6, *dört* kelimeye koşullanan bir
+modele ait; nöral model iki kelimeye koşullanıyor. Bağlam uzunluğuna göre
+eşleştirildiğinde dürüst karşılaştırma, trigram'ın %5,8'ine karşı nöral modelin
+%0,0'ı — hâlâ tek taraflı, ama artık aynı anda tek bir değişken oynuyor. 5-gram
+akıcılığını, ancak kopyalayarak karşılayabildiği iki fazladan kelimelik bağlamla
+satın alıyor; asıl nokta bu, ama bu nokta mimari kadar bağlam uzunluğu
+hakkında da.
 
 Yapay sinir ağı modelinden örnekleme, seed 7:
 
@@ -1342,6 +1384,16 @@ arkadaşlarının [@mikolov2010recurrent] dil modellemesine uyguladığı bu
 yaklaşım, günün en iyi n-gram sistemlerini geçti; LSTM'ler
 [@hochreiter1997long] ise uzun menzilli gradyanları pratikte
 eğitilebilecek kadar ehlileştirdi.
+
+Bunun yirmi yıl sürmesinin bir nedeni var. $h_t$'yi $h_{t-k}$'ye göre
+türevlemek $k$ tane Jacobian'ı birbiriyle çarpıyor; dolayısıyla gradyan kabaca
+$\lVert W_h \rVert^k$ gibi küçülüyor ya da büyüyor: bir'in altındaysa kayboluyor
+ve model on kelime geriye uzanan bir bağımlılığı hiç öğrenemiyor, üstündeyse
+patlıyor ve eğitim tek adımda ıraksıyor [@bengio1994learning]. Pratikte patlamayı
+durdurmak için gradyan normunu kırpıyorsunuz [@pascanu2013difficulty], kaybolmayı
+durdurmak için de mimariyi değiştiriyorsunuz — bir LSTM'in hücre durumu
+çarpılmıyor, *üstüne ekleniyor*; bu da gradyana üzerinde tekrarlanan matris
+bulunmayan bir yol veriyor.
 
 Ama $h_t$'nin ne olmak zorunda olduğuna yakından bakın. Sabit boyutlu tek
 bir vektör ve keyfî uzunlukta bir geçmişten gelen her şeyi taşımak
@@ -1455,7 +1507,7 @@ sayın.
 2. **Add-one smoothing neden bu kadar kötü başarısız oluyor?** Çünkü
    olasılık kütlesini kanıtla değil, sözlük büyüklüğüyle orantılı olarak
    dağıtıyor. `kargo` kelimesinden sonra 516 gözlenmiş, 29.257
-   gözlenmemiş devam var; dolayısıyla add-one olasılığın %92,3'ünü hiç
+   gözlenmemiş devam var; dolayısıyla add-one olasılığın %90,7'sini hiç
    görülmemiş şeylere veriyor. Kusur smoothing yapması değil, ima ettiği
    önselin (prior) fena hâlde yanlış olması.
 

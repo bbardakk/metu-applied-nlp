@@ -82,7 +82,7 @@ Before celebrating, look at *why* it got them apart.
 
 The model has never seen `kötü fiyat` *or* `fiyat kötü` in 858,000 tokens, so
 it has no direct evidence about bad prices at all — both sentences pay a
-backoff penalty on one bigram. What tips the balance is mostly that
+lean entirely on the interpolated lower-order term for one bigram. What tips the balance is mostly that
 `iyi fiyat` is a stock Turkish phrase, seen 112 times, and its mirror image is
 not.
 
@@ -362,6 +362,15 @@ $$
 \mathrm{PPL} = \exp\!\left(-\frac{1}{N}\sum_{i=1}^{N} \log P(w_i \mid h_i)\right)
 $$
 
+The base does not matter as long as you are consistent: $\mathrm{PPL} =
+\exp(H_e) = 2^{H_2}$, where $H$ is the average negative log probability per
+token — which is the model's **cross-entropy** against the held-out text. So
+minimising perplexity, maximising held-out log-likelihood and minimising
+cross-entropy are three names for one operation, and the training loss of every
+model in the rest of this book is that same quantity before the exponential.
+The widget below reports $H_2$ in bits, one token at a time; the tables report
+$\exp(H_e)$.
+
 That is the geometric mean of $1/P(w_i \mid h_i)$ — the reciprocal of the
 typical probability the model gave to the word that actually came next.
 
@@ -395,7 +404,8 @@ Two properties fall out of this that matter in practice.
 
 **Perplexity is a geometric mean, so one catastrophic token dominates.**
 Replace the third probability with $10^{-6}$ and the perplexity jumps
-from 4.0 to 158. Replace it with 0 and the perplexity is infinite,
+from 4.0 to **200** — the geometric mean of 2, 4 and $10^{6}$. Two tokens out of
+three were still predicted well, and the score moved by a factor of fifty. Replace it with 0 and the perplexity is infinite,
 regardless of how well the model did on every other token in the corpus.
 The next section is entirely about that fact.
 
@@ -678,11 +688,14 @@ trigram     13,221.2
 
 **The bigram model with add-one smoothing is two and a half times worse
 than ignoring context entirely.** The arithmetic shows why. After
-`kargo`, with $c(h) = 2{,}472$ and $V = 29{,}773$, add-one puts
-$29{,}773/(2{,}472 + 29{,}773) = 92.3\%$ of the probability mass on
-continuations that were never observed. The model saw 2,472 examples of
-what follows `kargo` and add-one instructs it to ignore 92% of that
-evidence. With longer contexts $c(h)$ is smaller still and the damage is
+`kargo`, with $c(h) = 2{,}472$, $V = 29{,}773$ and only 516 continuations ever
+observed, add-one leaves those 516 just
+$(2{,}472 + 516)/32{,}245 = 9.3\%$ of the probability mass and hands the
+remaining $29{,}257/32{,}245 = 90.7\%$ to word pairs that were never seen. (The
+familiar $V/(c(h)+V) = 92.3\%$ is the *total* pseudo-count mass added, part of
+which lands back on observed continuations; the number that matters is the
+90.7%.) The model collected 2,472 examples of what follows `kargo`, and add-one
+instructs it to spend nine tenths of the mass elsewhere. With longer contexts $c(h)$ is smaller still and the damage is
 total.
 
 Tuning the pseudo-count down helps, and the tuning must happen on dev:
@@ -743,6 +756,28 @@ discount $d$ from every observed count and redistributes what it took:
 $$
 P_{\text{KN}}(w \mid h) = \frac{\max(c(h,w) - d,\ 0)}{c(h)} + \lambda(h)\, P_{\text{KN}}(w \mid h')
 $$
+
+The variant written there is **interpolated** Kneser-Ney: it always adds a share
+of the shorter-context estimate rather than falling back only when the count is
+zero. That distinction matters because the margin note beside this paragraph
+defines backoff as the other thing.
+
+Two quantities the formula hides. First, $\lambda(h)$ is not a free parameter —
+it is exactly the mass the discount removed, so that the distribution still sums
+to one:
+
+$$\lambda(h) = \frac{d \cdot N_{1+}(h\bullet)}{c(h)},$$
+
+where $N_{1+}(h\bullet)$ counts the *distinct* words seen after $h$. A context
+with many different continuations gives more weight to the lower order; a
+context with one repeated continuation gives almost none. Second, the
+lowest-order distribution is not a unigram frequency but the **continuation**
+distribution,
+
+$$P_{\text{KN}}(w) = \frac{N_{1+}(\bullet w)}{N_{1+}(\bullet\bullet)},$$
+
+the number of distinct words that $w$ has ever followed, over the total number
+of distinct bigram types. That is the `Francisco` rule, written down.
 
 ::: {#gloss-backoff .column-margin .term-gloss}
 **backoff** — when the long context has never been seen, drop a word off
@@ -1162,7 +1197,7 @@ neural model **loses**, and not narrowly: 554.4 against 526.7.
 
 [The generalisation story is backwards on this corpus.]{.hl} The
 smoothed count model is the one that handles novel contexts better,
-because Kneser-Ney's backoff is a carefully engineered answer to exactly
+because Kneser-Ney's lower-order term is a carefully engineered answer to exactly
 that situation — when you have no evidence, fall back to how many
 *distinct* contexts a word completes. The neural model, faced with a
 context it has never seen, extrapolates from embedding geometry that was
@@ -1273,9 +1308,18 @@ it has a floor.
 
 ```text
 ### 8-word spans found verbatim in the training corpus
-5-gram model    91.6%
-neural, ctx=2    0.0%   (of 2,989 spans generated)
+trigram model  (2 words of context)    5.8%
+5-gram model   (4 words of context)   91.6%
+neural, ctx=2  (2 words of context)    0.0%   (0 of 2,989 spans)
 ```
+
+Read the context column before the percentages. The 91.6% belongs to a model
+conditioning on *four* words; the neural model conditions on two. Matched on
+context length the honest comparison is the trigram's 5.8% against the neural
+model's 0.0% — still one-sided, and now one variable at a time. The 5-gram buys
+its fluency with two extra words of context that it can only afford by copying,
+which is the point, but it is a point about context length as much as about
+architecture.
 
 Sampling from the neural model, seed 7:
 
@@ -1335,6 +1379,15 @@ chapter — is gone. Applied to language modelling by Mikolov and
 colleagues [@mikolov2010recurrent], this beat the best n-gram systems of
 the day, and LSTMs [@hochreiter1997long] made the long-range gradients
 trainable enough to be practical.
+
+There is a reason that took twenty years. Differentiating $h_t$ with respect to
+$h_{t-k}$ multiplies $k$ Jacobians together, so the gradient shrinks or grows
+roughly like $\lVert W_h \rVert^k$: below one it vanishes and the model never
+learns a dependency ten words back; above one it explodes and training diverges
+in a single step [@bengio1994learning]. In practice you clip the gradient norm
+to stop the explosion [@pascanu2013difficulty], and you change the architecture
+to stop the vanishing — an LSTM's cell state is *added to* rather than
+multiplied by, which gives the gradient a path with no repeated matrix on it.
 
 But look closely at what $h_t$ has to be. One fixed-size vector, carrying
 everything relevant from an arbitrarily long past.
@@ -1453,7 +1506,7 @@ marketing.
 2. **Why does add-one smoothing fail so badly?** Because it moves mass in
    proportion to vocabulary size rather than to evidence. After `kargo`
    there are 516 observed continuations and 29,257 unobserved ones, so
-   add-one hands 92.3% of the probability to things never seen. The
+   add-one hands 90.7% of the probability to things never seen. The
    failure is not that it smooths, it is that the implied prior is
    wildly wrong.
 
