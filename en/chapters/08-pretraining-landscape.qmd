@@ -197,6 +197,15 @@ That is the cause and effect worth carrying:
 | pretraining | knowledge, grammar, world model | months, thousands of GPUs | in practice, never |
 | fine-tuning | format, task shape, domain style | hours to days, one node | constantly |
 | preference tuning | tone, refusals, ranking of answers | days, plus annotation | every release |
+| RL on verifiable rewards | reasoning traces, tool use | days to weeks, a real cluster | every release |
+
+**A fourth stage arrived after that picture was drawn.** Since late 2024, models
+trained for reasoning add large-scale reinforcement learning against verifiable
+rewards — maths with a checkable answer, code with a passing test — and that
+stage does not fit the "coat of paint" description. Its token counts stay small,
+but its *compute* does not: rollouts are generation, and generation is the
+expensive half of RL. The 58,000× ratio above is a fact about **data**, not
+about **dollars**, and @sec-reasoning is where the dollars go.
 
 The last column is why this chapter matters even if you never train anything.
 [The pretraining decisions are the ones you inherit and cannot undo.]{.hl} If
@@ -364,9 +373,15 @@ original base filtered data"]{.hl} from them, since those had 95 later crawls
 to be deduplicated against [@penedo2024fineweb].
 
 Then they checked, which is the part most pipelines skip. Taking the 2013-48
-snapshot in isolation, they trained two models: one on the ~31 billion tokens
-global deduplication *kept*, and one on 171 billion tokens drawn from the ~460
-billion it had *removed*. The kept data lost.
+snapshot in isolation, they built two *pools*: the ~31 billion tokens global
+deduplication had **kept**, and 171 billion tokens re-deduplicated out of the
+~460 billion it had **removed**. They then trained one ablation model on a
+sample from each pool, at the same model size and the same token budget, so the
+only variable was which pool the tokens came from. The kept pool lost.
+
+That equal-budget detail is what makes the result mean anything. Had one model
+simply seen more tokens than the other, the comparison would have measured data
+*quantity* and told you nothing about data *quality*, which is the whole claim.
 
 Their explanation, after reading documents by hand, is what to memorise: the
 data surviving aggressive global deduplication "contains more ads, incoherent
@@ -862,6 +877,20 @@ You can estimate the compute of any pretraining run — how many
 parameter count $N$ and the token count $D$, and be accurate to under half a
 percent. That is unusual enough in systems work to be worth taking seriously,
 and it is the tool that lets you sanity-check a press release.
+
+**One caveat first, because it decides which number you put in $N$.** The $6ND$
+rule counts operations per parameter *used*, and in a mixture-of-experts model
+(@sec-transformers) a token only touches the experts its router picked. So the
+figure you want is active parameters, not total:
+
+$$C \approx 6\,N_{\text{active}}\,D$$
+
+DeepSeek-V3 makes the gap concrete: 671B total parameters, about 37B active per
+token, 14.8T training tokens. Using the active count gives
+$6 \times 37{\times}10^{9} \times 14.8{\times}10^{12} \approx 3.3\times10^{24}$
+FLOPs; substituting the total would have over-counted by **18×**. Whenever a
+release quotes two parameter counts, the smaller one is the one this
+arithmetic wants.
 
 ::: {#gloss-flop .column-margin .term-gloss}
 **FLOP** — one floating-point operation: a single multiply or a single add on decimal numbers. Training compute is counted in FLOPs; chips are rated in FLOP/s, operations per second. The two are easy to confuse and differ by a factor of however long you ran. [↩](#term-flop){.term-back}
@@ -1800,8 +1829,10 @@ decisions you are stuck with afterwards.
    quality, training rarely happens at full length throughout — the context is
    usually extended in stages near the end — so the last 100K tokens have seen
    far less training than the first 8K. On cost, take @sec-attention-cost's
-   arithmetic: a 7B model's KV cache at 100,000 tokens is 52.4 GB, per
-   concurrent request, against 14 GB of weights. The window being *advertised*
+   arithmetic: with plain multi-head attention a 7B model's KV cache at 100,000 tokens is
+   52.4 GB per concurrent request, against 14 GB of weights — but with the
+   grouped-query attention every current 8B model uses (8 KV heads instead of
+   32) the same cache is 13.1 GB. A 4× difference out of one line of config. The window being *advertised*
    and the window being *usable at your budget* are different numbers.
 
 6. **Why do small pretraining runs look so much less efficient than large

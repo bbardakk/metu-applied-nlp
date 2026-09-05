@@ -204,6 +204,15 @@ Akılda tutmaya değer neden-sonuç ilişkisi şu:
 | ön eğitim | bilgi, dilbilgisi, dünya modeli | aylar, binlerce GPU | pratikte asla |
 | fine-tuning | biçim, görev şekli, alan üslubu | saatler ya da günler, tek düğüm | sürekli |
 | tercih ayarı | üslup, ret, cevapların sıralaması | günler, artı etiketleme | her sürümde |
+| doğrulanabilir ödüllerle RL | akıl yürütme izleri, araç kullanımı | günler ilâ haftalar, gerçek bir küme | her sürümde |
+
+**O resim çizildikten sonra dördüncü bir aşama geldi.** 2024 sonundan beri, akıl
+yürütme için eğitilen modeller doğrulanabilir ödüllere karşı büyük ölçekli
+pekiştirmeli öğrenme ekliyor — cevabı kontrol edilebilir matematik, testi geçen
+kod — ve bu aşama "üstüne bir kat boya" tarifine uymuyor. Token sayıları küçük
+kalıyor ama *hesabı* kalmıyor: rollout'lar üretimdir ve üretim, RL'in pahalı
+yarısıdır. Yukarıdaki 58.000 katlık oran **veri** hakkında bir olgu, **para**
+hakkında değil; paranın gittiği yer @sec-akil-yuruten.
 
 Son sütun, hiç model eğitmeseniz bile bu bölümün neden önemli olduğunu
 söylüyor. [Ön eğitim kararları, devraldığınız ve geri alamadığınız
@@ -368,9 +377,16 @@ kabaca dokuzda biri. Ayrıca en sert vuruşu en eski anlık görüntülere indir
 [@penedo2024fineweb].
 
 Sonra kontrol ettiler; çoğu pipeline'ın atladığı kısım da bu. 2013-48 anlık
-görüntüsünü tek başına alıp iki model eğittiler: biri küresel deduplication'ın
-*tuttuğu* ~31 milyar token üzerinde, diğeri *attığı* ~460 milyardan çekilmiş
-171 milyar token üzerinde. Tutulan veri kaybetti.
+görüntüsünü tek başına alıp iki *havuz* kurdular: küresel deduplication'ın
+**tuttuğu** ~31 milyar token ve **attığı** ~460 milyardan yeniden
+tekilleştirilmiş 171 milyar token. Sonra her havuzdan alınan birer örneklem
+üzerinde, aynı model boyutu ve aynı token bütçesiyle birer ablasyon modeli
+eğittiler; böylece tek değişken, token'ların hangi havuzdan geldiğiydi. Tutulan
+havuz kaybetti.
+
+Sonucu anlamlı kılan şey o eşit bütçe ayrıntısı. Modellerden biri diğerinden
+daha çok token görseydi, karşılaştırma veri *kalitesini* değil veri *miktarını*
+ölçmüş olurdu — ki asıl iddia kalite hakkında.
 
 Belgeleri elle okuduktan sonra yaptıkları açıklama, ezberlenmeye değer olan:
 agresif küresel deduplication'dan sağ çıkan veri "başlangıçta atılan veriye
@@ -873,6 +889,20 @@ sayısı $N$ ve token sayısı $D$'den kestirebilir ve yarım yüzdenin altında
 isabetli olabilirsiniz. Bu, sistem işlerinde ciddiye alınacak kadar
 alışılmadık bir durum ve bir basın bültenini sağlamadan geçirmenizi sağlayan
 alet de bu.
+
+**Önce bir çekince, çünkü $N$'e hangi sayıyı koyacağınıza o karar veriyor.**
+$6ND$ kuralı, *kullanılan* parametre başına işlem sayıyor ve bir uzman karışımı
+(MoE) modelinde (@sec-transformerlar) bir token yalnızca yönlendiricisinin
+seçtiği uzmanlara dokunuyor. Yani istediğiniz rakam toplam değil, aktif
+parametre:
+
+$$C \approx 6\,N_{\text{aktif}}\,D$$
+
+DeepSeek-V3 farkı somutlaştırıyor: 671B toplam parametre, token başına yaklaşık
+37B aktif, 14,8T eğitim token'ı. Aktif sayıyı kullanmak
+$6 \times 37{\times}10^{9} \times 14{,}8{\times}10^{12} \approx 3{,}3\times10^{24}$
+FLOP veriyor; toplamı koymak **18 kat** fazla sayardı. Bir sürüm iki parametre
+sayısı birden veriyorsa, bu aritmetiğin istediği küçük olanıdır.
 
 ::: {#gloss-flop .column-margin .term-gloss}
 **FLOP** — bir kayan noktalı işlem: ondalık sayılar üzerinde tek bir çarpma ya da tek bir toplama. Eğitim hesabı FLOP cinsinden sayılır; yongalar ise saniyedeki işlem sayısı olan FLOP/s ile derecelendirilir. İkisini karıştırmak kolaydır ve aralarında koşuyu ne kadar çalıştırdığınız kadar fark vardır. [↩](#term-flop){.term-back}
@@ -1827,8 +1857,10 @@ sonradan mahkûm kaldığınızı bilmenizdir.
    uzunlukta yapılır — bağlam genelde sonlara doğru aşamalar hâlinde uzatılır —
    yani son 100K token, ilk 8K'ya göre çok daha az eğitim görmüştür. Maliyet
    tarafında ilgili aritmetiği (@sec-attention-maliyeti) alın: 7B'lik bir
-   modelin 100.000 token'daki KV cache'i, 14 GB'lık ağırlığa karşılık eşzamanlı
-   istek başına 52,4 GB. *Reklamı yapılan* pencere ile *sizin bütçenizde
+   modelin 100.000 token'daki KV cache'i, düz çok başlı dikkatle 14 GB'lık
+   ağırlığa karşılık eşzamanlı istek başına 52,4 GB — ama bugünkü her 8B modelin
+   kullandığı gruplanmış sorgu dikkatiyle (32 yerine 8 KV başlığı) aynı cache
+   13,1 GB. Tek bir yapılandırma satırından çıkan 4 katlık bir fark. *Reklamı yapılan* pencere ile *sizin bütçenizde
    kullanılabilir* pencere farklı sayılardır.
 
 6. **Küçük ön eğitim koşuları neden büyüklere göre bu kadar verimsiz
