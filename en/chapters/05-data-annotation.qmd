@@ -164,6 +164,8 @@ than before it starts: are you allowed to use this data at all?
 **The licence travels.** If a dataset is CC BY-NC-SA, a model trained on it may inherit obligations depending on jurisdiction and on how much of the data the model memorises. This is genuinely unsettled law, which is itself the reason to be conservative in anything you ship.
 
 **Provenance is a deliverable.** Record, at minimum: source URL, download date, licence text, and the exact filtering you applied. @longpre2024audit audited 1,800+ popular text datasets and found licence information missing or wrong for a large fraction of them — including datasets used in production. If you did not record it at download time, you will not be able to reconstruct it.
+
+**Copyright is not the only regime.** If the text can be linked to a person — and a product review often can — you are simultaneously in a personal-data regime, and that one carries an erasure right: KVKK Articles 7 and 11 in Turkey, GDPR Article 17 in the EU. "I already trained on it" is not an answer to a deletion request, which is the practical reason to keep the row-id-to-source mapping you would otherwise be tempted to discard. And if what you build is high-risk under the EU AI Act, its Article 10 turns most of this chapter into a compliance obligation rather than good practice: documented provenance, examination for bias, and a stated governance process for the training, validation and test sets. @sec-governance-kvkk works through the obligations and the dates.
 :::
 
 ## Read a hundred rows. Yourself. {#sec-random-audit}
@@ -175,6 +177,12 @@ I drew 100 rows from the 10,000-row test split with seed 42 and read all of them
 - **error** — the gold label contradicts the text;
 - **undecidable** — a single binary label is not determined by the text;
 - **ok** — everything else.
+
+I split `ok` in two during the reading, which is a deviation from the
+pre-registered scheme and is recorded here for exactly that reason:
+**arguable** for rows where the gold label is defensible but I would have chosen
+the other one, and plain `ok` for the rest. The `arguable` count is therefore a
+post-hoc category and carries less weight than the other three.
 
 The result:
 
@@ -188,7 +196,9 @@ arguable (defensible either way)            9
 positive labels in the sample              98
 ```
 
-Zero outright errors in 100 draws. With zero hits, the rule of three gives a 95% upper bound of 3/n — so the label error rate is **below 3%**, and probably well below. That is a good corpus by the standards of public sentiment data.
+Zero outright errors in 100 draws. With zero hits, the rule of three gives a 95% upper bound of 3/n — so the label error rate is **below 3%**. Under a uniform prior the posterior
+mean for zero hits in 100 draws is $1/(n+2) \approx 1\%$, which is the number
+to carry forward. That is a good corpus by the standards of public sentiment data.
 
 The seven undecidable rows are the interesting ones, because they are not errors. Test row 4745 reads, in full:
 
@@ -206,10 +216,20 @@ Ninety-eight of the hundred were positive, against a corpus rate of 93.7%. That 
 
 If the schema is where the damage is, it should be visible at scale — not just in a hundred rows one person happened to read.
 
-So how would you look for it in 10,000? You need something that marks the reviews a binary label cannot describe, and you need it computable without reading anything. Turkish gives us one almost for free: the contrastive connectives *ama*, *fakat*, *ancak*, *lakin* — all roughly "but". A review containing one of them is likely to be making two claims at once.
+So how would you look for it in 10,000? You need something that marks the reviews a binary label cannot describe, and you need it computable without reading anything. Turkish gives us one almost for free: the contrastive connectives *ama*, *fakat*, *ancak*, *lakin* — all roughly "but".
+
+A caveat the rest of this section rests on: this is a screen, not a parser, and
+its precision is unmeasured. *Ancak* also means "only" or "barely" — *ancak 3
+günde geldi* is a statement about delivery time, not a contrast — and the rule
+misses *gerçi*, *ne var ki* and *buna rağmen* entirely. So 20.03% is an upper
+bound on the contrastive share, and reading fifty random matches would tighten
+it in ten minutes. The rule earns its place because the finding is the
+*difference between the two groups*, which survives a fair amount of slop in
+either. A review containing one of them is likely to be making two claims at once.
 
 ```python
 import re
+# tr_lower is the Turkish-aware lowercaser from @sec-bake-off (İ->i, I->ı)
 CONTRAST = re.compile(r"\b(ama|fakat|ancak|lakin)\b")
 has_but = np.array([bool(CONTRAST.search(tr_lower(t))) for t in test.text])
 ```
@@ -298,7 +318,16 @@ you have to a measurement of whether the task is even well defined. [↩](#term-
 
 You cannot know your labels are good by looking at one annotator's output. You need a second opinion on the same items, and a number for how often the two opinions match — the [inter-annotator agreement](#gloss-inter-annotator-agreement-iaa){#term-inter-annotator-agreement-iaa .term-ref}.
 
-I do not have a second human, so I built a second annotator that is honest about being crude: a lexicon rule, 36 positive phrases and 37 negative phrases with six negators, applied to all 10,000 test rows.
+I do not have a second human, so I built a second annotator that is honest about being crude: a lexicon rule, 36 positive phrases and 37 negative phrases, applied to all 10,000 test rows.
+
+One caveat before the numbers, because it changes what the coefficient means.
+Annotator B is not a second opinion in the sense inter-annotator agreement
+requires: it is a rule written by someone who had already seen the gold labels,
+so $\kappa(\text{A}, \text{B})$ measures *how well a lexicon approximates gold*,
+not *whether the task is well defined*. Everything below about prevalence and
+$p_e$ transfers to a genuine two-human table unchanged — the arithmetic does not
+care where the second column came from — but the number 0.2698 is not a
+human–human agreement figure and should not be quoted as one.
 
 ```python
 def annotator_b(text):
@@ -354,8 +383,8 @@ $$
 \begin{aligned}
 p_e &= P(\text{both say negative}) + P(\text{both say positive}) \\
     &= (0.0632)(0.0308) + (0.9368)(0.9692) \\
-    &= 0.00195 + 0.90799 \\
-    &= 0.90994
+    &= 0.00195 + 0.90795 \\
+    &= 0.90989
 \end{aligned}
 $$
 
@@ -363,7 +392,9 @@ Almost all of $p_e$ — 0.908 of 0.910 — comes from the second term. Two annot
 
 This is why kappa collapses on skewed tasks and why reporting raw agreement on a skewed task is close to dishonest. It is also why kappa is unstable there: a handful of items moving between cells swings a denominator of 0.09 by a lot. Report both numbers, plus the confusion table, and let the reader see the skew.
 
-Cohen's kappa is defined for exactly two annotators. When you have three or more — the normal case once a crowd platform is involved — the same correction generalises as Fleiss' kappa [@fleiss1971measuring], which compares observed agreement against what a group labelling at its own base rates would produce. The interpretation, and the skew problem, are unchanged.
+Cohen's kappa is defined for exactly two annotators. When you have three or more — the normal case once a crowd platform is involved — use Fleiss' kappa [@fleiss1971measuring], which is the generalisation of *Scott's pi* rather than of Cohen's: it computes $p_e$ from a **single marginal pooled across all annotators**, not from each annotator's own rates, and it does not require the same annotators to have labelled every item. Krippendorff's alpha [@krippendorff2018content] takes the idea further, writing agreement as $\alpha = 1 - D_o/D_e$ — observed disagreement over expected disagreement — with a distance function you choose, so one coefficient covers nominal, ordinal and interval labels and tolerates missing judgements. The interpretation, and the skew problem, are unchanged for all three.
+
+That difference between "each annotator's own rates" and "one pooled rate" is not bookkeeping; it is the second of kappa's two known pathologies, and this corpus shows it. See below.
 :::
 
 ### The same annotators, a different number
@@ -382,7 +413,30 @@ Krippendorff's alpha                 0.2655              0.0722
 
 Raw agreement falls by 33 points. Neither annotator changed. The only thing that changed is the mix of items handed to them — and raw agreement, which most people read as a property of the annotators, turns out to be mostly a property of the sample.
 
+The two chance-corrected coefficients also part company on the right-hand column, and that gap is the second half of the story. On the full set they agree (0.2698 against 0.2655); on the balanced subsample kappa is nearly three times alpha (0.2057 against 0.0722), from the same data. The mechanism is the one named two sections above: Cohen's kappa computes $p_e$ from **each annotator's own marginals**, while alpha and Scott's pi use a **single pooled marginal**. On the balanced subsample A is 50% negative by construction and B is roughly 12% — a large divergence in how often the two of them reach for the minority label. Cohen credits that divergence as agreement; alpha does not.
+
+So kappa has two known pathologies rather than one. It *collapses* when the classes are skewed — the prevalence paradox, which is the whole of the previous section — and it *inflates* when the annotators' marginals differ, the bias paradox [@feinstein1990high; @cicchetti1990high]. This corpus exhibits both, in the two columns of one table. Report kappa and alpha side by side precisely so the gap between them stays visible.
+
+::: {.column-margin}
+One number in that table is exact rather than measured, and the reason is worth a line. On the balanced subsample $p_e = 0.5000$ exactly, because when one annotator is a perfect 50/50 split the expected agreement is $0.5b + 0.5(1-b) = 0.5$ *whatever* the other annotator's rate $b$ is. Half the coefficient's denominator stops depending on B entirely.
+:::
+
+The same 2×2 table will also produce whatever answer you want, if you choose the coefficient after seeing them:
+
+```text
+### the identical 10,000-row table, five coefficients
+raw agreement  p_o                    0.9342
+Gwet's AC1                            0.9277
+PABAK  (2*p_o - 1)                    0.8684
+Cohen's kappa                         0.2698
+Krippendorff's alpha                  0.2655
+```
+
+Not one of these is wrong. They differ because they make different assumptions about what "chance" means when one class dominates: kappa and alpha assume annotators guess at their observed rates and charge you for the skew; PABAK and AC1 assume they do not, and refuse to [@gwet2008computing]. Which is right depends on whether you believe your annotators actually guessed — an empirical question about your process, not a property of the table. [The same two annotators can be reported anywhere between 0.27 and 0.93.]{.hl} The honest report is the confusion table plus at least one chance-corrected number, with the choice stated.
+
 There is a second lesson hiding in B's scores. Annotator B achieves **93.42% accuracy** against gold. @sec-bake-off's majority-class baseline — label everything positive, read nothing — achieves **93.68%**. B's hand-built lexicon, 73 phrases of careful Turkish, performs *worse than a constant*. On macro-F1 the picture is different (63.27 for B against 48.37 for the constant), which is the whole reason @sec-bake-off refused to report accuracy alone.
+
+There is a third number worth reporting, and it is already on the page under a different name. **Specific agreement** — agreement restricted to one label, $2 n_{kk} / (n_{k\cdot} + n_{\cdot k})$ — is 96.55% on positive and **30.00%** on negative. That second figure is numerically identical to B's negative-class F1, because a binary F1 between two labellings *is* specific agreement. It localises the problem in one line that no single chance-corrected scalar can: these two annotators agree almost perfectly about praise and barely at all about complaint.
 
 ::: {.anlp-widget}
 
@@ -459,13 +513,28 @@ are the places where the guideline is unclear. [↩](#term-adjudication){.term-b
 
 Agreement measurement is diagnostic; [adjudication](#gloss-adjudication){#term-adjudication .term-ref} is the repair. The loop that works:
 
-1. **Both annotators label the same 200 items.** Not a sample of each — the same items.
-2. **Compute kappa and the confusion table.** If kappa is below 0.4, stop. Do not annotate more.
+1. **Both annotators label the same 200 items, stratified toward the minority class.** Not a sample of each — the same items. And not a plain random 200: at this corpus's 6.3% minority share a random 200 contains about thirteen minority items, and kappa's entire numerator lives in those cells. Oversample the minority until the pilot is roughly balanced; you are estimating a coefficient, not a prevalence.
+2. **Compute kappa with a bootstrap confidence interval, and the confusion table.** The interval is not optional at this size. For a kappa near 0.27, the standard error on 10,000 items is about 0.03; on 200 items it is about 0.20, so the 95% interval runs roughly $[-0.11, 0.65]$ — wider than the whole "fair to substantial" range. Stop only if the interval's **upper** bound is below 0.4. A point estimate of 0.35 whose upper bound is 0.6 is not evidence of anything.
+
+    ```python
+    from sklearn.metrics import cohen_kappa_score
+    rng = np.random.default_rng(42)
+    idx = (rng.integers(0, len(a), len(a)) for _ in range(2000))
+    boot = [cohen_kappa_score(a[i], b[i]) for i in idx]
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    ```
+
 3. **Read every disagreement together.** Not to decide who was right, but to find out *why* they differed. Most disagreements cluster into three or four recurring situations.
 4. **Add each situation to the guideline as a decided case with examples on both sides.** This is the deliverable.
 5. **Re-annotate a fresh 200 and re-measure.** If kappa did not move, the problem is the schema, not the guideline.
 
 The mistake is treating step 3 as a vote. Adjudicating item by item gets you 200 resolved items. Adjudicating *categories of disagreement* gets you a guideline that resolves the next 20,000.
+
+### What to do with three annotators instead of two
+
+Adjudication does not scale past a pilot, and the failure diagram at the top of this chapter named *aggregation* as its own failure mode without saying what to do about it. With a crowd you have several judgements per item and a choice about how to collapse them.
+
+**Majority vote** is the default, and it is wrong whenever annotators differ in reliability: it gives the careless third voter the same weight as the careful first. **Latent-variable aggregation** [@dawid1979maximum] estimates each annotator's confusion matrix and the true label jointly by EM, with no ground truth required — this is also the machinery underneath the label model in Snorkel-style weak supervision. And a third option, which this chapter's own findings argue for: **do not collapse at all.** Keep the vote distribution and train against a soft target. On a corpus where a large share of confident disagreements turn out to be schema failures rather than mistakes, an item three annotators split 2–1 is carrying information about the task that a hard label deletes [@uma2021learning; @plank2022problem].
 
 ## Auditing labels at scale {#sec-audit}
 
@@ -516,7 +585,9 @@ data-side problems                                   31 / 40
 schema breakdown:  mixed 12 · truncated 4 · lukewarm 3 · no verdict 1
 ```
 
-**Thirty-one of forty are problems with the data, not the model.** Four of the forty show what the categories mean:
+**Thirty-one of forty are problems with the data, not the model** — but read that as a direction, not a rate. With $n = 40$ and a single unblinded reader (me, who had written the hypothesis), the 95% Wilson interval on the schema share runs from about 35% to 65%, and on the error share from 16% to 43%. Those two intervals overlap. The claim this measurement supports is "schema failure is a first-order category, comparable in size to outright error" — not "exactly half". A second reader on the same forty items, with kappa reported, would cost an hour and would settle it; I did not do that, and you should before you quote the number.
+
+Four of the forty show what the categories mean:
 
 - **Row 6874** (gold = negative, model p(positive) = 0.984). Clear praise, no reservations, labelled negative. A genuine error — someone pressed the wrong key.
 - **Row 8356** (gold = positive, p = 0.059). *"yastıklar ince yeterli değil"* — "the pillows are thin, not enough." Labelled positive. Another genuine error.
@@ -542,7 +613,7 @@ drop  2  (p > 0.99)      92.54      76.15     56.37
 flip  2  (p > 0.99)      92.52      76.11     56.31
 ```
 
-**Every single repair made the model worse.** Not dramatically — the largest drop is half a macro-F1 point — but consistently, at every threshold, in both directions.
+**No repair improved anything.** The largest movement is half a macro-F1 point, and it is worth being careful about how to read a table of small negatives: elsewhere in this chapter three seeds give a standard deviation up to 0.50 macro-F1, which is the size of the largest cell here. So do not read the individual drops as a downward *effect* — they are noise around zero, and the next paragraph says so. What is not noise is the absence of any gain, at any threshold, in either direction, across all six conditions.
 
 This is not a failure of the technique; it is the technique working correctly and telling you something you should want to hear. Two reasons:
 
@@ -559,6 +630,7 @@ I corrupted the training labels at controlled rates under three regimes, retrain
 
 ```text
 ### macro-F1, clean test set, model retrained at each rate
+### rates are the share of the SOURCE class flipped; "symmetric" flips that share of EACH class
 
 flip rate      0%     1%     2%     5%    10%    20%    30%    40%
 symmetric   76.21  74.18  72.43  68.58  63.34  55.43  49.86  43.71
@@ -593,7 +665,7 @@ The middle row does not move. You can mislabel **forty percent of the negative c
   <text x="464" y="255" text-anchor="middle" class="t-xs t-mono t-muted">20%</text>
   <text x="543" y="255" text-anchor="middle" class="t-xs t-mono t-muted">30%</text>
   <text x="621" y="255" text-anchor="middle" class="t-xs t-mono t-muted">40%</text>
-  <text x="385" y="275" text-anchor="middle" class="t-xs t-muted">share of the source class flipped</text>
+  <text x="385" y="275" text-anchor="middle" class="t-xs t-muted">share of the source class flipped &#183; ordinal scale, spacing is not proportional</text>
 
   <polyline points="70,59.0 149,69.1 228,77.8 306,97.1 385,123.3 464,162.8 543,190.7 621,221.4"
             fill="none" class="ln-rose" stroke-width="2"/>
@@ -646,16 +718,21 @@ Two rules follow, and they are the practically useful output of this section:
 
 ::: {.column-margin}
 This asymmetry is a property of the imbalance, not of sentiment. Any task where one class is 5–10% of the data behaves the same way: spam, fraud, medical screening, content moderation. Theory for learning under class-conditional noise is surveyed in @frenay2014classification.
+
+One caveat about how this noise was made, because it bounds every number above. These flips are **class-conditional**: chosen at a fixed rate, independent of the text. Real annotation error is not. A tired annotator does not get random items wrong; they get the *hard* ones wrong, so the errors concentrate exactly where the decision boundary already is. The audit earlier in this chapter shows it directly — the flagged rows are mixed, truncated and lukewarm reviews, not a random 0.23% of the corpus. Instance-dependent noise at the same nominal rate is measurably more damaging, because it moves the boundary rather than just blurring it [@wei2022learning]. The taxonomy is in @frenay2014classification, which separates noise independent of everything, noise depending on the class, and noise depending on the instance; this experiment is the middle one. Read these curves as a **lower bound** on what your real error rate costs.
 :::
 
 ## Your test set is a ceiling, not a ruler
 
 Everything so far corrupted *training* labels and measured on a clean test set. Now the reverse: one fixed model, trained once on clean data, evaluated against test labels of decreasing quality. The model never changes. Only the ruler does.
 
+Note the change of denominator, because the word "noise" is doing different work in the two experiments. In the previous section a "1% flip rate" meant one percent *of the source class*. Here it means one percent *of all test rows*, flipped in whichever direction the row happened to be — at this corpus's balance, about 94 positives and 6 negatives per hundred flips. Uniform flipping is the right model for a test set, because a test-label error is a slip rather than a policy.
+
 ```text
 ### one fixed model, corrupted test labels, mean of 5 seeds
 
 test noise      acc   macro-F1   F1(neg)   sd(macro-F1)
+### noise here = share of ALL test rows, flipped uniformly at random
     0%        92.57      76.21     56.47          0.00
     1%        91.73      74.68     53.90          0.23
     2%        90.85      73.13     51.31          0.12
@@ -677,7 +754,9 @@ Line these up against the @sec-bake-off leaderboard, which was computed on clean
 
 : The @sec-bake-off leaderboard, interleaved with the same winner measured against noisier rulers {tbl-colwidths="[62,38]"}
 
-**Two percent noise in the test labels is enough to make the chapter-4 winner score below the system it beat.** Not because it became worse — it is byte-for-byte the same model, making byte-for-byte the same predictions. The comparison inverted because the measuring instrument moved by an amount smaller than most teams would ever detect.
+**Two percent noise in the test labels is enough to erase the chapter-4 winner's reported margin over a rival measured on clean labels.** Not because it became worse — it is byte-for-byte the same model, making byte-for-byte the same predictions.
+
+Read the table carefully, though, because it is easy to over-claim from it and the over-claim is instructive. Those rows are not all on the same ruler: 73.13 is the winner measured against noisy labels, 73.51 is bag-of-words measured against clean ones. Under a *common* noisy ruler the ranking would survive — both systems fall together, because the noise is in the labels and not in either model. What this table actually shows is the danger of **cross-lab comparison**: your 73.13, measured on a test set with 2% label noise, is indistinguishable from someone else's 73.51 measured on a clean one, and neither paper reports its label quality. That is how a leaderboard inverts in the literature without a single model changing, and it is why "which test set, how clean" belongs in every comparison you make.
 
 Three consequences:
 
@@ -754,6 +833,8 @@ In rough order of how often they bite:
 ## Where to spend the next thousand labels
 
 You have a budget. The two dials are how many labels you buy and how carefully each is produced. They trade off: careful labels cost more, so you get fewer. Which dial do you turn?
+
+Before the grid, one paragraph on what "cost more" means, because there is a person on the other end of it. At a realistic 150–250 short reviews an hour, 40,000 labels is roughly 200 hours of somebody's attention. Three consequences follow, and they are engineering consequences and not only ethical ones. **Pay structure determines data quality**: piece-rate payment rewards speed, and speed produces exactly the fatigue slips this chapter's failure model names, so an hourly rate with a quality gate produces different data from the same instructions. **Task design is a working condition**: a guideline with `SKIP` and decided cases is both faster and less punishing than one that forces a binary choice on undecidable items — the same change that improves your kappa improves someone's day. And on some tasks — moderation, safety, abuse detection — **exposure is a real cost**, and a project that budgets annotator hours without budgeting rotation and support is under-costed rather than cheap [@gray2019ghost; @sambasivan2021everyone]. Record in your datasheet who labelled, how they were paid, and at what rate; @gebru2021datasheets asks for exactly this and almost nobody answers it.
 
 The grid below trains the same model at seven budget sizes and six noise levels, three seeds each, and evaluates all 42 cells on the same clean test set.
 
@@ -873,9 +954,18 @@ With a budget of exactly 1,000 labels, mean of three seeds:
 
 The mechanism is entirely visible in the first column. Random sampling of a 93.7%-positive corpus finds 62 negative examples in 1,000 draws. Uncertainty sampling finds **248** — four times as many — because uncertain items are disproportionately minority-class items. The model then has enough negative examples to learn something about them, and F1 on the negative class rises by 6.6 points.
 
-Put that next to the budget grid: **1,000 uncertainty-sampled labels (68.80) match 2,500 random ones (68.76).** A 2.5× discount on the annotation budget, from twenty lines of code.
+The comparison that stands on its own is inside this table: same budget, same
+seeds, same protocol, **65.49 against 68.80** — 3.3 macro-F1 points for changing
+only which thousand rows you pay for.
 
-Two warnings. The selected set is biased by construction, so it is training data only — **never** build a test set this way. And the discount depends on the seed model being good enough to be usefully uncertain; with 20 seed labels instead of 200, uncertainty is indistinguishable from noise.
+Putting it next to the budget grid — *1,000 uncertainty-sampled (68.80) matches
+2,500 random (68.76)*, a 2.5× discount — is the more quotable claim and the
+weaker one, because the two tables do not share a baseline. Random 1,000 is
+63.71 in the grid and 65.49 here, a 1.78-point gap that the sampling protocols
+differ by and that neither table explains. Until those are reconciled under one
+protocol, treat the 2.5× as indicative and the 3.3 points as measured.
+
+Three warnings. The selected set is biased by construction, so it is training data only — **never** build a test set this way. The discount depends on the seed model being good enough to be usefully uncertain; with 20 seed labels instead of 200, uncertainty is indistinguishable from noise. And the acquired set is **tied to the model that acquired it**: a set chosen as uncertain for a linear TF-IDF classifier is not necessarily a good set for the transformer you fine-tune in @sec-transformers, and has been measured to underperform a random sample of the same size once the architecture changes [@lowell2019practical]. Active learning buys you labels for *this* model. Budget accordingly.
 
 ## Labels you do not write by hand
 
@@ -885,7 +975,7 @@ Hand annotation is not the only source of labels, and on a 235,000-row corpus it
 
 **Distant supervision.** Use an existing signal as a proxy label: star ratings for sentiment, a knowledge base for relation extraction, user clicks for relevance. Cheap and abundant. The risk is that the proxy is not the target — a 3-star review is not "neutral", it is whatever that platform's users mean by three stars, and the mapping shifts across platforms and across years.
 
-**LLM labelling.** Prompt a large model to label your data. As of 2026 this is often the strongest option per unit cost, and @sec-prompting covers the mechanics. Three things to hold on to. It inherits the model's biases wholesale and they are correlated across every row, so no amount of data averages them out. It is *not* independent of a model you then evaluate — if the same family labelled your test set, your evaluation is partly measuring agreement with that family. And you still need a human-labelled test set to know whether any of it worked. Do not skip that step; it is the only thing standing between you and a confident wrong answer.
+**LLM labelling.** Prompt a large model to label your data. On objective, well-specified tasks it now matches or beats non-expert crowdworkers at a fraction of the cost [@gilardi2023chatgpt], and @sec-prompting covers the mechanics. On subjective or culturally-loaded tasks the margin shrinks and sometimes reverses [@ziems2024can], so "strongest option per unit cost" is a claim about *your* task, not a general one. Three things to hold on to. It inherits the model's biases wholesale and they are correlated across every row, so no amount of data averages them out. It is *not* independent of a model you then evaluate — if the same family labelled your test set, your evaluation is partly measuring agreement with that family, and models demonstrably prefer their own output [@panickssery2024llm]. And you still need a human-labelled test set to know whether any of it worked: treat LLM labels as an unvalidated instrument and measure them against human labels on a held-out sample before you trust a single row [@pangakis2023automated].
 
 ::: {.callout-note collapse="true"}
 ## Synthetic data, and the quality filter that decides everything
@@ -901,7 +991,7 @@ Three failure modes are worth knowing by name:
 
 **Distributional mismatch.** Generated text is fluent, well-punctuated, and correctly spelled. Real Turkish product reviews are none of those things; @sec-turkish-nlp showed how much of the signal lives in exactly the messiness a generator smooths away. A model trained on clean synthetic text and deployed on real text is being asked to generalise across a shift you introduced yourself.
 
-**Recursive contamination.** Training on the output of models trained on model output degrades over generations — @shumailov2024curse calls it model collapse. The tails of the distribution disappear first, which means the rare cases go first, which means exactly the cases you needed the model for.
+**Recursive contamination.** Training on the output of models trained on model output degrades over generations — @shumailov2024curse calls it model collapse. The tails of the distribution disappear first, which means the rare cases go first, which means exactly the cases you needed the model for. The condition matters, though, and it is easy to drop: that result *replaces* the real data at each generation. When real data is **accumulated** alongside the synthetic instead of swapped out — which is what actually happens in practice — the test error stays bounded and the collapse largely disappears [@gerstgrasser2024model]. So the operational rule is narrower and more useful than "synthetic data is dangerous": never let a generation of synthetic data displace the real data it came from, and keep a fixed, human-labelled evaluation set outside the loop so you would see collapse if it started.
 
 The rule that survives all three: synthetic data is a training-set technique. Your test set stays human.
 :::
@@ -961,7 +1051,7 @@ ranked by return rather than by topic.
 | out-of-fold flagging + hand reading | 1 day | which rows to read; almost never a better model | when agreement is fine but scores are not |
 | leakage audit | 30 minutes | confidence that the number is real | before you report any number to anyone |
 
-: [Strengths]{.pro} and [Weaknesses]{.con} of each data-quality activity, by return on effort {tbl-colwidths="[16,29,32,23]"}
+: Each data-quality activity, ranked by return on effort {tbl-colwidths="[16,29,32,23]"}
 
 [Strengths]{.pro} — reading rows costs nothing and is the only step that reliably changes what you do next. Guidelines and kappa are cheap up front and compound: every hour spent before the first item is worth many hours of adjudication later. The leakage audit is thirty minutes against the risk of publishing a number that is not true.
 
@@ -1123,7 +1213,7 @@ Work in pairs. The point is to produce a guideline and an agreement number, not 
 1. **Draw 200 items** from the Turkish review corpus with a fixed seed. Both partners get the identical 200 items and do not see the gold labels.
 2. **Write guideline v0 together** — the class definitions only, no decided cases. Ten minutes, no more.
 3. **Annotate the first 100 items independently.** Allow `SKIP`. Record how long it took.
-4. **Compute raw agreement, Cohen's kappa, and the confusion table.** Report all three. Compare your kappa to this chapter's 0.2698.
+4. **Compute raw agreement, Cohen's kappa with a bootstrap interval, and the confusion table.** Report all four. Do *not* compare your number to this chapter's 0.2698 — that one is gold-versus-a-lexicon, not human-versus-human, and they are different quantities. Compare it instead to the range usually published for sentiment annotation with a written guideline, and treat anything low as a statement about your guideline rather than about your annotators.
 5. **Read every disagreement together** and group them into recurring situations. You should find three to five.
 6. **Write guideline v1**, adding each situation as a decided case with a worked example on both sides. Follow the format in this chapter.
 7. **Annotate the remaining 100 items** independently under v1 and re-measure. Report the change in kappa and say honestly whether it came from the guideline or from practice.
