@@ -1294,6 +1294,20 @@ blokta yeniden ölçekler, dolayısıyla birim yol artık birim değildir ve der
 post-norm modeller eğitilebilmek için bir öğrenme oranı ısınmasına ihtiyaç
 duyar [@xiong2020layernorm]. Aşağıdaki her şey pre-norm'dur.
 
+**Pratikte ise layer norm bile değil.** Bu bölümün adını andığı her açık
+ağırlıklı model — Llama, Mistral, Qwen, Gemma — **RMSNorm** kullanıyor
+[@zhang2019root]:
+
+$$\operatorname{RMSNorm}(x) = \frac{x}{\sqrt{\tfrac{1}{d}\sum_j x_j^2 + \epsilon}} \odot \gamma$$
+
+İki şey gitti: ortalama çıkarma ve $\beta$ kaydırması. İddia — kuramdan değil
+ablasyondan geliyor — yeniden merkezlemenin zaten işe yarayan kısım olmadığı,
+yalnızca yeniden ölçeklemenin olduğu. Yaklaşık %15 daha az aritmetiğe ve yarı
+parametreye mal oluyor; bir Llama yapılandırma dosyasında `layer_norm_eps` değil
+`rms_norm_eps` alanı bulunmasının nedeni de bu. Normalizasyonun *nereye*
+konduğuna dair yukarıda söylenen her şey aynen geçerli; yalnızca kutunun
+içindeki işlev sadeleşiyor.
+
 ::: {.column-margin}
 "Standart", "evrensel" demek değil. Gemma 2, her alt katmandan hem önce *hem
 de* sonra normalize eden **sandwich norm** kullanıyor:
@@ -1326,6 +1340,25 @@ $$
 \qquad W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}
 $$
 
+$\sigma$ doğrusal olmayan işlev ve hangisi olduğu iki kez değişti.
+@vaswani2017attention ReLU kullanıyordu: $\max(0, z)$. GPT ve BERT **GELU**'ya
+geçti [@hendrycks2016gelu]: $z\,\Phi(z)$ — bir girdiyi, standart normalin onun
+altında kalma olasılığıyla ağırlıklandıran yumuşak bir ReLU; böylece küçük
+negatif değerler tam sıfıra kırpılmak yerine sızabiliyor. Llama'dan beri standart
+ise **SwiGLU** [@shazeer2020glu]; bu, noktasal bir işlev bile değil, bir *kapı*:
+
+$$
+\operatorname{FFN}_{\text{SwiGLU}}(x)
+  = \big(\operatorname{Swish}(xW_1) \odot xW_3\big)W_2,
+\qquad \operatorname{Swish}(z) = z\,\sigma_{\text{lojistik}}(z)
+$$
+
+Bir dal *ne kadar* geçireceğine, diğeri *neyi* geçireceğine karar veriyor —
+aşağıdaki tablodaki üçüncü matris buradan geliyor ve $d_{\text{ff}}$ oranları
+4'ten küçükken parametre sayılarının daha büyük olmasının nedeni de bu. İlerideki
+çalışılmış örnek ReLU kullanıyor, çünkü bir tablodan okuyabileceğiniz bir eşiğin
+ateşlendiğini izlemek, yumuşak bir eğriyi izlemekten kolay.
+
 [*Ayrı ayrı ve birebir aynı şekilde* ifadesi bütün yükü taşıyor: `kedi`nin FFN
 hesabı `sütü`yü hiç görmez.]{.hl} Bir transformer'daki token'lar arası her
 etkileşim attention'da olur, başka hiçbir yerde değil. Uzun bir belgede iki
@@ -1352,7 +1385,7 @@ $3\,d\,d_{\text{ff}}$ tutuyor. Peki alan bununla ne yaptı?
 
 | model | $d$ | $d_{\text{ff}}$ | oran | FFN parametreleri |
 |:--|--:|--:|--:|--:|
-| GPT-2, ReLU | 768 | 3.072 | 4,00 | $8d^2$ |
+| GPT-2, GELU | 768 | 3.072 | 4,00 | $8d^2$ |
 | Llama 2 7B, SwiGLU | 4.096 | 11.008 | 2,69 | $8{,}1d^2$ |
 | Llama 3 8B, SwiGLU | 4.096 | 14.336 | 3,50 | $10{,}5d^2$ |
 | Llama 3 70B, SwiGLU | 8.192 | 28.672 | 3,50 | $10{,}5d^2$ |
@@ -1547,7 +1580,7 @@ gerekçesi ya yukarıda ya aşağıda tartışılıyor.
 | birden çok head | tek bir ağırlıklı ortalama tam olarak tek bir ilişkiyi izleyebilir | katman, konum başına birkaç değil yalnızca bir ilişki ifade eder |
 | $W^O$ | head çıktıları ayrı alt uzaylarda yaşar ve akışa geri girmelidir | head'lerin bulduklarını birleştirmenin ya da yönlendirmenin yolu kalmaz |
 | residual toplama | bir katman hiçbir şey yapmayabilmelidir; bu seçenek olmadan derin yığınlar bozulur | derinlik eklemek önce fayda etmeyi bırakır, sonra doğrudan zarar verir |
-| layer norm | akışın büyüklüğü derinlikle artar; softmax ve ReLU ölçeğe duyarlıdır | aktivasyonlar kayar ve eğitim kararsızlaşır |
+| layer norm (pratikte RMSNorm) | akışın büyüklüğü derinlikle artar; softmax ve ReLU ölçeğe duyarlıdır | aktivasyonlar kayar ve eğitim kararsızlaşır |
 | normalizasyonun *pre*-norm konumu | post-norm akışı yeniden ölçekler, dolayısıyla birim yol birim değildir | derin modeller eğitilebilmek için öğrenme oranı ısınmasına muhtaç olur |
 | feed-forward | attention yalnızca *karıştırır*: çıktısı value'ların dışbükey bir bileşimidir | token başına özel, doğrusal olmayan işleme kalmaz ve kapasitenin çoğu kaybolur |
 | konum sinyali | maskesiz attention permütasyona eşdeğişkendir — sırayı göremez | bir encoder her cümleyi bag of words olarak okur |
@@ -1697,9 +1730,13 @@ feed-forward.
 
 Üstelik üçte iki *alt sınırdır*. Bu, $4d^2$ attention'a karşı $8d^2$
 feed-forward olan GPT-2 şeklini varsayıyor. Bir Llama-3 bloğu SwiGLU
-feed-forward'ına $10{,}5d^2$ harcar; bu da payı %72'ye çıkarır. Son birkaç
-yılın her mimari değişikliği ağırlığı bu alt katmanın *içine* taşıdı, dışına
-değil.
+feed-forward'ına $10{,}5d^2$, attention'ına ise yalnızca $2{,}5d^2$ harcar —
+gruplanmış sorgu dikkati $W^K$ ile $W^V$'yi $d \times d$'den $d \times 1024$'e
+küçültüyor (@sec-servis'in de dayandığı yapı), dolayısıyla o çift $2d^2$ yerine
+$0{,}5d^2$ tutuyor. Feed-forward payı bu yüzden $10{,}5/13 = \mathbf{\%81}$;
+tam genişlikte attention varsayarak bulunan %72 değil. Son birkaç yılın her
+mimari değişikliği ağırlığı bu alt katmanın *içine* ya da attention'ın *dışına*
+taşıdı; hiçbiri tersini yapmadı.
 
 Bir pratik kural, ancak bakıp doğrulayabileceğiniz bir sayıyı üretiyorsa
 elde tutmaya değer. GPT-2 small herkese açık: sözlük 50.257, $d = 768$, 12
@@ -2736,9 +2773,33 @@ sadeleştirilip mühendislik ölçekte oturunca pratik hâle geldi
 [@fedus2022switch]. Pratikte zor olan kısım yönlendirme kuralı değil, **yük
 dengeleme**: router'ın üç uzmana âşık olup geri kalanını aç bırakmasını
 engelleyen hiçbir şey yok; bu da parasını ödediğiniz parametreleri çöpe atar ve
-eğitimi çökertebilir. Gerçek sistemler, dengesiz uzman kullanımını cezalandıran
-yardımcı bir loss ekler — ana amacın seve seve düştüğü bir hata moduna karşı
-açıkça konulmuş bir düzeltme.
+eğitimi çökertebilir.
+
+Yönlendiricinin kendisi tek bir matris. $x$ token'ı için
+$s = xW_r \in \mathbb{R}^{E}$ üretiyor, en yüksek $k$ skoru tutuyor, onları
+yeniden normalleştiriyor ve yalnızca o uzmanları karıştırıyor:
+
+$$
+\operatorname{MoE}(x) = \sum_{e \,\in\, \operatorname{top-}k(s)} \tilde g_e\, E_e(x),
+\qquad \tilde g_e = \frac{\exp s_e}{\sum_{e' \in \operatorname{top-}k(s)} \exp s_{e'}}
+$$
+
+Yük dengeleme için klasik çözüm, dengesiz kullanımı cezalandıran yardımcı bir
+kayıp — ana amacın seve seve düştüğü bir hata moduna karşı açıkça konulmuş bir
+düzeltme. Ama bu, birinciyle kavga eden ikinci bir amaç ve 2025'e gelindiğinde en
+büyük açık MoE'ler onu bırakmıştı: DeepSeek-V3 bunun yerine yönlendirme skoruna
+uzman başına eklenen ve çevrimiçi ayarlanan, kendi gradyanı olmayan bir bias ile
+dengeliyor. Yardımcı kaybın orada olduğunu varsaymak yerine modelin hangi
+mekanizmayı kullandığına bakın.
+
+Yukarıdaki tablodaki %29'luk aktif oran, MoE'nin değil *bu yapılandırmanın* bir
+özelliği. Alanın gittiği yön **daha ince tanecikliliğe** doğru: top-2 ile 8 büyük
+uzman yerine, top-8 ile 64–256 dar uzman ve her token'ın uğradığı bir ya da iki
+paylaşılan uzman. Aynı toplam, çok daha küçük aktif oran — 36B toplamı olan bir
+modelin 10,7B yerine 3B civarı aktife inmesinin yolu bu; `qwen3.6:35b-a3b`
+@sec-siniflandirma'da tam olarak bunu yapıyor. Bir lansman yazısı okurken
+bakılacak oran aktif/toplam ve sevk edilmiş modellerde bu oran %30'dan %3'e kadar
+inmiş durumda.
 
 ## Ölçekleme yasaları ve neyi öngördükleri {#sec-olcekleme-yasalari}
 

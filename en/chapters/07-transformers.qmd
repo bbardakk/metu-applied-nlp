@@ -1287,6 +1287,19 @@ on it. Post-norm rescales the stream at every block, so the identity path
 is no longer an identity, and deep post-norm models need a learning-rate
 warmup to train at all [@xiong2020layernorm]. Everything below is pre-norm.
 
+**And in practice, not even layer norm.** Every open-weight model this chapter
+names — Llama, Mistral, Qwen, Gemma — uses **RMSNorm** [@zhang2019root]:
+
+$$\operatorname{RMSNorm}(x) = \frac{x}{\sqrt{\tfrac{1}{d}\sum_j x_j^2 + \epsilon}} \odot \gamma$$
+
+Two things are gone: the mean subtraction and the shift $\beta$. The claim —
+supported by ablation rather than by theory — is that re-centring was never the
+part that helped; only the re-scaling was. It costs about 15% less arithmetic
+and half the parameters, and it is why a Llama config file has an
+`rms_norm_eps` field and no `layer_norm_eps`. Everything above about *where*
+the normalisation goes applies unchanged; only the function inside the box gets
+simpler.
+
 ::: {.column-margin}
 "Standard" is not "universal". Gemma 2 uses **sandwich norm**, normalising
 before *and* after each sublayer, $x + \operatorname{N}_2(f(\operatorname{N}_1(x)))$.
@@ -1324,6 +1337,26 @@ $$
 \qquad W_2 \in \mathbb{R}^{d_{\text{ff}} \times d}
 $$
 
+$\sigma$ is the nonlinearity, and which one it is has changed twice.
+@vaswani2017attention used ReLU, $\max(0, z)$. GPT and BERT switched to **GELU**
+[@hendrycks2016gelu], $z\,\Phi(z)$ — a smooth ReLU that weights an input by the
+probability a standard normal falls below it, so small negative values leak
+through instead of being clipped to exactly zero. Since Llama the standard has
+been **SwiGLU** [@shazeer2020glu], which is not a pointwise function at all but
+a *gate*:
+
+$$
+\operatorname{FFN}_{\text{SwiGLU}}(x)
+  = \big(\operatorname{Swish}(xW_1) \odot xW_3\big)W_2,
+\qquad \operatorname{Swish}(z) = z\,\sigma_{\text{logistic}}(z)
+$$
+
+One branch decides *how much* to let through and the other decides *what* —
+which is where the third matrix in the table below comes from, and why its
+$d_{\text{ff}}$ ratios are smaller than 4 while its parameter counts are larger.
+The worked example further down uses ReLU, because a threshold you can read off
+a table is easier to watch fire than a smooth curve.
+
 [The words *separately and identically* carry the weight: `kedi`'s FFN
 computation does not see `sütü` at all.]{.hl} Every cross-token interaction in
 a transformer happens in attention, and nowhere else. This is worth
@@ -1350,7 +1383,7 @@ did the field do with that?
 
 | model | $d$ | $d_{\text{ff}}$ | ratio | FFN parameters |
 |:--|--:|--:|--:|--:|
-| GPT-2, ReLU | 768 | 3,072 | 4.00 | $8d^2$ |
+| GPT-2, GELU | 768 | 3,072 | 4.00 | $8d^2$ |
 | Llama 2 7B, SwiGLU | 4,096 | 11,008 | 2.69 | $8.1d^2$ |
 | Llama 3 8B, SwiGLU | 4,096 | 14,336 | 3.50 | $10.5d^2$ |
 | Llama 3 70B, SwiGLU | 8,192 | 28,672 | 3.50 | $10.5d^2$ |
@@ -1552,7 +1585,7 @@ argued for somewhere above or below.
 | multiple heads | one weighted average can track exactly one relation | the layer expresses one relation per position, not several |
 | $W^O$ | head outputs live in separate subspaces and must re-enter the stream | no way to combine or route what the heads found |
 | residual add | a layer must be able to do nothing, and deep stacks degrade without that option | adding depth stops helping, then actively hurts |
-| layer norm | the stream's magnitude grows with depth; softmax and ReLU are scale-sensitive | activations drift and training destabilises |
+| layer norm (RMSNorm in practice) | the stream's magnitude grows with depth; softmax and ReLU are scale-sensitive | activations drift and training destabilises |
 | *pre*-norm placement | post-norm rescales the stream, so the identity path is not an identity | deep models need learning-rate warmup to train at all |
 | feed-forward | attention only *mixes*: its output is a convex combination of values | no private per-token nonlinear processing, and most capacity disappears |
 | positional signal | unmasked attention is permutation-equivariant — it cannot see order | an encoder reads every sentence as a bag of words |
@@ -1698,11 +1731,15 @@ of the *model* is about 46%. At $d = 8192$ the embeddings are a rounding error
 and the model ratio converges back on two thirds. Small models are mostly
 vocabulary; large models are mostly feed-forward.
 
-And two thirds is the *floor*. It assumes the GPT-2 shape, $8d^2$ of
-feed-forward against $4d^2$ of attention. A Llama-3 block spends $10.5d^2$ on
-its SwiGLU feed-forward, which pushes the share to 72%. Every architectural
-change of the last few years has moved weight *into* this sublayer, never out
-of it.
+And two thirds is the *floor*. It assumes the GPT-2 shape: $8d^2$ of
+feed-forward against $4d^2$ of attention. A Llama-3 block moves in both
+directions at once. Its SwiGLU feed-forward costs $10.5d^2$, and its attention
+costs only $2.5d^2$ — grouped-query attention shrinks $W^K$ and $W^V$ from
+$d \times d$ to $d \times 1024$ (@sec-attention-cost), so that pair costs
+$0.5d^2$ instead of $2d^2$. The feed-forward share is therefore
+$10.5/13 = \mathbf{81\%}$, not the 72% you get by assuming full-width
+attention. Every architectural change of the last few years has moved weight
+*into* this sublayer or *out of* attention, and never the reverse.
 
 A rule of thumb is only worth having if it reproduces a number you can look
 up. GPT-2 small is public: vocabulary 50,257, $d = 768$, 12 layers, context
@@ -2725,9 +2762,33 @@ routing was simplified to one expert per token and the engineering worked out
 at scale [@fedus2022switch]. The hard part in practice is not the routing rule
 but **load balancing**: nothing stops the router from falling in love with
 three experts and starving the rest, which wastes the parameters you paid for
-and can collapse training. Real systems add an auxiliary loss that penalises
-uneven expert usage — an explicit correction for a failure mode that the main
-objective is happy to walk into.
+and can collapse training.
+
+The router itself is a single matrix. For token $x$ it produces
+$s = xW_r \in \mathbb{R}^{E}$, keeps the top $k$ scores, renormalises them, and
+mixes only those experts:
+
+$$
+\operatorname{MoE}(x) = \sum_{e \,\in\, \operatorname{top-}k(s)} \tilde g_e\, E_e(x),
+\qquad \tilde g_e = \frac{\exp s_e}{\sum_{e' \in \operatorname{top-}k(s)} \exp s_{e'}}
+$$
+
+The classical fix for load balancing is an auxiliary loss penalising uneven
+usage — an explicit correction for a failure mode the main objective is happy
+to walk into. But it is a second objective fighting the first, and by 2025 the
+largest open MoEs had dropped it: DeepSeek-V3 balances instead with a
+per-expert bias added to the routing score and adjusted online, carrying no
+gradient of its own. Check which mechanism a model uses rather than assuming
+the auxiliary loss is there.
+
+The 29% active fraction in the table above is a property of *this*
+configuration, not of MoE. The direction the field went is **finer
+granularity**: instead of 8 large experts with top-2, use 64–256 narrow experts
+with top-8, plus one or two shared experts that every token visits. Same total,
+far smaller active fraction — which is how a 36B-total model ends up near 3B
+active rather than 10.7B, as `qwen3.6:35b-a3b` does in @sec-classification.
+When you read a launch post, the ratio to look for is active over total, and
+across shipped models it has ranged from about 30% down to 3%.
 
 ## Scaling laws and what they predict {#sec-scaling-laws}
 
