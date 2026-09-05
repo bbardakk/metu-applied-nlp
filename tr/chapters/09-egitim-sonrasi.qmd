@@ -966,7 +966,34 @@ sonra, tercih çiftleri üzerinde sıradan bir gradyan adımıyla eğitmek. Gene
 [↩](#term-direct-preference-optimization){.term-back}
 :::
 
-RLHF hedefinin — ödülü maksimize et, referanstan KL ıraksaması kadar cezalan —
+Kısayoldan önce, *etrafından dolandığı* iki hedef; çünkü aşağıdaki türetim
+ikisine de yaslanıyor. Birincisi, ödül modeli karşılaştırmalara **Bradley–Terry**
+olabilirliğiyle uyduruluyor — bir insanın $y_w$'yi $y_l$'ye
+$\sigma(r(x,y_w) - r(x,y_l))$ olasılığıyla tercih ettiği varsayımı:
+
+$$
+\mathcal{L}_{\text{RM}} = -\,\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\!\left(r_\phi(x, y_w) - r_\phi(x, y_l)\right)\right]
+$$
+
+Yalnızca $r_\phi$'nin *farkları* kısıtlanıyor, dolayısıyla ödül ölçeği keyfî. Bu
+olgu iki kez işe yarayacak: ödül modellerinin kayıpla değil sıralama
+doğruluğuyla raporlanmasının nedeni bu ve birkaç satır sonra $Z(x)$ teriminin
+sadeleşmesini sağlayan da bu.
+
+İkincisi, politika o dondurulmuş ödüle karşı, referansa tasmalanmış hâlde
+eniyileniyor:
+
+$$
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_\theta(\cdot \mid x)}\big[r_\phi(x, y)\big]
+\;-\; \beta\, \mathbb{D}_{\text{KL}}\!\left[\pi_\theta(y \mid x) \,\|\, \pi_{\text{ref}}(y \mid x)\right]
+$$
+
+PPO, bu hedef üzerinde adım atmanın bir yolu: tek bir batch'in politikayı uzağa
+taşıyamaması için kırpılmış bir vekil hedefi maksimize ediyor
+[@schulman2017ppo]. O kırpma aralığı, yukarıdaki tablonun PPO'nun hesabına
+yazdığı hiperparametre.
+
+*O* hedefin — ödülü maksimize et, referanstan KL ıraksaması kadar cezalan —
 bilinen bir kapalı form optimumu var:
 
 $$
@@ -1526,6 +1553,21 @@ iki epoch, dizi uzunluğu 128, batch boyu 32, bir Apple M serisi GPU üzerinde.
 LoRA adaptörleri yalnızca `query` ve `value` üzerinde, $\alpha = 2r$, dropout
 0,05.
 
+::: {.callout-warning appearance="simple"}
+**Bu tablonun denetlemediği bir şey; doğru iskonto edebilesiniz diye yazıyorum.**
+Satırlar paylaşılan tek bir öğrenme oranıyla koşuldu ve koşulmamalıydı. LoRA'nın
+en iyi öğrenme oranı tipik olarak tam ince ayarınkinin bir büyüklük mertebesi
+üstündedir; çünkü adaptör sıfırdan başlıyor ve oynatacak çok daha az parametresi
+var. Tek bir paylaşılan oranda yapılan LoRA–tam ince ayar karşılaştırması, iki
+yöntemi karşılaştırdığı kadar iki öğrenme oranını da karşılaştırır ve tam ince
+ayar ile $r=8$ arasındaki 1,2 puanlık fark, yöntem başına bir taramanın makul
+olarak oynatabileceği aralığın içinde. LoRA satırlarının *kendi aralarındaki*
+rank karşılaştırması bundan etkilenmiyor — onlar hem yöntemi hem oranı
+paylaşıyor. Bunu düzgün yapmak, eğitim bölmesinden ayrılmış bir doğrulama
+diliminde her satır için oranı ayrı ayrı ayarlamak demek ve bu sayıların üstüne
+bir şey inşa edecekseniz düzeltilecek ilk şey bu.
+:::
+
 | neyi eğittik | eğitilebilir | pay | macro-F1 | F1(olumsuz) | doğruluk | duvar saati | tepe GiB |
 |:--|--:|--:|--:|--:|--:|--:|--:|
 | yalnızca baş (doğrusal yoklama) | 1.538 | %0,001 | 48,37 | 0,00 | 93,68 | 3d 35s | 0,41 |
@@ -1566,7 +1608,21 @@ yapan ayrım bu.
 
 **Rank neredeyse hemen önemsizleşiyor.** $r=1$'den $r=8$'e çıkmak 2,2 macro-F1
 puanı kazandırıyor. $r=8$'den $r=64$'e çıkmak — sekiz katı parametre — 0,30
-*kaybettiriyor*. Eğri bir kez yükseliyor, sonra düzleşiyor ve durmanız gereken
+*kaybettiriyor*.
+
+O satırdaki bir karıştırıcıyı adlandırmakta yarar var, çünkü literatürün asıl
+tartıştığı şey o. $\alpha = 2r$ ile etkin ölçek $\alpha/r$ her rank'te sabit 2;
+yani bu tarama, sabit bir $\alpha$ altında olacağı gibi kılık değiştirmiş bir
+ölçek taraması *değil*. Ama $\alpha/r$'yi sabit tutmak da bir seçim:
+@kalajdzievski2023rank, $\Theta(1/r)$ ölçeklemesinin rank büyüdükçe gradyanları
+küçülttüğünü ve yüksek rank'te kararlı öğrenmenin $\Theta(1/\sqrt{r})$
+istediğini gösteriyor — öngörülen belirti de tam olarak "yüksek rank yardımcı
+olmuyor". Dolayısıyla $r=64$ satırının dürüst okuması *bu ölçekleme kuralı
+altında rank ödemeyi bırakıyor*; ki bu kuralı neredeyse herkes kullanıyor.
+Rank-kararlı ölçekleme altında da bırakıp bırakmadığı ayrı bir deney ve bu bölüm
+onu çalıştırmadı.
+
+Eğri bir kez yükseliyor, sonra düzleşiyor ve durmanız gereken
 yer düz kısım. Bu, oradaki aritmetiğin (@sec-lora) "sonradan düşünülecek bir mesele"
 dediği rank taraması ve bu görevde gerçekten öyle.
 
