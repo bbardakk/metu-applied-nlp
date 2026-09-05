@@ -4,8 +4,12 @@
 **Bölüm durumu: çevrildi.** Kaynak metin:
 [İngilizce 2. bölüm](../../en/chapters/02-text-as-data.html). Bu sayfadaki
 her sayı ve her kod çıktısı, gösterilen kodun `scikit-learn` 1.9 ve
-`tiktoken` 0.13 ile çalıştırılmasıyla üretildi. Tokenization, Zipf ve vektör
-uzayı gezginleri tamamen etkileşimlidir.
+`tiktoken` 0.13 ile çalıştırılmasıyla üretildi; ortamın tamamı
+@sec-kurulum'da. `LogisticRegression` sonuçları belirlenimci — varsayılan
+`lbfgs` çözücüsü hiç rastgelelik kullanmıyor, dolayısıyla aşağıdaki
+`random_state` bir şeyi sabitleyen bir tohum değil, ihtiyaten konulmuş bir
+parametre. Tokenization, Zipf ve vektör uzayı gezginleri tamamen
+etkileşimlidir.
 :::
 
 **Öğrenme hedefleri.** Bu bölümün sonunda:
@@ -42,7 +46,7 @@ Aşağıdaki her seçim bir modelleme varsayımıdır ve makalenizin yöntem
 bölümüne aittir.
 :::
 
-## Karakterlerden token'lara
+## Karakterlerden token'lara {#sec-metin-veri-tokenlar}
 
 ::: {#gloss-tokenization .column-margin .term-gloss}
 **tokenization** (bölütleme) — bir metin akışını, modelin sayacağı parçalara
@@ -86,7 +90,7 @@ da öyle. `P-101'in` ile `P-101` de. Bunların her biri sizin vermeniz gereken b
 her biri ya ayrı kalması gerekenleri birleştirir ya da birlikte kalması
 gerekenleri ayırır.
 
-### Normalleştirme merdiveni
+### Normalleştirme merdiveni {#sec-metin-veri-normallestirme}
 
 ::: {#gloss-stop-word .column-margin .term-gloss}
 **stop word** (etkisiz kelime) — o kadar sık geçen bir kelime ki, bazı iş
@@ -108,13 +112,30 @@ aleyhteki argümanlardır.
 
 | Adım | [Size ne kazandırır]{.pro} | [Size neye mal olur]{.con} | Varsayılan |
 |---|---|---|---|
-| Küçük harfe çevirme | `Pompa` = `pompa`, birçok sayımı yarıya indirir | Python'ın `.lower()`'ı Türkçe `I`'yı bozar: `IŞIK` → `işik` (doğrusu `ışık`). Ayrıca `AŞ` şirketi ile `aş` fiili aynılaşır. | Evet, varlık isimleri önemli değilse |
+| Küçük harfe çevirme | `Pompa` = `pompa`, birçok sayımı yarıya indirir | `AŞ` şirketi ile `aş` fiili aynılaşır — ve Türkçede `str.lower()` doğrudan yanlıştır, hem de sessizce. | İngilizce için evet; başka dillerde yalnızca yerel ayara duyarlı bir işlevle |
 | Noktalama temizleme | `arızalandı;` = `arızalandı` | `P-101`'i, ondalıkları, URL'leri, kimyasal formülleri bozar. | Hayır — seçerek temizleyin |
 | [**Stop word**](#gloss-stop-word){#term-stop-word .term-ref} atma | `the`, `is`, `of` düşer; burada token'ların %43,9'u | Olumsuzlamayı (`not`) ve *to be or not to be* gibi ifadeleri yok eder. | Yalnızca seyrek sayım modellerinde |
 | Gövdeleme (stemming) | `replaced` → `replac`, `kitaplarımızdan` → `kitap`; çekimleri ucuza tek çatı altında toplar | Kaba ek kırpma. `university` → `univers` = `universe`. | Hayır |
 | Sözlük biçimine indirgeme (lemmatization) | `replaced` → `replace`, `gidiyorum` → `gitmek`; doğru biçimde | Sözlük ve sözcük türü etiketleme (part-of-speech tagging) ister, üstelik yavaştır. | Nadiren — alt kelimeler daha ucuz |
 
 : Normalleştirme merdiveni {tbl-colwidths="[14,28,40,18]"}
+
+O ilk satır, burada adlandırmaya değer bir tuzağı gizliyor; kaçınması bedava,
+kaçırması pahalı. Python'un `str.lower()` fonksiyonu, İngilizce için yazılmış
+Unicode varsayılan durum eşlemesini uygular ve Türkçede iki `i`, iki de `I`
+harfi vardır:
+
+```python
+"İSTANBUL".lower()                # 'i̇stanbul' — 'i' + U+0307, dokuz karakter
+"İSTANBUL".lower() == "istanbul"  # False
+"IĞDIR".lower()                   # 'iğdir' — 'ığdır' olmalıydı
+```
+
+Hiçbir şey hata vermiyor. Sonuç yalnızca, kullanıcının yazdığı kelimeden farklı
+bir sözlük sütununa düşüyor — hem de kalıcı olarak. @sec-karsilastirma bu hatayı
+gerçek bir derlemde yakalıyor, @sec-turkce-nlp ise yerel ayara duyarlı çözümü
+veriyor; *buradaki* nokta yalnızca şu: "küçük harfe çevirme" bedava bir işlem
+gibi sunulan, dile bağımlı bir işlemdir.
 
 Son sütunu şüpheyle okuyun: o bir varsayılan, kural değil. Bu adımların her
 biri, sildiği ayrımın *sizin* göreviniz için önemsiz olduğuna oynanmış bir
@@ -156,7 +177,7 @@ Türkçe için hazır stop word listelerine iki kat şüpheyle yaklaşın.
 kullanmadan önce açıp okuyun.
 :::
 
-### Alt kelimeler: kazanan uzlaşma
+### Alt kelimeler: kazanan uzlaşma {#sec-metin-veri-bpe}
 
 ::: {#gloss-vocabulary .column-margin .term-gloss}
 **vocabulary** (sözlük) — modelin bilmesine izin verilen sabit token listesi.
@@ -259,15 +280,26 @@ widest   -> wi d est</w>
 ```
 
 `lowest` eğitimde hiç geçmedi ve modelin çok iyi bildiği iki birime
-bölündü. Alt kelimelerin kazanmasının bütün sebebi budur: **sözlük dışı
-(out-of-vocabulary, OOV) token diye bir şey yoktur**. En kötü durumda kelime
-karakterlere düşer, `slow`'da kısmen olduğu gibi. Kalitesi düşer; ama hiç
-çuvallamaz.
+bölündü. Alt kelimelerin kazanmasının bütün sebebi budur: **görülmemiş bir
+*kelime* asla bir `<UNK>` token'ına ihtiyaç duymaz**. En kötü durumda daha kısa
+parçalara düşer, `slow`'da kısmen olduğu gibi. Kalitesi düşer; çuvallamaz.
+
+Bir çekince, çünkü oyuncak bir tokenizer ile üretim tokenizer'ı arasındaki fark
+tam olarak bu. Birleştirme tablomuz *karakterler* üzerinde öğrenildi ve gördüğü
+alfabe yalnızca `low`, `lower`, `newest`, `widest` kelimelerinden geliyordu.
+Dolayısıyla görülmemiş bir **karakter** onu hâlâ kırıyor:
+`apply_merges("çay", merges)` çağrısı `('ç', 'a', 'y', '</w>')` döndürüyor ve bu
+sembollerin hiçbiri sözlükte yok. Gerçek tokenizer'lar bu deliği, karakterler
+yerine UTF-8'in 256 olası **baytından** başlayarak kapatıyor
+[@radford2019language]. Byte düzeyinde bir tokenizer kuruluş gereği her olası
+diziyi temsil edebilir — emoji, Çince ve `görüşebileceklerimiz`deki `ş` dâhil.
+Bu bölümde sonradan ölçülen bütün OpenAI kodlamaları byte düzeyinde; Türkçe bir
+kelimenin `<UNK>` olmak yerine *daha fazla* token'a mal olmasının nedeni de bu.
 
 :::: {.anlp-fig}
 ```{=html}
 <div class="fig-title">Byte-pair encoding ne öğreniyor ve onu nasıl kullanıyor</div>
-<svg viewBox="0 0 760 330" role="img" aria-label="BPE şeması">
+<svg viewBox="0 0 760 330" role="img" aria-label="Byte-pair encoding; üstte eğitim, altta çıkarım. Dört kelimelik bir derlem, önce es, sonra est, sonra est-kelime-sonu birimlerini kuran üç birleştirme adımını besliyor; her biri dokuz kez görülmüş. Altta, görülmemiş lowest kelimesi aynı birleştirmeler tekrar oynatılarak bilinen iki birime, low ve est, bölünüyor.">
   <defs>
     <marker id="bpe-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" class="head"/>
@@ -365,6 +397,8 @@ viewof bpeWord = Inputs.text({
 
 ```{ojs}
 //| echo: false
+// Bu bölümün başındaki birleştirme döngüsünün birebir çıktısı — oyuncak derlem
+// değişirse ikisini birlikte yeniden üretin.
 bpeMerges = [
   ["e", "s"], ["es", "t"], ["est", "</w>"], ["l", "o"], ["lo", "w"],
   ["n", "e"], ["ne", "w"], ["new", "est</w>"], ["low", "</w>"], ["w", "i"]
@@ -374,7 +408,9 @@ bpeMerges = [
 ```{ojs}
 //| echo: false
 bpeTrace = {
-  const clean = (bpeWord || "").toLowerCase().replace(/[^a-z]/g, "");
+  const raw = (bpeWord || "").toLowerCase();
+  const clean = raw.replace(/[^a-z]/g, "");
+  const dropped = raw.length !== clean.length;
   let symbols = clean.length ? [...clean, "</w>"] : [];
   const trace = [{ step: 0, rule: "başlangıç (karakterler)", symbols: [...symbols] }];
   bpeMerges.forEach(([a, b], k) => {
@@ -388,6 +424,7 @@ bpeTrace = {
     symbols = out;
     if (used) trace.push({ step: k + 1, rule: `${a} + ${b}`, symbols: [...symbols] });
   });
+  trace.dropped = dropped;
   return trace;
 }
 ```
@@ -417,7 +454,7 @@ html`<div style="font-size:0.9rem;">
 ```
 :::
 
-### Türkçe için faturayı kim ödüyor
+### Türkçe için faturayı kim ödüyor {#sec-metin-veri-turkce}
 
 Şimdi, İngilizce dışında bir dille çalışıyorsanız asıl önemli olan kısım.
 Tokenizer bir derlem üzerinde eğitilir ve o derlem ezici çoğunlukla
@@ -544,11 +581,25 @@ token'a mal oluyor, üç kelimelik İngilizce karşılığı ise üç.
 Bu çıktıyı bir daha okuyun, çünkü birbirine zıt iki açıdan dikkat çekici.
 Kötü haber: tek bir Türkçe kelime beş token'a mal oluyor; İngilizce
 karşılığı *from our houses* ise üç — İngilizce bunu söylemek için üç ayrı
-kelimeye ihtiyaç duydu, yine de daha az token ödedi. İyi haber: bölünmeye
-bakın. `ev|ler|im|iz|den` neredeyse doğru morfolojik çözümlemedir — *ev*,
-*-ler* (çoğul), *-imiz* (iyelik), *-den* (ayrılma hâli). BPE, Türkçe
-dilbilgisinin tek bir kuralını bilmeden, ham istatistikten Türkçe
-morfolojisini yeniden keşfetti.
+kelimeye ihtiyaç duydu, yine de daha az token ödedi. İyi haber, bir dürüst yıldız işaretiyle:
+bölünmeye bakın. `ev|ler|im|iz|den`, dört sınırının üçünde gerçek morfolojiyle
+örtüşüyor — *ev*, *-ler* (çoğul), *-den* (ayrılma hâli) — ve kimse Türkçe
+dilbilgisinin tek bir kuralını vermedi. Yıldız işareti `im|iz`de: *-imiz*
+(iyelik) **tek** bir biçimbirimdir ve BPE onu ikiye bölmüştür, çünkü `im` ile
+`iz` tek başlarına da sık geçiyor. Yukarıdaki şeklin `iz` altına bir açıklama
+değil bir tire koymasının nedeni de bu. Sıklık, morfoloji için iyi bir vekildir
+ama onun yerine geçmez — üstelik eşit sözlük büyüklüğünde unigram LM,
+morfolojiye BPE'den daha yakın bölüyor [@bostrom2020byte].
+
+Yukarıdaki çıktılarda iki konvansiyon çarpışıyor ve bunları adlandırmakta yarar
+var. Gerçek tokenizer'lar BPE'yi ham dizgeye uygulamaz; önce bir regex ile
+boşluk ve noktalama sınırlarında bölerek **ön-tokenizasyon** yapar ve
+birleştirmeleri ancak her parçanın içinde çalıştırır. Dolayısıyla kelime
+sınırlarının token'ın kendisine taşınması gerekir, yoksa geri birleştirme
+belirsiz olurdu. GPT'nin kodlamaları önceki boşluğu token'a yapıştırır —
+yukarıdaki `' ev'`de baştaki boşluk bu — SentencePiece
+[@kudo2018sentencepiece] ise görünür bir işaret koyar: `▁ev`. Aynı fikir, iki
+yazım; şekilde `▁` biçimi kullanılıyor, çünkü sayfada görmesi daha kolay.
 
 Bir örnek daha; bu kez şapkalı harflerin faturasını göstermek için:
 
@@ -557,7 +608,24 @@ gorusebileceklerimiz            8 tokens  ['gor','use','b','ile','cek','ler','im
 görüşebileceklerimiz           10 tokens  ['g','ör','ü','ş','eb','ile','cek','ler','im','iz']
 ```
 
-Doğru Türkçe yazmak, ASCII Türkçe yazmaktan %25 daha pahalı. Lütfen yine
+Doğru Türkçe yazmak, ASCII Türkçe yazmaktan %25 daha pahalı.
+
+Bu sayıya güvenmeden önce, kimsenin söylemediği bir adımın gerçekleşmesi
+gerekiyor. `ö` iki biçimde saklanabilir: tek bir kod noktası olarak (U+00F6,
+"NFC") ya da `o` artı birleştirici çift nokta olarak (U+0308, "NFD"). İkisi
+ekranda ayırt edilemez, Python'da *eşit değil* diye karşılaştırılır ve farklı
+sayıda token'a mal olur — `görüşebileceklerimiz` NFC'de 20 karakter ve 23 bayt,
+NFD'de 23 karakter ve 26 bayttır. macOS dosya adları, birçok PDF çıkarımı ve
+bazı web formları size NFD verir. Dolayısıyla ASCII dışı metne dokunan her
+hattın ilk satırı şudur:
+
+```python
+import unicodedata
+text = unicodedata.normalize("NFC", text)
+```
+
+Bu bölümdeki her ölçüm o çağrıdan sonra alındı. Atlayın, sözlüğünüz aynı
+kelimenin iki yazımını sessizce barındırsın. Lütfen yine
 de doğru Türkçe yazın; sadece bunun bedelini bilin ve çok dilli bir
 sistemi asla yalnızca token sayısıyla kıyaslamayın.
 
@@ -578,13 +646,16 @@ gelir.
 ::: {.callout-tip collapse="true"}
 ## Sezgi kontrolü: madem öyle, neden doğrudan karakter kullanmıyoruz?
 
-Karakter sözlüğü minik (~100 sembol), sözlük dışı sorunu hiç yaşamaz ve
+Karakter sözlüğü minik (İngilizce için ~100 sembol, baytla çalışırsanız 256),
+sözlük dışı sorunu hiç yaşamaz ve
 eğitim gerektirmez. Peki neden herkes alt kelime kullanıyor?
 
 **Çünkü asıl kısıt dizi uzunluğudur.** Attention mekanizmasının maliyeti dizi
-uzunluğunun karesiyle büyür
+uzunluğunun *karesiyle*, katmandaki her şey ise doğrusal büyür
 (@sec-transformerlar), dolayısıyla 5 kat uzun
-bir dizi kabaca 25 kat pahalıdır. Alt kelimeler bir sıkıştırma şemasıdır:
+bir dizi, model genişliğine göre nerede durduğunuza bağlı olarak 5 ile 25 kat
+arasında pahalıya mal olur — ve eninde sonunda kazanan terim kareseldir. Alt
+kelimeler bir sıkıştırma şemasıdır:
 sözlük harcayıp kısa dizi satın alırlar. Tokenizer, sözlük büyüklüğü ile
 dizi uzunluğu arasındaki takası ayarlayan düğmedir ve BPE bu düğmeyi bir
 insanın tahminine göre değil verinin istatistiğine göre ayarlar.
@@ -594,9 +665,9 @@ insanın tahminine göre değil verinin istatistiğine göre ayarlar.
 durur ve bütün tasarım problemi şudur: iki uç, birbirinin tam tersi yönde
 başarısız olur.
 
-| | Karakterler | Alt kelimeler (BPE, WordPiece) | Bütün kelimeler |
+| | Karakterler | Alt kelimeler (BPE, WordPiece, Unigram) | Bütün kelimeler |
 |---|---|---|---|
-| Sözlük büyüklüğü | [~100 sembol]{.pro} | 30 bin–100 bin | [Sınırsız — asla kapanmaz]{.con} |
+| Sözlük büyüklüğü | [ASCII için ~100; çok dilli Unicode'da on binlerce — baytla çalışırsanız 256]{.pro} | 30 bin–100 bin | [Sınırsız — asla kapanmaz]{.con} |
 | Sözlük dışı kelimeler | [Bu sorun hiç doğmaz — her kelime zaten karakterlerden kurulu]{.pro} | [Doğmaz — kelime tanınmıyorsa daha kısa parçalara bölünür]{.pro} | [Sürekli, üstelik en çok önemsediğiniz kelimelerde]{.con} |
 | Dizi uzunluğu | [5–10 kat daha uzun; uzun dizi hem daha yavaş hem daha pahalı]{.con} | [Orta]{.pro} | [En kısa]{.pro} |
 | Birim başına anlam | [Neredeyse yok — `p` hiçbir şey ifade etmez]{.con} | Kısmi; çoğu zaman biçimbirime benzer | [Bütün bir anlam birimi]{.pro} |
@@ -610,7 +681,37 @@ onlar. Mühendislikteki uzlaşmalar genelde böyle kazanır: hiçbir şeyde en i
 oldukları için değil, kendilerini eletecek kadar kötü bir zayıflıkları
 olmadığı için.
 
-## Zipf yasası ve sözlüğün neden hiç kapanmadığı
+### Aynı tür birimi öğrenmenin üç yolu {#sec-metin-veri-algoritmalar}
+
+BPE, karşılaşacağınız üç algoritmadan biri ve aralarındaki fark ne ürettiklerinde
+değil, *neyi eniyiledikleri*nde. Bir modelin hangisini kullandığını bilmek,
+bölünmelerini öngörmenin yoludur.
+
+| | Neyi eniyiler | Yön | Nerede kullanılır |
+|---|---|---|---|
+| **BPE** [@sennrich2016neural] | en *sık* komşu çifti birleştir | aşağıdan yukarı, sözlük büyür | GPT-2/3/4, RoBERTa, Llama |
+| **WordPiece** [@schuster2012japanese] | derlem olabilirliğini en çok artıran çifti birleştir, kabaca $\frac{c(ab)}{c(a)\,c(b)}$'yi büyüt | aşağıdan yukarı | BERT, DistilBERT, ELECTRA |
+| **Unigram LM** [@kudo2018subword] | büyük bir aday kümeden başla ve kaldırılması en az olabilirliğe mal olan parçaları EM ile *buda* | yukarıdan aşağı, sözlük küçülür | T5, ALBERT, Gemma, çoğu SentencePiece modeli |
+
+: Üç alt kelime algoritması ve her birinin gerçekte neyi büyüttüğü
+{tbl-colwidths="[16,40,24,20]"}
+
+Taşımaya değer iki sonuç. Birincisi, WordPiece'in oranı parçaları tek başlarına
+zaten sık olan çiftleri cezalandırıyor, dolayısıyla ham sıklığa göre daha çok
+biçimbirim benzeri birim koruyor. İkincisi, tek bir belirlenimci cevap yerine
+her bölünmeye bir *olasılık* atayan tek algoritma Unigram LM; alt kelime
+düzenlileştirmesini mümkün kılan da bu: her epoch'ta farklı bir bölünme
+örnekleyin, model tek bir keyfî bölünmeye aşırı uyum sağlamayı bıraksın
+[@kudo2018subword]. `SentencePiece` [@kudo2018sentencepiece] dördüncü bir
+algoritma değil, son ikisinin genellikle içinde geldiği *uygulamadır* — katkısı,
+boşluklar dâhil ham dizgeyi girdi olarak ele almasıdır; token'larının boşluk olan
+yerde `▁` taşımasının nedeni de bu.
+
+Seçim BPE lehine kapanmış da değil: eşit sözlük büyüklüğünde unigram LM,
+morfolojiye daha yakın bölüyor ve BPE'den daha iyi dil modeli ön eğitiyor
+[@bostrom2020byte].
+
+## Zipf yasası ve sözlüğün neden hiç kapanmadığı {#sec-metin-veri-zipf}
 
 Yukarıdakilerin hepsi mekanikti. Bu bölüm ise mekaniğin *neden* böyle olmak
 zorunda olduğunu açıklayan istatistiksel olgudur.
@@ -651,11 +752,31 @@ On kelime, derlemin beşte biri. Buna karşılık [sözlüğün yarısı tam ola
 bir kez geçiyor]{.hl}. Bu tek seferlik kelimeler (*hapax legomena*)
 saklamak zorunda olduğunuz her şeyin %49'u, ama hayatınız boyunca
 göreceğinizin %1,7'si. Zipf yasası budur [@zipf1949human]: frekans kabaca
-sıra ile ters orantılıdır; bu da log-log eksenlerde düz bir çizgi demektir.
+sıranın bir kuvvetiyle düşer, $f(r) \propto r^{-\alpha}$; bu da log-log
+eksenlerde düz bir çizgiye *yakın* demektir. O cümlede "yakın" kelimesi iş
+yapıyor. Bu derlemde onuncu sıradaki kelime 26.985 kez geçiyor; temiz bir
+$\alpha = 1$'in öngöreceği ~10.600 değil — dağılımın başı yasadan daha yassı ve
+Mandelbrot'un $f(r) \propto (r + b)^{-\alpha}$ düzeltmesi tam da bunu soğurmak
+için var. Düz çizgiyi uydurulmuş bir model olarak değil, bir *biçim* olarak
+alın.
+
+::: {.callout-warning appearance="simple" collapse="true"}
+## Üssü bir gün hesaplamanız gerekirse, regresyonla uydurmayın
+
+Log-log sıra-frekans grafiğinden en küçük karelerle eğim okumak, yanlış bir
+kuvvet yasası üssü elde etmenin standart yoludur ve üç ayrı nedenle yanlıştır:
+sıralama verinin bir dönüşümüdür, dolayısıyla sıra ile frekans mekanik olarak
+ilişkilidir; log dönüşümü hataları heteroskedastik yapar, ki bu OLS varsayımını
+bozar; ve uzun, gürültülü kuyruktaki her nokta iyi kestirilmiş baş kadar ağırlık
+taşır. Yayımlanmış çözüm, uydurulmuş bir alt kesim $x_{\min}$ ile maksimum
+olabilirlik ve $R^2$ yerine bir Kolmogorov–Smirnov uyum testidir
+[@clauset2009powerlaw]. Bu bölümde hiçbir şey üssün tam değerine bağlı değil;
+ders biçimin kendisi.
+:::
 
 ::: {.anlp-widget}
 ```{=html}
-<div class="widget-title">Sıra ve frekans, 20 Newsgroups (2,29 milyon token, 78.649 tür)</div>
+<div class="widget-title">Sıra ve frekans, 20 Newsgroups — 78.649 türlük bir sözlükten log-aralıklı 50 örnek sıra (2,29 milyon token)</div>
 ```
 
 ```{ojs}
@@ -663,6 +784,15 @@ sıra ile ters orantılıdır; bu da log-log eksenlerde düz bir çizgi demektir
 viewof zipfScale = Inputs.radio(["log-log", "doğrusal"], {
   value: "log-log", label: "Eksenler"
 })
+```
+
+```{ojs}
+//| echo: false
+// Observable Plot bir CSS değişkenini çözemiyor, o yüzden temayı bir kez burada
+// okuyoruz. Bu bölümdeki dört SVG bunu --fig-* ile zaten doğru yapıyor; sabit
+// #1F4E79 ise karanlık zeminde 2,13:1 kontrasta düşüyordu.
+figColor = name => getComputedStyle(document.documentElement)
+  .getPropertyValue(`--fig-${name}`).trim() || "currentColor"
 ```
 
 ```{ojs}
@@ -697,7 +827,7 @@ Plot.plot({
   marks: [
     Plot.line(zipfData, { x: "rank", y: "freq", stroke: "currentColor", strokeWidth: 1 }),
     Plot.dot(zipfData, {
-      x: "rank", y: "freq", r: 3.2, fill: "#1F4E79",
+      x: "rank", y: "freq", r: 3.2, fill: figColor("navy"),
       title: d => `sıra ${d.rank}: ${d.freq.toLocaleString("tr-TR")} kez`
     })
   ]
@@ -727,11 +857,44 @@ biçimlendirdi:
    kelimeler size en az şeyi söyler. Bir sonraki bölümün tohumu bu
    gözlemdir.
 
+### Heaps yasası: ikinci sorunun cevabı {#sec-metin-veri-heaps}
+
+Zipf, elinizde *zaten olan* derlemi betimliyor. Bu bölümün açılışındaki soru —
+*bir sonraki milyon kaç yeni kelime getirir?* — ikinci bir yasa istiyor.
+Derlemde ilerlerken ayrık tür sayısını sayın:
+
+```python
+import numpy as np
+
+seen, curve = set(), []
+for i, tok in enumerate(tokens, 1):
+    seen.add(tok)
+    if i % 10_000 == 0:
+        curve.append((i, len(seen)))
+
+N, V = np.array(curve).T
+beta, logK = np.polyfit(np.log(N), np.log(V), 1)
+print(f"|V| ~ {np.exp(logK):.1f} * N^{beta:.3f}")
+```
+
+Bu **Heaps yasasıdır** [@heaps1978information]: sözlük, derlem büyüklüğünün bir
+kuvveti olarak büyür, $|V| \approx K N^{\beta}$, ve $\beta$ tipik olarak 0,4 ile
+0,6 arasındadır. Üs 1'in altında olduğu için eğri yükselmeye devam eder ve asla
+düzleşmez — türev $\mathrm{d}|V|/\mathrm{d}N = K\beta N^{\beta-1}$ her $N$ için
+kesinlikle pozitiftir.
+
+[Yeni kelimelerle karşılaşmayı bıraktığınız bir derlem büyüklüğü yoktur.
+Yalnızca onlarla *hızlı* karşılaşmayı bıraktığınız bir büyüklük vardır.]{.hl}
+Alt kelimelerin bütün gerekçesi budur; `min_df`'in sütunlarınızın çoğunu silip
+metninizin çok azını silmesinin nedeni de.
+
 ::: {.callout-important appearance="simple"}
 **Her zaman ilk 50 listenize bakın.** Bu derlemde en sık *ikinci* token
 `'ax`; 62.043 kez geçiyor — *to*, *a* ve *of*'un önünde. Bu bir kelime
 değil. 11.314 belgenin 13'ünden geliyor ve bunlardan biri onu 11.147 kez
-içeriyor: tek bir çöp gönderi.
+içeriyor — bozuk bir ikili gönderinin alıntılanmış bir kopyası ve onu geri
+alıntılayan on iki cevap; en büyük tek belge 62.043 geçişin 11.147'sini
+karşılıyor.
 
 Terim frekansına göre `'ax`, İngilizcenin en önemli ikinci kelimesi. Belge
 frekansına göre belgelerin %0,1'inde geçiyor. "Sık geçiyor" ile "çok yerde
@@ -740,7 +903,7 @@ ta kendisi — ve ünlü bir kıyaslama veri kümesinde otuz yıldır duran ger�
 bir hata.
 :::
 
-## Bir kelime nasıl vektöre dönüşür
+## Bir kelime nasıl vektöre dönüşür {#sec-metin-veri-vektorler}
 
 Bölümün çekirdeği burası. Dört kısa bakım kaydını, karakter dizisi
 olmaktan çıkarıp üzerinde uzaklık hesaplayabileceğiniz vektörlere kadar
@@ -759,7 +922,7 @@ corpus = [
 :::: {.anlp-fig}
 ```{=html}
 <div class="fig-title">Karakter dizisinden vektöre: bu bölümün altı adımı</div>
-<svg viewBox="0 0 760 306" role="img" aria-label="Pipeline şeması">
+<svg viewBox="0 0 760 306" role="img" aria-label="Ham metinden karşılaştırılabilir bir vektöre altı adım. the pump failed dizgesi tokenlaştırılıyor, dokuz alfabetik sütuna indeksleniyor, one-hot kodlanıyor, sayım vektörüne toplanıyor, TF-IDF ile yeniden ağırlıklandırılıyor, L2 ile 0,64 0 0,64 ve 0,42 olacak şekilde normalleştiriliyor ve son olarak kosinüsle başka bir belgeyle karşılaştırılıyor.">
   <defs>
     <marker id="pl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" class="head"/>
@@ -943,8 +1106,16 @@ aynı muameleyi yapar.
 İstediğimiz ağırlık, bir kelime *bu belgede* sık ve *belgeler arasında*
 nadir olduğunda yüksek olmalı. Bunu iki çarpana ayırmak TF-IDF'i verir.
 
-**Terim frekansı**, kelimenin bu belgede kaç kez geçtiğidir — zaten
-elimizdeki sayım.
+**Terim frekansı**, kelimenin bu belgede kaç kez geçtiğidir — zaten elimizdeki
+*ham* sayım. *Ham* olduğuna dikkat: `scikit-learn` burada belge uzunluğuna
+bölmüyor, çünkü uzunluğu 5. adımdaki L2 normalleştirmesi hallediyor. Birçok ders
+kitabı bunun yerine $\mathrm{tf} = c(t,d)/|d|$ ya da logaritmik
+$1 + \log c(t,d)$ tanımlar ve çıkan sayılar farklı olur. Bir varyantı
+adlandırmanın klasik kısaltması, (tf) × (idf) × (normalleştirme) için üç harfli
+bir kod olan SMART gösterimidir: `scikit-learn`'ün varsayılanı kabaca **`ntc`**
+— doğal tf, düzleştirilmiş idf, kosinüs normalleştirmesi — klasik bilgi erişimi
+varsayılanı ise logaritmik tf'li **`ltc`**'dir. `sublinear_tf=True` sizi `n`'den
+`l`'ye taşır ve bu bölümün sonundaki deneyde bir satır kazanan seçenek odur.
 
 ::: {#gloss-document-frequency .column-margin .term-gloss}
 **document frequency (df)** (belge frekansı) — bir kelimenin, her birinde kaç
@@ -965,9 +1136,13 @@ $$
 
 Formülü sembol sembol okuyun. $t$ bir terim, $n$ derlemdeki belge sayısı ve
 $\mathrm{df}(t)$, bunlardan kaçının $t$'yi en az bir kez içerdiğini sayıyor.
-$1+$ terimleri düzleştirmedir (hiç görülmemiş bir terim için sıfıra bölmeyi
-önler); sondaki $+1$ ise her yerde geçen bir kelimenin 0 yerine 1 ağırlık
-almasını garantiler, yani kelime silinmez, aşağı çekilir. Bu,
+$1+$ terimleri düzleştirmedir ve temiz bir okuması vardır: formül, sanki
+derlemde **her terimi birer kez içeren fazladan bir belge** varmış gibi
+davranır. $\mathrm{df}$'in hiç sıfır olamamasının ve hiçbir ağırlığın
+kaçamamasının nedeni o hayalî belgedir; bu da @sec-dil-modelleri'nde Laplace
+düzleştirmesi olarak yeniden karşılaşacağınız aynı bire-ekleme fikridir. Sondaki
+$+1$ ise her yerde geçen bir kelimenin 0 yerine 1 ağırlık almasını garantiler,
+yani kelime silinmez, aşağı çekilir. Bu,
 `scikit-learn`'ün birebir formülüdür; başka kütüphaneler ayrıntıda
 farklılaşır ve bu, "sayılarım neden tutmuyor" sorusunun klasik
 kaynağıdır.
@@ -1116,9 +1291,9 @@ Plot.plot({
   x: { label: "kelimeyi içeren belgelerin oranı", percent: true, grid: true },
   y: { label: "idf ağırlığı", domain: [0, 10], grid: true },
   marks: [
-    Plot.line(idfCurve, { x: "share", y: "idf", stroke: "#1F4E79", strokeWidth: 2 }),
-    Plot.ruleY([1], { stroke: "#B3453E", strokeDasharray: "4,3" }),
-    Plot.dot([idfAt], { x: "share", y: "idf", r: 6, fill: "#B3453E" }),
+    Plot.line(idfCurve, { x: "share", y: "idf", stroke: figColor("navy"), strokeWidth: 2 }),
+    Plot.ruleY([1], { stroke: figColor("rose"), strokeDasharray: "4,3" }),
+    Plot.dot([idfAt], { x: "share", y: "idf", r: 6, fill: figColor("rose") }),
     Plot.text([idfAt], {
       x: "share", y: "idf", dy: -14, fontSize: 12,
       text: d => `df ≈ ${d.df.toLocaleString("tr-TR")} belge → idf ${d.idf.toFixed(2)}`
@@ -1171,7 +1346,7 @@ kareleyin, toplayın, karekökünü alın:
 
 $$
 \lVert v \rVert_2 = \sqrt{1{,}5108^2 + 1{,}5108^2 + 1{,}0000^2}
-= \sqrt{2{,}2825 + 2{,}2825 + 1{,}0000} = \sqrt{5{,}5650} = 2{,}3590
+= \sqrt{2{,}28259 + 2{,}28259 + 1{,}00000} = \sqrt{5{,}56518} = 2{,}3591
 $$
 
 Sıfır olan altı giriş hiçbir şey katmıyor; sözlükte 200.000 sütun olduğunda
@@ -1374,7 +1549,7 @@ word olanlar.
 :::: {.anlp-fig}
 ```{=html}
 <div class="fig-title">Neden kosinüs, neden Öklid uzaklığı değil</div>
-<svg viewBox="0 0 760 322" role="img" aria-label="Kosinüs ile Öklid karşılaştırması">
+<svg viewBox="0 0 760 322" role="img" aria-label="Sol panel: pump ve leak kelimeleri üzerinde ham sayım vektörü olarak üç belge. 2,1 noktasındaki A ile 20,10 noktasındaki B aynı raporun iki uzunluğu ve tek bir ışın üzerinde duruyor; yine de Öklid uzaklığı A ile ilgisiz C arasına 3,16, A ile B arasına 20,12 koyuyor. Sağ panel: L2 normalleştirmesinden sonra bütün vektörler birim çember üzerinde, A ile B çakışıyor ve geriye yalnızca C ile arasındaki 49,4 derecelik açı kalıyor.">
   <defs>
     <marker id="geo-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" class="head"/>
@@ -1508,7 +1683,7 @@ sıralı listeyi döndürür — **vektörler önceden normalleştirilmiş olmak
 uzunluğuna göre sıralamaya başlar.
 :::
 
-## Bag-of-words'ün yapamadıkları
+## Bag-of-words'ün yapamadıkları {#sec-metin-veri-sinirlar}
 
 Sıra sınırlarda — ve bu sınırlar, kitabın geri kalanının var olma
 sebebini oluşturacak kadar ağır.
@@ -1553,10 +1728,14 @@ düşürdü*. n-gram'lar yerel bir yamadır, çözüm değil. Gerçek çözüm
 
 ```text
 "sızıntı tespit edilmiş değil"  vs  "sızıntı tespit edilmiş"
-cosine similarity: 0.866
+sözlük (varsayılan token_pattern tek harfli "a"yı atıyor):
+    ['found', 'leak', 'no', 'was']
+ham sayımlar  ->  kosinüs 0.866
+TF-IDF        ->  kosinüs 0.777
 ```
 
-Operasyonel anlamı taban tabana zıt iki cümle %87 benzer. Stop word
+Operasyonel anlamı taban tabana zıt iki cümle, ağırlıklandırmaya göre %78–87
+benzer — TF-IDF biraz yardım ediyor, yeterli olmaktan çok uzak. Stop word
 listenizde *değil* varsa — ki çoğu hazır Türkçe listede vardır — tam olarak
 %100 benzer olurlar.
 Bir metin sınıflandırıcısının güvenlik kritik bir incelemede sessizce
@@ -1628,13 +1807,37 @@ Bu altı satırı dikkatle okuyun, çünkü içlerinde dört ders var:
 2. **Stop word atmak burada faydalı** (+2,2 puan) — konu
    sınıflandırmasında, işlev kelimeleri gerçekten sinyal taşımadığı için.
    Duygu analizinde ya da olumsuzluk tespitinde zarar verirdi. Evrensel bir
-   cevap yok.
+   cevap yok. O listeyle ilgili bir dipnot: `scikit-learn`'ün kendi
+   belgelendirmesi `stop_words='english'`i sorunlu ilan ediyor — genel amaçlı
+   bir liste değil, seçim ölçütleri belgelenmemiş ve birkaç girdisi zaten
+   varsayılan `token_pattern` tarafından hiç üretilemiyor. Stop word'ler
+   sonucunuz için önemliyse listeyi kendiniz yazın ve ekrana basın.
 3. **İkili n-gram'lar durumu kötüleştirdi**, üstelik değişken sayısını 7,7
    katına çıkararak. Daha çok değişken daha çok bilgi demek değildir; daha
    çok varyans demektir.
-4. **`sublinear_tf` fayda sağlıyor** (0,843'e karşı 0,831). Bu seçenek ham
-   sayımı $1 + \log(\text{tf})$ ile değiştirir — IDF için kurduğumuz azalan
-   getiri argümanının, bu kez terim frekansı tarafına uygulanmış hâli.
+4. **`sublinear_tf` aynı yönü işaret ediyor** (0,843'e karşı 0,831). Bu
+   seçenek ham sayımı $1 + \log(\text{tf})$ ile değiştirir — IDF için
+   kurduğumuz azalan getiri argümanının, bu kez terim frekansı tarafına
+   uygulanmış hâli.
+
+O altı sayıyı alıntılamadan önce bir uyarı, çünkü bu kitap aynısını herkesten
+istiyor. Bunlar aralık iliştirilmemiş nokta kestirimleri. Test kümesinde 1.550
+belge var; dolayısıyla 0,83 civarındaki *tek* bir doğruluk kabaca ±1,9 puanlık
+bir %95 aralığı taşıyor — ders 3 ile ders 4'ün her biri ise 1,2 puanlık bir
+farka dayanıyor. Bu onları yanlış yapmaz: altı model birebir aynı test
+belgelerini görüyor, dolayısıyla doğru alet McNemar gibi **eşleşmiş** bir
+testtir [@mcnemar1947note] ve bu test, iki bağımsız aralığı karşılaştırmaktan
+çok daha güçlüdür. Bu bölüm öyle bir test çalıştırmadı. O hâlde ders 1 ile 2'yi
+bulgu, ders 3 ile 4'ü *yön* olarak okuyun — ve deney sizinken eşleşmiş testi
+çalıştırıp raporlayın.
+
+Altı satırdan genelleme yapmaya dair bir uyarı daha. Buradaki her sayı *uzun
+belgeler üzerinde İngilizce konu sınıflandırmasından* geliyor ve dört dersin
+ikisi görev değişince tersine dönüyor. Türkçe ürün yorumlarında — kısa belgeler,
+konu değil duygu — @sec-karsilastirma her iki konuda da tersini ölçüyor: ikili
+n-gram'lar o bölümdeki en büyük tek kazancı veriyor ve düz sayım TF-IDF'i
+yeniyor, çünkü IDF tam da sinyali taşıyan sık duygu kelimelerini aşağı
+ağırlıklandırıyor. Aktarılabilir olan ders sıralama değil, yöntem.
 
 Önemsemek için ikinci sebep, modelin *okunabilir* olması. TF-IDF artı
 lojistik regresyon modeline ne öğrendiğini sorun; size kelimelerle
@@ -1708,6 +1911,25 @@ Aşağıdakilerin hiçbiri tarihî merak konusu değil ve her biri onu kuran
   yazı dizisi formülü ve iki ayar sabitini çoğu ders kitabından iyi
   anlatır. Hayatınızda bir kez site içi arama kutusu kullandıysanız, bunu
   kullandınız.
+
+::: {.callout-note collapse="true"}
+## BM25 tek formülde, ve iki düğmesi neden zaten tanıdık
+
+$$
+\mathrm{BM25}(q, d) = \sum_{t \in q} \mathrm{idf}(t) \cdot
+\frac{c(t,d)\,(k_1 + 1)}{c(t,d) + k_1\!\left(1 - b + b\,\frac{|d|}{\mathrm{avgdl}}\right)}
+$$
+
+Az önce kurduğunuz şeye karşı okuyun. $\mathrm{idf}$ çarpanı bizimkiyle aynı
+fikir (BM25 olasılıksal bir varyant kullanıyor). Kesir, ham terim frekansının
+yerine *doyuma giden* bir frekans koyuyor: $c(t,d)$ büyüdükçe terim $k_1 + 1$'e
+yaklaşıp büyümeyi bırakıyor, dolayısıyla bir kelimenin onuncu geçişi neredeyse
+hiçbir şey eklemiyor — bu, ayarlanabilir tavanı olan `sublinear_tf`. Ve
+$b \in [0,1]$, belge uzunluğunu yok saymak ($b = 0$) ile tümüyle bölmek
+($b = 1$) arasında geçiş yapıyor — bu da anahtar yerine kadranı olan L2
+normalleştirmesi. Lucene'in varsayılanları $k_1 = 1,2$ ve $b = 0,75$
+[@robertson2009probabilistic].
+:::
 - **Google'ın kendi metin sınıflandırma rehberi** hâlâ bu temsili
   öneriyor [@google2022textclassification]: karşılaştırdığı kodlamalar
   arasında en doğru olanın TF-IDF n-gram'ları olduğunu bildiriyor ve
@@ -2034,7 +2256,7 @@ Sınadıkları şey tek bir refleks: her belge çiftine tek tek bakmaya
 kalkmamak. 100 milyon belgenin $\binom{10^8}{2} \approx 5 \times 10^{15}$
 çifti vardır; saniyede bir milyar karşılaştırma yapabilseniz bile bu 58 gün
 sürer. Yani cevap "hızlandırırız" değil, "çiftleri hiç saymayız" olmalı.
-Beklenen hat dört adımdır ve her adım bir öncekinin bıraktığı sorunu çözer.
+Beklenen hat beş adımdır ve her adım bir öncekinin bıraktığı sorunu çözer.
 
 1. **Shingling — belgeyi karşılaştırılabilir bir kümeye çevirin.** Her
    belgeyi, üzerinde kaydırılan sabit uzunlukta kelime pencerelerinin
@@ -2045,14 +2267,14 @@ Beklenen hat dört adımdır ve her adım bir öncekinin bıraktığı sorunu ç
 2. **Jaccard benzerliği — "yakın kopya"yı tanımlayın.** İki shingle kümesi
    $A$ ve $B$ için $|A \cap B| / |A \cup B|$. Doğru ölçü budur; sorun onu
    *hesaplamak*, çünkü kümeler büyük ve çift sayısı da $5 \times 10^{15}$.
-3. **MinHash — kümeleri kısaltın.** Her shingle kümesini sabit uzunlukta
+3. **MinHash — kümeleri kısaltın** [@broder1997resemblance]. Her shingle kümesini sabit uzunlukta
    kısa bir imzaya sıkıştırır; diyelim 128 sayı. MinHash'i özel kılan
    özellik şudur: iki imzanın belirli bir konumda aynı çıkma olasılığı, tam
    olarak özgün kümelerin Jaccard benzerliğine eşittir. Yani koca kümeleri
    kesiştirmek yerine 128 sayı karşılaştırarak benzerliği kestirebilirsiniz.
    Belge başına depolama birkaç yüz bayta iner — ama çift sayısı hâlâ
    $5 \times 10^{15}$.
-4. **LSH (yerele duyarlı karma) — çift patlamasını çözün.** 128
+4. **LSH (yerele duyarlı karma) — çift patlamasını çözün** [@indyk1998approximate]. 128
    sayılık imzayı $b$ banda bölün, her bant $r$ satır içersin ($b \times r =
    128$). Her bandı ayrı ayrı özetleyip bir kovaya atın. İki belge, ancak
    *en az bir bantta aynı kovaya düşerse* aday sayılır. Benzer belgeler bunu
@@ -2198,7 +2420,9 @@ bakıyor.
    neyin değiştiğini raporlayın.
 3. **Elle türetin.** Bu bölümdeki dört belgelik derlem için d3'ün TF-IDF
    vektörünü kâğıt kalemle hesaplayın, sonra `TfidfVectorizer` ile
-   doğrulayın. Uyuşmazlarsa, uyuşmazlık her zaman düzleştirmededir — bulun.
+   doğrulayın. Uyuşmazlarsa, uyuşmazlık neredeyse her zaman üç yerden birindedir
+   — düzleştirme, L2 normalleştirmesi ya da tokenizer'ın `token_pattern`'ı.
+   Hangisi olduğunu bulun.
 4. **Tekrarlayın ve genişletin.** Yukarıdaki sınıflandırma tablosunu yeniden
    üretin, sonra bir satır ekleyin: `min_df=5` ile TF-IDF. Doğruluk düşüyor
    mu? Değişken sayısı ne kadar düştü? İki yapılandırmadan birini, onu
