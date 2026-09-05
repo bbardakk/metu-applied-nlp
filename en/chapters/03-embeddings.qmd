@@ -384,15 +384,22 @@ U, S, Vt = np.linalg.svd(PPMI, full_matrices=False)
 emb = U[:, :d] * S[:d]
 ```
 
-Multiplying by `S` is deliberate: a direction that explains a lot of the
-matrix should count for more in the distance calculation than one that
-explains almost nothing.
+Multiplying by `S` weights each direction by how much of the matrix it
+explains, and that is the textbook choice. It is also, on the evidence, the
+wrong default. @levy2015improving swept the whole family
+$W = U_d \Sigma_d^{\,p}$ and found $p = 0.5$ — often even $p = 0$, dropping
+$\Sigma$ entirely — beating $p = 1$ by up to fifteen points on similarity
+benchmarks. The mechanism is one this chapter meets again later: $\Sigma$ loads
+the dominant direction most heavily, and the dominant direction is largely
+frequency, which is precisely the anisotropy we will measure as a *defect*
+sixty lines from now. We keep $p = 1$ here because it keeps the arithmetic
+visible; in production, sweep $p$.
 
 ```text
 ### singular values (how much structure each dimension carries)
   5.75  4.76  4.03  3.71  3.64  3.08  3.03  2.80
-  first 2 dimensions hold 36.8% of the variance
-  first 5 dimensions hold 65.4% of the variance
+  first 2 dimensions hold 36.8% of the sum of squares
+  first 5 dimensions hold 65.4% of the sum of squares
 
 ### nearest neighbours after SVD to 5 dimensions
   king     queen 0.90, are 0.88, the 0.74, castle 0.65
@@ -403,7 +410,10 @@ explains almost nothing.
 
 Those percentages are shares of the *squared* singular values, which is the
 conventional way to report how much of a matrix a set of directions accounts
-for. Five directions out of nineteen carry roughly two-thirds of it — the
+for. Strictly it is a share of the total sum of squares $\lVert X \rVert_F^2$
+and not of variance — the PPMI matrix is never centred, so there is no variance
+to speak of. The two coincide only after centring, which is what makes the
+thirty-word PCA plot later in this chapter a genuinely different calculation. Five directions out of nineteen carry roughly two-thirds of it — the
 remaining fourteen are splitting the last third between them, which is
 another way of saying none of them is describing much.
 
@@ -447,6 +457,11 @@ word2vec by more than twenty years.
   king vs banana(2-D) : cosine 0.141
 ```
 
+Read 0.996 with the caveat in the box below already in mind: in a
+two-dimensional space where every word shares the sign of the first
+coordinate, a high cosine is partly the shared direction talking, not the
+similarity.
+
 ::: {.callout-warning appearance="simple"}
 **A detail worth noticing, because it comes back at the end of the chapter.**
 In this toy space every single word has a *negative* first coordinate. A
@@ -485,6 +500,8 @@ toyPts = [
 ```{ojs}
 //| echo: false
 Plot.plot({
+  ariaLabel: "Nineteen toy-corpus words placed by SVD dimensions 2 and 3.",
+  ariaDescription: "Royalty words, food words and function words fall into three separable regions, with apple sitting between food and people because of the single sentence that links them.",
   width: 700, height: 420, marginLeft: 55, marginBottom: 45,
   x: {label: "dimension 2", grid: true, domain: [-2.1, 2.1]},
   y: {label: "dimension 3", grid: true, domain: [-2.0, 2.3]},
@@ -830,12 +847,22 @@ Both vectors in a pair move. The collapsed derivation below shows the two
 gradients, and each vector is dragged along the direction of the other.
 
 To keep the arithmetic followable, let us hold the context vectors
-$\mathbf{u}$ fixed and update only the centre vector $\mathbf{v}$. With a
-learning rate of 0.05, one step moves `failed`·`pump` from 0.570 to 0.583, and
-`failed`·`opera` from $-0.340$ to $-0.354$.
+$\mathbf{u}$ fixed and update only the centre vector $\mathbf{v}$. Its
+gradient is the *sum* of both terms — that is what the loss above says, and
+what `gv` in the training code below computes in one `einsum`:
 
-Update both vectors, as a real implementation does, and the same step lands on
-0.596 and $-0.368$ — the same directions, moved about twice as far.
+$$
+g_{\mathbf v} = (0.639 - 1)\,\mathbf u_{\texttt{pump}}
+              + (0.416 - 0)\,\mathbf u_{\texttt{opera}}
+              = (-0.305,\ 0.213,\ -0.300,\ 0.275)
+$$
+
+With a learning rate of 0.05 that moves `failed`·`pump` from 0.570 to **0.590**
+and `failed`·`opera` from $-0.340$ to $-0.359$.
+
+Update the context vectors too, as a real implementation does, and the same
+step lands on **0.603** and $-0.374$ — the same directions, moved about 1.6
+times as far.
 
 Those are tiny movements. Multiply them by tens of billions of pairs and you
 get the geometry that made these models famous, which is the honest summary
@@ -976,7 +1003,7 @@ clipping only when many updates for the same word are batched together.
 The left panel asks *which of 400,000 words comes next* — one question with
 400,000 answers. The right panel asks *is this pair real?* six times — six
 questions with two answers each. The second is a logistic regression, and it
-is roughly 65,000 times cheaper.
+is roughly 67,000 times cheaper.
 :::
 ::::
 
@@ -1022,6 +1049,8 @@ nsSigmoid = z => 1 / (1 + Math.exp(-z))
 ```{ojs}
 //| echo: false
 Plot.plot({
+  ariaLabel: "The two negative-sampling loss terms as a function of the dot product.",
+  ariaDescription: "The real-pair loss falls as the dot product rises; the fake-pair loss rises. Both are gentle where the model is already right and steep where it is badly wrong, which is what makes the updates self-limiting.",
   width: 700, height: 260, marginLeft: 55, marginBottom: 42,
   x: {label: "v·u", domain: [-6, 6], grid: true},
   y: {label: "loss  −log σ(±z)", domain: [0, 6], grid: true},
@@ -1032,7 +1061,7 @@ Plot.plot({
       {x: "z", y: "l", stroke: "k", strokeWidth: 2}),
     Plot.line(d3.range(-6, 6.05, 0.1).map(z => ({z, l: -Math.log(nsSigmoid(-z)), k: "fake pair"})),
       {x: "z", y: "l", stroke: "k", strokeWidth: 2}),
-    Plot.ruleX([nsDot], {stroke: "#1E2229", strokeDasharray: "3,3"})
+    Plot.ruleX([nsDot], {stroke: "currentColor", strokeDasharray: "3,3"})
   ]
 })
 ```
@@ -1108,13 +1137,18 @@ data. word2vec discards a token with probability depending on its frequency,
 keeping word $w$ with probability
 
 $$
-p_{\text{keep}}(w) = \left(\sqrt{\frac{f(w)}{t}} + 1\right)\cdot\frac{t}{f(w)},
+p_{\text{keep}}(w) = \min\!\left(1,\ \left(\sqrt{\frac{f(w)}{t}} + 1\right)\cdot\frac{t}{f(w)}\right),
 \qquad t \approx 10^{-3}
 $$
 
 The formula looks arbitrary until you put numbers through it. The threshold
 $t = 10^{-3}$ is the pivot: any word making up less than a thousandth of the
-corpus comes out with $p_{\text{keep}} \geq 1$ and is simply always kept.
+corpus comes out with the inner expression above 1 and is simply always kept,
+which is what the $\min$ is doing. This is the formula in word2vec's C source,
+which is what every implementation follows; the published paper states a
+different one, $P(\text{discard}) = 1 - \sqrt{t/f}$. The two disagree, and the
+code is what was actually run — a small but useful reminder to read the
+implementation, not only the paper.
 
 | share of corpus | example | $p_{\text{keep}}$ | discarded |
 |---|---|--:|--:|
@@ -1146,9 +1180,12 @@ informative ones.
 :::
 
 **The 0.75 exponent.** Negative samples are not drawn from the unigram
-distribution but from $P(w) \propto f(w)^{0.75}$. Raising a probability to a
-power less than 1 flattens it, because numbers below 1 shrink less the
-smaller the exponent — and small numbers shrink proportionally least of all.
+distribution but from $P(w) \propto f(w)^{0.75}$. Raising every probability to
+a power below 1 pulls all of them toward 1, and it pulls the smallest ones
+furthest in relative terms: $0.5^{0.75}$ is 19% larger than $0.5$, while
+$0.001^{0.75}$ is 5.6 times larger than $0.001$. Renormalising afterwards
+therefore moves probability mass out of the head of the distribution and into
+the tail.
 
 Concretely: if a common word is 5,000 times more frequent than a rare one,
 then after the exponent it is only $5000^{0.75} \approx 595$ times more
@@ -1204,6 +1241,11 @@ D, K, WINDOW, EPOCHS, LR0 = 100, 5, 5, 3, 0.02
 Wc = ((rng.random((V, D)) - 0.5) / D).astype(np.float32)   # centre vectors
 Wo = np.zeros((V, D), dtype=np.float32)                    # context vectors
 
+# Two simplifications, stated so you can undo them. The window is fixed at 5,
+# whereas word2vec samples an effective width uniformly from {1..5} for each
+# centre, which weights near neighbours more heavily. And pairs are formed
+# across the whole token stream, ignoring document boundaries — harmless on
+# text8, which is one continuous dump, wrong on a corpus of separate documents.
 centres, contexts = [], []
 for off in range(1, WINDOW + 1):
     centres.append(ids[:-off]); contexts.append(ids[off:])
@@ -1220,6 +1262,10 @@ def sigmoid(x):
 
 for epoch in range(EPOCHS):
     for b in range(n_batches):
+        # drawn WITH replacement: "3 epochs" means three times as many
+        # pair-draws as there are pairs, not three passes. About 5% of pairs
+        # are never drawn and some are drawn six times, so do not compare
+        # EPOCHS=3 here with epochs=3 in gensim.
         sl = rng.integers(0, N, BATCH)
         c, o = centres[sl], contexts[sl]
         negs = np.searchsorted(cum, rng.random((BATCH, K))).astype(np.int32)
@@ -1279,8 +1325,19 @@ batch of 2048 pairs, a common word can appear a hundred times, so it
 receives a hundred stacked updates computed from a vector that never moved.
 
 Without clipping this run diverges to `nan` within half an epoch — which is
-exactly what happened the first time it was run for this chapter, at
-learning rate 0.05. The clip is not a modelling choice; it is the price of
+exactly what happened the first time it was run for this chapter, at learning
+rate 0.05.
+
+It is worth being precise about what the clip does, because it does not fix the
+stacking described above. `np.clip` is applied to the *per-example* gradient,
+before `np.add.at` sums the duplicates, so it bounds each contribution but not
+the accumulated row update: a word appearing a hundred times in the batch can
+still move by $100 \times \text{lr}$. What it actually prevents is a single
+large residual multiplied by a context vector whose norm has grown. The clean
+fix is to divide each row's accumulated gradient by how many times its index
+occurred in the batch — `np.bincount(targets.ravel(), minlength=V)` gives the
+counts — which recovers the per-pair semantics word2vec has by construction.
+The clip is not a modelling choice; it is the cheap version, and the price of
 vectorising an inherently sequential algorithm. It is also a good example of
 why "I reimplemented the paper and it didn't work" is usually about
 optimisation details rather than the equations.
@@ -1289,13 +1346,22 @@ optimisation details rather than the equations.
 ### The two families were one family all along
 
 For a year the field treated counting (LSA, PPMI+SVD) and predicting
-(word2vec) as rival philosophies. Then @levy2014neural proved that
+(word2vec) as rival philosophies — @baroni2014dont is the paper that framed it
+as a contest and reported predicting winning. Then @levy2014neural proved that
 skip-gram with negative sampling is *implicitly factorizing* a matrix — and
-the matrix is PPMI, shifted by $\log K$:
+that matrix is PMI, shifted by $\log K$:
 
 $$
 \mathbf{v}_w \cdot \mathbf{u}_c = \mathrm{PMI}(w, c) - \log K
 $$
+
+Note that this is PMI, not the PPMI of route A, and the difference is not
+cosmetic. The implicit matrix holds $-\infty$ in every cell for a pair that
+never co-occurs, which no factorization can represent — which is exactly why
+Levy and Goldberg go on to propose the *shifted positive* PMI matrix,
+$\mathrm{SPPMI}(w,c) = \max(\mathrm{PMI}(w,c) - \log K,\ 0)$, as the explicit
+matrix you would actually build. The two routes agree on the theorem; the
+clipping is the practical patch both of them need.
 
 at the optimum. The neural network was a matrix factorization wearing a
 costume.
@@ -1349,6 +1415,23 @@ pair. It cannot — the dot products all share the same underlying vectors, and
 with $d$ far below the vocabulary size the model must compromise. That
 compromise is precisely the low-rank approximation an SVD would have given
 you.
+
+A second assumption is hiding in the notation, and it matters because it
+contradicts the code you are about to write. Writing the noise weight as
+$K\,P(w)P(c)$ assumes negatives are drawn from the *raw* unigram distribution.
+word2vec draws them from $P_\alpha(c) \propto f(c)^{0.75}$ instead — the
+exponent from two sections ago — and carrying that through gives
+
+$$
+\mathbf{v}_w \cdot \mathbf{u}_c
+  = \log \frac{P(w,c)}{P(w)\,P_\alpha(c)} - \log K
+$$
+
+which is PMI computed against a *smoothed* context distribution.
+@levy2015improving call this context distribution smoothing, and show it
+transfers straight to PPMI+SVD, where it is worth several points. So the 0.75
+exponent is not a sampling detail bolted onto the algorithm: it changes which
+matrix the algorithm factorizes.
 :::
 
 :::: {.anlp-fig}
@@ -1421,8 +1504,8 @@ you.
 The routes look unrelated — one is linear algebra on a count matrix, the
 other is stochastic gradient descent on a classifier — but @levy2014neural
 proved they arrive at the same place. Skip-gram with negative sampling is
-implicitly factorizing the PMI matrix that route A builds explicitly, shifted
-by $\log K$.
+implicitly factorizing the PMI matrix that route A approximates by clipping it
+into PPMI, shifted by $\log K$.
 :::
 ::::
 
@@ -1441,7 +1524,7 @@ arrive at the same place, the choice is entirely about engineering:
 
 | | [Counting]{.pro} (PPMI + SVD) | [Predicting]{.pro} (word2vec) |
 |---|---|---|
-| Memory | Holds a $V \times V$ matrix — 400,000 words would be 160 billion cells | Streams the corpus; memory is $V \times d$ regardless of corpus size |
+| Memory | Holds a $V \times V$ matrix. Stored densely that is 160 billion cells at $V = 400{,}000$ — but nobody stores it densely: the matrix is sparse, and GloVe builds exactly this one, for exactly this vocabulary, to produce the vectors used throughout this chapter. The real cost is that it is a single monolithic artifact, expensive to build and expensive to update | Streams the corpus; memory is $V \times d$ regardless of corpus size |
 | Corpus size | Comfortable on small corpora, where every count is precious | Needs a lot of text before the gradient noise averages out |
 | Determinism | [Same input, same output, every time]{.pro} | [Random initialisation and sampling; two runs differ]{.con} |
 | New data | [Recount and refactorize from scratch]{.con} | [Keep training from where you stopped]{.pro} |
@@ -1450,9 +1533,23 @@ arrive at the same place, the choice is entirely about engineering:
 
 : The same destination, different engineering {tbl-colwidths="[19,40,41]"}
 
-The row that decides it in practice is memory. Counting is the better
-pedagogy and the better choice for a modest corpus; predicting is what
-survives contact with a corpus that does not fit in RAM.
+One difference does not fit in that table because it is statistical rather
+than practical, and for a reader with a statistics background it is the most
+important one. Truncated SVD gives the best rank-$d$ approximation in Frobenius
+norm — the Eckart–Young–Mirsky theorem — which means it weights *every cell
+equally*, and the overwhelming majority of cells in a PPMI matrix are zero. So
+SVD spends most of its budget faithfully reproducing "these two words never
+met", a fact it holds millions of copies of. SGNS never sees a cell it did not
+sample, so it weights each cell by how often the pair actually occurred. That,
+and not the neural framing, is where SGNS's advantage on rare words comes from
+— and it is exactly the defect that GloVe's weighting function $f(X_{wc})$ was
+designed to fix, as the next section shows. Read the three methods as three
+answers to one question: *how much should a cell you barely observed count?*
+
+The row that decides it in practice is new data. Counting is the better
+pedagogy, the better choice for a modest corpus, and the only one of the two
+that is deterministic and inspectable; predicting is what survives contact with
+a corpus that keeps growing.
 
 ## GloVe: counting, with a loss function
 
@@ -1650,10 +1747,19 @@ vector, but not far enough to leave `king`'s neighbourhood. The famous result
 depends on a post-hoc filter that removes the true answer to the question
 actually asked.
 
-This is not a gotcha — the filter is defensible, since you rarely want an
-input echoed back. But it changes what the demonstration proves, and
-@nissim2020fair and @linzen2016issues argue at length that the analogy task
-has been over-read as evidence of reasoning. Try a few for yourself:
+This is not a gotcha — the filter is defensible, since you rarely want an input
+echoed back. But it changes what the demonstration proves, and it is worth
+knowing that the method being filtered has a name. It is **3CosAdd**, and the
+standard alternative, **3CosMul** [@levy2014linguistic], replaces the sum of
+three cosines with a ratio, which suppresses the pull of any single input term
+and gains a few points on the same question set.
+
+The deeper objection is @linzen2016issues'. He shows that a baseline which
+ignores the analogy entirely — return the nearest neighbour of `woman`, never
+look at `king` or `man` — already recovers a large share of the reported
+accuracy, so the headline number measures neighbourhood structure at least as
+much as it measures a relation. @nissim2020fair make the complementary point
+about how such results get presented. Try a few for yourself:
 
 ::: {.anlp-widget}
 ```{=html}
@@ -1725,6 +1831,8 @@ projPts = [{"w":"king","x":0.524,"y":-0.835,"g":"royalty"},{"w":"queen","x":0.61
 ```{ojs}
 //| echo: false
 Plot.plot({
+  ariaLabel: "Thirty GloVe words projected onto two principal components.",
+  ariaDescription: "Royalty, people, countries, capitals and verb forms separate into five visible groups; countries and their capitals sit adjacent on the left, verbs at the top.",
   width: 700, height: 460, marginLeft: 55, marginBottom: 45,
   x: {label: "component 1", grid: true},
   y: {label: "component 2", grid: true},
@@ -1742,10 +1850,13 @@ Plot.plot({
 //| echo: false
 html`<p style="font-size:0.85rem; color:var(--fig-muted); margin-top:0.4rem;">
 The five groups separate cleanly, and countries sit near their capitals.
-Read this with care: these two components keep only <b>37.5%</b> of the
-variance of the 100-dimensional vectors, so distances on the page are a
-shadow of distances in the space. Every number quoted in this chapter is
-computed in 100 dimensions, never from a projection like this one.</p>`
+Read this with care. The two components are the first two principal components
+<i>of these thirty vectors</i>, not of the full 400,000 — which is part of why
+the groups look so clean, since PCA picks the directions that best separate
+exactly the points it was given. They keep only <b>37.5%</b> of the variance of
+the 100-dimensional vectors, so distances on the page are a shadow of distances
+in the space. Every number quoted in this chapter is computed in 100
+dimensions, never from a projection like this one.</p>`
 ```
 :::
 
@@ -1975,6 +2086,7 @@ ftShared = {
 html`<div style="font-size:0.9rem;">
   <div style="margin:0.4rem 0 0.6rem 0;">
     ${ftGrams.map(gm => html`<code style="background:${ftShared.has(gm) ? "#D6EAE9" : "#F4F6F8"};
+      color:#1E2229;
       border:1px solid ${ftShared.has(gm) ? "#0E7C7B" : "currentColor"};
       border-radius:0.35em; padding:0.1em 0.4em; margin:0 0.25em 0.3em 0;
       display:inline-block;">${gm}</code>`)}
@@ -2081,6 +2193,16 @@ per *document* by the same negative-sampling trick, treating the document id
 as an extra context. It comes in two flavours, and they are the CBOW and
 skip-gram of the document world.
 
+::: {.column-margin}
+Which flavour wins is not settled by the original paper. @le2014distributed
+recommend PV-DM; @lau2016empirical re-ran both carefully and found PV-DBOW at
+least as strong and much cheaper, which is why `gensim`'s defaults and most
+later work follow it. doc2vec is also the field's best-known reproducibility
+case: the paper's headline IMDB error rate was not independently reproduced for
+years, and the gap turned out to be hyperparameters and training length rather
+than the architecture. Read it as a cautionary tale about single-number claims.
+:::
+
 :::: {.anlp-fig}
 ```{=html}
 <div class="fig-title">doc2vec: give the document its own vector, then reuse word2vec</div>
@@ -2160,7 +2282,7 @@ skip-gram of the document world.
   <text x="447" y="196" class="t-xs t-mid t-muted">document only</text>
   <text x="706" y="196" class="t-xs t-mid t-muted">words drawn from it</text>
   <text x="402" y="228" class="t-sm t-muted">No word inputs and no averaging at all —</text>
-  <text x="402" y="244" class="t-sm t-muted">cheaper, and the version that usually wins.</text>
+  <text x="402" y="244" class="t-sm t-muted">cheaper, and often the stronger of the two.</text>
   <text x="402" y="260" class="t-sm t-muted">Word order is discarded, exactly as in a bag.</text>
 </svg>
 ```
@@ -2184,6 +2306,16 @@ idf-weighted averaged glove        accuracy 0.822   dimensions     100
 doc2vec (PV-DBOW, 40 epochs)       accuracy 0.839   dimensions     100
 averaged glove + doc2vec           accuracy 0.845   dimensions     200
 ```
+
+A caution on reading those four decimal places. The test set is roughly 1,500
+documents, so the standard error of an accuracy near 0.83 is about 0.010. The
+1.9-point gap between doc2vec and averaging is therefore about two standard
+errors on a single split — suggestive, not established — and the 0.2 points
+between averaged and idf-weighted averaged GloVe is noise. The right test is
+McNemar's on the paired predictions, and the right presentation is a mean over
+several splits with a spread. The 3.3-point gap between TF-IDF and averaged
+GloVe is the one the argument actually rests on, and it is the one that
+survives.
 
 Read that table carefully, because it is not the result the marketing
 promised. **The sparse chapter-2 baseline wins.** Every dense method loses
@@ -2266,6 +2398,15 @@ keep identical company and land in the same place. The embedding encodes
 *relatedness*, and similarity and oppositeness are both kinds of
 relatedness.
 
+There is a stronger version of this warning, and it is not about static vectors
+at all. @steck2024cosine show that for a family of learned embedding models,
+cosine similarity is not merely a noisy measure of similarity — it can be
+*arbitrary*: two regularisation choices that fit the data equally well produce
+cosine values with no consistent relationship to each other. The practical
+advice that follows is to train the objective you actually want to measure, or
+calibrate cosine against a baseline drawn from your own data, rather than
+treating 0.8 as meaning the same thing across two models.
+
 The consequence is practical and severe: **never build a sentiment or
 polarity feature out of raw cosine similarity between static word vectors.**
 The benchmark community formalised this split by building two datasets
@@ -2280,7 +2421,9 @@ often at 90° as at any other angle, and mean cosine would be near zero. They
 are not.
 
 ```python
-sample = rng.choice(50000, size=4000, replace=False)
+rng = np.random.default_rng(0)
+M = g.get_normed_vectors()                       # (400000, 100), unit rows
+sample = rng.choice(50_000, size=4000, replace=False)   # top 50k only
 S = M[sample]
 vals = (S @ S.T)[np.triu_indices(4000, k=1)]
 ```
@@ -2324,6 +2467,8 @@ viewof anisoShow = Inputs.radio(["both", "raw only", "centred only"],
 ```{ojs}
 //| echo: false
 Plot.plot({
+  ariaLabel: "Distribution of cosine similarity between about eight million random GloVe word pairs, before and after mean-centring.",
+  ariaDescription: "The raw distribution is shifted to the right of zero, with most pairs scoring positive; after subtracting the mean vector the distribution is centred on zero and roughly symmetric.",
   width: 700, height: 300, marginLeft: 65, marginBottom: 45,
   x: {label: "cosine similarity", grid: true},
   y: {label: "number of pairs", grid: true},
@@ -2422,7 +2567,10 @@ proj = float(g[w] @ axis / np.linalg.norm(g[w]))
 `nurse`, `homemaker` and `receptionist` sit on the `woman` side;
 `engineer`, `programmer` and `scientist` on the `man` side. No one put this
 in. It is a faithful measurement of how these words are used in Wikipedia
-and news text from 2014 [@bolukbasi2016man]. @caliskan2017semantics showed
+and news text from 2014. The projection method is @bolukbasi2016man's, though
+they defined the gender direction from the principal component of about ten
+word pairs rather than from a single pair as here, which makes their axis less
+noisy and ours easier to check by hand. @caliskan2017semantics showed
 that embeddings reproduce the full range of documented human implicit
 associations, including racial ones, and that the effect sizes match those
 found in psychological studies.
@@ -2469,6 +2617,10 @@ engine. It is slow, and it is the only one that pays.
 
 ```python
 from gensim.test.utils import datapath
+# gensim defaults: restrict_vocab=300000, case_insensitive=True — so answers
+# are searched only among the 300,000 most frequent words. Given what we
+# measure below about the quality of the tail, that default is quietly
+# flattering: the 100,000 rarest GloVe vectors are never allowed to be wrong.
 pear, spear, oov = g.evaluate_word_pairs(datapath("wordsim353.tsv"))
 # SimLex-999 does not ship with gensim; download it and pass it the same way
 pear_s, spear_s, oov_s = g.evaluate_word_pairs("SimLex-999.tsv")
@@ -2537,8 +2689,19 @@ scored on all 353 pairs; the NumPy model is scored on the easy 88%.
 This is worth dwelling on, because it is the most common way embedding
 comparisons are quietly wrong: **a model that refuses to answer looks more
 accurate than one that answers and is sometimes mistaken.** Always report
-coverage next to the score. On analogies, where both models face the same
-question set, the real gap shows: 0.200 against 0.633.
+coverage next to the score.
+
+Including here. It would be convenient to say the analogy numbers — 0.200
+against 0.633 — escape the problem because both models face the same
+questions. They do not. `evaluate_word_analogies` defaults to
+`dummy4unknown=False`, which *skips* any question containing a word the model
+does not have, and the margin note above already showed GloVe losing 58
+questions that way. A model with an 18,677-word vocabulary loses far more of
+them, and it loses the hard ones, so the two scores do not share a
+denominator. To compare them properly, score both with `dummy4unknown=True`,
+which forces every model to answer all 19,544 questions and counts a miss as
+wrong. Until that is run, quote the two numbers with the count of questions
+actually scored beside each — which is what this book asks of everyone else.
 :::
 
 ::: {.callout-important appearance="simple"}
@@ -2575,7 +2738,7 @@ suggests:
 | | [Strengths]{.pro} | [Weaknesses]{.con} |
 |---|---|---|
 | **Averaged word vectors** | Nothing to train. Works on a document the model has never seen, instantly. Trivially explainable. | Destroys word order and negation. Frequent words dominate the average unless you weight them down. |
-| **doc2vec** | Learns what averaging cannot; scored 0.839 against averaging's 0.820 here. | A new document has no vector — inference means running gradient steps at query time. Needs many epochs to be worth it. |
+| **doc2vec** | Scored 0.839 against averaging's 0.820 here — about two standard errors on one split, so a direction rather than a verdict. | A new document has no vector — inference means running gradient steps at query time. Needs many epochs to be worth it. |
 
 : Turning a document into one vector {tbl-colwidths="[20,40,40]"}
 
@@ -2789,7 +2952,7 @@ network's mathematics identical to a logistic regression. If they push back
 with "but isn't this a neural network?", the answer is ready: yes, a shallow
 one, and the two are names for the same thing. Then deliver the key point:
 @levy2014neural proved the
-optimum is a factorization of the shifted PPMI matrix, so the "neural" method
+optimum is a factorization of the shifted PMI matrix, so the "neural" method
 and the "count" method are the same method.
 
 **Q: What do skip-gram and CBOW each predict, and when would you prefer
