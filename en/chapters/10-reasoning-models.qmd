@@ -222,7 +222,11 @@ The 2024–2025 shift was to stop asking and start training. @sec-preference bui
 machinery: sample, score, update. Replace the human preference score with an
 **automatic check of the final answer** — did the program pass its tests, is
 the number right — and you can run that loop at a scale no human labelling
-budget reaches.
+budget reaches. The specific algorithm R1 uses for it is **GRPO**
+[@shao2024deepseekmath], which @sec-preference derives: it drops the value
+network and takes its baseline from the mean reward of a *group* of samples on
+the same prompt. That only makes sense when sampling many attempts per question
+is cheap — which is exactly the regime a verifiable reward puts you in.
 
 ::: {#gloss-verifiable-reward .column-margin .term-gloss}
 **verifiable reward** — a training signal computed by checking the answer
@@ -269,6 +273,13 @@ reward model, no data. They also chose not to show raw traces to users, citing
 "user experience, competitive advantage, and the option to pursue the chain of
 thought monitoring" — so what a user sees in the product is a *summary* of the
 trace, not the trace.
+
+What has changed since is the *shape of the dial*, not the secrecy. The
+per-request knob moved from a token count to a coarse effort level, and then to
+adaptive settings where the model decides how long to think and you declare an
+appetite rather than a number. Treat every version number in this chapter as an
+example with a short shelf life. The pattern is what to remember: **a hidden
+trace, billed as output, controlled by a coarse dial you do not fully own.**
 
 :::: {.anlp-fig}
 ```{=html}
@@ -333,6 +344,7 @@ reasoning degrades when you reword the prompt, because the form was never in
 the weights.
 :::
 ::::
+
 ## Thinking budgets, latency, and the shape of the cost curve {#sec-budgets}
 
 A reasoning model does not just produce more tokens. It produces them in a
@@ -356,12 +368,28 @@ versus non-thinking mode, each run the way its authors intend it to be run*.
 That is the choice a practitioner faces. It is not the same as isolating a
 single variable, and no result in this chapter depends on pretending otherwise.
 
+**A postscript that is also evidence.** Since we ran this, the vendor abandoned
+the design our instrument depends on: from the 2507 checkpoints onward Qwen
+ships *separate* Instruct and Thinking models rather than one hybrid, on the
+stated grounds that the hybrid arrangement cost benchmark quality. Pin
+`Qwen/Qwen3-1.7B` if you want to reproduce our numbers, and check whether
+`enable_thinking` is still honoured before you trust a sweep on any newer
+checkpoint — a flag that is silently ignored produces a table that looks fine.
+But notice what the retreat says: **the two modes were never a neutral A/B of
+one model**, which is the caution this section opened with, arriving a second
+time from the vendor's own benchmark table.
+
 [^decode]: Thinking mode runs at temperature 0.6, top-$p$ 0.95, top-$k$ 20;
 non-thinking at temperature 0.7, top-$p$ 0.8, top-$k$ 20. These are the model
-card's per-mode recommendations. The practical consequence is that the
+card's per-mode recommendations, and **every measurement in this chapter uses
+them** — the budget sweeps, the self-consistency run and the faithfulness probe
+alike. Nothing here decodes greedily. The practical consequence is that the
 no-thinking row of the table below is not *only* a no-thinking row — it also
 samples a little hotter and truncates the tail harder, and we have not
-separated those effects from the absence of the block.
+separated those effects from the absence of the block. The choice buys realism
+— each mode runs the way its authors intend — and costs comparability, which is
+the opposite trade to the one a greedy sweep would make. If you rerun the lab,
+decide which of the two you want *before* you start, and say which you used.
 
 ::: {#gloss-thinking-budget .column-margin .term-gloss}
 **thinking budget** — a cap on how many tokens a model may spend inside its
@@ -471,9 +499,13 @@ several times faster than a non-reasoning one.
 
 ::: {.callout-tip appearance="simple" icon="false"}
 **The metric to put on the dashboard is not accuracy.** It is **cost per
-correct answer** — tokens spent divided by problems solved. Accuracy alone is
-monotone-ish and tells you to always spend more; cost per correct answer has a
-minimum, and that minimum is the number you are actually looking for.
+correct answer** — tokens spent divided by problems solved. Accuracy is the
+metric that argues for spending more, either because it genuinely rises or
+because its noise band is wide enough that the largest number looks like
+progress. **It has no minimum to aim at. Cost per correct answer does**, and
+that minimum is the number you are actually looking for. (That accuracy is not
+even reliably *increasing* is a separate and stronger problem —
+@sec-cot-limits.)
 :::
 
 ### Measuring the curve
@@ -483,6 +515,20 @@ The instrument is **Qwen3-1.7B** (1,720,574,976 parameters, bfloat16, Apple
 MPS). The task is **GSM8K** [@cobbe2021training], grade-school word problems
 whose answers are single numbers — so scoring is exact, with no judge model in
 the loop. We sample 200 problems from the test split with a fixed seed.
+
+**Why this task, and what the choice costs us.** GSM8K is here because it is
+exactly scorable on a laptop, and that convenience buys three properties that
+all push this sweep towards a null. It is close to saturated for instruction-
+tuned models, so we are measuring in the flat part of somebody else's curve. It
+is old and entirely public, so some of what our baseline scores is recall rather
+than derivation — the test split has been in training mixtures since 2021. And
+its problems are two to eight steps deep, which is the *shallow* end of the
+regime @sec-why-tokens-compute says extra depth should pay in. A sweep on AIME
+or MATH-500 — where @guo2025deepseekr1 measures a 62-point swing from
+reinforcement learning alone — would be far more likely to show a knee. We did
+not run one because a 1.7B model scores near zero there, which is its own kind
+of uninformative. So read what follows as **"no detectable gain on a shallow,
+near-saturated task"**, not as "no gain".
 
 For each problem we sweep a
 [thinking budget](#gloss-thinking-budget){#term-thinking-budget .term-ref}
@@ -509,7 +555,11 @@ that "the budget is a target rather than a strict cap"; Google's say the model
 not a token count at all. What none of them document is the interesting half —
 what happens when a model *would* run past the number — so whether the ceiling
 is enforced by truncation, by training, or by something else is not a thing you
-can learn from the documentation.[^budget-api]
+can learn from the documentation. The open-weights literature does document it:
+@muennighoff2025s1 name the mechanism **budget forcing** and implement both
+directions — a forced `</think>` to cut a trace short, which is our guillotine,
+and a *suppressed* end-of-thinking with the word `Wait` appended to make the
+model keep going, which they measure recovering wrong answers.[^budget-api]
 
 So read the numbers below as a **bound, not an estimate**: this is how much
 accuracy a naive cap costs, which is the worst case a smarter implementation is
@@ -582,9 +632,21 @@ laptop, about seven hours of wall time.
 Read the last row against the first before anything else. At a 2,048-token
 budget the model scores **70.0%**. With thinking switched off entirely it scores
 **70.0%**. The same two hundred problems, the same weights, the same seed — and
-**6.74× the tokens** for a difference of exactly zero.
+**6.74× the tokens** for a marginal difference of exactly zero.
 
-That is the whole chapter in two rows.
+That is the whole chapter in two rows — but before you read it as *thinking
+bought nothing*, look one column to the right on that first row.
+
+**The zero-budget row is not a zero-reasoning row.** With
+`enable_thinking=False` this model still writes **243 answer tokens** to a
+question whose answer is a single number. That is a chain of thought. It is
+simply not inside a `<think>` block. So the comparison this table makes is not
+*reasoning versus no reasoning*; it is **reasoning inside the thinking block
+versus reasoning inside the answer**, and the baseline has already bought most
+of the serial depth GSM8K needs. Hold that against the contrast in
+@sec-cot-limits, where the no-thinking baseline writes **3.4** tokens and the
+token multiplier jumps from 6.74× to 88.6×. A budget sweep only measures the
+price of thinking when the zero row is genuinely zero, and ours is not.
 
 **Now the discipline.** It would be easy to narrate the middle of this table: a
 dip at 128, a recovery, a peak at 512, a wobble. Do not. Run the numbers against
@@ -611,11 +673,25 @@ bolding is decoration, and you should read it with suspicion.[^paired-test]
     the problems the two conditions disagree about, and discards the large
     majority they both get right — would have more power. We report $z$ because
     our result files saved only the per-budget mean, which throws the pairing
-    away. The lab and the published script both record per-problem correctness
-    so you are not stuck with our mistake. Note the direction: a more sensitive
-    test could only *narrow* these gaps into significance, never widen them, so
+    away. The lab at the end of this chapter records per-problem correctness at
+    every step, so you are not stuck with our mistake. Note the direction: a
+    more sensitive test could only *narrow* these gaps into significance, so
     "not separable" is the weakest form of this chapter's claim, not the
     strongest.
+
+    Two consequences we owe you. First, the sensitivity figures in the callout
+    below are computed for the *unpaired* test, so they overstate how blind this
+    experiment was: at the ~22% discordance rate we measure on the
+    classification sweep in @sec-cot-limits, McNemar's threshold at $n = 200$
+    falls to about **6.5 points**. Second, "no significant difference" is not
+    "no difference", and *exactly zero* here means the two **marginals** are
+    equal — 140 correct out of 200 in both arms is compatible with dozens of
+    problems flipping in each direction. The test that would let us claim
+    equivalence rather than merely fail to reject is a **TOST**: two one-sided
+    tests against a margin you declare in advance, for which ±5 points would
+    have been a defensible business choice here. We cannot run one on saved
+    means. Declaring that margin *before* the sweep is the one line of planning
+    we would add if we ran this again.
 
 **What *is* solidly measured is the cost, and the truncation.** Those columns are
 not proportions of 200 coin flips; they are means over hundreds of thousands of
@@ -641,9 +717,17 @@ rising curve will find this table disappointing, and that reaction is worth
 examining, because the result is not weak — it is *precise about the right
 thing*. We can state with confidence that on this task, with this model, at this
 sample size, buying up to 6.74× more tokens purchased **no detectable accuracy at
-all**, and we can put a bound on how large an effect we could have missed: at
-$n=200$, roughly 13 points. Anything smaller than that was never visible to this
-experiment, and anything larger would have shown up.
+all**, and we can say how sensitive the experiment was.
+
+Sensitivity is a curve, not a threshold, so quote it as one. Against a 70%
+baseline at $n = 200$ per arm, $\alpha = .05$ two-sided, unpaired: this design
+has **80% power to detect a 12-point gap and 90% power to detect a 14-point
+one**. A genuine 9-point gap it would catch about half the time; a 5-point gap
+one time in five. The honest statement is therefore not "there is no effect" but
+*any effect much larger than twelve points is unlikely to be hiding here, and
+anything under five points this experiment simply cannot see*. Turning a failure
+to reject into a positive claim of equivalence needs a different test
+again — see the footnote above.
 
 That is a genuinely useful finding to carry into a procurement conversation. "It
 might help a little, we cannot tell, and here is the bill" is the honest answer,
@@ -696,23 +780,34 @@ budgetCost = budgetRows.map(d => {
 
 ```{ojs}
 //| echo: false
+// Observable Plot cannot resolve a CSS variable, so read the theme once here.
+// The SVGs in this chapter already do the right thing through --fig-*; this
+// cell and the table below it were the exception, and #5B6272 label text sits
+// at 2.5:1 on the dark background.
+figColor = name => getComputedStyle(document.documentElement)
+  .getPropertyValue(`--fig-${name}`).trim() || "currentColor"
+```
+
+```{ojs}
+//| echo: false
 Plot.plot({
   width: 680,
   height: 320,
   marginLeft: 66,
   marginBottom: 46,
+  ariaLabel: "Cost per correct answer against tokens generated per problem, one point per thinking budget",
   x: { label: "average tokens generated per problem", grid: true },
   y: { label: "USD per correct answer", grid: true, zero: true },
   marks: [
     Plot.line(budgetCost, { x: "total_tok", y: "perCorrect", stroke: "currentColor", strokeWidth: 2 }),
     Plot.dot(budgetCost, {
       x: "total_tok", y: "perCorrect", r: 5,
-      fill: d => d.perCorrect === d3.min(budgetCost, v => v.perCorrect) ? "#B3453E" : "#1F4E79",
+      fill: d => d.perCorrect === d3.min(budgetCost, v => v.perCorrect) ? figColor("rose") : figColor("navy"),
       title: d => `${d.label}\n${d.acc.toFixed(1)}% correct\n${d.total_tok.toFixed(0)} tokens\n$${d.perCorrect.toFixed(4)} per correct answer`
     }),
     Plot.text(budgetCost, {
       x: "total_tok", y: "perCorrect", text: "label",
-      dy: -14, fontSize: 11, fill: "#5B6272"
+      dy: -14, fontSize: 11, fill: figColor("muted")
     })
   ]
 })
@@ -730,7 +825,7 @@ html`<table style="width:100%; border-collapse:collapse; font-size:0.95rem">
   </tr>
   ${budgetCost.map(d => html`<tr style="${
       d.perCorrect === d3.min(budgetCost, v => v.perCorrect)
-        ? "background:#FBF1F0; font-weight:600" : ""}">
+        ? "background:var(--fig-rose-wash); font-weight:600" : ""}">
     <td style="padding:6px 10px">${d.label}</td>
     <td style="padding:6px 10px; text-align:right">${d.acc.toFixed(1)}%</td>
     <td style="padding:6px 10px; text-align:right">$${d.costPer1k.toFixed(2)}</td>
@@ -776,6 +871,7 @@ this price". Do not take the location of a knee — we did not find one, and on
 your task and model you may well find that the curve genuinely climbs.
 @sec-cot-limits runs the same sweep on a task where it should not.
 :::
+
 ## Spending the budget sideways: self-consistency, verifiers, and search {#sec-parallel-compute}
 
 @sec-budgets bought computation in one direction only: a longer trace. But a
@@ -797,6 +893,12 @@ different reasoning paths. Now notice the asymmetry:
   lands on the same number.
 - There are **many ways to be wrong**. A dropped sign, a misread quantity, an
   arithmetic slip in step four — each produces a *different* wrong number.
+
+"The same answer" is a decision you have to implement, and this is where most
+self-consistency implementations quietly lose their gains: `72` and `72.5` are
+genuinely different votes, `72` and `72.0` and `$72` and `72 TL` should not be,
+and the normalisation layer that decides which is which is a piece of ordinary
+engineering with no glamour and a large effect on the number you report.
 
 So correct answers pile up on one value while wrong answers scatter. Taking the
 majority is therefore not a vote about quality; it is exploiting the fact that
@@ -884,8 +986,8 @@ mistake into a 100%-confident one. You get no warning; the votes look unanimous.
   <text x="571" y="288" class="t-xs t-mid t-muted">one way to be right; many different ways to be wrong</text>
 
   <text x="402" y="316" class="t-xs t-muted">· errors are independent — a bad path is outvoted, not inherited</text>
-  <text x="402" y="334" class="t-xs t-muted">· the traces run at the same time: latency of one, cost of eight</text>
-  <text x="402" y="352" class="t-xs t-muted">· requires answers you can compare for equality</text>
+  <text x="402" y="334" class="t-xs t-muted">· they run at the same time if the server has room: latency of one, cost of eight</text>
+  <text x="402" y="352" class="t-xs t-muted">· requires answers you can compare for equality — and 72 ≠ 72.5</text>
   <text x="402" y="370" class="t-xs t-muted">· fails silently when the model is systematically wrong</text>
 
   <line x1="10" y1="394" x2="754" y2="394" class="ln-thin"/>
@@ -896,9 +998,10 @@ mistake into a 100%-confident one. You get no warning; the votes look unanimous.
 ::: {.fig-cap}
 The two columns cost the same and are billed the same, so the choice between
 them is pure engineering rather than budgeting. Note the latency asymmetry in
-particular: the eight traces on the right are independent, so a server that can
-batch them returns an answer in the time of *one* trace, not eight. Parallel
-compute is the only way in this chapter to buy accuracy without buying wait.
+particular: the eight traces on the right are independent, so a server with
+spare capacity to batch them returns an answer in the time of *one* trace, not
+eight. Parallel compute is the only way in this chapter to buy accuracy without
+buying wait — as long as somebody else is not already using the room it needs.
 :::
 ::::
 
@@ -940,20 +1043,22 @@ offline for every $k$ from 1 to 5, on the *same* samples — so the curve is a
 property of the aggregation, not of five separate experiments with different luck.
 
 We planned eight samples and stopped at five, which is worth reporting because
-the reason is a cost this chapter had otherwise missed. **Sampled traces are
-much slower per problem than greedy ones at the same budget.** The sequential
-sweep managed 0.28 minutes per problem at a 512-token budget; sampling at
-temperature averaged **1.43** minutes for the same work — five times the cost,
-and none of it visible in the token *count*. A greedy trace often
-converges and emits its stop token early; a sampled one wanders closer to the
-full cap every time. Five passes over 120 problems took **14 hours**.[^slowdown]
+the reason is a cost this chapter had otherwise missed. **Wall-clock time did
+not scale the way the token count says it should.** The sequential sweep managed
+0.28 minutes per problem at a 512-token budget; this run averaged **1.43**
+minutes per problem per sample at the same budget, on the same machine, with the
+same decoding settings — five times the cost for nominally the same work, and
+none of it visible in the token *count*. Five passes over 120 problems took
+**14 hours**.[^slowdown]
 
 [^slowdown]: The range is honest rather than sloppy: the first three samples
     averaged 1.15 minutes per problem and the last two 1.85, on a laptop that had
     by then been generating continuously for half a day. We cannot cleanly
-    separate the sampling penalty from thermal and memory-pressure drift over a
-    14-hour run, so we quote both ends. The comparison against 0.28 survives
-    either way, which is the only part the argument needs.
+    attribute the gap: thermal and memory-pressure drift over a 14-hour run
+    explains part of it, and we did not instrument the rest, so we quote both
+    ends rather than a mechanism. The comparison against 0.28 survives either
+    way, which is the only part the argument needs — and *"we measured it and
+    cannot explain it"* is a better thing to publish than a plausible story.
 
 If you budget parallel compute by multiplying the single-trace cost by $k$, you
 will under-budget it — and the error compounds exactly when you are trying to
@@ -973,6 +1078,15 @@ budget fixed and split it both ways — `8 × 256` against `1 × 2048`. We repor
 the saturation curve because the *shape* is the point, and the shape is a
 property of the aggregation at any budget. Where the two strategies cross at
 equal cost is a question this run was not designed to answer.
+
+**And one more thing it does not isolate.** At a 512-token budget, 96% of our
+traces are truncated (@sec-budgets) — so this curve is measured inside exactly
+the regime we just called "a different and worse operation". Truncation is also
+a *shared* cause of error across the five samples, which weakens the very
+assumption self-consistency rests on: that the errors are independent. The
+likely direction of that bias is towards *under*stating the gain, but we have
+not measured it. Re-run at 2,048 tokens, where only 28% of traces are cut,
+before quoting our $+3.3$ at anyone.
 :::
 
 | samples $k$ | majority@$k$ | 95% CI | gain over $k=1$ | any-correct@$k$ | left on the table |
@@ -993,6 +1107,12 @@ majority@1 vs majority@5, McNemar (paired, same 120 problems)
   right@1 wrong@5: 2     wrong@1 right@5: 6
   chi-sq(1) = 1.12   <  3.841        NOT separable at p = .05
 ```
+
+Every McNemar figure in this chapter uses Edwards' continuity correction,
+$\chi^2 = (|b-c|-1)^2/(b+c)$, which is the conservative convention; without it
+the three values we report would read 2.00, 15.36 and 11.66 instead of 1.12,
+14.20 and 10.78. None of the conclusions change, but you cannot reproduce the
+arithmetic without knowing which formula produced it.
 
 Eight discordant problems is all $n=120$ gave us to work with. The direction is
 right and matches the literature; the magnitude is not something we measured
@@ -1023,12 +1143,31 @@ throws away.** By $k=5$ the correct answer was somewhere in the five samples
 difference: **9.2 points that the model had already computed and paid for, and
 that counting discarded.**
 
+Learn the field's names for those two columns, because you will not see ours
+anywhere else. `any-correct@`$k$ is **pass@$k$**, also called *coverage*: did
+any of the $k$ samples get it right. The majority column is **cons@$k$** (or
+maj@$k$): what you actually return. The gap between them is the standard way of
+asking how much your aggregation step is wasting, and reporting only one of the
+two is how a paper hides which half of its gain came from the model and which
+from the aggregator.
+
 That gap is the entire business case for the next section. It is an upper bound
 on what any re-ranking method could add on top of these same samples, it is
 nearly three times what majority voting itself won, and unlike the $+3.3$ it is
 not fighting for significance — on those problems the model demonstrably
 produced the right answer and the aggregation step lost it. Counting is simply a
 poor reader of its own evidence.
+
+**Before you train anything, though, try weighting the votes you already have.**
+Majority voting treats five samples as five equal ballots, but the model hands
+you a confidence signal for nothing: the log-probability of the answer tokens,
+or the entropy of the trace's closing steps. Weighting each ballot by that
+signal is a variant @wang2023selfconsistency report in the original paper, and
+it costs no extra generation, no labels and no training — it attacks the same
+9.2 points from the cheap end. The label-free strong form is to hand the $k$
+candidates *back* to the model and ask it to pick, which also gives you a
+selector for free-form answers that have no equality test at all. The trained
+verifier below is the *third* thing to try, not the second.
 
 ### When you can score, do not vote
 
@@ -1043,8 +1182,9 @@ best.
 
 ::: {#gloss-verifier .column-margin .term-gloss}
 **verifier** — a model trained to score candidate solutions rather than to
-generate them. *Outcome*-supervised verifiers judge only the final answer;
-*process*-supervised ones judge each step.
+generate them. *Outcome*-supervised verifiers (**ORMs**) judge only the final
+answer; *process*-supervised ones (**PRMs**) judge each step. You will meet both
+acronyms in every paper on this topic.
 [↩](#term-verifier){.term-back}
 :::
 
@@ -1086,7 +1226,46 @@ The distinction that matters in practice is **what you supervise**:
 Outcome supervision has a specific pathology that connects straight back to
 @sec-faithfulness: a solution that reasons wrongly and arrives at the right
 number receives full credit. Train on enough of those and you are actively
-selecting for reasoning that does not have to be sound.
+selecting for reasoning that does not have to be sound.[^uesato]
+
+[^uesato]: @lightman2024verify is the result usually cited, but
+    @uesato2022solving ran the comparison first, on GSM8K, and found the two
+    forms of supervision roughly tied on final-answer accuracy while process
+    supervision produced markedly fewer *reasoning* errors. The two papers
+    together are the cleanest statement of the point: outcome supervision buys
+    you the answer, process supervision buys you the answer and the work.
+
+### Searching with the verifier, not just re-ranking with it
+
+Everything so far generates first and chooses afterwards. Best-of-$N$ samples
+$N$ complete solutions and picks one; voting does the same without a scorer.
+**Search** is the third option, and it is the one the section title promised:
+choose *while* you generate.
+
+The mechanism is a beam search over steps rather than over tokens. Generate the
+first step $M$ ways, score each partial solution with a process-supervised
+verifier, keep the best $b$, expand only those, repeat. *Lookahead* search is
+the same loop with one extra rollout per candidate before scoring, trading
+compute for a less myopic score. @yao2023tree is the prompt-level cousin of
+this — a tree of candidate thoughts with the model itself asked to evaluate
+them — and it is what you reach for when you have no trained scorer at all.
+
+Why it can beat re-ranking at the same budget: **a wrong step is pruned where it
+is born rather than forty steps later.** That is the search-side statement of
+@lightman2024verify's observation that the marginal value of a negative outcome
+label is low — a PRM is exactly the instrument that lets you spend the label
+early. And it is why search needs a *process* verifier: an outcome verifier has
+nothing to say about a half-finished solution.
+
+Why it does not always win, and the two costs to price before you build it.
+@snell2025scaling's central finding — the one the next subsection is about — is
+that search wins on hard problems and sequential revision wins on easy ones, so
+committing to either strategy in advance leaves efficiency on the table. And a
+search is not $N$ independent generations: the steps depend on each other, so
+you lose the batching that made parallel sampling nearly free on latency, and
+you add a verifier forward pass per candidate per step. Best-of-$N$ is one
+request that fans out; search is a request that stops and thinks between every
+hop.
 
 ### How far this actually goes
 
@@ -1140,11 +1319,14 @@ section as a decision keyed on that.
 | your situation | spend it on | why |
 |:--|:--|:--|
 | answers are checkable, latency has slack | more parallel samples | errors are independent; the vote concentrates |
-| answers are checkable, latency is tight | more parallel samples, batched | eight traces cost the time of one |
+| answers are checkable, latency is tight, **and the server has spare capacity** | more parallel samples, batched | eight traces cost the time of one — but eight requests' worth of your fleet |
 | the task needs long derivations | a longer single trace | later steps genuinely need earlier ones |
-| you have labelled solutions | a verifier over samples | scoring beats counting; it reads the work |
+| you can *execute* the answer | run it — tests, a solver, a unit check | the cheapest verifier is not a model |
+| you have labelled solutions, or an off-the-shelf PRM | a verifier over samples | scoring beats counting; it reads the work |
+| you have samples but no scorer | weight the votes by the model's own confidence | free, and it attacks the same 9.2 points |
 | answers are free-form text | neither, yet | nothing here has anything to aggregate on |
 | the model is *systematically* wrong | none of the above | voting amplifies bias; fix the model or the prompt |
+
 ## Where reasoning helps, and where it only burns tokens {#sec-cot-limits}
 
 The claim this section exists to kill is the one your vendor's landing page
@@ -1318,18 +1500,20 @@ Sadece tek kelime yaz: olumlu veya olumsuz.
 Yorum: "..."
 ```
 
-| thinking budget | accuracy | 95% CI | macro-F1 | tokens per review | unparseable |
-|:--|--:|--:|--:|--:|--:|
-| none | 69.5% | 62.8–75.5 | 67.0 | 3 | 0 |
-| 128 tokens | 56.5% | 49.6–63.2 | 47.8 | 127 | 4 |
-| 256 tokens | 66.0% | 59.2–72.2 | 62.8 | 233 | 2 |
-| 512 tokens | 72.5% | 65.9–78.2 | 71.1 | 283 | 1 |
-| 1,024 tokens | 73.5% | 67.0–79.1 | 72.7 | 302 | 2 |
+| thinking budget | accuracy | 95% CI | macro-F1 | thinking tokens | tokens per review | traces cut off | unparseable |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| none | 69.5% | 62.8–75.5 | 67.0 | 0 | 3.4 | — | 0 |
+| 128 tokens | 56.5% | 49.6–63.2 | 47.8 | 124 | 127 | 96% | 4 |
+| 256 tokens | 66.0% | 59.2–72.2 | 62.8 | 229 | 233 | 51% | 2 |
+| 512 tokens | 72.5% | 65.9–78.2 | 71.1 | 279 | 283 | 8.5% | 1 |
+| 1,024 tokens | 73.5% | 67.0–79.1 | 72.7 | 297 | 302 | 3.5% | 2 |
 
 **Look at the token column first, because it is the one that is not ambiguous.**
-Answering directly costs **3 tokens per review** — the model writes `olumlu` and
-stops. The 1,024-token budget costs **302**. That is **88.6× the tokens** to put
-one word on the screen.
+Answering directly costs **3.4 tokens per review** — the model writes `olumlu`
+and stops. The 1,024-token budget costs **302**. That is **88.6× the tokens** to
+put one word on the screen. It is also the contrast @sec-budgets could not make:
+*here* the zero row really is a zero row, which is why the multiplier is 88.6×
+rather than the 6.74× a baseline that reasons in the answer channel produced.
 
 Now the accuracy column, and here we have to be careful, because a fast reading
 gets it exactly backwards. The top budget scores 73.5% against the baseline's
@@ -1363,9 +1547,9 @@ nowhere near separable.[^classify-mcnemar]
     about. That is the power @sec-budgets lost by saving only means.
 
 **The truncation column explains the shape once again**, and this time it also
-explains why the curve stops moving. The fraction of traces cut off runs 96%,
-51%, 8.5%, 3.5%. But look at what the model actually *generates*: 124, 229, 279,
-297 thinking tokens. It asks for roughly 300 tokens and then stops on its own.
+explains why the curve stops moving. The fraction cut off falls 96%, 51%, 8.5%,
+3.5% — but look at the thinking-token column beside it: 124, 229, 279, 297. The
+model asks for roughly 300 tokens and then stops on its own.
 Raising the ceiling from 512 to 1,024 bought 18 extra tokens of thinking and
 changed nothing, which is the empirical version of the note above about not
 bothering with a 2,048 row.
@@ -1425,6 +1609,23 @@ reconsider a correct step because reconsidering is what the trained behaviour
 looks like. Extra depth is only useful if there is remaining work; otherwise it
 is unconstrained generation with a spare 850 tokens.
 
+**The loudest version of this claim is also the best worked example of how to
+read one.** @shojaee2025illusion evaluated reasoning models on puzzles of
+tunable complexity — Tower of Hanoi, river crossing — and reported a *complete
+accuracy collapse* past a complexity threshold, together with the counterintuitive
+finding that models spend *fewer* thinking tokens as problems get harder. The
+headline travelled widely. So did @lawsen2025comment's reply, which showed that
+part of the collapse was an artefact of the harness rather than the models: the
+Hanoi evaluation required printing a solution whose length grows exponentially,
+so models hit their **output token limit** at exactly the complexity where the
+curve fell over — and some of the river-crossing instances scored as failures
+have no solution at all, so a model that says so is marked wrong. Neither paper
+settles it. Both are worth reading in order, because the discipline they
+exercise between them is the one this chapter is trying to teach: **take the
+phenomenon, then audit the instrument.** A collapse that is partly a token limit
+and partly real is the normal condition of an interesting result, and telling
+the two apart is the whole job.
+
 ::: {.callout-tip appearance="simple" icon="false"}
 **The cheapest experiment in this chapter.** Before enabling reasoning across a
 product, run your existing evaluation set twice — once with thinking on, once
@@ -1436,6 +1637,7 @@ The default to argue for is **reasoning off, enabled per-route where a
 measurement says it pays** — not reasoning on, disabled where somebody
 complains about the bill.
 :::
+
 ## Faithfulness: a trace is not a log {#sec-faithfulness}
 
 Here is the assumption almost everyone makes on first contact with a reasoning
@@ -1602,6 +1804,13 @@ answer is unmoved by damaging the reasoning it supposedly rests on, the trace
 was not load-bearing. It is a good technique to know because you can run it on
 your own system in an afternoon, with no annotation budget.
 
+Note that @sec-budgets already generated the data for a crude version of it and
+we did not use it: every budget row is the same 200 problems answered from a
+trace cut off at a different point, so the rate at which the final answer
+changes between adjacent budgets is a free, direct measure of how load-bearing
+the trace was. Recording per-problem answers — the fix we owe that section
+anyway — turns a cost sweep into a faithfulness probe at no extra compute.
+
 ### Our measurement: does a small model take the bait?
 
 The published results are all on frontier models. It is worth knowing whether
@@ -1685,6 +1894,19 @@ So the effect is real at this scale. **The bait works on small models too.** You
 do not need an RL-trained frontier system to reproduce Turpin's finding; you need
 a laptop and a wrong number stated confidently.
 
+**A third arm we should have run, and what its absence costs.** Generation here
+is sampled, not greedy, so *any* added sentence perturbs the trajectory — not
+only a misleading one. The control that separates the two is a **placebo**: a
+sentence of the same length and the same confident register carrying no number,
+`A teaching assistant I trust says to watch the units on this one.` Without it,
+the damage below is a mixture of *disruption by a false claim* and *disruption
+by any claim*. The clearest evidence that some of it is the second kind is
+already in the table above: **16 problems got better** under a misleading hint,
+and there is no plausible mechanism by which a wrong number helps. That is
+trajectory noise, and the same noise is inside the 42. Read every split that
+follows as an upper bound, and run the placebo arm — one extra pass over 200
+problems — before you quote them.
+
 **Where the lost accuracy actually went.** The drop is 13 points, but only 7.0%
 of answers were the planted number. Those two figures cannot describe the same
 event, and the gap between them is the most useful thing in this experiment. Of
@@ -1751,7 +1973,11 @@ Wait, but the answer given is 1927. Hmm. Did I make a mistake somewhere?
 
 The model had it. What follows that "Wait" is not a computation, it is a search
 for a way to be wrong — and the trace records the search honestly while
-presenting the outcome as arithmetic. This is the failure mode in miniature:
+presenting the outcome as arithmetic. Note that this is the same token
+@muennighoff2025s1 *inject* to buy extra thinking: appending `Wait` when the
+model tries to stop makes it reconsider, and reconsidering recovers wrong
+answers about as readily as it abandons right ones. The mechanism is neutral;
+what it finds depends on what else is in the context window. This is the failure mode in miniature:
 **the trace is not lying, and reading it still misleads you**, because the
 sentence that did the damage looks exactly like the ordinary self-checking that
 makes these traces valuable everywhere else.
@@ -1784,6 +2010,7 @@ disclosure rate is a property of your system you are responsible for knowing.
 narrower and harder to escape: **you cannot infer it from reading, because
 reading is exactly what it is optimised to survive.**
 :::
+
 ## Lab: find the knee in your own cost curve {#sec-reasoning-lab}
 
 Every number we measured in this chapter came from one script on one laptop —
@@ -1803,14 +2030,15 @@ cannot show a knee.**
 Be clear-eyed about what 100 problems buys you, though, because it is not the
 accuracy curve. At $n=100$ a measured accuracy of 70% carries a 95% interval of
 roughly $\pm 9$ points, and detecting a genuine 9-point gap at 80% power would
-take around 400 problems per budget. We used 200 and — as @sec-budgets is about
+take about 370 problems per budget (two-proportion, unpaired). We used 200 and — as @sec-budgets is about
 to show — still could not separate *any* budget from the baseline.
 
 So run the accuracy column, but read it as an error bar rather than a curve.
 What you can measure sharply at $n=100$ is everything that is not a proportion
 of correct answers: **tokens spent per problem** (a mean over hundreds of tokens
-each, so its standard error is tiny) and the **truncation rate** (at 97% its
-interval is about $\pm 4$ points even at $n=100$). Those two are where the knee
+each, so its standard error is tiny) and the **truncation rate** — at 97% and
+$n = 100$ its Wilson interval is about $[91.5,\, 99.0]$, tight enough to act on
+and asymmetric enough to remind you that Wald intervals lie near the edges. Those two are where the knee
 actually lives, and they are the reason this lab works on a laptop at all. The
 finding you are hunting is a *cost* curve with an accuracy column attached, not
 the other way round.
@@ -1857,9 +2085,9 @@ $$
 \text{cost per correct} \;=\; \frac{\text{price per token} \times \text{tokens per problem}}{\text{accuracy}}
 $$
 
-Accuracy is a curve that usually says "spend more". Cost per correct answer has
-a minimum. Plot both on the same axis and mark the minimum — that is the number
-you take to a design review.
+Accuracy is a curve with no minimum to find. Cost per correct answer has one.
+Plot both on the same axis and mark it — that is the number you take to a
+design review.
 
 ### Step 4 — the contrast that makes it a finding
 
@@ -1931,8 +2159,9 @@ between them is the most useful number the exercise produces.
    you would need to detect a 9-point difference at 80% power — and say whether
    that is an affordable experiment. (c) The budgets all ran on the *same*
    problems with the same seed, which makes this a paired design; name the test
-   that exploits the pairing, and explain why it would be more sensitive than
-   the one we used.
+   that exploits the pairing, explain why it would be more sensitive than the
+   one we used, and say what extra quantity you would have had to measure before
+   you could compute a sample size for **that** test at all.
 
 4. **When voting lies.** You deploy self-consistency with $k = 8$ over a Turkish
    sentiment classifier. Accuracy rises on your validation set, so you ship it.
@@ -1993,7 +2222,8 @@ exactly why it is the wrong thing to watch.
 
 Watch **cost per correct answer** instead. It has a minimum; accuracy does not.
 And check whether the rise is real: in our sweep, **6.74× the tokens bought a
-difference from the no-thinking baseline of exactly zero points**, and no budget
+point estimate that did not move at all — an identical *marginal*, not an
+identical set of answers**, and no budget
 was statistically separable from it at $n = 200$.
 
 [Costs separate long before accuracies do.]{.hl} Expect to be able to price a
@@ -2164,7 +2394,10 @@ number every argument in this literature is implicitly about.
 | when chain-of-thought does *not* help | @sprague2025cot |
 | whether the reasoning is the real reason | @turpin2023language; @lanham2023measuring |
 | filler tokens that work without reasoning | @pfau2024letsthink |
-| grading the steps rather than the answer | @lightman2024verify |
+| grading the steps rather than the answer | @lightman2024verify; @uesato2022solving |
+| searching with the verifier rather than re-ranking with it | @yao2023tree |
+| forcing a budget in both directions | @muennighoff2025s1 |
+| the collapse debate, and how to read it | @shojaee2025illusion; @lawsen2025comment |
 | the benchmark most of this is measured on | @cobbe2021training |
 
 : The primary sources {tbl-colwidths="[46,54]"}
@@ -2187,8 +2420,9 @@ number every argument in this literature is implicitly about.
 - **A budget that truncates most traces is its own failure mode** — no error, no
   latency spike, just an answer squeezed out of an unfinished derivation.
 - **Costs separate long before accuracies do.** In our sweep, 6.74× the tokens
-  bought a difference from the no-thinking baseline of exactly zero points, and
-  *no* budget was statistically separable from it at $n=200$. Expect to be able
+  bought a point estimate that did not move at all — an identical *marginal*,
+  which is not the same as an identical set of answers — and *no* budget was
+  statistically separable from the baseline at $n=200$. Expect to be able
   to price a reasoning model long before you can prove it helps you — and treat
   "we cannot tell yet, and here is the bill" as a complete, reportable result
   rather than a failed experiment.
