@@ -50,7 +50,9 @@ down before anyone is invested.
 ## Six decisions, and what was rejected {#sec-capstone-decisions}
 
 An architecture decision record is worth writing only if it records the
-alternative honestly. The compressed form:
+alternative honestly. The compressed form — and note that one row below is not
+a technical decision at all, which is the point of putting it in the same
+table:
 
 | decision | chosen | rejected, and why |
 |:--|:--|:--|
@@ -60,6 +62,7 @@ alternative honestly. The compressed form:
 | **PII** | detect and tokenise reversibly at the boundary | mask destructively — safe and it breaks order lookup (@sec-guardrails) |
 | **Refunds** | agent proposes, service enforces the ceiling, human approves above it | agent calls the refund API with a limit in the prompt — a limit in a prompt is a request (@sec-agent-security) |
 | **Eval** | golden set in the repo, gate on every prompt change | manual spot-checks before release — @sec-production-eval measured what slips through |
+| **Where the provider sits** | a Türkiye-region deployment where one exists, otherwise a standard contract under KVKK Article 9 | "the gateway abstracts it away" — the gateway centralises the choice, it does not make it a technical one (@sec-governance-kvkk) |
 
 : Six decisions; the rejected column is the one to read
 {tbl-colwidths="[16,34,50]"}
@@ -112,26 +115,39 @@ you already have. Every figure below is quoted from an earlier chapter, and the
 arithmetic is the only new thing.
 
 **Latency.** @sec-serving's split — prefill around 2,000 tokens per second
-against decode at 190 — means the answer's length barely matters and the
-prompt's length is almost everything. With retrieval keeping context near a
-thousand tokens rather than seven thousand, time-to-first-token is the term to
-optimise, and prompt caching is the first lever: warm prefill measured **flat at
-12–16 ms regardless of prompt length**, a 9.0× improvement on the whole request
-at 4,247 tokens. That is free of quality risk, which is why it goes first.
+against decode at 190 — means a token you *write* costs about eleven times a
+token you *read*. Which half dominates is therefore a question about your own
+ratio rather than a universal fact, and the ratio changes as soon as you make
+the retrieval decision. At 7,427 in and 64 out, the request @sec-serving
+reports as 91% prefill, decode is 8%. At the shape planned for below — a
+thousand tokens of context and a two-sentence Turkish answer, call it 150
+tokens — prefill is 0.50 s and decode is 0.79 s, so **decode is the larger
+term**, and time-to-first-token stops being the thing to optimise. That is a
+consequence of the design, not an argument against it.
 
-**Token volume.** @sec-serving's own summarisation measurement — **890 prompt
-tokens against 53 generated** — is the shape to plan for. [Asking for shorter
-answers saves almost nothing; sending less saves almost everything.]{.hl} At
+Prompt caching still goes first, because it is free of quality risk: warm
+prefill measured **flat at 12–16 ms regardless of prompt length**. But scale
+the multiplier to your own prefill share rather than carrying the headline. The
+9.0× @sec-serving reports is at 4,247 tokens; at a thousand tokens of context
+and a 150-token answer the same lever is about **1.6×** on the whole request.
+Quote the mechanism, recompute the number.
+
+**Token volume.** @sec-summarization's measurement — **890 prompt tokens
+against 53 generated** — is one shape to plan for, and worth converting before
+using: at eleven-to-one, those 53 output tokens are worth about 583 input ones
+against a prompt of 890, so [sending less saves more than writing less, but
+"almost nothing" overstates it]{.hl}. At
 40,000 conversations a month with a few model calls each, the boilerplate in
 your system prompt is a larger line item than the model you chose.
 
 **Telemetry.** @sec-observability measured **4.8 spans and 3,167 bytes per run**
 on 301-token prompts, of which **48.3% was prompt and completion text** — and at
-890-token prompts the same structure is **10,180 bytes with 83.9% content**. At
-40,000 runs a month that is roughly 190,000 spans and, with content recorded,
-about 0.4 GB. Small. At a million runs it is 10 GB, and the decision to record
-content is a six-fold difference. Decide it deliberately, and sample content
-while keeping it on every error.
+890-token prompts the same structure is **6,163 bytes with 73.4% content**. At
+40,000 runs a month that is roughly 190,000 spans and, with content recorded at
+that prompt size, about **0.25 GB**; on the measured 301-token prompts it is
+0.13 GB. Small either way. At a million runs it is 6 GB, and the decision to
+record content is a near-fourfold difference. Decide it deliberately, and sample
+content while keeping it on every error.
 
 **Evaluation.** @sec-llm-eval's sizing says 100 items resolves a 13.4-point
 difference and 1,000 resolves 4.8 — so a hundred-item golden set finds broken,
@@ -152,8 +168,10 @@ architecture separates the agent that reads tickets from the one that can move
 money. That is not a mitigation with a residual rate; it is a pair that has been
 broken.
 
-**Routing.** @sec-gateway measured a difficulty-router at **AUROC 0.667** — real
-signal, and not enough to route on blindly. The version of routing that survives
+**Routing.** @sec-classification measured an LLM's verbalised confidence as a
+detector of its own errors at **AUROC 0.667**, against 0.843 for a fine-tuned
+classifier's own probability on the same task — real signal, and not enough to
+route on blindly. The version of routing that survives
 is the cascade of @sec-governance: answer with the small model, escalate on a
 validator failure rather than on a predicted difficulty.
 
@@ -216,6 +234,17 @@ invisible until someone measures the rejection rate.
 **Someone will propose giving the ticket-reading agent the refund tool** to
 remove a hop. The answer is in @sec-agent-security, and it needs to be a
 measurement — your own attack success rate — rather than an argument.
+
+**Choosing a provider is a legal decision before it is a latency one.** This is
+a Turkish company handling TCKN and IBAN, so a US-hosted provider is a transfer
+abroad under KVKK Article 9, and @sec-governance-kvkk has the consequence: the
+Board has issued no adequacy decision, so the route is the published standard
+contract with its five-business-day notification. If the company is a bank, a
+payment institution or an insurer, the sectoral rule cuts above that and the
+question may not be open at all. One gateway in front of all providers helps
+here — it is the single place where that choice is recorded and enforced — but
+it does not make the choice, and a design review that skips this is not a design
+review.
 
 **The model will be upgraded underneath you.** @sec-gateway's alias problem: if
 you record only the requested model, you find out weeks later from a quality
@@ -386,9 +415,10 @@ the assembled budget has a hole is where the first experiment goes.
 Not from a benchmark table. Make it a measurement on your own suite, and prefer
 a cascade to a routing decision: answer with the small model and escalate on a
 runtime validity check, because a validator is a signal you actually have at
-request time, where predicted difficulty is a guess — @sec-gateway measured a
-difficulty router at AUROC 0.667, which is real signal and not enough to route
-on blindly.
+request time, where predicted difficulty is a guess — @sec-classification
+measured verbalised confidence as a detector of a model's own errors at AUROC
+0.667, against 0.843 for a real probability, which is real signal and not enough
+to route on blindly.
 
 ### Testing whether you have run a platform
 
