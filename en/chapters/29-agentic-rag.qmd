@@ -71,8 +71,16 @@ document only exists in the first]{.hl}.
 
 This is not a weak retriever. @sec-retrieval's measurements do not apply,
 because the issue is not ranking. It is that one query cannot express the
-information need. That is a **structural** ceiling, and it is the entire
-justification for putting a loop around retrieval.
+information need. That is a **structural** ceiling on *one query*.
+
+Note the size of what that rules out, because it is smaller than it looks. It
+rules out a single retrieval, not a fixed pipeline. You can write a fixed
+pipeline that breaks this example with no model judgement in it at all:
+retrieve, extract the named entities from what came back, retrieve again with
+those entities, generate. Two retrievals, two model calls, deterministic cost,
+guaranteed termination, no loop. That is *query decomposition* by bridge
+entity, and it is a real third option the choice below does not offer — so
+read what follows as "one query is not enough", not as "you need a loop".
 
 ### Measured
 
@@ -89,6 +97,12 @@ qwen3.5:9b, 30 questions per cell, 660 documents, top-3 retrieval
     1-hop   agentic     100.0%   [88.6, 100.0]     1.00      179
     2-hop   classic       0.0%   [ 0.0,  11.4]     1.00      158
     2-hop   agentic      30.0%   [16.7,  47.9]     3.43    1,043
+
+ A *round* is one retrieve-then-judge cycle; the answer-generating call is not
+ a round, and the budget is three. The 3.43 therefore does not fit inside its
+ own cap: either the cap was on model calls rather than retrieval rounds, or
+ the counter is off. It is flagged rather than quietly rounded down, and it is
+ the reason nothing below reads an interpretation off that column.
 ```
 
 :::: {.anlp-fig}
@@ -169,7 +183,17 @@ Three readings, and the third is the one worth arguing about.
 of the thirty two-hop questions. Not a low score — a structural zero, from a
 retriever that scored 100% on the single-hop versions of the same facts. When
 people say a RAG system "cannot handle multi-hop questions", this is the shape
-of the failure, and no reranker or embedding upgrade addresses it.
+of the failure.
+
+One check this experiment owes you and does not have: **the rank of the second
+gold document**. A zero has two possible causes with different consequences. If
+document 2 never entered the top 3, the failure is retrieval and no reranker
+addresses it — the reading above. If it sometimes did, and the model still
+could not join it to document 1, the failure is aggregation, a reranker is
+irrelevant for a different reason, and the honest sentence is a different one.
+Exercise 2 asks the reader to run exactly this check; the chapter should run it
+too. Until it does, read "structural" as the likely explanation rather than the
+established one.
 
 **On single-hop questions the loop buys nothing and costs 1.15×.** Identical
 accuracy, identical rounds, 15% more tokens for the sufficiency check that
@@ -180,9 +204,8 @@ architecture is pure overhead.
 **Breaking the ceiling is not the same as clearing it.** Agentic retrieval went
 from 0% to **30%**, which is an infinite relative improvement from a structural
 zero and a system that is still wrong seven times in ten. It cost **6.6× the
-tokens** and 3.43 rounds — meaning it usually spent most of its budget. Per
-*correct* answer, that is about 3,475 tokens against a classic pipeline that
-produces none at any price.
+tokens** on that cell. Per *correct* answer that is about 3,475 tokens, against
+a classic pipeline that produces none at any price.
 
 [Agentic RAG removed the ceiling. It did not deliver a working system.]{.hl}
 The loop can now express the second query; the model frequently fails to
@@ -206,9 +229,21 @@ The honest recommendation is a router rather than an architecture:
   on latency, and on debuggability.
 - **Detect the questions that need iteration** — ones whose answer depends on a
   key the question does not contain — and route only those into the loop.
-- **Measure your own mix first.** If two-hop questions are 5% of your traffic,
-  a 6.6× cost multiplier on all of it to fix part of that 5% is a bad trade,
-  and the arithmetic is easy enough to do before building anything.
+- **Measure your own mix, and blend the numbers before believing them.** The
+  6.6× is the two-hop *cell*, not your bill. At 5% two-hop traffic an
+  all-agentic architecture costs 0.95 × 179 + 0.05 × 1,043 ≈ **222 tokens** per
+  request against the classic pipeline's ≈ 155 — a blended **1.43×**, for +1.5
+  accuracy points overall. At 20% two-hop it is ≈ 352 tokens, a blended 2.26×,
+  for +6 points. The per-cell multiplier is the number that sells the
+  architecture; the blended one is the number you pay.
+- **Then check whether you need the router at all.** In this measurement the
+  loop routed itself: on single-hop questions it averaged exactly **1.00
+  rounds**, never once issuing a second query it did not need. That caps a
+  *perfect* router's saving at the 24-token sufficiency check — about 10% of
+  the blended bill at a 5% mix, for identical accuracy. So the case for routing
+  here is not cost. It is latency, debuggability and tail variance. And an
+  imperfect classifier is strictly worse than none, because a two-hop question
+  misrouted into the pipeline scores zero rather than 30%.
 
 ## Planning, and when to skip it {#sec-agentic-rag-planning}
 
@@ -303,7 +338,7 @@ adopted on the strength of its best case.
 |:--|:--|
 | **Accuracy, split by question type** | the aggregate hides everything. Here it would have averaged a 100% single-hop tie with a 0%-versus-30% multi-hop gap into a number describing neither |
 | **Tokens per *correct* answer** | not tokens per request. A system that costs 6.6× and answers 30% of the time costs about 3,475 tokens per right answer; the per-request figure flatters it |
-| **Rounds, and how often the cap was hit** | 3.43 of a 3-round budget means the loop was usually exhausting itself, which is a different system from one that stops when satisfied |
+| **Rounds, and how often the cap was hit** | report both, and define a round. A mean tells you the typical spend; the cap-hit rate tells you whether the loop stops when satisfied or runs out of budget, and those are different systems. The mean alone cannot distinguish them — as the unresolved 3.43 above demonstrates |
 | **Variance** | a fixed pipeline costs the same every time. A loop does not, and a p99 that is ten times the median is an operational fact your budget has to survive |
 
 : Four columns, and the reason for each {tbl-colwidths="[34,66]"}
@@ -338,8 +373,8 @@ ranking problem, so no reranker or embedding upgrade touches it.
 
 It removes the ceiling without clearing it. From **0% to 30%** — infinite
 relative improvement from a structural zero, and still wrong seven times in
-ten — at **6.6× the tokens** and 3.43 rounds of a 3-round budget. The loop can
-now express the second query; the model often fails to formulate it or to use
+ten — at **6.6× the tokens** on that cell, which is a blended 1.43× if two-hop
+questions are 5% of your traffic. The loop can now express the second query; the model often fails to formulate it or to use
 what came back, which is @sec-agent-anatomy's aggregation failure again.
 :::
 
@@ -550,9 +585,10 @@ The proportion decides which half of this literature is relevant to you.
   two-hop versions of the same facts, because the term needed for the second
   document exists only in the first. No reranker fixes this.
 - **Agentic retrieval removes the ceiling without clearing it.** 0% to **30%**,
-  at **6.6× the tokens** and 3.43 rounds of a three-round budget — about 3,475
-  tokens per correct answer, against a pipeline that produces none at any
-  price.
+  at **6.6× the tokens** *on that cell* — about 3,475 tokens per correct
+  answer, against a pipeline that produces none at any price. Blend it before
+  you quote it: at a 5% two-hop mix the whole architecture costs 1.43×, not
+  6.6×.
 - **On single-hop questions the loop costs 1.15× and buys nothing.** That is
   the case that dominates real traffic, which makes routing — not replacing —
   the conclusion.

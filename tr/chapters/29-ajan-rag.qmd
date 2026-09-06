@@ -73,8 +73,17 @@ hiçbir miktarda ayar bunu değiştirmez: [ikinci belgeyi getirmek için gereken
 terim yalnızca birincinin içinde vardır]{.hl}.
 
 Bu zayıf bir erişimci değil. @sec-erisim'in ölçümleri geçerli değil, çünkü mesele
-sıralama değil. Tek bir sorgunun bilgi ihtiyacını ifade edememesi. Bu **yapısal**
-bir tavandır ve erişimin etrafına bir döngü koymanın bütün gerekçesidir.
+sıralama değil. Tek bir sorgunun bilgi ihtiyacını ifade edememesi. Bu, *tek bir
+sorgu* üzerinde **yapısal** bir tavandır.
+
+Bunun ne kadarını elediğine dikkat edin, çünkü göründüğünden azını eliyor. Tek
+bir erişimi eliyor, sabit bir hattı değil. Bu örneği içinde hiç model yargısı
+olmadan kıran sabit bir hat yazabilirsiniz: eriş, gelenin içinden adlandırılmış
+varlıkları çıkar, o varlıklarla yeniden eriş, üret. İki erişim, iki model
+çağrısı, belirlenimli maliyet, garanti sonlanma, döngü yok. Bu, köprü varlık
+üzerinden *sorgu ayrıştırma* ve aşağıdaki seçimin sunmadığı gerçek bir üçüncü
+seçenek — dolayısıyla devamını "bir sorgu yetmez" diye okuyun, "bir döngüye
+ihtiyacınız var" diye değil.
 
 ### Ölçüldü
 
@@ -91,6 +100,12 @@ qwen3.5:9b, 30 questions per cell, 660 documents, top-3 retrieval
     1-hop   agentic     100.0%   [88.6, 100.0]     1.00      179
     2-hop   classic       0.0%   [ 0.0,  11.4]     1.00      158
     2-hop   agentic      30.0%   [16.7,  47.9]     3.43    1,043
+
+ A *round* is one retrieve-then-judge cycle; the answer-generating call is not
+ a round, and the budget is three. The 3.43 therefore does not fit inside its
+ own cap: either the cap was on model calls rather than retrieval rounds, or
+ the counter is off. It is flagged rather than quietly rounded down, and it is
+ the reason nothing below reads an interpretation off that column.
 ```
 
 :::: {.anlp-fig}
@@ -172,7 +187,16 @@ yetmiyor.
 **hiçbirini** cevaplamadı. Düşük bir puan değil — aynı olguların tek adımlı
 sürümlerinde %100 alan bir erişimciden gelen yapısal bir sıfır. İnsanlar bir RAG
 sisteminin "çok adımlı soruları kaldıramadığını" söylediğinde kusurun biçimi
-budur ve hiçbir yeniden sıralayıcı ya da gömme yükseltmesi buna değmez.
+budur.
+
+Bu deneyin size borçlu olduğu ve elinde olmayan bir kontrol var: **ikinci altın
+belgenin sırası**. Bir sıfırın, sonuçları farklı iki olası nedeni var. Belge 2
+top-3'e hiç girmediyse kusur erişimdir ve hiçbir yeniden sıralayıcı onu çözmez —
+yukarıdaki okuma. Bazen girdiyse ve model onu yine de belge 1'le
+birleştiremediyse kusur toplamadır, yeniden sıralayıcı başka bir nedenle
+ilgisizdir ve dürüst cümle başka bir cümledir. Alıştırma 2 okuyucudan tam olarak
+bu kontrolü istiyor; bölüm de onu koşmalı. Koşana kadar "yapısal"ı kanıtlanmış
+değil olası açıklama olarak okuyun.
 
 **Tek adımlı sorularda döngü hiçbir şey kazandırmıyor ve 1,15 kata mal
 oluyor.** Birebir aynı doğruluk, birebir aynı tur sayısı, her seferinde yeterli
@@ -182,10 +206,9 @@ mimarinin saf ek yük olduğu durum.
 
 **Tavanı kırmak onu aşmakla aynı şey değildir.** Ajan tabanlı erişim %0'dan
 **%30**'a gitti; ki bu yapısal bir sıfırdan sonsuz bir göreli iyileşmedir ve
-hâlâ onda yedi yanlış olan bir sistemdir. **6,6 kat token**'a ve 3,43 tura mal
-oldu — yani genellikle bütçesinin çoğunu harcadı. *Doğru* cevap başına bu,
-hiçbir fiyata cevap üretmeyen klasik bir hatta karşı yaklaşık 3.475 token
-demektir.
+hâlâ onda yedi yanlış olan bir sistemdir. O hücrede **6,6 kat token**'a mal
+oldu. *Doğru* cevap başına bu, hiçbir fiyata cevap üretmeyen klasik bir hatta
+karşı yaklaşık 3.475 token demektir.
 
 [Ajan tabanlı RAG tavanı kaldırdı. Çalışan bir sistem teslim etmedi.]{.hl}
 Döngü artık ikinci sorguyu ifade edebiliyor; model sıklıkla onu kuramıyor ya da
@@ -208,9 +231,22 @@ Dürüst öneri bir mimari değil bir yönlendirici:
   gecikmede ve hata ayıklanabilirlikte kazanıyor.
 - **Yineleme gerektiren soruları saptayın** — cevabı, sorunun içermediği bir
   anahtara bağlı olanları — ve yalnızca onları döngüye yönlendirin.
-- **Önce kendi karışımınızı ölçün.** İki adımlı sorular trafiğinizin %5'iyse, o
-  %5'in bir kısmını düzeltmek için tamamına 6,6 katlık bir maliyet çarpanı kötü
-  bir takastır ve aritmetiği bir şey kurmadan önce yapmak yeterince kolaydır.
+- **Kendi karışımınızı ölçün ve sayılara inanmadan önce harmanlayın.** 6,6, iki
+  adımlı *hücrenin* çarpanı; faturanızın değil. Trafiğin %5'i iki adımlıysa
+  tümüyle ajan tabanlı bir mimari istek başına
+  0,95 × 179 + 0,05 × 1.043 ≈ **222 token**'a mal olur; klasik hattın ≈ 155'ine
+  karşı — harmanlanmış **1,43 kat**, genel olarak +1,5 doğruluk puanı için.
+  %20 iki adımlıda ≈ 352 token, harmanlanmış 2,26 kat, +6 puan için. Hücre
+  çarpanı mimariyi satan sayıdır; harmanlanmış olan ödediğiniz sayıdır.
+- **Sonra yönlendiriciye ihtiyacınız olup olmadığını kontrol edin.** Bu ölçümde
+  döngü kendi kendini yönlendirdi: tek adımlı sorularda ortalaması tam olarak
+  **1,00 tur**du, ihtiyaç duymadığı ikinci bir sorguyu bir kez bile açmadı. Bu,
+  *kusursuz* bir yönlendiricinin kazancını 24 token'lık yeterlilik kontrolüyle
+  sınırlıyor — %5'lik bir karışımda harmanlanmış faturanın yaklaşık %10'u, üstelik
+  birebir aynı doğruluk için. Yani burada yönlendirmenin gerekçesi maliyet değil.
+  Gecikme, hata ayıklanabilirlik ve kuyruk varyansı. Ve kusurlu bir sınıflandırıcı
+  hiç olmamasından kesinlikle kötüdür: hatta yanlış yönlendirilen iki adımlı bir
+  soru %30 değil sıfır alır.
 
 ## Planlama ve ne zaman atlanacağı {#sec-ajan-rag-planlama}
 
@@ -303,7 +339,7 @@ en iyi durumunun gücüyle benimsenme biçimidir.
 |:--|:--|
 | **Soru türüne göre ayrılmış doğruluk** | toplam her şeyi gizler. Burada %100'lük tek adımlı beraberliği %0'a karşı %30'luk çok adımlı farkla ortalayıp hiçbirini tarif etmeyen bir sayı üretirdi |
 | ***Doğru* cevap başına token** | istek başına değil. 6,6 kata mal olan ve zamanın %30'unda cevaplayan bir sistem, doğru cevap başına yaklaşık 3.475 token'a mal olur; istek başına rakam onu olduğundan iyi gösterir |
-| **Tur sayısı ve sınıra ne sıklıkla çarpıldığı** | 3 turluk bir bütçenin 3,43'ü, döngünün genellikle kendini tükettiği anlamına gelir; ki bu, tatmin olduğunda duran bir sistemden farklı bir sistemdir |
+| **Tur sayısı ve sınıra ne sıklıkla çarpıldığı** | ikisini de raporlayın ve turu tanımlayın. Ortalama tipik harcamayı söyler; sınıra çarpma oranı, döngünün tatmin olduğunda mı durduğunu yoksa bütçesini mi tükettiğini söyler ve bunlar farklı sistemlerdir. Ortalama tek başına ikisini ayıramaz — yukarıdaki çözülmemiş 3,43'ün gösterdiği gibi |
 | **Varyans** | sabit bir hat her seferinde aynıya mal olur. Bir döngü olmaz ve ortancasının on katı bir p99, bütçenizin dayanması gereken operasyonel bir olgudur |
 
 : Dört sütun ve her birinin nedeni {tbl-colwidths="[34,66]"}
@@ -336,8 +372,9 @@ sıralayıcı ya da gömme yükseltmesi ona dokunmaz.
 ## 2. Ajan tabanlı RAG bunu düzeltiyor mu?
 
 Tavanı aşmadan kaldırıyor. **%0'dan %30'a** — yapısal bir sıfırdan sonsuz göreli
-iyileşme ve hâlâ onda yedi yanlış — **6,6 kat token**'da ve üç turluk bir
-bütçenin 3,43 turunda. Döngü artık ikinci sorguyu ifade edebiliyor; model
+iyileşme ve hâlâ onda yedi yanlış — o hücrede **6,6 kat token**'da; ki iki
+adımlı sorular trafiğinizin %5'iyse bu harmanlanmış 1,43 kat eder. Döngü artık
+ikinci sorguyu ifade edebiliyor; model
 sıklıkla onu kuramıyor ya da geleni kullanamıyor, ki bu @sec-ajan-anatomisi'nin
 toplama kusurunun tekrarı.
 :::
@@ -549,9 +586,10 @@ verir.
   sıfır.** Tek adımlı sorularda **%100** alan bir erişimci, aynı olguların iki
   adımlı sürümlerinde **%0** aldı; çünkü ikinci belge için gereken terim yalnızca
   birincinin içinde var. Hiçbir yeniden sıralayıcı bunu düzeltmez.
-- **Ajan tabanlı erişim tavanı aşmadan kaldırıyor.** %0'dan **%30**'a, **6,6 kat
-  token**'da ve üç turluk bir bütçenin 3,43 turunda — doğru cevap başına yaklaşık
-  3.475 token; hiçbir fiyata cevap üretmeyen bir hatta karşı.
+- **Ajan tabanlı erişim tavanı aşmadan kaldırıyor.** %0'dan **%30**'a, *o
+  hücrede* **6,6 kat token**'da — doğru cevap başına yaklaşık 3.475 token;
+  hiçbir fiyata cevap üretmeyen bir hatta karşı. Alıntılamadan önce harmanlayın:
+  %5'lik bir iki adımlı karışımda bütün mimari 6,6 değil 1,43 kata mal oluyor.
 - **Tek adımlı sorularda döngü 1,15 kata mal olur ve hiçbir şey kazandırmaz.**
   Gerçek trafiğe hâkim olan durum budur ve sonucu değiştirmek değil yönlendirmek
   yapar.
