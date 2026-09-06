@@ -45,19 +45,32 @@ def agent(question, tools, model, max_steps=10):
         if not reply.tool_calls:                  # 3. the exit
             return reply.content
 
-        messages.append(reply)                    # 4. remember the decision
+        messages.append(reply.model_dump())       # 4. remember the decision
         for call in reply.tool_calls:             # 5. the runtime acts
             try:
-                result = tools[call.name](**call.arguments)
+                args = json.loads(call.arguments) # a JSON string, not a dict
+                result = tools[call.name](**args)
             except Exception as e:
                 result = f"ERROR: {e}"            # 6. failure is an observation
-            messages.append({"role": "tool", "content": str(result)})
+            messages.append({"role": "tool",
+                             "tool_call_id": call.id,
+                             "content": str(result)})
 
-    raise StepLimitExceeded(question)             # 7. it did not finish
+    raise StepLimitExceeded(question, messages)   # 7. it did not finish
 ```
 
-That is an agent. Fourteen lines, and every serious framework you will meet is
-this loop plus opinions about lines 1, 4 and 7.
+That is an agent. Fourteen statements — count them — and every serious
+framework you will meet is this loop plus opinions about statements 1, 4
+and 7.
+
+Three details in there are not decoration. `call.arguments` arrives as a JSON
+*string* on every OpenAI-compatible endpoint, so `**call.arguments` raises
+`TypeError` and — because it does so inside the `try` — hands the model an
+error message blaming its own call for the runtime's bug. The `tool_call_id`
+is what makes parallel tool calling expressible at all: five results come back
+in one turn and only the id says which answers which. And the exception
+carries `messages`, because whatever you decide to do when the cap fires, you
+can only do it if the transcript survives the raise.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -132,19 +145,27 @@ only one.
 **`messages` is the state, and it only grows.** There is no other memory. Every
 observation is appended, so the context gets longer with every step — which
 makes cost grow superlinearly in the number of steps, and eventually collides
-with the window. @sec-context-engineering is that problem taken seriously.
+with the window. The fourteen statements do not handle that collision: when
+the window overflows, `model.chat` raises *outside* the `try`, and the run
+dies with the transcript unsaved. A production version wraps that call too,
+persists `messages` before re-raising, and hands the overflow to a compaction
+step — which is where @sec-context-engineering starts.
 
-**Line 3 is the termination condition, and it is a *model* decision.** The loop
+**Statement 3 is the termination condition, and it is a *model* decision.** The loop
 ends when the model chooses not to call a tool. Nothing checks whether the task
 is complete. That is the single most surprising property of this architecture
 for someone arriving from ordinary software: the stopping rule is a
 prediction.
 
-**Line 6 turns an exception into text.** A failed tool call is not a crash; it
-is an observation the model gets to react to. Whether it reacts *well* is
-@sec-tool-design's subject, and it is largely decided by what that string says.
+**Statement 6 turns an exception into text.** A failed tool call is not a
+crash; it is an observation the model gets to react to. Whether it reacts
+*well* is @sec-tool-design's subject, and it is largely decided by what that
+string says. Note also what else that `except` swallows: a `KeyError` from
+`tools[call.name]` is *your* bug, and the model receives it as though the tool
+had failed. A runtime worth trusting distinguishes tool failures from harness
+failures before it writes the observation.
 
-**Line 7 is the honest part.** A
+**Statement 7 is the honest part.** A
 [**step cap**](#gloss-step-cap){#term-step-cap .term-ref} is not a performance
 tuning knob,
 
@@ -158,16 +179,42 @@ it fires — retry, escalate, return partial work — is a product decision that
 deserves to be made deliberately rather than by whatever the framework defaults
 to.
 
+### Three ways to make the exit a condition again
+
+The exit does not have to stay a prediction. Three cheap moves put a checkable
+condition back into the loop, in increasing order of intrusiveness.
+
+**Make finishing a tool.** A `submit_answer(answer)` in the schema turns "I am
+done" into a call the runtime can recognise, so the loop terminates on an
+observable event rather than on an absence. It also fixes the text protocol's
+problem in @sec-agent-anatomy-decay directly: `CEVAP` stops competing with
+`ARA` once both are the same *kind* of thing.
+
+**Detect repetition.** If a call is byte-identical to one already in the
+transcript, the loop has stopped making progress. Return an observation that
+says so rather than the same result again — the chapter's own worst failure
+below is four identical calls in a row, and one line of bookkeeping catches it.
+
+**Bound three budgets, not one.** Steps, wall-clock seconds and tokens fail
+differently: a run can stay under ten steps and still spend a minute or fifty
+thousand tokens. Each needs a defined behaviour when it fires, and the
+fourteen statements above bound only the first.
+
 **There is no plan.** The model chooses one action, sees one result, and
 chooses again. Anything that looks like planning is either the model writing a
 plan into its own context and then following it, or your code imposing
-structure from outside. Both are legitimate; neither is in the loop.
+structure from outside. Both are legitimate; neither is in the loop. The
+distinction is worth keeping: writing a plan into the transcript is
+*in-context* planning, and it works about as well as the model's coherence
+over the run. Imposing a decomposition your code then executes is not planning
+at all — it is a pipeline, and @sec-agent-anatomy-decide argues it is usually
+the better trade.
 
 ::: {.column-margin}
 It is worth writing this loop yourself once, in whatever language you use,
 against two real tools. It takes an afternoon and it permanently changes how
 you read framework documentation — every abstraction you meet afterwards is
-recognisably a wrapper around these fourteen lines, and you can ask what it
+recognisably a wrapper around these fourteen statements, and you can ask what it
 adds instead of what it does.
 :::
 
@@ -210,6 +257,17 @@ retry is starting the whole loop again, which is why "just retry it" is a much
 more expensive suggestion for an agent than for an HTTP request.
 
 ::: {.column-margin}
+One thing takes the sting out of the quadratic term and it is worth knowing
+before you optimise anything else. Every turn of an agent loop sends an exact
+*prefix* of the previous turn, which is the pattern prompt caching was built
+for: a cached read costs roughly a tenth of a fresh one. The quadratic does
+not go away, its constant shrinks by about an order of magnitude — and the
+corollary is uncomfortable, because compacting a transcript rewrites the
+prefix and invalidates the cache. @sec-context-engineering's compaction is
+therefore not free, and @sec-serving has the mechanics.
+:::
+
+::: {.column-margin}
 Which is why @sec-context-engineering exists as a chapter at all. Once you see
 that the transcript *is* the state, deciding what goes into it — and what gets
 summarised, dropped, or never added — stops being tidying and becomes the main
@@ -228,8 +286,13 @@ choosing a point on that spectrum deliberately is most of the engineering.
 | **Router** | the model, once, from a small set | a few known paths, and the input decides which |
 | **Constrained loop** | the model, each step, from a restricted toolset with a step cap | the path varies but the space is bounded |
 | **Open loop** | the model, each step, with broad tools | genuinely open-ended tasks. [The most capable and the least predictable]{.con} |
+| **Loop with an approval gate** | the model each step, but named tools stop for a human before executing | the action is irreversible: money moves, data is deleted, a message is sent |
 
-: Four levels of autonomy {tbl-colwidths="[22,36,42]"}
+: Five levels of autonomy {tbl-colwidths="[22,36,42]"}
+
+The gate belongs in the runtime, not the prompt: a model can be talked out of
+asking for permission, a `requires_approval` flag on the tool cannot. Where
+that gate goes and who is on the other side of it is @sec-guardrails.
 
 The mistake worth naming is starting at the bottom. An open loop is the most
 *impressive* thing to build and almost never the thing the problem needs, and
@@ -251,22 +314,34 @@ tasks at each *k*, temperature 0, exact-match scoring. Two loops over the same
 model: the provider's structured tool-calling API, and a hand-rolled text
 protocol where the model writes `ARA(ZRG-14, butce)` and the runtime parses it.
 
+A run that hits the cap is scored wrong, not excluded — worth stating,
+because for the text protocol it is most of the story.
+
 ```text
 qwen3.5:9b, 25 tasks per step count, step cap 14
+95% intervals are Wilson on n = 25
 
-   loop  lookups  accuracy  model calls  tool calls  ideal  hit cap   tokens
- native        1    100.0%          2.0         1.0      1     0.0%      881
- native        2     96.0%          2.0         2.0      2     0.0%      999
- native        3     80.0%          2.0         3.0      3     0.0%    1,112
- native        4     68.0%          2.0         4.0      4     0.0%    1,227
- native        5     40.0%          2.0         5.0      5     0.0%    1,338
+   loop  lookups  accuracy  95% CI          model calls  tool calls  ideal  hit cap   tokens
+ native        1    100.0%  [86.7, 100.0]           2.0         1.0      1     0.0%      881
+ native        2     96.0%  [80.5,  99.3]           2.0         2.0      2     0.0%      999
+ native        3     80.0%  [60.9,  91.1]           2.0         3.0      3     0.0%    1,112
+ native        4     68.0%  [48.4,  82.8]           2.0         4.0      4     0.0%    1,227
+ native        5     40.0%  [23.4,  59.3]           2.0         5.0      5     0.0%    1,338
 
-   text        1     40.0%         11.1        10.7      1    60.0%    3,240
-   text        2     76.0%          6.5         5.7      2    24.0%    1,815
-   text        3     52.0%          7.1         6.4      3    28.0%    2,019
-   text        4     60.0%          5.3         4.3      4     0.0%    1,322
-   text        5     28.0%          7.0         6.1      5    12.0%    1,936
+   text        1     40.0%  [23.4,  59.3]          11.1        10.7      1    60.0%    3,240
+   text        2     76.0%  [56.6,  88.5]           6.5         5.7      2    24.0%    1,815
+   text        3     52.0%  [33.5,  70.0]           7.1         6.4      3    28.0%    2,019
+   text        4     60.0%  [40.7,  76.6]           5.3         4.3      4     0.0%    1,322
+   text        5     28.0%  [14.3,  47.6]           7.0         6.1      5    12.0%    1,936
 ```
+
+Twenty-five tasks per cell is a small sample and the intervals say so: 40% at
+five lookups is [23, 59], and 80% at three is [61, 91]. What this measurement
+supports is the *direction* — one lookup against five is far apart (Fisher
+exact, p = 3 × 10⁻⁶) — and not the exact shape of the curve between them. No
+pair of adjacent step counts separates on its own; the closest is 4 against 5
+at p = 0.088. Read the intermediate points as a slope rather than as
+landmarks.
 
 ::: {.anlp-widget}
 ```{=html}
@@ -276,16 +351,16 @@ qwen3.5:9b, 25 tasks per step count, step cap 14
 ```{ojs}
 //| echo: false
 agentData = [
-  {loop: "native (tool API)", k: 1, acc: 100.0, model: 2.0, tools: 1.0, tokens: 881},
-  {loop: "native (tool API)", k: 2, acc: 96.0,  model: 2.0, tools: 2.0, tokens: 999},
-  {loop: "native (tool API)", k: 3, acc: 80.0,  model: 2.0, tools: 3.0, tokens: 1112},
-  {loop: "native (tool API)", k: 4, acc: 68.0,  model: 2.0, tools: 4.0, tokens: 1227},
-  {loop: "native (tool API)", k: 5, acc: 40.0,  model: 2.0, tools: 5.0, tokens: 1338},
-  {loop: "text protocol",     k: 1, acc: 40.0,  model: 11.1, tools: 10.7, tokens: 3240},
-  {loop: "text protocol",     k: 2, acc: 76.0,  model: 6.5,  tools: 5.7,  tokens: 1815},
-  {loop: "text protocol",     k: 3, acc: 52.0,  model: 7.1,  tools: 6.4,  tokens: 2019},
-  {loop: "text protocol",     k: 4, acc: 60.0,  model: 5.3,  tools: 4.3,  tokens: 1322},
-  {loop: "text protocol",     k: 5, acc: 28.0,  model: 7.0,  tools: 6.1,  tokens: 1936}
+  {loop: "native (tool API)", k: 1, acc: 100.0, model: 2.0, tools: 1.0, tokens: 881,  cap: 0.0},
+  {loop: "native (tool API)", k: 2, acc: 96.0,  model: 2.0, tools: 2.0, tokens: 999,  cap: 0.0},
+  {loop: "native (tool API)", k: 3, acc: 80.0,  model: 2.0, tools: 3.0, tokens: 1112, cap: 0.0},
+  {loop: "native (tool API)", k: 4, acc: 68.0,  model: 2.0, tools: 4.0, tokens: 1227, cap: 0.0},
+  {loop: "native (tool API)", k: 5, acc: 40.0,  model: 2.0, tools: 5.0, tokens: 1338, cap: 0.0},
+  {loop: "text protocol",     k: 1, acc: 40.0,  model: 11.1, tools: 10.7, tokens: 3240, cap: 60.0},
+  {loop: "text protocol",     k: 2, acc: 76.0,  model: 6.5,  tools: 5.7,  tokens: 1815, cap: 24.0},
+  {loop: "text protocol",     k: 3, acc: 52.0,  model: 7.1,  tools: 6.4,  tokens: 2019, cap: 28.0},
+  {loop: "text protocol",     k: 4, acc: 60.0,  model: 5.3,  tools: 4.3,  tokens: 1322, cap: 0.0},
+  {loop: "text protocol",     k: 5, acc: 28.0,  model: 7.0,  tools: 6.1,  tokens: 1936, cap: 12.0}
 ]
 ```
 
@@ -293,7 +368,8 @@ agentData = [
 //| echo: false
 viewof agentMetric = Inputs.radio(
   new Map([["accuracy (%)", "acc"], ["model calls", "model"],
-           ["tool calls", "tools"], ["tokens", "tokens"]]),
+           ["tool calls", "tools"], ["tokens", "tokens"],
+           ["hit the step cap (%)", "cap"]]),
   {value: "acc", label: "Show"})
 ```
 
@@ -304,8 +380,11 @@ Plot.plot({
   x: {label: "lookups the task needs", domain: [0.7, 5.3], ticks: [1, 2, 3, 4, 5],
       grid: true},
   y: {label: agentMetric === "acc" ? "accuracy (%)"
+        : agentMetric === "cap" ? "runs that hit the step cap (%)"
         : agentMetric === "tokens" ? "tokens per task" : "calls per task",
-      grid: true, domain: agentMetric === "acc" ? [0, 105] : undefined},
+      grid: true,
+      domain: agentMetric === "acc" ? [0, 105]
+        : agentMetric === "cap" ? [0, 70] : undefined},
   color: {legend: true, domain: ["native (tool API)", "text protocol"],
           range: ["#0E7C7B", "#C1666B"]},
   marks: [
@@ -316,7 +395,8 @@ Plot.plot({
     Plot.line(agentData, {x: "k", y: agentMetric, stroke: "loop", strokeWidth: 2}),
     Plot.dot(agentData, {x: "k", y: agentMetric, fill: "loop", r: 5}),
     Plot.text(agentData, {x: "k", y: agentMetric, dy: -14, fontSize: 11, fill: "loop",
-      text: d => agentMetric === "acc" ? d[agentMetric].toFixed(0) + "%"
+      text: d => (agentMetric === "acc" || agentMetric === "cap")
+        ? d[agentMetric].toFixed(0) + "%"
         : d[agentMetric].toLocaleString()})
   ].filter(m => m)
 })
@@ -324,7 +404,9 @@ Plot.plot({
 
 ```{ojs}
 //| echo: false
-md`${agentMetric === "tools"
+md`${agentMetric === "cap"
+  ? "The native loop never once failed to terminate. The text protocol failed worst on the *easiest* task: 60% of one-lookup runs retrieved the answer at step 0 and then repeated the call until the budget ran out."
+  : agentMetric === "tools"
   ? "The grey line is the ideal — one call per lookup. The native loop sits exactly on it; the text protocol makes calls it did not need, worst on the *easiest* task."
   : agentMetric === "model"
   ? "Flat at 2.0 for the native loop: parallel tool calling means the number of model calls does not grow with the task. This is the whole cost story."
@@ -350,6 +432,30 @@ That is worth internalising because it redirects the debugging. When an agent
 fails, the instinct is to inspect the tool calls — and here the tool calls were
 never the problem. Aggregation over accumulated observations is.
 
+Two rival explanations are worth taking seriously, and they end in different
+places. The first is context length, and it can be ruled out: the longest run
+in this table is 1,338 tokens, and @sec-context-engineering-rot runs the same
+model on the same shape of task out to 11,048 tokens with the curve
+essentially flat. Whatever fails at five lookups, it is not the window.
+
+The second cannot be ruled out with this design, so it has to be stated. *k*
+controls two things at once — how many observations the loop must carry, and
+how many numbers have to be added in a single forward pass. Part of the fall
+may be arithmetic width rather than agency. The control that separates them is
+cheap and has not been run: the same 25 tasks with the five figures pasted
+straight into the prompt and no tool at all. Until that exists, read the curve
+as "reliability falls with the amount that has to be combined at the end", and
+treat the agentic reading as the interpretation rather than the finding.
+
+What the curve is *not* is steady per-step attrition. Constant per-step
+success would show as $p^k$; solving for it gives 0.980, 0.928, 0.908 and
+0.833 — falling, not constant — and a flat 0.90 per step would predict 59% at
+five lookups against the 40% measured. The load per step is getting heavier,
+which is the same conclusion from a different direction. Externally, this is
+the shape @yao2024taubench measures at scale with `pass^k`: frontier
+function-calling agents that clear a task around half the time clear it eight
+times out of eight under 25% of the time.
+
 ### Parallel tool calling collapses the loop
 
 The same table holds a second surprise, and this one is good news. The `model
@@ -366,6 +472,13 @@ lever on what an agent costs.
 It does not take five turns to make five lookups; it emits all five requests in
 one turn, reads all five results, and answers. So the loop runs exactly twice however
 much work the task needs.
+
+One distinction the name hides: the *calls* are parallel, the *execution* in
+the fourteen statements is not. The loop above runs them in a `for`, so
+batching cuts the token bill and the number of round trips, but not the
+wall-clock time spent inside the tools. Making that parallel too — an
+`asyncio.gather` over the calls — is a separate change, and it is the one that
+matters once your tools are network calls rather than dictionary lookups.
 
 That has a large consequence for cost. Five times the work costs **1.52× the
 tokens** — 881 to 1,338 — because the expensive thing is re-sending the
@@ -389,10 +502,24 @@ protocol differed. So the second block is a clean answer to a question that
 usually gets settled by taste: does the provider's tool-calling API buy you
 anything a well-written prompt could not?
 
-The native loop beats the text protocol at every step count — by 60, 20, 28, 8
-and 12 accuracy points — while using a third of the model calls. That is a
-larger gap than I expected, and the reason is visible in the transcripts rather
-than the totals.
+The text protocol is deliberately the shape @yao2023react introduced: the
+model writes an action as text, a parser extracts it, the observation comes
+back as text. In 2022 there was no alternative — no provider exposed a typed
+tool schema — and the contribution was showing that interleaving reasoning
+with acting beat doing either alone. So what follows is not "ReAct is bad". It
+is what the *typed transport* added once it arrived, on one small model. Note
+too that this protocol has no `Thought:` step: it is ReAct's transport without
+ReAct's scratchpad.
+
+The native loop is ahead at every step count — by 60, 20, 28, 8 and 12
+accuracy points — while using a third of the model calls. But only the first
+of those gaps survives a test on 25 tasks: 25/25 against 10/25 is Fisher exact
+p = 3 × 10⁻⁶, while the 8-point gap at four lookups is 17 correct against 15
+(p = 0.77) and means nothing. The text protocol's own curve — 40, 76, 52, 60,
+28 — is not even monotone, and is compatible with noise around a flat line.
+The two findings the totals cannot hide are the ones to keep: the native loop
+used a third of the model calls, and it never once failed to terminate. The
+reason for both is visible in the transcripts rather than in the accuracies.
 
 Here is a text-protocol run on the *easiest* task, one lookup:
 
@@ -410,6 +537,15 @@ SORU: BRS-26 projesinin bütçesi kaçtır?
 It got the answer at step 0 and never stopped. **Sixty percent of the
 one-lookup tasks hit the step cap** — the easiest condition had the worst
 termination behaviour, and it made **10.7 tool calls for a task needing one**.
+
+Read that against the accuracy column and an identity falls out. At one and
+two lookups the text protocol's accuracy is exactly 100% minus its cap rate:
+40 + 60, and 76 + 24. *Every run that managed to stop was correct.* The
+protocol was not reasoning worse there; it was failing to say it was done. So
+the 60-point gap at one lookup is a termination result rather than an accuracy
+result — which is the cleanest evidence in this chapter that the exit is the
+fragile part of the loop. From three lookups on the identity breaks (52 + 28,
+60 + 0, 28 + 12) and real reasoning errors appear alongside the cap.
 
 This is @sec-agent-anatomy-loop's third point, measured. The exit is a model
 decision, and in the native API "stop calling tools and answer" is a
@@ -486,6 +622,13 @@ makes you specify a calling convention unambiguously, in prose, and a typed
 schema does that for free. The 0% was a real cost of the text approach; it just
 was not the cost I was trying to measure, and publishing it as a model result
 would have been wrong.
+
+One honest limit survives the fix. This is a *single* protocol prompt, and the
+first version showed exactly how sensitive the result is to wording. An
+instruction as small as "if you already have the answer, emit `CEVAP`
+immediately", or a stop sequence on `CEVAP`, might recover much of the
+termination gap; no ablation was run. What a typed schema gives you is not a
+better prompt — it is the removal of that variable from the experiment.
 :::
 
 ## Agent or pipeline? {#sec-agent-anatomy-decide}
@@ -512,11 +655,18 @@ data-dependent?"** Complexity is not the criterion; branching is.
 : The criterion is branching, not difficulty {tbl-colwidths="[46,54]"}
 
 The measurement in @sec-agent-anatomy-decay gives this teeth. A fixed pipeline
-for that task — parse the project codes, look each one up, add them — is
-**correct by construction at every step count**, costs nothing per call, and
-takes microseconds. The agent reaches 40% at five lookups. If the steps are
-known, writing them down beats asking a model to rediscover them every time,
-and it is not close.
+for that task — parse the project codes, look each one up, add them — moves
+all the risk into one place, the parse. Once the codes are extracted the
+lookups and the sum are **exact at every step count**, cost nothing per call
+and take microseconds; the agent reaches 40% at five lookups. That is the
+trade in its clearest form, and note what it is not: it is not "no model", and
+it is not "a regex beats a model". It is that the model does one bounded thing
+instead of five sequential ones. Where the steps are known, writing them down
+beats asking a model to rediscover them every time, and it is not close.
+
+@anthropic2024effectiveagents makes the same argument from production
+experience, and puts it more bluntly: add complexity only when it demonstrably
+improves outcomes.
 
 ### The failure modes are different in kind
 
@@ -549,7 +699,7 @@ for; the other four it settled with a measurement rather than an argument.
 A while-loop around a model that can call functions. The model emits arguments
 and your runtime executes them; the loop ends when the model chooses not to
 call anything. Everything else — planning, memory, orchestration — is
-engineering around those fourteen lines, and being able to say so is what keeps
+engineering around those fourteen statements, and being able to say so is what keeps
 framework documentation readable.
 :::
 
@@ -697,7 +847,7 @@ Build it before you read another framework's documentation, because the point
 of the exercise is to have something concrete for that documentation to be
 *about*.
 
-### Step 1 — write the fourteen lines yourself
+### Step 1 — write the fourteen statements yourself
 
 No framework. Two real tools, one model, one step cap. You are done when it
 answers a two-tool question end to end.
@@ -783,14 +933,17 @@ framework. Everything below reads differently afterwards.
 | reasoning interleaved with acting | @yao2023react |
 | the model calling functions at all | @schick2023toolformer |
 | self-correction, and what it does not fix | @madaan2023selfrefine; @huang2024large |
-| planning as a separate step | @yao2023tree |
+| search over reasoning, not over actions | @yao2023tree |
+| self-correction inside the loop | @shinn2023reflexion |
+| how far reliability falls over repeated trials | @yao2024taubench |
+| the same decay, measured as a task-length horizon | @kwa2025timehorizon |
 | the agent's own memory problem | @packer2023memgpt |
 
 : The primary sources {tbl-colwidths="[46,54]"}
 
 ## What to remember {#sec-agent-anatomy-summary}
 
-- **An agent is fourteen lines.** A while-loop around a model with tools. The
+- **An agent is fourteen statements.** A while-loop around a model with tools. The
   model emits arguments and never executes them, so the runtime is the only
   security boundary; the transcript is the only state; and the loop ends when
   the model chooses not to call a tool.
@@ -799,7 +952,9 @@ framework. Everything below reads differently afterwards.
   than a tuning parameter.
 - **Reliability decays with the number of steps, and you can measure the
   curve.** Here: **100% → 96% → 80% → 68% → 40%** for one to five lookups, at
-  temperature 0 on a task with exact answers.
+  temperature 0 on a task with exact answers — n = 25 per cell, so the 40% is
+  [23, 59] and it is the *direction* that is solid, not the shape.
+  @yao2024taubench and @kwa2025timehorizon measure the same decay at scale.
 - **The loop was not what broke.** Tool use was perfect at every step count —
   exactly the right calls, none malformed, none capped — while accuracy fell 60
   points. Aggregation over collected observations is where the failure lives,
@@ -808,9 +963,11 @@ framework. Everything below reads differently afterwards.
   collapsed this loop to **2.0 model calls at every step count**, so five times
   the work cost 1.52× the tokens. A sequential loop pays on every step: the
   text protocol used 3.5× the model calls for the same work.
-- **The structured tool API is not sugar.** It beat a hand-rolled text protocol
-  at every step count, by up to 60 accuracy points, mainly because it makes
-  "stop and answer" a structurally different action from "call a tool".
+- **The structured tool API is not sugar.** It was ahead at every step count,
+  by up to 60 accuracy points — though only the one-lookup gap survives a
+  significance test on 25 tasks — and it never failed to terminate, mainly
+  because it makes "stop and answer" a structurally different action from
+  "call a tool".
 - **The termination failure was worst on the easiest task.** The text loop hit
   the step cap on **60% of one-lookup tasks**, having retrieved the answer at
   step 0 and then repeated the call until the budget ran out.
