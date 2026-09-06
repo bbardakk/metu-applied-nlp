@@ -102,15 +102,20 @@ qwen3.5:9b, 30 tasks, 2 lookups needed
  tokens                          829            1,557
 ```
 
-The first thing to say is what this did *not* show. **Only one run in thirty
-passed on outcome and failed on trajectory.** I expected more, and the reason
-there are not more is worth understanding: when this system takes a bad path it
-usually also gets the wrong answer, so the two metrics agree on most runs.
+The first thing to say is what this measurement *cannot* settle. The
+disagreement everyone argues about — a run that passes on outcome and fails on
+trajectory — happened once. But the denominator for that event is not thirty:
+a run that failed on outcome cannot exhibit it. **One of the eleven runs that
+passed on outcome failed on trajectory: 9.1%, Wilson interval [1.6, 37.7].**
+That is too wide to support a claim in either direction. An upper bound near
+38% would justify a whole library on its own.
 
-That is a useful corrective to a claim that gets made loosely — that
-trajectory evaluation earns its place by catching runs outcome evaluation
-passes. On this task it barely does. It earns its place through the other three
-rows instead, and those are the ones to build your suite around.
+And the native loop cannot contribute to the estimate at all, which is the
+deeper problem. It passed 30/30 on both axes, so there is no room for a
+disagreement to appear in that arm. The regime the usual argument is actually
+about — a system that is *mostly* right but sometimes gets there badly — is not
+measured here. What this table settles is different, does not depend on that
+count, and is worth more:
 
 **It tells you what the system is doing.** The text protocol made **7.10 tool
 calls for a task needing 2**, and **5.00 of them were repeats** — 70% of all
@@ -124,6 +129,16 @@ answers, they are *unfinished* runs — @sec-agent-anatomy's termination problem
 and a completely different repair from a reasoning problem. Accuracy alone
 cannot distinguish "answered wrongly" from "never stopped".
 
+That reading has a consequence the rest of the table has to live with. If two
+runs in three ran out of budget, then **36.7% is a lower bound on what this
+system can do, not a measurement of it** — it is partly a fact about the step
+cap. The ablation that settles it is one line of configuration: double the cap
+and re-run. Either accuracy climbs, and the text protocol is slow rather than
+incapable, or it does not, and the protocol is stuck in a loop that more budget
+only feeds — which is the more interesting result and the more damning one.
+That run has not happened, and until it does the 5.1× below inherits the
+uncertainty, because the cap bounds its numerator and shapes its denominator.
+
 **It changes the cost comparison.** On raw tokens the text protocol looks 1.9×
 more expensive. Per *correct answer* it is **5.1×** — 4,246 tokens against 829.
 [The cost metric that ignores outcome understates the real gap by nearly
@@ -131,11 +146,17 @@ three-fold]{.hl}, which is why tokens-per-correct-answer is the only cost
 number worth putting in a comparison.
 
 ::: {.column-margin}
-Small measurement, thirty runs, one model, intervals around ±17 points on the
-percentages. The 3.3% disagreement figure in particular is one run and should
-not be quoted as a rate. What the table establishes solidly is the size of the
+Small measurement: thirty tasks, one model, one run per task. Wilson 95%
+intervals, because a proportion near a boundary needs them and
+@sec-llm-eval-reporting says so: outcome 100% → [88.6, 100]; outcome 36.7% →
+[21.9, 54.5]; cap-hit 63.3% → [45.5, 78.1]; the single outcome-only
+disagreement → [0.6, 16.7] on thirty runs, or [1.6, 37.7] on the eleven where
+it could have happened. What the table establishes solidly is the size of the
 waste the outcome metric conceals — 7.10 calls against 2, and 70% of them
-repeats — and the direction of the cost correction.
+repeats — and the direction of the cost correction. The outcome gap itself is
+not in doubt: the two systems ran the same thirty tasks, so the comparison is
+paired, and McNemar's exact test on 19 discordant pairs all one way gives
+p = 4 × 10⁻⁶.
 :::
 
 :::: {.anlp-fig}
@@ -347,11 +368,14 @@ accuracy number.
 ::: {.callout-note collapse="true"}
 ## 2. Does trajectory evaluation catch runs that outcome evaluation passes?
 
-Rarely, in this measurement — one run in thirty. When a system takes a bad path
-it usually gets the wrong answer too, so the two metrics mostly agree on *which
-runs* fail. Trajectory evaluation earns its place differently: it tells you what
-the system is doing, why runs failed (a 63.3% cap-hit rate is unfinished runs,
-not wrong ones), and what correctness actually costs.
+This measurement cannot tell you. It happened once, out of the eleven runs
+where it *could* have happened — 9.1%, with an interval running from 2% to 38%
+— and the arm that scored 100% on both axes had no room to disagree at all. So
+the honest answer to the question as asked is "not settled at this sample
+size". Trajectory evaluation earns its place for reasons that do not depend on
+the answer: it tells you what the system is doing, why runs failed (a 63.3%
+cap-hit rate is unfinished runs, not wrong ones), and what correctness actually
+costs.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -417,9 +441,10 @@ from a reasoning error and invisible in accuracy.
 
 **Q: Why is trajectory evaluation worth building?**
 
-Not primarily to catch runs outcome evaluation passes — measured on one task,
-that was one run in thirty, because a bad path usually produces a bad answer.
-It is worth building because it tells you what the system is *doing*: a system
+Not primarily to catch runs outcome evaluation passes — on one task that
+happened once in the eleven runs where it could, an interval too wide to
+conclude anything from. It is worth building because it tells you what the
+system is *doing*: a system
 at 36.7% accuracy was making 7.10 tool calls for a task needing 2, with 70% of
 them repeats. You would ship that knowing it works a third of the time and not
 knowing where the effort went.
@@ -562,12 +587,17 @@ tool calls needed. That ratio is usually the first surprise.
 - **An agent produces an answer and a path, and accuracy scores only one of
   them.** Outcome evaluation asks whether it was right; trajectory evaluation
   asks what it did to get there.
-- **Trajectory metrics rarely flag different *runs*.** One in thirty here — a
-  bad path usually produces a bad answer. They earn their place by showing what
-  the system is doing and why it failed.
+- **Whether trajectory metrics flag *different runs* is not settled by a
+  measurement this size.** One of eleven outcome-passing runs failed on
+  trajectory here — an interval from 2% to 38% — and the arm that passed
+  everything could not have shown a disagreement at all. They earn their place
+  for a reason that does not depend on that number: they show what the system
+  is doing and why it failed.
 - **The waste outcome hides can be enormous.** A system at 36.7% accuracy made
   **7.10 tool calls for a task needing 2**, with **70% of them repeats**, and
-  hit its step cap on **63.3%** of runs.
+  hit its step cap on **63.3%** of runs — which also means that 36.7% is a
+  lower bound set partly by the cap, and doubling the cap is the ablation that
+  would say by how much.
 - **Report tokens per *correct* answer.** Raw tokens made one system look 1.9×
   more expensive; per correct answer it was **5.1×** — the outcome-blind figure
   understated the gap by nearly three-fold.
