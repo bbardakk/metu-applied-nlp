@@ -2,9 +2,12 @@
 
 ::: {.callout-note appearance="simple" icon="false"}
 **Chapter status: drafted.** The measurements run `qwen3.5:9b` through
-`ollama` 0.24.0. Nothing is executed in the schema experiment — it scores the
-*call* the model emits, so the model's arithmetic cannot contaminate a result
-about schemas. @sec-agent-anatomy owns the loop; this chapter owns what the
+`ollama` 0.24.0 at temperature 0, one pass per condition, n = 60 per cell.
+`ollama` does not grammar-constrain enum values in a tool definition, so the
+enum measured below is a hint the model reads, not a decoding constraint —
+which changes what the result means, and is spelled out where it matters.
+Nothing is executed in the schema experiment — it scores the *call* the model
+emits, so the model's arithmetic cannot contaminate a result about schemas. @sec-agent-anatomy owns the loop; this chapter owns what the
 loop reaches for. Software: NumPy 2.5.2 on Python 3.14.5.
 :::
 
@@ -28,7 +31,7 @@ one shot from it and cannot check a guess.
 [↩](#term-tool-schema){.term-back}
 :::
 
-That single sentence is the chapter, and everything below is its consequences.
+That single sentence is the chapter; everything below follows from it.
 
 The distinction matters because the two are written by different instincts.
 Documentation is written for a reader who can ask a colleague, read the source,
@@ -46,7 +49,7 @@ which one you are doing:
 |:--|:--|
 | **name** | tells the model *when* this tool applies, before it reads anything else |
 | **description** | resolves the cases the name leaves ambiguous, and rules out the ones it should not be used for |
-| **parameter types and enums** | make wrong calls unrepresentable rather than merely discouraged — @sec-decoding's argument, one level up |
+| **parameter types and enums** | put your API's own vocabulary in front of the model — and, *if your runtime constrains decoding*, make out-of-set values unrepresentable rather than merely discouraged. Which of the two you get depends on your stack, not on your schema — @sec-decoding |
 | **parameter descriptions** | carry the mapping from how a user phrases a thing to what your API calls it |
 
 : Four jobs, one object {tbl-colwidths="[30,70]"}
@@ -60,8 +63,8 @@ bridge.
 actually earns its keep, where the answer is uncomfortable for anyone who has
 spent an afternoon polishing a tool description. Then the same treatment
 applied to error strings, which turn out to be worth more than any other single
-change you can make — and where the style most tools return by default is the
-worst of the four tested. Then what a tool should hand back, which is a
+change you can make — and where the style most tools return by default turns
+out to be a half-written one. Then what a tool should hand back, which is a
 question about the agent's memory rather than about output. Then what to do
 when there are too many tools to list at all. And finally how to tell whether a
 tool is any good, which is not a question you can answer without asking a
@@ -75,21 +78,69 @@ the field literally** — *how much money was allocated* has to become
 `alan="butce"`. So the schema is the only thing that can carry the mapping.
 Nothing is executed; what is scored is the call the model emits.
 
+Two of the four differ by four words. Here they are in full:
+
+```json
+// variant B — named, free string
+{"name": "veri_getir",
+ "description": "Fetch one field of one project.",
+ "input_schema": {"type": "object",
+   "properties": {"proje": {"type": "string"},
+                  "alan":  {"type": "string"}},
+   "required": ["proje", "alan"],
+   "additionalProperties": false}}
+
+// variant C — the only change is the enum
+{"name": "veri_getir",
+ "description": "Fetch one field of one project.",
+ "input_schema": {"type": "object",
+   "properties": {"proje": {"type": "string"},
+                  "alan":  {"type": "string",
+                            "enum": ["butce", "personel", "sure"]}},
+   "required": ["proje", "alan"],
+   "additionalProperties": false}}
+```
+
+Variant A replaces every name with `f1`, `a`, `b` and empties the description;
+variant D is C plus a written-out `description` on each parameter.
+
 ```text
 qwen3.5:9b, 60 questions, one tool, four descriptions
+95% intervals are Wilson on n = 60
 
- variant         called a tool  project right  field right  fully correct
- A. opaque               58.3%           0.0%         0.0%           0.0%
- B. named               100.0%         100.0%        25.0%          25.0%
- C. enum                100.0%         100.0%       100.0%         100.0%
- D. described           100.0%         100.0%       100.0%         100.0%
+ variant         called a tool  project right  field right   95% CI          fully correct
+ A. opaque               58.3%           0.0%         0.0%   [ 0.0,   6.0]            0.0%
+ B. named               100.0%         100.0%        25.0%   [15.8,  37.2]           25.0%
+ C. enum                100.0%         100.0%       100.0%   [94.0, 100.0]          100.0%
+ D. described           100.0%         100.0%       100.0%   [94.0, 100.0]          100.0%
 ```
 
 [The enum did all of the work.]{.hl} Going from free strings to an enumerated
-list took field accuracy from **25% to 100%**, and adding careful prose
-descriptions on top of that added **nothing measurable**. That is the opposite
-of where most effort goes: people write the description and leave the parameter
-as a string.
+list took field accuracy from **25% to 100%** — 15/60 against 60/60, intervals
+that do not come close to touching, Fisher exact p < 10⁻¹⁹ — and adding
+careful prose descriptions on top of that added **nothing measurable**. That is
+the opposite of where most effort goes: people write the description and leave
+the parameter as a string.
+
+**What the enum is doing here, and what it is not.** `ollama` does not
+grammar-constrain enum values in a tool definition, so variant C's 100% is not
+the decoder refusing to emit `mali buyukluk`. It is the model reading `butce,
+personel, sure` in the schema and using them. That matters, because it makes
+this finding and the error-message finding later in the chapter the *same*
+finding: what fixed both was putting the API's vocabulary where the model could
+see it. If your runtime *does* constrain decoding, the enum becomes a
+guarantee and this experiment tells you nothing about the model at all. Say
+which case you are in before you generalise.
+
+**And one cell is missing — the one that decides how far this generalises.**
+The four variants are a ladder, not a factorial: nothing → names → names +
+enum → names + enum + prose. The untested rung is *names + prose, no enum*.
+Without it, the honest statement is not "prose does nothing" but "prose adds
+nothing **once the enum has already put your vocabulary in front of the
+model**". For a parameter you cannot enumerate — a free-text query, a date, an
+id, an open-ended filter — a description is the only bridge you have, and this
+experiment says nothing about it. Read rule 3 below as an argument rather than
+a measurement.
 
 Two rows deserve their own explanation, because each teaches something the
 totals hide.
@@ -109,7 +160,7 @@ Here is the whole of variant B, one row per phrasing:
   MISS  wanted butce     got "mali buyukluk"   ← "mali buyuklugu nedir?"
   OK    wanted personel  got "personel"        ← "kac kisi calisiyor?"
   MISS  wanted personel  got "ekip mevcudu"    ← "ekip mevcudu nedir?"
-  OK    wanted sure      got "sure"            ← "kac ay surüyor?"
+  OK    wanted sure      got "sure"            ← "kac ay suruyor?"
   MISS  wanted sure      got "takvim"          ← "takvimi ne kadar?"
 ```
 
@@ -122,7 +173,17 @@ what the user said.
 And note the first row, which is @sec-turkish-nlp arriving in a new place: the
 model wrote **`bütçe`** where the API expects **`butce`**. Correct Turkish,
 wrong identifier. Any API whose parameter values are ASCII-folded versions of
-real words has this failure waiting in it, and an enum removes it entirely.
+real words has this failure waiting in it, and an enum removes it here.
+
+Not everywhere, though, and the difference is worth being precise about. An
+enum in a schema is a hint your model usually follows; normalising at the tool
+boundary is a guarantee you control. Do both: apply NFC, then fold diacritics
+through an explicit alias table (`bütçe → butce`) *before* you validate. And
+never round-trip an identifier through `.lower()` without a locale — in Turkish
+`"BUTCE".lower()` is `bıtce`, and `"İSTANBUL".lower()` picks up a combining
+dot. Accept what the model plausibly sends; store what your API needs.
+@sec-turkish-nlp has the rest of the traps; this is the one that reaches your
+function signature.
 
 :::: {.anlp-fig}
 
@@ -239,7 +300,7 @@ Plot.plot({
 //| echo: false
 md`${toolWhich === "schema"
   ? "The jump is entirely between **B** and **C** — free string to enum, 25% to 100%. The prose descriptions added in **D** changed nothing. And **A** shows the failure worth fearing: it did not call the tool at all on 41.7% of tasks, and answered from memory instead."
-  : "One sentence separates the last row from the other three. The stack trace — what most tools return by default — is the *worst* of the four, at 81.7% abandonment against a bare Error's 76.7%."}`
+  : "One sentence separates the last row from the other three. The stack trace — what most tools return by default — produced the fewest retries of any style, but the highest share of *correct* ones: 7 of its 9 retries found the right field."}`
 ```
 :::
 
@@ -271,16 +332,31 @@ for a human who will be reading a log.
 The claim is testable. Hold everything fixed and change only what the tool
 returns when it fails. To make every condition face exactly the same failure,
 the first tool call is rejected **unconditionally**, whatever the model asked
-for; the score is on the *second* call.
+for; the score is on the *second* call. One artefact comes with holding the
+string fixed: a model that sent `butce` correctly is still told that `'bütçe'`
+was invalid. That keeps the four conditions comparable, which is the point,
+but every condition is slightly less coherent than a real error would be, and
+the traceback condition — which quotes the value — suffers most from it.
 
 ```text
 qwen3.5:9b, 60 tasks, first call always rejected, four error styles
+95% intervals are Wilson on n = 60
 
- error style     retried  valid field  right field   gave up
- bare              23.3%         1.7%         1.7%     76.7%
- traceback         15.0%        11.7%        11.7%     81.7%
- vague             36.7%         3.3%         3.3%     63.3%
- actionable       100.0%       100.0%       100.0%      0.0%
+ error style     retried        right field              gave up
+ bare          14/60  23.3%   1/60   1.7% [ 0.3,  8.9]  46/60  76.7% [64.6, 85.6]
+ traceback      9/60  15.0%   7/60  11.7% [ 5.8, 22.2]  49/60  81.7% [70.1, 89.4]
+ vague         22/60  36.7%   2/60   3.3% [ 0.9, 11.4]  38/60  63.3% [50.7, 74.4]
+ actionable    60/60 100.0%  60/60 100.0% [94.0,100.0]   0/60   0.0% [ 0.0,  6.0]
+
+ A `valid field` column is not shown because it was identical to `right field`
+ in all four conditions: whenever the model recovered far enough to emit one
+ of the three legal values, it emitted the correct one. Recovery here is
+ all-or-nothing.
+
+ The traceback row does not reconcile: 9 retried plus 49 abandoned is 58, not
+ 60. Two of that condition's tasks are unaccounted for, so one of its three
+ figures is off by up to two tasks. It is flagged rather than quietly patched,
+ and re-running that condition is the first thing on this chapter's list.
 ```
 
 The four strings were:
@@ -299,17 +375,43 @@ The four strings were:
               Gecerli alanlar sunlardir: butce, personel, sure."
 ```
 
+The scope of that 100%, stated honestly: the valid set here has three
+elements, so the actionable error could list all of it, and a ceiling that
+high is close to guaranteed once the model reads it. What this measures is the
+*presence* of a recovery instruction, not how well one scales. The interesting
+untested case is a set of two hundred values, where all you can offer is the
+nearest few — measure that on your own tool before assuming the same jump.
+
 [One sentence took recovery from 1.7% to 100%.]{.hl} Not a model change, not a
 prompt change, not a retry policy — a different string returned by a function.
 
 Three things in that table are worth taking seriously.
 
-**The stack trace is the worst of the four.** It is also the one your tools
-almost certainly return today, because it is what happens if you do nothing.
-Worse than a bare `"Error"`: 81.7% gave up against 76.7%. A traceback is dense,
-authoritative-looking, and contains no statement of what would have worked, so
-it reads as *this is broken* rather than *try this instead*. Structured
-uselessness is not better than plain uselessness.
+**The stack trace is the most interesting of the four, not the worst.** It is
+also the one your tools almost certainly return today, because it is what
+happens if you do nothing. It produced the *fewest* retries — 15.0% against a
+bare `"Error"`'s 23.3% — but the retries it produced were the ones that
+worked: **7 of its 9 retries landed on the right field, against 1 of 14 for
+the bare error and 2 of 22 for the vague one** (Fisher exact on the
+conditional rates, p = 0.001). That fits the three-part rule below exactly. A
+traceback states *what failed* — `KeyError: 'bütçe'` names the offending value
+— and says nothing about *what would work*, so it is a half-written error
+message, and it behaves like one: rarely acted on, but informative when it is.
+
+What it is *not* is worse than nothing. The abandonment gap that reading rests
+on is 49/60 against 46/60 — three tasks, with intervals of [70.1, 89.4] and
+[64.6, 85.6] and Fisher exact p = 0.65. This experiment cannot resolve that
+comparison, and an earlier draft of this chapter called the ordering a result
+six separate times. What the four rows *do* separate, unambiguously, is the
+actionable string from all three others.
+
+This is the sharpest version of a known result. @huang2024large found that
+models cannot reliably correct their own reasoning from *intrinsic* feedback —
+being told to try again does not help. What this experiment adds is the
+boundary: the same model recovers 1.7% of the time from feedback that carries
+no content and 100% of the time from feedback that names the answer set. The
+difference is not the model's capacity for self-correction. It is whether the
+feedback contains information.
 
 **Giving up is the dominant failure, not looping.** Three of the four styles
 produced abandonment in the majority of cases — the model stopped calling tools
@@ -396,8 +498,18 @@ called. This one is about what the tools cost *before* any of them is called.
 
 Every tool definition sits in the context of every call, so a flat list of
 fifty tools is a large fixed tax on every step, paid whether or not any of them
-is relevant. It also gets *less* accurate: more near-duplicate options means
-more chances to pick a neighbouring one.
+is relevant. The published figures are larger than most people expect:
+@anthropic2025advancedtools reports a catalogue costing **77,000 tokens of
+definitions** before a single call, and about **85% of that** recovered by
+loading definitions on demand. @sec-mcp measures what the same tax looks like
+once your tools arrive over a protocol rather than out of your own codebase.
+
+It also gets *less* accurate — more near-duplicate options means more chances
+to pick a neighbouring one — and the same report puts numbers on that too:
+tool-selection accuracy on a large surface rose from **49% to 74%** for one
+model, and from 79.5% to 88.1% for a stronger one, purely by searching the
+catalogue instead of pasting it in. That is the unusual case where the cheap
+fix and the accurate fix are the same fix.
 
 Three ways out, in increasing order of how much they change your architecture:
 
@@ -407,7 +519,11 @@ Three ways out, in increasing order of how much they change your architecture:
   [**progressive disclosure**](#gloss-progressive-disclosure){#term-progressive-disclosure .term-ref}.
   Expose one `find_tools(query)` and load only the matching definitions for
   that step. This is @sec-retrieval applied to your
-  own API surface, and it is the standard answer above roughly fifty tools.
+  own API surface, and it is what @anthropic2025advancedtools ships as a
+  first-class API feature. The threshold at which people reach for it is not a
+  constant — reports put it somewhere between thirty tools and a hundred,
+  depending on how verbose the definitions are — so measure your own
+  definition tax before picking a number.
 - **Give it an interpreter instead.** If your tools are mostly small
   transformations, a sandboxed code environment replaces fifty definitions
   with one — the model composes what it needs rather than picking from a menu.
@@ -422,7 +538,7 @@ call. [↩](#term-progressive-disclosure){.term-back}
 
 That third option — [**code mode**](#gloss-code-mode){#term-code-mode .term-ref}
 — deserves naming clearly, because it is increasingly the default in serious
-systems.
+systems [@cloudflare2025codemode].
 
 ::: {#gloss-code-mode .column-margin .term-gloss}
 **Code mode** — giving an agent a sandboxed interpreter instead of a fixed
@@ -519,9 +635,11 @@ API whose values are ASCII-folded words.
 
 What would have worked. Measured across four styles, recovery went from **1.7%
 to 100%** purely by naming the invalid value and listing the valid ones. The
-striking row is the stack trace: at **81.7% abandonment** it was worse than a
-bare `"Error"`, because it is dense, authoritative, and contains no statement
-of what to try instead. Never return a raw exception.
+striking row is the stack trace: it produced the fewest retries of the four,
+because it names the value that failed and never what would have worked. It is
+a half-written error message, not a worse-than-nothing one — the abandonment
+gap against a bare `"Error"` is three tasks in sixty and does not survive a
+test. Catch it and add the missing sentence.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -716,6 +834,8 @@ that has a fixed value set, and measure the change. It is twenty minutes.
 | making the schema a hard constraint | @willard2023efficient |
 | what self-correction does and does not fix | @huang2024large |
 | tool use at scale, and its failure modes | @qin2024toolllm |
+| what a large tool surface costs, and searching it instead | @anthropic2025advancedtools |
+| replacing a tool menu with an interpreter | @cloudflare2025codemode |
 
 : The primary sources {tbl-colwidths="[46,54]"}
 
@@ -739,9 +859,11 @@ that has a fixed value set, and measure the change. It is twenty minutes.
 - **The error string is worth more than any other single change.** Recovery
   went from **1.7% to 100%** by naming the invalid value and listing the valid
   ones. Write what *would* have worked; the rest is optional.
-- **A stack trace is worse than nothing.** At **81.7% abandonment** it beat a
-  bare `"Error"` for uselessness, because it looks authoritative and offers no
-  path forward. Catch and translate.
+- **A stack trace is a half-written error message.** It names the value that
+  failed and never what would have worked, so it produced the fewest retries
+  of any style — though the ones it produced were the most often correct, 7 of
+  9. Do not read it as *worse than nothing*: at n = 60 that comparison sits
+  inside the noise. Read it as unfinished, and add the third sentence.
 - **The dominant failure after an error is giving up, not looping.** Three of
   four error styles made the model stop calling tools and answer without the
   data — a quieter failure than a retry loop and a worse one.

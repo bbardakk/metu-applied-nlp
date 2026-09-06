@@ -3,7 +3,11 @@
 ::: {.callout-note appearance="simple" icon="false"}
 **Bölüm durumu: çevrildi.** Kaynak metin:
 [İngilizce 24. bölüm](../../en/chapters/24-tool-design.html). Ölçümler `ollama`
-0.24.0 üzerinden `qwen3.5:9b` çalıştırıyor. Şema deneyinde hiçbir şey
+0.24.0 üzerinden `qwen3.5:9b`'yi sıcaklık 0'da, koşul başına tek geçişle ve
+hücre başına n = 60 ile çalıştırıyor. `ollama`, bir araç tanımındaki enum
+değerlerini gramerle kısıtlamıyor; dolayısıyla aşağıda ölçülen enum, modelin
+okuduğu bir ipucu — bir çözümleme kısıtı değil. Bu, sonucun anlamını değiştiriyor
+ve önemli olduğu yerde açıkça yazılı. Şema deneyinde hiçbir şey
 yürütülmüyor — modelin ürettiği *çağrıyı* puanlıyor, böylece modelin aritmetiği
 şemalarla ilgili bir sonucu kirletemiyor. @sec-ajan-anatomisi döngünün
 sahibidir; bu bölüm döngünün uzandığı şeyin sahibi. Yazılım: NumPy 2.5.2,
@@ -77,21 +81,69 @@ adlandırmıyor** — *ne kadar para ayrıldı*, `alan="butce"` olmak zorunda.
 Dolayısıyla eşlemeyi taşıyabilecek tek şey şema. Hiçbir şey yürütülmüyor;
 puanlanan şey modelin ürettiği çağrı.
 
+Dördünden ikisi dört sözcükle ayrışıyor. İkisi de tam hâliyle:
+
+```json
+// varyant B — adlandırılmış, serbest dizgi
+{"name": "veri_getir",
+ "description": "Fetch one field of one project.",
+ "input_schema": {"type": "object",
+   "properties": {"proje": {"type": "string"},
+                  "alan":  {"type": "string"}},
+   "required": ["proje", "alan"],
+   "additionalProperties": false}}
+
+// varyant C — tek değişiklik enum
+{"name": "veri_getir",
+ "description": "Fetch one field of one project.",
+ "input_schema": {"type": "object",
+   "properties": {"proje": {"type": "string"},
+                  "alan":  {"type": "string",
+                            "enum": ["butce", "personel", "sure"]}},
+   "required": ["proje", "alan"],
+   "additionalProperties": false}}
+```
+
+Varyant A her adı `f1`, `a`, `b` ile değiştiriyor ve açıklamayı boşaltıyor;
+varyant D ise C artı her parametrede yazılı bir `description`.
+
 ```text
 qwen3.5:9b, 60 questions, one tool, four descriptions
+95% intervals are Wilson on n = 60
 
- variant         called a tool  project right  field right  fully correct
- A. opaque               58.3%           0.0%         0.0%           0.0%
- B. named               100.0%         100.0%        25.0%          25.0%
- C. enum                100.0%         100.0%       100.0%         100.0%
- D. described           100.0%         100.0%       100.0%         100.0%
+ variant         called a tool  project right  field right   95% CI          fully correct
+ A. opaque               58.3%           0.0%         0.0%   [ 0.0,   6.0]            0.0%
+ B. named               100.0%         100.0%        25.0%   [15.8,  37.2]           25.0%
+ C. enum                100.0%         100.0%       100.0%   [94.0, 100.0]          100.0%
+ D. described           100.0%         100.0%       100.0%   [94.0, 100.0]          100.0%
 ```
 
 [İşin tamamını enum yaptı.]{.hl} Serbest dizgilerden numaralandırılmış bir
-listeye geçmek alan doğruluğunu **%25'ten %100'e** taşıdı ve bunun üstüne özenli
+listeye geçmek alan doğruluğunu **%25'ten %100'e** taşıdı — 15/60'a karşı 60/60,
+birbirine yaklaşmayan aralıklar, Fisher exact p < 10⁻¹⁹ — ve bunun üstüne özenli
 düzyazı açıklamalar eklemek **ölçülebilir hiçbir şey** eklemedi. Bu, çabanın
 gittiği yerin tam tersi: insanlar açıklamayı yazar ve parametreyi dizgi olarak
 bırakır.
+
+**Enum'un burada ne yaptığı ve ne yapmadığı.** `ollama`, bir araç tanımındaki
+enum değerlerini gramerle kısıtlamıyor; dolayısıyla varyant C'nin %100'ü
+çözücünün `mali buyukluk` üretmeyi reddetmesi değil. Modelin şemada `butce,
+personel, sure` okuyup onları kullanması. Bu önemli, çünkü bu bulguyla bölümün
+ilerisindeki hata mesajı bulgusunu *aynı* bulgu hâline getiriyor: ikisini de
+düzelten şey, API'nin kelime dağarcığını modelin görebileceği yere koymaktı.
+Sizin çalışma zamanınız çözümlemeyi kısıtlıyorsa enum bir garanti olur ve bu
+deney model hakkında hiçbir şey söylemez. Genellemeden önce hangi durumda
+olduğunuzu söyleyin.
+
+**Ve bir hücre eksik — üstelik bunun ne kadar genelleneceğine karar veren
+hücre.** Dört varyant bir faktöriyel değil bir merdiven: hiçbir şey → isimler →
+isimler + enum → isimler + enum + düzyazı. Sınanmayan basamak *isimler +
+düzyazı, enum yok*. O olmadan dürüst ifade "düzyazı hiçbir şey yapmıyor" değil,
+"**enum kelime dağarcığınızı modelin önüne zaten koyduktan sonra** düzyazı bir
+şey eklemiyor". Numaralandıramayacağınız bir parametre için — serbest metin
+sorgusu, tarih, kimlik, açık uçlu filtre — elinizdeki tek köprü açıklamadır ve
+bu deney onun hakkında hiçbir şey söylemiyor. Aşağıdaki 3. kuralı bir ölçüm
+değil bir sav olarak okuyun.
 
 İki satır kendi açıklamasını hak ediyor, çünkü her biri toplamların gizlediği bir
 şey öğretiyor.
@@ -110,7 +162,7 @@ varyantının tamamı, ifade başına bir satır:
   MISS  wanted butce     got "mali buyukluk"   ← "mali buyuklugu nedir?"
   OK    wanted personel  got "personel"        ← "kac kisi calisiyor?"
   MISS  wanted personel  got "ekip mevcudu"    ← "ekip mevcudu nedir?"
-  OK    wanted sure      got "sure"            ← "kac ay surüyor?"
+  OK    wanted sure      got "sure"            ← "kac ay suruyor?"
   MISS  wanted sure      got "takvim"          ← "takvimi ne kadar?"
 ```
 
@@ -123,7 +175,17 @@ söylüyor.
 Ve ilk satıra dikkat edin; @sec-turkce-nlp'nin yeni bir yerde ortaya çıkışı:
 model, API'nin **`butce`** beklediği yere **`bütçe`** yazdı. Doğru Türkçe,
 yanlış tanımlayıcı. Parametre değerleri gerçek kelimelerin ASCII'ye katlanmış
-hâlleri olan her API'de bu kusur beklemektedir ve bir enum onu tümüyle kaldırır.
+hâlleri olan her API'de bu kusur beklemektedir ve bir enum onu burada kaldırır.
+
+Ama her yerde değil ve fark üzerinde titiz olmaya değer. Şemadaki bir enum,
+modelinizin genellikle uyduğu bir ipucudur; araç sınırında normalizasyon ise
+sizin kontrol ettiğiniz bir garantidir. İkisini de yapın: NFC uygulayın, sonra
+diyakritikleri açık bir eşleme tablosuyla katlayın (`bütçe → butce`) — hem de
+doğrulamadan *önce*. Ve bir tanımlayıcıyı asla yerel belirtmeden `.lower()`
+içinden geçirmeyin: Türkçede `"BUTCE".lower()` `bıtce` verir ve
+`"İSTANBUL".lower()` birleşik bir nokta kazanır. Modelin makul biçimde
+gönderdiğini kabul edin; API'nizin ihtiyaç duyduğunu saklayın. Tuzakların
+gerisi @sec-turkce-nlp'de; bu, fonksiyon imzanıza kadar ulaşan olanı.
 
 :::: {.anlp-fig}
 
@@ -240,7 +302,7 @@ Plot.plot({
 //| echo: false
 md`${toolWhich === "schema"
   ? "Sıçrama tümüyle **B** ile **C** arasında — serbest dizgiden enum'a, %25'ten %100'e. **D**'de eklenen düzyazı açıklamalar hiçbir şey değiştirmedi. Ve **A** korkulacak kusuru gösteriyor: görevlerin %41,7'sinde aracı hiç çağırmadı ve bunun yerine bellekten cevapladı."
-  : "Son satırı diğer üçünden tek bir cümle ayırıyor. Yığın izi — çoğu aracın varsayılan olarak döndürdüğü şey — dördün *en kötüsü*: çıplak bir Error'ın %76,7'sine karşı %81,7 vazgeçme."}`
+  : "Son satırı diğer üçünden tek bir cümle ayırıyor. Yığın izi — çoğu aracın varsayılan olarak döndürdüğü şey — biçimler içinde en az yeniden denemeyi üretti, ama *doğru* olanların payı en yükseği: 9 denemesinin 7'si doğru alanı buldu."}`
 ```
 :::
 
@@ -271,16 +333,32 @@ okuyacak bir insan için yazılır.
 İddia sınanabilir. Diğer her şeyi sabit tutun ve yalnızca aracın bozulduğunda ne
 döndürdüğünü değiştirin. Her koşulun tam olarak aynı kusurla karşılaşması için
 ilk araç çağrısı, model ne isterse istesin **koşulsuz** reddediliyor; puan
-*ikinci* çağrı üzerinden.
+*ikinci* çağrı üzerinden. Dizgiyi sabit tutmanın bir yan ürünü var: `butce`'yi
+doğru gönderen bir modele de `'bütçe'`nin geçersiz olduğu söyleniyor. Bu, dört
+koşulu karşılaştırılabilir tutuyor — ki amaç bu — ama her koşulu gerçek bir
+hatadan biraz daha tutarsız kılıyor ve değeri alıntılayan yığın izi koşulu
+bundan en çok etkileniyor.
 
 ```text
 qwen3.5:9b, 60 tasks, first call always rejected, four error styles
 
- error style     retried  valid field  right field   gave up
- bare              23.3%         1.7%         1.7%     76.7%
- traceback         15.0%        11.7%        11.7%     81.7%
- vague             36.7%         3.3%         3.3%     63.3%
- actionable       100.0%       100.0%       100.0%      0.0%
+ error style     retried        right field              gave up
+ bare          14/60  23.3%   1/60   1.7% [ 0.3,  8.9]  46/60  76.7% [64.6, 85.6]
+ traceback      9/60  15.0%   7/60  11.7% [ 5.8, 22.2]  49/60  81.7% [70.1, 89.4]
+ vague         22/60  36.7%   2/60   3.3% [ 0.9, 11.4]  38/60  63.3% [50.7, 74.4]
+ actionable    60/60 100.0%  60/60 100.0% [94.0,100.0]   0/60   0.0% [ 0.0,  6.0]
+
+ 95% intervals are Wilson on n = 60.
+
+ A `valid field` column is not shown because it was identical to `right field`
+ in all four conditions: whenever the model recovered far enough to emit one
+ of the three legal values, it emitted the correct one. Recovery here is
+ all-or-nothing.
+
+ The traceback row does not reconcile: 9 retried plus 49 abandoned is 58, not
+ 60. Two of that condition's tasks are unaccounted for, so one of its three
+ figures is off by up to two tasks. It is flagged rather than quietly patched,
+ and re-running that condition is the first thing on this chapter's list.
 ```
 
 Dört dizgi şunlardı:
@@ -299,18 +377,42 @@ Dört dizgi şunlardı:
               Gecerli alanlar sunlardir: butce, personel, sure."
 ```
 
+O %100'ün kapsamı, dürüstçe: buradaki geçerli küme üç elemanlı, dolayısıyla
+eylenebilir hata onun tamamını listeleyebiliyor ve model bunu okuduktan sonra bu
+kadar yüksek bir tavan neredeyse garanti. Ölçülen şey, bir toparlanma
+talimatının *varlığı*; onun nasıl ölçeklendiği değil. İlginç olan sınanmamış
+durum, yalnızca en yakın birkaçını sunabileceğiniz iki yüz elemanlı bir küme —
+aynı sıçramayı varsaymadan önce onu kendi aracınızda ölçün.
+
 [Tek bir cümle toparlanmayı %1,7'den %100'e taşıdı.]{.hl} Bir model değişikliği
 değil, bir prompt değişikliği değil, bir yeniden deneme politikası değil — bir
 işlevin döndürdüğü farklı bir dizgi.
 
 O tablodaki üç şey ciddiye alınmaya değer.
 
-**Yığın izi dördün en kötüsü.** Aynı zamanda araçlarınızın bugün büyük olasılıkla
-döndürdüğü şey, çünkü hiçbir şey yapmazsanız olan budur. Çıplak bir `"Error"`dan
-daha kötü: %76,7'ye karşı %81,7 vazgeçti. Bir yığın izi yoğundur, otoriter
-görünür ve neyin işe yarayacağına dair hiçbir ifade içermez; dolayısıyla *şunu
-dene* değil *bu bozuk* diye okunur. Yapılandırılmış işe yaramazlık, sade işe
-yaramazlıktan iyi değildir.
+**Yığın izi dördün en kötüsü değil, en ilginci.** Aynı zamanda araçlarınızın
+bugün büyük olasılıkla döndürdüğü şey, çünkü hiçbir şey yapmazsanız olan budur.
+*En az* yeniden deneme üretti — çıplak bir `"Error"`ın %23,3'üne karşı %15,0 —
+ama ürettiği denemeler işe yarayanlardı: **9 denemesinin 7'si doğru alanı buldu;
+çıplak hatanın 14 denemesinin 1'i, belirsiz olanın 22 denemesinin 2'si**
+(koşullu oranlarda Fisher exact, p = 0,001). Bu, aşağıdaki üç parçalı kurala tam
+oturuyor. Bir yığın izi *neyin başarısız olduğunu* söyler — `KeyError: 'bütçe'`
+sorunlu değeri adlandırır — ve *neyin işe yarayacağı* hakkında hiçbir şey
+söylemez; yani yarısı yazılmış bir hata mesajıdır ve öyle davranır: nadiren
+üzerine hareket edilir, ama edildiğinde bilgilendiricidir.
+
+*Olmadığı* şey ise hiçbir şeyden kötü olmak. O okumanın dayandığı vazgeçme farkı
+46/60'a karşı 49/60 — üç görev; aralıklar [64,6, 85,6] ve [70,1, 89,4] ve Fisher
+exact p = 0,65. Bu deney o karşılaştırmayı çözemiyor ve bu bölümün önceki bir
+taslağı sıralamayı altı ayrı yerde bir sonuç diye sundu. Dört satırın kesin
+biçimde *ayırdığı* şey ise eylenebilir dizginin diğer üçünden farkı.
+
+Bu, bilinen bir sonucun en keskin sürümü. @huang2024large, modellerin kendi akıl
+yürütmelerini *içsel* geri bildirimden güvenilir biçimde düzeltemediğini buldu —
+"tekrar dene" demek işe yaramıyor. Bu deneyin eklediği şey sınır: aynı model,
+hiçbir içerik taşımayan geri bildirimden zamanın %1,7'sinde, cevap kümesini
+adlandıran geri bildirimden %100'ünde toparlanıyor. Fark, modelin öz-düzeltme
+kapasitesi değil. Geri bildirimin bilgi içerip içermediği.
 
 **Baskın kusur döngüye girmek değil vazgeçmektir.** Dört biçimden üçü vakaların
 çoğunluğunda terk üretti — model araç çağırmayı bıraktı ve veriyi almadan
@@ -397,8 +499,18 @@ araçların, herhangi biri çağrılmadan *önce* neye mal olduğuyla ilgili.
 
 Her araç tanımı her çağrının bağlamında durur, dolayısıyla elli araçlık düz bir
 liste, herhangi biri ilgili olsun olmasın her adımda ödenen büyük ve sabit bir
-vergidir. Ayrıca *daha az* doğru hâle gelir: daha çok benzer seçenek, komşusunu
-seçmek için daha çok şans demektir.
+vergidir. Yayımlanmış rakamlar çoğu kişinin beklediğinden büyük:
+@anthropic2025advancedtools, tek bir çağrıdan önce **77.000 token'lık tanım**
+maliyeti olan bir katalog ve tanımları talep üzerine yükleyerek bunun
+**yaklaşık %85'inin** geri kazanıldığını raporluyor. Araçlarınız kendi kod
+tabanınızdan değil bir protokol üzerinden geldiğinde aynı verginin neye
+benzediğini @sec-mcp ölçüyor.
+
+Ayrıca *daha az* doğru hâle gelir — daha çok benzer seçenek, komşusunu seçmek
+için daha çok şans demektir — ve aynı rapor buna da sayı koyuyor: geniş bir
+yüzeyde araç seçme doğruluğu, kataloğu yapıştırmak yerine aramakla bir modelde
+**%49'dan %74'e**, daha güçlü bir modelde %79,5'ten %88,1'e çıkıyor. Ucuz
+çözümle doğru çözümün aynı çözüm olduğu ender durumlardan biri.
 
 Mimarinizi ne kadar değiştirdiklerine göre artan sırada üç çıkış yolu:
 
@@ -409,7 +521,11 @@ Mimarinizi ne kadar değiştirdiklerine göre artan sırada üç çıkış yolu:
   [**kademeli açılım**](#gloss-progressive-disclosure){#term-progressive-disclosure .term-ref}.
   Tek bir `find_tools(query)` açığa çıkarın ve o adım için yalnızca eşleşen
   tanımları yükleyin. Bu, @sec-erisim'in kendi API yüzeyinize uygulanmış hâlidir
-  ve kabaca elli aracın üstünde standart cevaptır.
+  ve @anthropic2025advancedtools'un birinci sınıf bir API özelliği olarak
+  sunduğu şeydir. İnsanların buna başvurduğu eşik bir sabit değil — tanımların
+  ne kadar ayrıntılı olduğuna göre otuz araçla yüz araç arasında bir yerde
+  raporlanıyor — dolayısıyla bir sayı seçmeden önce kendi tanım vergilerinizi
+  ölçün.
 - **Bunun yerine ona bir yorumlayıcı verin.** Araçlarınız çoğunlukla küçük
   dönüşümlerse, korumalı bir kod ortamı elli tanımın yerine bir tane geçirir —
   model bir menüden seçmek yerine ihtiyacı olanı besteler.
@@ -424,7 +540,7 @@ vergilendirmez. [↩](#term-progressive-disclosure){.term-back}
 
 Üçüncü seçenek — [**kod kipi**](#gloss-code-mode){#term-code-mode .term-ref} —
 net biçimde adlandırılmayı hak ediyor, çünkü ciddi sistemlerde giderek
-varsayılan hâline geliyor.
+varsayılan hâline geliyor [@cloudflare2025codemode].
 
 ::: {#gloss-code-mode .column-margin .term-gloss}
 **Kod kipi** (code mode) — bir ajana sabit bir araç listesi yerine korumalı bir
@@ -521,9 +637,11 @@ kelimeler olan her API'nin içinde bekleyen bir kusur.
 
 Neyin işe yarayacağını. Dört biçim üzerinden ölçüldü: toparlanma, yalnızca
 geçersiz değeri adlandırıp geçerlileri listeleyerek **%1,7'den %100'e** çıktı.
-Çarpıcı satır yığın izi: **%81,7 vazgeçmeyle** çıplak bir `"Error"`dan kötüydü,
-çünkü yoğun, otoriter ve ne deneneceğine dair hiçbir ifade içermiyor. Asla ham
-bir istisna döndürmeyin.
+Çarpıcı satır yığın izi: dördü içinde en az yeniden denemeyi üretti, çünkü
+başarısız olan değeri adlandırıyor ama neyin işe yarayacağını hiç söylemiyor.
+Hiçbir şeyden kötü değil, yarısı yazılmış bir hata mesajı — çıplak bir
+`"Error"`a karşı vazgeçme farkı altmışta üç görev ve bir testten sağ çıkmıyor.
+Yakalayın ve eksik cümleyi ekleyin.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -719,6 +837,8 @@ her parametreye enum ekleyin ve değişimi ölçün. Yirmi dakika sürer.
 | şemayı katı bir kısıt yapmak | @willard2023efficient |
 | kendini düzeltmenin neyi düzeltip düzeltmediği | @huang2024large |
 | ölçekte araç kullanımı ve kusur biçimleri | @qin2024toolllm |
+| geniş bir araç yüzeyinin maliyeti ve onu aramak | @anthropic2025advancedtools |
+| araç menüsünün yerine bir yorumlayıcı koymak | @cloudflare2025codemode |
 
 : Birincil kaynaklar {tbl-colwidths="[46,54]"}
 
@@ -742,9 +862,11 @@ her parametreye enum ekleyin ve değişimi ölçün. Yirmi dakika sürer.
 - **Hata dizgisi diğer her tek değişiklikten değerlidir.** Toparlanma, geçersiz
   değeri adlandırıp geçerlileri listeleyerek **%1,7'den %100'e** çıktı. Neyin işe
   *yarayacağını* yazın; gerisi isteğe bağlıdır.
-- **Bir yığın izi hiçbir şeyden kötüdür.** **%81,7 vazgeçmeyle** işe yaramazlıkta
-  çıplak bir `"Error"`ı geçti, çünkü otoriter görünür ve ileri bir yol sunmaz.
-  Yakalayın ve çevirin.
+- **Bir yığın izi yarısı yazılmış bir hata mesajıdır.** Başarısız olan değeri
+  adlandırır, neyin işe yarayacağını hiç söylemez; dolayısıyla biçimler içinde
+  en az yeniden denemeyi üretti — gerçi ürettikleri en sık doğru olanlardı,
+  9'da 7. Bunu *hiçbir şeyden kötü* diye okumayın: n = 60'ta o karşılaştırma
+  gürültünün içinde. Bitmemiş diye okuyun ve üçüncü cümleyi ekleyin.
 - **Bir hatadan sonra baskın kusur döngüye girmek değil vazgeçmektir.** Dört hata
   biçiminden üçü modeli araç çağırmayı bırakıp veriyi almadan cevaplamaya itti —
   bir yeniden deneme döngüsünden daha sessiz ve daha kötü bir kusur.
