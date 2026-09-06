@@ -5,7 +5,8 @@
 [İngilizce 33. bölüm](../../en/chapters/33-deployment-reliability.html). Bir
 dakika kadar hesap tutan tek bir küçük ölçüm: bir ajan adımını yeniden denemenin
 onu yeniden üretip üretmediğini öğrenmek için bir modelden aynı araç çağrısını
-defalarca çıkarmasını isteyen 48 kısa çağrı. Buradaki diğer her şey, belirlenimci
+defalarca çıkarmasını isteyen 72 kısa çağrı — üç görev × üç örnekleme koşulu ×
+sekiz yeniden deneme. Buradaki diğer her şey, belirlenimci
 olmayan bir çağırana uygulanan sıradan dağıtık sistem pratiği ve yeniden
 türetilmek yerine kaynak gösteriliyor. Yazılım: `ollama` 0.24.0, `llama3.2:3b`
 servis ediyor; Python 3.14.5, Apple Silicon.
@@ -144,7 +145,10 @@ kez başarılı olan bir ajan adımı yeniden denemesi e-postayı iki kez gönde
 
 Altta yatan ilginç soru, insanların ölçmek yerine varsaydığı soru: **adımı
 yeniden denediğinizde aynı araç çağrısını mı alıyorsunuz?** Üç görev için, bir
-modelden sekiz kez tek bir `send_email` çağrısı çıkarması istendiğinde:
+modelden üç örnekleme koşulunun her birinde sekiz kez tek bir `send_email`
+çağrısı çıkarması istendiğinde. `identical`, sekiz yeniden denemenin tamamında
+araç çağrısı yükünün bayt eşitliği; `distinct to` ve `distinct subj` yalnızca o
+iki argümanın benzersiz değerlerini sayıyor.
 
 ```text
     task  temp   seed  identical  distinct to  distinct subj
@@ -174,6 +178,17 @@ Son satırı okuyun. Görev *"pompa arızalandı, bilmesi gerekene haber ver"*di
 adres uydurma ve idempotans koruması olmayan bir yeniden deneme döngüsü
 bunlardan birkaçına posta göndermiş olurdu.
 
+**Beşi bir tahmin değil bir taban olarak okuyun.** Sekiz çekiliş, modelin kaç
+adres uydurmaya istekli olduğunu sınırlayamaz. Bu dağılımla — bir adres üç kez,
+biri iki kez, üçü birer kez — Chao1 zenginlik kestirimi desteği beş değil kabaca
+**on** koyuyor; çünkü sekiz çekilişte üç tekil, örneklemediğiniz uzun bir
+kuyruğun imzasıdır. Diğer yönde, sıcaklık 0'daki sekiz özdeş çıktı tekrar oranı
+üzerinde kabaca **[%68, %100]** Wilson aralığı veriyor; yani "sekiz kez bayt bayt
+aynı", gerçek tekrar oranının üçte ikiye yakın olmasıyla uyumlu. İki düzeltme de
+tasarım sonucunu değiştirmiyor. İkisi de neyin iddia edilebileceğini değiştiriyor:
+bu ölçüm kusurun var olduğunu ve kolayca yeniden üretildiğini ortaya koyuyor, sizin
+uçta ne sıklıkla olduğunu değil.
+
 Bunun söylemediği ve ikisi de önemli olan iki şey.
 
 **Sıcaklık 0 çare değil, farklı bir risktir.** Sıcaklık 0'da her görev için sekiz
@@ -182,19 +197,32 @@ belirlenimci biçimde uyduran `choice` dâhil. Yeniden üretilebilir ve yine de
 yanlış. Belirlenimcilik yeniden denemeyi *tekrarlanabilir* kılar; altta yatan
 kararı doğru kılmaz.
 
+**Ve bu tablonun eksik olan bir koşulu, ilgili bir soruyu çözüyor.**
+@sec-promptlama aynı kontrolü daha büyük ölçekte koştu ve **sıcaklık 0,7'de sabit
+bir seed'in** de otuz belgenin hepsinde, on tekrar boyunca özdeş çıktı ürettiğini
+buldu. Yani buradaki eksen aslında sıcaklık değil; örnekleyicinin sabitlenip
+sabitlenmediği. Sıcaklık 0'a bir güvenilirlik kolu diye uzanmadan önce bunu
+bilmeye değer, çünkü isteyebileceğiniz çeşitliliği alıp götürüyor ve bir seed'in
+daha ucuza aldığı bir şeyi veriyor.
+
 **Ve bu belirlenimcilik tek akışlı yerel bir sunucunun bir özelliği, bir garanti
-değil.** Barındırılan API'lerin sıcaklık 0'da bit bit aynı çıktı vaat etmediği
-geniş biçimde belgelenmiş durumda, çünkü batch'leme, kayan nokta indirgeme sırası
-ve uzman yönlendirmesi hepsi o an uçuşta olan diğer şeylerle birlikte değişiyor.
-Sıcaklık 0'ı bir varyans azaltma olarak görün, asla bir idempotans mekanizması
-olarak değil.
+değil.** Yükü taşıyan koşul **batch değişmezliği**: matmul, normalizasyon ve
+dikkatin arkasındaki indirgeme çekirdekleri farklı batch boyutlarında farklı kod
+yolları izliyor; dolayısıyla aynı prompt, bir batch'te tek başınayken ve on yedi
+kişilik bir batch'teyken sıcaklık 0'da bile farklı çözümlenebiliyor
+[@he2025nondeterminism]. Barındırılan API'ler isteğinizi yabancılarla
+batch'liyor. Sıcaklık 0'ı bir varyans azaltma olarak görün, asla bir idempotans
+mekanizması olarak değil.
 
 ::: {.column-margin}
-Tablodaki örüntü tekil sayılardan daha değerli: sıcaklık yalnızca *görevin* yan
-etkiyi eksik belirttiği yerde hasar verdi. Alıcıyı adlandıran `clear`, 0,7'de
-bile kararlıyken `choice` değildi. Sıcaklığın büyüttüğü şey yönergedeki
-belirsizlik ve bu da konuyu bir örnekleme problemi olduğu kadar bir prompt
-problemi yapıyor.
+Tablodaki örüntü tekil sayılardan daha değerli ve "sorun sıcaklıktır"dan daha
+ince. 0,7'de *hiçbir* görev bayt bayt aynı değildi — alıcıyı adlandıran ve yine
+de gövdede değişen `clear` dâhil. Belirsizliğin değiştirdiği şey *hangi alanın*
+oynadığı: `clear` alıcıyı ve konuyu korudu, `vague` altı konu satırı üretti,
+`choice` beş alıcı üretti. Sıcaklık her şeyi bozar; yan etkisi olan bir alana
+düşüp düşmeyeceğine görev karar verir. Yükün *herhangi* bir parçasından —
+yalnızca alıcıdan değil — türetilen bir anahtarın neden güvensiz olduğunun nedeni
+de bu.
 :::
 
 ## İdempotans anahtarları ve anahtarın nereden geldiği {#sec-dagitim-idempotans}
@@ -222,10 +250,21 @@ anahtar, anahtar değildir.
 
 : Dört aday anahtar ve işe yarayan ikisi {tbl-colwidths="[26,18,56]"}
 
-Pratikte işe yarayıp yaramayacağına karar veren iki uygulama notu. Kayıt, **etkiyle
-aynı işlemde** yazılmalı, yoksa aradaki bir çökme pencereyi yeniden açar. Ve en
-uzun yeniden denemenizi kapsayacak kadar uzun bir saklama penceresine ihtiyaç
-duyar; bunu beş dakikaya ayarlayıp sonra altı saat gerektiğini keşfetmek kolaydır.
+Pratikte işe yarayıp yaramayacağına iki uygulama notu karar veriyor.
+
+**Kayıt ile etki birlikte commit olmalı.** Etki sizin veritabanınızdaki bir
+satırsa bu tek bir işlemdir ve problem çözülmüştür. Etki uzak bir çağrıysa — ki
+bu bölümün sürekli kullandığı `send_email` dâhil ilginç her araç için durum
+budur — çözülmemiştir, çünkü bir HTTP isteği sizin işleminize katılamaz. Bu,
+çift-yazma (dual-write) problemidir ve standart cevabı **işlemsel outbox**: tek
+bir işlemde hem idempotans kaydını *hem de* amaçlanan çağrıyı tarif eden bir
+satırı yazın; ayrı bir yayıcı outbox'ı okuyup çağrıyı at-least-once yapar ve
+anahtarı taşır, böylece alıcı yinelemeyi yutar. Yinelemeyi ortadan kaldırmadınız.
+Onu, bir anahtarın soğurabileceği bir yere taşıdınız.
+
+**Saklama penceresi en uzun yeniden denemenizden uzun olmalı.** Bunu beş dakikaya
+ayarlayıp sonra altı saat gerektiğini keşfetmek kolaydır — çünkü kuyruk birikmişti
+ve iş ertesi sabah yeniden teslim edildi.
 
 ## Telafi: gönderilmiş bir e-postanın geri alması yoktur {#sec-dagitim-telafi}
 
@@ -418,7 +457,9 @@ barındırılan API'ler bunu vaat etmiyor.
 Yukarı akıştaki, kararlı bir yerden — `(oturum kimliği, adım indisi)` ya da istek
 kimliği. Açıkça araç argümanlarının bir özeti *değil*, çünkü onlar modelin çıktısı
 ve yeniden denemeler arasında değişiyorlar. Sonra işe yarayıp yaramayacağına
-karar veren iki ayrıntı: anahtar etkiyle aynı işlemde kaydedilmeli ve saklama
+karar veren iki ayrıntı: anahtar etkiyle atomik biçimde commit olmalı — uzak bir
+çağrı için bu bir outbox demek, çünkü bir HTTP isteği işleminize katılamaz — ve
+saklama
 penceresi en uzun yeniden denemenizden uzun olmalı.
 
 ### Bir tane sevk edip etmediğinizi sınayanlar
@@ -454,7 +495,7 @@ koşunun bir tavana çarpıp çarpmadığı ve başarı olarak raporlanıp rapor
 ## 2026 alet çantası {#sec-dagitim-araclar}
 
 Bu bölümde neredeyse hiçbir şey bir kütüphane gerektirmedi — ölçüm yerel bir
-modele 48 çağrıydı ve geri kalan her şey kendi döngünüzün bir özelliği. Önemli
+modele 72 çağrıydı ve geri kalan her şey kendi döngünüzün bir özelliği. Önemli
 olan ikinci tablo ve ikiye temiz biçimde ayrılıyor: yukarıda anlatılan
 belirlenimcilik sözleşmesini dayatan dayanıklı yürütme motorları ve dayatmayan
 düz görev kuyrukları.
@@ -541,9 +582,11 @@ birinin ateşlendiğine ve raporlandığına dair kanıt.
    için bir satır: araç, telafisi ve telafinin dürüst olup olmadığı. Bunun yerine
    onay kapısına ihtiyaç duyan satırları belirleyin.
 
-4. **Atomiklik.** İdempotans kaydınızın, koruduğu etkiyle aynı işlemde yazılıp
-   yazılmadığını öğrenin. Yazılmıyorsa yineleme üreten araya girişi kurun ve bunun
-   sizin trafiğinizde ne kadar olası olduğunu söyleyin.
+4. **Atomiklik.** İdempotans kaydınızın, koruduğu etkiyle birlikte commit olup
+   olmadığını öğrenin. Etki uzak bir çağrıysa olamaz; o zaman outbox'ı uygulayın
+   ve yinelemenin artık sizin işleminizle engellenmek yerine alıcının anahtarıyla
+   soğurulduğunu gösterin. Her hâlükârda yineleme üreten araya girişi kurun ve
+   bunun sizin trafiğinizde ne kadar olası olduğunu söyleyin.
 
 5. **Üç tavanın üçüne de çarpın.** Sırasıyla adımı, token'ı ve duvar saatini
    tüketen üç görev yazın. Her birinin ajanı durdurduğunu ve üçünün kütüklerinizde
@@ -619,8 +662,10 @@ literatürü ve onu uygulayan motorlar.
 - **İdempotans anahtarını yukarı akıştan türetin, asla modelin çıktısından
   değil.** Araç argümanlarını özetlemek tam da ihtiyaç duyulduğunda başarısız
   oluyor — beş argüman kümesi, beş özet, beş e-posta demek. `(oturum kimliği,
-  adım indisi)` ya da istek kimliğini kullanın, kaydı etkiyle aynı işlemde yazın
-  ve ona en uzun yeniden denemenizden uzun bir saklama penceresi verin.
+  adım indisi)` ya da istek kimliğini kullanın, kaydı etkiyle birlikte commit
+  edin — etki uzak bir çağrıysa bir outbox üzerinden, çünkü bir HTTP isteği
+  işleminize katılamaz — ve ona en uzun yeniden denemenizden uzun bir saklama
+  penceresi verin.
 
 - **Telafi tablosunu aracı sevk etmeden önce yazın.** Bir kayıt silinebilir, bir
   çekim iade edilebilir, bir rezervasyon iptal edilebilir. Gönderilmiş bir mesaj

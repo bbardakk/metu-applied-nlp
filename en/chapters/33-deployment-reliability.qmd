@@ -2,8 +2,9 @@
 
 ::: {.callout-note appearance="simple" icon="false"}
 **Chapter status: drafted.** One small measurement, about a minute of compute:
-48 short calls asking a model to emit the same tool call repeatedly, to find out
-whether retrying an agent step reproduces it. Everything else here is ordinary
+72 short calls — three tasks × three sampling conditions × eight retries —
+asking a model to emit the same tool call repeatedly, to find out whether
+retrying an agent step reproduces it. Everything else here is ordinary
 distributed-systems practice applied to a non-deterministic caller, and is cited
 rather than re-derived. Software: `ollama` 0.24.0 serving `llama3.2:3b`, Python
 3.14.5, Apple Silicon.
@@ -140,7 +141,10 @@ succeeds twice sends the email twice.
 
 The interesting question underneath is one people assume rather than measure:
 **when you retry the step, do you get the same tool call?** Asking a model to
-emit one `send_email` call, eight times, for three tasks:
+emit one `send_email` call, eight times, for each of three tasks under three
+sampling conditions. `identical` is byte equality of the whole tool-call
+payload across all eight retries; `distinct to` and `distinct subj` count
+unique values of those two arguments only.
 
 ```text
     task  temp   seed  identical  distinct to  distinct subj
@@ -171,6 +175,18 @@ different recipients**:
 address is invented, and a retry loop with no idempotency protection would have
 mailed several of them.
 
+**Read five as a floor, not an estimate.** Eight draws cannot bound how many
+addresses the model is willing to invent. With this distribution — one address
+three times, one twice, three once each — a Chao1 richness estimate puts the
+support at roughly **ten**, not five, because three singletons in eight draws
+is the signature of a long tail you have not sampled. In the other direction,
+eight identical outputs at temperature 0 give a Wilson 95% interval of about
+**[68%, 100%]** on the repeat rate, so "byte-identical eight times" is
+compatible with a true repeat rate near two thirds. Neither correction changes
+the design conclusion. Both change what may be claimed: this establishes that
+the failure exists and reproduces easily, not how often it happens on your
+endpoint.
+
 Two things this does *not* say, both of which matter.
 
 **Temperature 0 is not the fix, it is a different risk.** At temperature 0 all
@@ -179,18 +195,31 @@ deterministically invented `maintenance@company.com`. Reproducible and still
 wrong. Determinism makes a retry *repeatable*; it does not make the underlying
 decision correct.
 
+**And a condition this table is missing settles a related question.**
+@sec-prompting ran the same check at larger scale and found that a **fixed seed
+at temperature 0.7** also produced identical output on all 30 documents across
+ten repeats. So the axis here is not really temperature; it is whether the
+sampler is pinned. That is worth knowing before you reach for temperature 0 as
+a reliability lever, because it costs you diversity you may want and buys you
+something a seed buys more cheaply.
+
 **And this determinism is a property of a single-stream local server, not a
-guarantee.** Hosted APIs are widely documented as not promising bit-identical
-output at temperature 0, because batching, floating-point reduction order and
-expert routing all vary with what else is in flight. Treat temperature 0 as a
-variance reduction, never as an idempotency mechanism.
+guarantee.** The load-bearing condition is **batch invariance**: the reduction
+kernels behind matmul, normalisation and attention take different code paths at
+different batch sizes, so the same prompt in a batch of one and a batch of
+seventeen can decode differently even at temperature 0
+[@he2025nondeterminism]. Hosted APIs batch your request with strangers. Treat
+temperature 0 as a variance reduction, never as an idempotency mechanism.
 
 ::: {.column-margin}
-The pattern in the table is worth more than the individual numbers: temperature
-only did damage where the *task* left the side effect under-specified.
-`clear` — which named the recipient — was stable even at 0.7, while `choice`
-was not. Ambiguity in the instruction is what temperature amplifies, which
-makes this a prompt problem as much as a sampling one.
+The pattern in the table is worth more than the individual numbers, and it is
+finer than "temperature is the problem". At 0.7 *no* task was byte-identical —
+including `clear`, which named the recipient and still varied in the body. What
+ambiguity changed is *which field* moved: `clear` kept the recipient and the
+subject, `vague` produced six subject lines, `choice` produced five recipients.
+Temperature perturbs everything; the task decides whether the perturbation
+lands on a field that has a side effect. Which is also why a key derived from
+*any* part of the payload rather than the recipient alone is unsafe.
 :::
 
 ## Idempotency keys, and where the key comes from {#sec-deployment-idempotency}
@@ -217,11 +246,22 @@ So derive it from something upstream and stable:
 
 : Four candidate keys, and the two that work {tbl-colwidths="[26,18,56]"}
 
-Two implementation notes that decide whether it works in practice. The record
-must be written **in the same transaction as the effect**, or a crash between
-them re-opens the window. And it needs a retention window long enough to cover
-your longest retry, which is easy to set to five minutes and then discover was
-needed for six hours.
+Two implementation notes decide whether it works in practice.
+
+**The record and the effect must commit together.** When the effect is a row in
+your own database that is one transaction and the problem is solved. When the
+effect is a remote call — which is the case for every interesting tool,
+including the `send_email` this chapter keeps using — it is not, because an
+HTTP request cannot join your transaction. This is the dual-write problem, and
+the standard answer is the **transactional outbox**: in one transaction, write
+the idempotency record *and* a row describing the intended call; a separate
+publisher reads the outbox and performs the call at-least-once, carrying the
+key so the receiver dedupes it. You have not removed the duplicate. You have
+moved it somewhere a key can absorb it.
+
+**The retention window must outlast your longest retry.** Easy to set to five
+minutes and then discover was needed for six hours, because the queue was
+backed up and the job was redelivered the next morning.
 
 ## Compensation: there is no rollback for a sent email {#sec-deployment-compensation}
 
@@ -411,7 +451,8 @@ variance reduction, not a guarantee, and hosted APIs do not promise it.
 Somewhere upstream and stable — `(session id, step index)`, or the request id.
 Explicitly *not* a hash of the tool arguments, because those are the model's
 output and vary between retries. Then two details that decide whether it works:
-the key must be recorded in the same transaction as the effect, and the
+the key must commit atomically with the effect — which for a remote call means
+an outbox, since an HTTP request cannot join your transaction — and the
 retention window must outlast your longest retry.
 
 ### Testing whether you have shipped one
@@ -444,7 +485,7 @@ whether the run hit a ceiling and was reported as a success.
 
 ## The 2026 toolbox {#sec-deployment-tools}
 
-Almost nothing in this chapter needed a library — the measurement was 48 calls
+Almost nothing in this chapter needed a library — the measurement was 72 calls
 to a local model, and everything else is a property of your own loop. The second
 table is the one that matters, and it splits cleanly in two: durable execution
 engines that impose the determinism contract described above, and plain task
@@ -534,10 +575,12 @@ evidence that each of the three ceilings fires and is reported.
    work on: the tool, its compensation, and whether the compensation is honest.
    Identify the rows that need an approval gate instead.
 
-4. **Atomicity.** Find out whether your idempotency record is written in the
-   same transaction as the effect it guards. If it is not, construct the
-   interleaving that produces a duplicate, and say how likely it is at your
-   traffic.
+4. **Atomicity.** Find out whether your idempotency record commits together
+   with the effect it guards. If the effect is a remote call it cannot, so
+   implement the outbox instead and show that the duplicate is now absorbed by
+   the receiver's key rather than prevented by your transaction. Either way,
+   construct the interleaving that produces a duplicate and say how likely it
+   is at your traffic.
 
 5. **Trip all three ceilings.** Write three tasks that exhaust steps, tokens and
    wall clock respectively. Confirm each stops the agent, and that the three are
@@ -611,8 +654,9 @@ engines that implement it.
 - **Derive the idempotency key from upstream, never from the model's output.**
   Hashing tool arguments fails exactly when it is needed — five argument sets
   means five hashes means five emails. Use `(session id, step index)` or the
-  request id, write the record in the same transaction as the effect, and give
-  it a retention window longer than your longest retry.
+  request id, commit the record together with the effect — via an outbox when
+  the effect is a remote call, because an HTTP request cannot join your
+  transaction — and give it a retention window longer than your longest retry.
 
 - **Write the compensation table before shipping the tool.** A record can be
   deleted, a charge refunded, a booking cancelled. A posted message can only be
