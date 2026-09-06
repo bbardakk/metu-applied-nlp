@@ -3,8 +3,10 @@
 ::: {.callout-note appearance="simple" icon="false"}
 **Chapter status: drafted.** The measurements here are small on purpose —
 about 150 short requests against a 3B model on a laptop, a few minutes in
-total. They are enough because the quantities that matter are ratios, and the
-ratios hold across hardware. Everything that needs a GPU fleet to observe is
+total. They are enough because what matters is a ratio whose *sign and cause*
+are the same on every machine — prefill is compute-bound, decode is
+bandwidth-bound. The magnitude does not transfer, and the chapter says where
+it stops transferring rather than pretending otherwise. Everything that needs a GPU fleet to observe is
 cited rather than claimed. Every condition is measured five times and reported
 as a median; the conditions are run in shuffled order, so drift cannot pile up
 in the long-prompt rows; and a fixed short prompt is re-timed every fifth call
@@ -13,7 +15,11 @@ whole session, which is what makes the rest of the table worth reading.
 Software: `ollama` 0.24.0 serving `llama3.2:3b` (Q4_K_M, 28 layers, 24
 attention heads, 8 KV heads, head dimension 128), `num_ctx` 8192,
 `temperature` 0, `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0`,
-on Python 3.14.5 and Apple Silicon.
+on Python 3.14.5 and Apple Silicon. The exact chip matters more than that name
+suggests, and the timings say which class it was: 190 decode tokens per second
+against a 2.0 GB weight file is about **380 GB/s** of weight streaming, which
+only a high-bandwidth part sustains. The same model on a 120 GB/s laptop tops
+out near 60 tokens per second. Reproduce the ratio, not the rate.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -68,9 +74,12 @@ prompt tokens   prefill   prefill tok/s      decode tok/s
 ```
 
 Prefill runs at roughly **2,000 tokens per second**; decode at roughly **190**.
-[Reading a token is about eleven times cheaper than writing one]{.hl} — 0.5
-milliseconds against 5.2 — and the ratio, not the absolute numbers, is what
-transfers to your hardware.
+[Reading a token is about eleven times cheaper than writing one]{.hl} — on the
+4,247-token row, 0.54 milliseconds against 6.2 — and it is the ratio rather
+than the absolute numbers that survives a change of hardware. Take both figures
+from the same row: decode slows as the context grows (5.2 ms at 96 tokens,
+6.2 ms at 4,247), so pairing the best prefill with the worst decode inflates
+the gap.
 
 ::: {.column-margin}
 The 1,433 tok/s on the first row is not a slower prefill; it is a fixed
@@ -122,7 +131,8 @@ $$
   <path d="M422,63 H428" class="ln-accent" marker-end="url(#sv-b)"/>
   <path d="M508,63 H514" class="ln-accent" marker-end="url(#sv-b)"/>
   <path d="M594,63 H600" class="ln-accent" marker-end="url(#sv-b)"/>
-  <text x="513" y="112" class="t-xs t-muted t-mid">serial &#183; 5.2 ms/token &#183; memory-bound</text>
+  <text x="513" y="112" class="t-xs t-muted t-mid">serial &#183; 6.2 ms/token at this context &#183; memory-bound</text>
+  <text x="513" y="126" class="t-xs t-muted t-mid">boxes enlarged &#8212; at prefill's scale all 32 would be 25 px wide</text>
 
   <path d="M8,142 H752" class="ln-thin"/>
   <text x="8" y="136" class="t-xs t-muted t-b">A DIFFERENT REQUEST &#183; 7,427 TOKENS IN, 64 OUT</text>
@@ -137,9 +147,13 @@ $$
 ```
 
 ::: {.fig-cap}
-The two halves at the same scale. Prefill is one pass over 4,247 tokens;
-decode is 32 separate passes over the model, one per output token. The bar
-underneath is a different request — 7,427 tokens of context, 64 tokens out —
+The top half is **not** to scale: the decode boxes are enlarged so the
+per-token loop is visible at all. In wall clock those 32 passes take 0.20 s
+against prefill's 2.29 s, so drawn honestly they would occupy about 25 pixels
+against prefill's 286. The bar underneath *is* to scale, and it is the shape
+worth remembering. Prefill is one pass over 4,247 tokens; decode is 32
+separate passes over the model, one per output token. That bar is a different
+request — 7,427 tokens of context, 64 tokens out —
 measured with streaming on, and it is the shape most production requests
 have: almost all of the wall clock is spent before the first character
 appears.
@@ -239,14 +253,14 @@ For this model at fp16 — 28 layers, 8 KV heads, head dimension 128 — that is
 $2 \times 28 \times 8 \times 128 \times 2 = 114{,}688$ bytes, or **112 KiB
 per token**. Multiply by the window:
 
-| context | KV cache | against a 2.0 GB model file |
-|--:|--:|:--|
-| 8,192 | 0.88 GiB | under half the weights |
-| 32,768 | 3.50 GiB | [1.8× the weights]{.con} |
-| 131,072 | **14.00 GiB** | [**7× the weights**]{.con} |
+| context | cache, fp16 | cache, q8_0 | fp16 cache vs 6.4 GB of fp16 weights | fp16 cache vs the 2.0 GB Q4 file |
+|--:|--:|--:|:--|:--|
+| 8,192 | 0.88 GiB | 0.46 GiB | 0.15× | 0.47× |
+| 32,768 | 3.50 GiB | 1.86 GiB | 0.59× | [1.9×]{.con} |
+| 131,072 | **14.00 GiB** | **7.44 GiB** | [2.3×]{.con} | [**7.5×**]{.con} |
 
-: What the window costs in memory, llama3.2:3b at fp16
-{tbl-colwidths="[18,20,62]"}
+: What the window costs in memory, llama3.2:3b
+{tbl-colwidths="[14,14,14,29,29]"}
 
 ::: {.column-margin}
 That table is fp16, which is the default and the right first calculation. The
@@ -259,8 +273,16 @@ binds, and it is off by default. Check which one your server is running before
 you size a card, because nothing in the output tells you.
 :::
 
-[A 2 GB model with its context window full needs 14 GB of cache — the cache is
-seven times the model.]{.hl} This is why "can I run a 3B model?" is the wrong
+[A 2.0 GB quantized model file with its 131k window full at fp16 needs 14 GiB
+of cache.]{.hl} Note what that last ratio compares before quoting it: four-bit
+weights against a sixteen-bit cache, which is the widest of the three honest
+comparisons. At matched precision the cache is **2.3×** the weights; against
+the eight-bit cache this chapter actually ran it is **4.0×** the file. All
+three say the same thing — the cache is the allocation that scales with usage,
+and it is the one nobody budgets for — but only one of them is the number to
+size a card with, and which one depends on what you are running.
+
+This is why "can I run a 3B model?" is the wrong
 question and "at what context length?" is the right one, and why the default
 `num_ctx` in a local server matters so much: ask for the full 131k window and
 you have committed 14 GB before the first request.
@@ -281,10 +303,40 @@ sequences on the same card.
 
 ## Batching: throughput the individual user cannot feel {#sec-serving-batching}
 
+### Why decode is bandwidth-bound, and where that stops
+
+"Decode is memory-bound" has been asserted four times by now. Here is the
+derivation, because it also tells you the one thing the assertion does not: how
+far batching goes before it stops being free.
+
+A decode step for a batch of $B$ sequences does about $2NB$ floating-point
+operations and moves about $N \cdot b$ bytes of weights, where $N$ is the
+parameter count and $b$ the bytes per parameter. Their ratio — the **arithmetic
+intensity** — is
+
+$$I \;=\; \frac{2NB}{N b} \;=\; \frac{2B}{b}$$
+
+and note what cancelled: the model size. Intensity depends on batch and
+precision only. A chip is compute-bound above its *ridge point*, peak FLOP/s
+divided by peak bandwidth — for an H100-class part, roughly
+$989 \text{ TFLOP/s} \div 3.35 \text{ TB/s} \approx 295$ FLOP/byte. So at fp16
+decode stays bandwidth-bound until about $B = 295$; at four-bit weights, until
+about $B = 74$.
+
+Prefill is the same formula with the prompt length in place of $B$. For the
+4,247-token prompt above that is an intensity of 4,247 — more than an order of
+magnitude past the ridge, which is exactly why prefill is compute-bound and
+decode is not, and why the two halves of the table behave so differently.
+
+That number is also the honest boundary on the claim that follows.
+
 Decode is memory-bound: the hardware spends its time moving weights, not
 multiplying them. That means a second request costs *almost nothing extra*,
 because the weights being moved for one sequence can serve several at once.
-Batching converts that slack into throughput.
+Batching converts that slack into throughput — and the second request is nearly
+free, and so is the fiftieth, and somewhere around the three-hundredth it is
+not, because the batch has crossed the ridge and the arithmetic starts to
+cost.
 
 ::: {#gloss-continuous-batching .column-margin .term-gloss}
 **continuous batching** — new requests join a running batch as slots free,
@@ -373,14 +425,23 @@ first and turns the cache off without anybody noticing.
 instrumented is a belief. @sec-observability is where that instrumentation
 belongs, and the metric is share of prompt tokens served from cache, per route.
 
-::: {.column-margin}
-Hosted APIs expose this differently — some cache automatically above a minimum
-prefix length, some require an explicit marker, and the discount on cached
-input tokens varies by provider. The mechanism is the same one measured above;
-what differs is who decides when it applies. Read your provider's rule before
-designing the prompt around it, because the minimum prefix length in particular
-determines whether short system prompts benefit at all.
-:::
+**What was measured, and what was not.** The 153× above is a local server's
+*slot-level* prefix reuse: the previous request's KV cache is still resident
+and the next request happens to share its prefix. That is the same *mechanism*
+a hosted API uses, but not the same *system*, and three differences change the
+number you will see in production.
+
+Eviction is the big one. A local server keeps one slot per model by default, so
+a single interleaved request from another user discards the prefix — and the
+measurement above sent the same prompt twice in a row, which is the friendliest
+case that exists. Two users alternating would have shown nothing. Control is
+the second: some hosted APIs cache automatically above a minimum prefix length,
+others require an explicit marker, and a local server gives you neither knob.
+Price is the third: hosted cached input tokens are billed at a discount rather
+than skipped, which is the line the worksheet in @sec-serving-cost depends on.
+
+Take 153× as an upper bound on the mechanism, and instrument the real hit rate
+on the real system.
 
 ## The cost worksheet {#sec-serving-cost}
 
@@ -584,8 +645,10 @@ value for every token in the window, for every layer and every KV head.
 
 For this model at fp16 — 28 layers, 8 KV heads, head dimension 128 — that is
 112 KiB per token, so a 131,072-token window is 14 GiB of cache against a
-2.0 GB model file. Seven times the model. An 8-bit cache roughly halves it,
-which is a lever worth knowing about and one that is off by default.
+2.0 GB model file. Say what that ratio compares, though: four-bit weights
+against a sixteen-bit cache. At matched precision the cache is 2.3× the
+weights. An 8-bit cache roughly halves the cache side, which is a lever worth
+knowing about and one that is off by default.
 
 This is why the honest answer to "will it fit?" is a question about context
 length, and why a local server's default window is a memory decision disguised
@@ -856,10 +919,12 @@ once you know your own ratio.
   generated token: decode fell from **189 to 141 tokens per second** between an
   empty window and a 7,400-token one.
 
-- **The KV cache can dwarf the model.** At 112 KiB per token, a 131k window on a
-  2.0 GB model is **14 GiB of cache — seven times the weights**. "Will it fit?"
-  is a question about context length. Grouped-query attention is why that number
-  is 14 and not 42.
+- **The KV cache can dwarf the model.** At 112 KiB per token, a 131k window is
+  **14 GiB of cache** — 7.5× a 2.0 GB four-bit file, 2.3× the same weights at
+  fp16, 4.0× the file with the eight-bit cache actually used here. Quote
+  whichever matches your setup, but "will it fit?" is a question about context
+  length either way. Grouped-query attention is why the number is 14 and not
+  42.
 
 - **Prompt caching is the first lever and it is not subtle.** Warm prefill was
   **flat at 12–16 ms regardless of prompt length**: 153× on prefill and 9.0× on
