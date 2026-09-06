@@ -100,7 +100,10 @@ korunmuş hâlidir — ve protokolün hiç güvenli olabilmesinin bütün nedeni
 ::: {.fig-cap}
 Şemayı sağdan sola da okuyun. Bir sunucu yetenekleri yayımlar ve modelin
 göreceği şey, host'un iletmeyi seçtiğidir. @sec-mcp-guvenlik'teki her şey,
-kontrol edebilecek konumdaki tek tarafın host olmasından çıkar.
+kontrol edebilecek konumdaki tek tarafın host olmasından çıkar. Çarpı işaretli
+bağlantı güncel revizyon hakkında bir ifade ve zayıflamadı, güçlendi:
+2026-07-28 itibarıyla bir sunucu bağımsız bir istek gönderemiyor bile — geri bir
+şeye ihtiyacı olduğunda dönüyor ve yeniden sorulmayı bekliyor.
 :::
 
 ::::
@@ -131,9 +134,24 @@ okuduysanız bu liste hatırladığınızdan kısadır ve fark kozmetik değildi
 
 : Sunucu özellikleri, 2026-07-28 revizyonu {tbl-colwidths="[16,50,34]"}
 
-**Client'lar bir tane sunar:** **Elicitation** — "Sunucunun başlattığı, kullanıcıdan
-ek bilgi isteyen istekler". Eksik bir parametreye ihtiyaç duyan bir sunucu,
-başarısız olmak yerine host üzerinden sorabilir.
+**Client'lar bir tane sunar:** **Elicitation** — eksik bir parametreye ihtiyaç
+duyan bir sunucu, başarısız olmak yerine host üzerinden sorabilir.
+
+*Nasıl* sorduğu ise 2025 tarihli bir öğreticinin yanlış anlatacağı kısım ve
+yanlış anlamak, hiçbir güncel host'un konuşamayacağı bir sunucu üretir. Artık
+sunucunun başlattığı bir JSON-RPC isteği diye bir şey yok. 2026-07-28
+revizyonu, `elicitation/create`'i — `sampling/createMessage` ve `roots/list` ile
+birlikte — **Multi Round-Trip Requests** desenine (SEP-2322) devretti: sunucu,
+`resultType: "input_required"` ve bir `inputRequests` alanı taşıyan bir
+`InputRequiredResult` *döndürüyor*; client ise **özgün isteği yeniden
+göndererek**, yanına `inputResponses` ekleyerek cevaplıyor. Artık her sonuç
+zorunlu bir `resultType` taşıyor — sıradan olanlar için `"complete"` — ve bir
+client, daha eski bir sunucudan gelen eksik alanı `"complete"` saymalı.
+
+Bunun üzerinde durmaya değer, çünkü bu bölümün açılış iddiasının en güçlü
+kanıtı. Bir sunucunun host'un dünyasına geri uzanabildiği tek kanal, host'un
+üzerine hareket edip etmemeyi seçtiği bir dönüş değerine çevrildi. Sunucu
+host'u çağırmıyor. Cevap veriyor ve hâlâ neye ihtiyacı olduğunu söylüyor.
 
 ::: {.callout-warning appearance="simple"}
 **2025 tarihli bir öğreticinin size söyleyeceği, artık kullanımdan kaldırılmış
@@ -188,6 +206,30 @@ El sıkışma tabanlı revizyonlarla (`2025-11-25` ve öncesi) geriye dönük uy
 varsayılmak yerine şartnamede belirtilmiş; ki insanların zaten dağıttığı bir
 protokolden isteyeceğiniz şey budur.
 
+Üç sonuç sunucuyu yazanın omzuna biniyor ve "durumsuz"u bir sıfattan bir işe
+çeviren de bunlar:
+
+- **Çağrılar arası durum artık açıkça sizin probleminiz.** Oturumlar ve
+  `Mcp-Session-Id` başlığı gittiğine göre, çağrılar arasında bir şey hatırlaması
+  gereken bir sunucu kendi **tutamacını** basar ve onu, modelin ileri taşıdığı
+  sıradan bir araç argümanı olarak geri verir. Görebildiğiniz ve
+  denetleyebildiğiniz bir tasarım — mesele de bu — ama artık yazmanız gereken
+  bir tasarım.
+- **Değişiklik bildirimleri tek bir opt-in akışa taşındı.**
+  `resources/subscribe` ve HTTP GET uç noktası, client'ın bildirim türüne göre
+  katıldığı tek bir uzun ömürlü akış olan `subscriptions/listen` ile
+  değiştirildi. İlerleme gibi istek kapsamlı bildirimler, ait oldukları isteğin
+  yanıt akışında akmayı sürdürüyor.
+- **Kopan bir akış isteği kaybettirir.** SSE'nin kaldığı yerden devam etmesi —
+  `Last-Event-ID` ve olay kimlikleri — kaldırıldı; dolayısıyla client, düşen bir
+  isteği yeni bir kimlikle yeniden göndermek zorunda. Etkisiz olmayan her aracın
+  bunu hesaba katması gerekiyor; @sec-arac-tasarimi'nin argümanı kablonun
+  üzerinden geliyor.
+
+`ping`, `logging/setLevel` ve `notifications/roots/list_changed` kullanımdan
+kaldırılmadı, tamamen çıkarıldı; kayıt düzeyi artık `_meta` içinde istek başına
+bir alan.
+
 Çekirdeğin ötesinde şartname, iki tarafın da görüştüğü isteğe bağlı
 **uzantılar** tanımlıyor: yoklama ve kalıcı tutamaçlarla uzun süren işler için
 **Tasks**, yapılandırılmış ajan talimatları için **Skills over MCP** ve satır içi
@@ -211,10 +253,24 @@ işlem bir süre sınırı alır ve onu aşmak sessizlik yerine yapılandırılm
 döndürür. İş meşru biçimde dakikalar sürüyorsa, **Tasks** uzantısı bunun içindir;
 kimsenin iptal edemediği uzun bir istek değil.
 
-**Modelin üzerine hareket edebileceği hatalar döndürün.** @sec-arac-tasarimi bunu
-ölçtü: eyleme dönük bir hata mesajı toparlanmayı %1,7'den %100'e taşıdı ve bir
-yığın izi çıplak bir `"Error"`dan *kötüydü*. Bir süreç sınırı boyunca ham
-istisnayı geçirme cazibesi daha güçlüdür ve bedel aynıdır.
+**Modelin üzerine hareket edebileceği hatalar döndürün — hem de doğru yoldan.**
+@sec-arac-tasarimi bunu ölçtü: eyleme dönük bir hata mesajı toparlanmayı
+%1,7'den %100'e taşıdı; hiçbir şey yapmayınca elde ettiğiniz şey olan yığın izi
+ise başarısız olan değeri adlandırıp neyin işe yarayacağını hiç söylemedi. Bir
+süreç sınırı boyunca ham istisnayı geçirme cazibesi daha güçlüdür ve bedel
+aynıdır. Doğru anlaşılması gereken bir protokol ayrımı da var: başarısız olan
+bir *araç*, modelin okuyup tepki verebileceği bir hata sonucu taşıyan başarılı
+bir çağrıdır; bir JSON-RPC hatası ise çağrının kendisinin başarısızlığıdır ve
+model onu hiç görmeyebilir. Bozuk bir argümanı JSON-RPC hatası olarak geri
+göndermek, toparlanamayan bir model elde etmenin yoludur — çünkü ona hiç
+söylenmemiştir.
+
+**Sonucunuzun bir biçimi varsa bir `outputSchema` yayımlayın.** Bir araç bunu
+bildirip metninin yanında `structuredContent` döndürebilir; böylece host'un
+eline yeniden ayrıştırması gereken bir dizgi değil, doğrulayıp
+yönlendirebileceği bir değer geçer. 2026-07-28 revizyonu ikisini de tam JSON
+Schema 2020-12'ye gevşetti; bu da onu bir merak konusu olmaktan çıkarıp yapmaya
+değer hâle getiriyor.
 
 Sunucu olmaya özgü iki tane daha:
 
@@ -231,9 +287,17 @@ Bir stdio sunucusu kullanıcının makinesini ve izinlerini devralır. Uzak bir
 sunucu devralmaz ve gerçek bir yetkilendirme hikâyesine ihtiyaç duyar: şartname
 OAuth 2.1 üzerine kuruluyor ve 2026-07-28 itibarıyla **Dynamic Client
 Registration, Client ID Metadata Documents lehine kullanımdan kaldırıldı**.
-Pratik noktalar sıradan web güvenliği noktalarıdır — token'ları ihtiyacınız olan
-en aza kapsamlayın, onları modelin bağlamından uzak tutun ve *host*'un kimlik
-bilgisini tuttuğunu, *modelin* ise yalnızca kullanımını tetiklediğini unutmayın.
+Pratik noktaların çoğu sıradan web güvenliği noktalarıdır — token'ları
+ihtiyacınız olan en aza kapsamlayın, onları modelin bağlamından uzak tutun ve
+*host*'un kimlik bilgisini tuttuğunu, *modelin* ise yalnızca kullanımını
+tetiklediğini unutmayın. Ama üçü tavsiye değil, şartnamede normatif — ve bir
+SDK'nın sizin yerinize yapmayacağı türden: yetkilendirme sunucusu `iss`
+parametresini döndürmeli (*should*) ve client bir yetkilendirme kodunu
+kullanmadan önce onu kayıtlı issuer'a karşı doğrulamak **zorunda**; client
+kimlik bilgileri onları veren yetkilendirme sunucusuna bağlıdır, yani client
+onları issuer'a göre anahtarlamak **zorunda**, başka bir yerde yeniden
+kullanmamak **zorunda** ve yetkilendirme sunucusu değiştiğinde yeniden kayıt
+olmak **zorunda**.
 
 ## Güvenlik: asıl saldırı yüzeyi açıklamadır {#sec-mcp-guvenlik}
 
@@ -256,6 +320,17 @@ sunucudan alınmadıkça güvenilmez sayılmalıdır" ve host'lar "herhangi bir 
 
 : Bir sunucunun host'a saldırmasının üç yolu {tbl-colwidths="[18,52,30]"}
 
+Bu üçü, bir sunucunun *model* üzerinden saldırmasıyla ilgili. Hiç model
+gerektirmeyen dördüncü bir yön var: client, kontrol etmediği bir sunucudan gelen
+girdiyi ayrıştırıyor. @cve2025mcpremote referans vaka — yaygın kullanılan bir
+uzak-MCP köprüsü, `authorization_endpoint` URL'sini sunucunun kendi yanıtından
+alıp bir tarayıcı açmak için kaçışsız biçimde bir kabuk komutuna geçirdi;
+böylece kötü niyetli bir sunucu, kullanıcının makinesinde CVSS 9.6'lık keyfî
+kod yürütme elde etti. Prompt enjeksiyonu yok, döngüde model yok; yalnızca
+kaçırılmamış bir URL. Bir sunucuya bağlanmak, onun verisini kendi
+ayrıştırıcınızdan geçirmektir ve bu, egzotik olan değil sıradan tedarik zinciri
+sorusudur.
+
 Üçüncü taraf bir sunucu için inceleme sorusu bu yüzden "bu paket popüler mi"
 değil, **"bu açıklama düşmanca olsaydı ne yapardı ve fark eder miydim"**dir. Her
 açıklamayı, kendi kullanıcınız olarak çalıştırmak üzere olduğunuz bir betiği
@@ -267,8 +342,9 @@ Her araç tanımı her model çağrısının bağlamındadır. Bu MCP'ye bir ele
 değil — her araç çağıran sistem için doğrudur — ama MCP fark etmeden çok araç
 kurmayı kolaylaştırır, dolayısıyla aritmetiği yapmaya değer.
 
-Resmî dosya sistemi sunucusu 14 araç yayımlıyor. Araç tanımı olarak
-seri hâle getirilip token'landığında:
+Resmî dosya sistemi sunucusu, bu ölçüm yapıldığında 14 araç yayımlıyordu —
+sürümler arasında değişen bir sayı, dolayısıyla rakamı yeniden kullanmadan önce
+sürümü sabitleyin. Araç tanımı olarak seri hâle getirilip token'landığında:
 
 ```text
 official MCP filesystem server, 14 tools
@@ -289,10 +365,24 @@ kullanıcı turunun yarısı — ve hepsinin bedelini her çağrıda ödüyorsun
 Üç sunucu kuruluyken yirmi adımlık bir oturum, daha kimse bir şey söylemeden
 yalnızca araç tanımlarına yaklaşık **75.000 token** harcıyor.
 
-O sayı bir argüman olarak kullanılmadan önce iki dürüst uyarı. Prompt
-önbellekleme, kararlı bir ön eki ham sayının düşündürdüğünden çok daha ucuz kılar
-ve tanımlar bağlamdaki en önbelleklenebilir şeydir. Ve 89 token, iyi bir aracın
-*kazandırdığının* yanında küçüktür.
+O sayı bir argüman olarak kullanılmadan önce üç dürüst uyarı.
+
+89, **bu sunucunun** ortalaması ve dosya sistemi sunucusunun tanımları alışılmadık
+biçimde kısa: kısa adlar, az parametre, uzun düzyazı yok. Araçları bir düzine
+isteğe bağlı filtre alan bir sunucu bunun birkaç katı olur. 89'u bir taban olarak
+kullanın ve kendinizinkini ölçün; @sec-arac-tasarimi, tek bir çağrıdan önce
+77.000 token'lık tanım maliyeti olan yayımlanmış bir kataloğu alıntılıyor — aralığın
+öteki ucu böyle görünüyor.
+
+Prompt önbellekleme, kararlı bir ön eki ham sayının düşündürdüğünden çok daha ucuz
+kılar ve tanımlar bağlamdaki en önbelleklenebilir şeydir. 2026-07-28 revizyonu
+buna bilerek yaslanıyor: liste sonuçları artık zorunlu `ttlMs` ve `cacheScope`
+alanları taşıyor, böylece client yeniden çekmek yerine önbellekleyebiliyor; ve
+sunucular `tools/list`'ten araçları, tam da prompt cache isabet oranını
+artırmak için deterministik bir sırada döndürmeli. Kararsız bir araç sıralaması
+her çağrıda bir cache ıskasıdır — hata mesajı olmayan bir bug.
+
+Ve 89 token, iyi bir aracın *kazandırdığının* yanında küçüktür.
 
 Mesele ek yükün yıkıcı olması değil; **görünmez ve çarpımsal** olması ve
 sekizinci sunucuyu kuran hiç kimsenin bu toplamı yapmıyor olmasıdır.
@@ -571,6 +661,7 @@ tarihini kontrol edin.
 | ölçekte araç kullanımı ve kusur biçimleri | @qin2024toolllm |
 | protokolün hizmet ettiği döngü | @yao2023react |
 | bir şemada kısıtların düzyazıyı neden yendiği | @willard2023efficient |
+| güvenilmeyen bir sunucuya bağlanmanın, ayrıştırıcı bug olduğunda bedeli | @cve2025mcpremote |
 
 : Birincil kaynaklar {tbl-colwidths="[46,54]"}
 

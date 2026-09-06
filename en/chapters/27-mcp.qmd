@@ -97,7 +97,10 @@ boundary — and it is the whole reason the protocol can be safe at all.
 Read the diagram right to left as well. A server publishes capabilities, and
 what the model gets to see is whatever the host chose to forward. Everything in
 @sec-mcp-security follows from the fact that the host is the only party in a
-position to check.
+position to check. The crossed link is a statement about the current revision
+and it got stronger, not weaker: as of 2026-07-28 a server cannot send an
+independent request at all — when it needs something back it returns and waits
+to be asked again.
 :::
 
 ::::
@@ -128,9 +131,25 @@ than the one you remember, and the difference is not cosmetic.
 
 : Server features, revision 2026-07-28 {tbl-colwidths="[16,50,34]"}
 
-**Clients offer one:** **Elicitation** — "Server-initiated requests for
-additional information from users". A server that needs a missing parameter
-can ask, through the host, rather than failing.
+**Clients offer one:** **Elicitation** — a server that needs a missing
+parameter can ask for it, through the host, rather than failing.
+
+*How* it asks is the part a 2025 tutorial will get wrong, and getting it wrong
+produces a server no current host can talk to. There is no longer any such
+thing as a server-initiated JSON-RPC request. Revision 2026-07-28 replaces
+`elicitation/create` — along with `sampling/createMessage` and `roots/list` —
+with the **Multi Round-Trip Requests** pattern (SEP-2322): the server *returns*
+an `InputRequiredResult`, carrying `resultType: "input_required"` and an
+`inputRequests` field, and the client answers by **re-sending the original
+request** with `inputResponses` attached. Every result now carries a required
+`resultType`, `"complete"` for ordinary ones, and a client must treat a missing
+field from an older server as `"complete"`.
+
+That is worth pausing on, because it is the strongest evidence for the claim
+this chapter opened with. The one channel by which a server could reach back
+towards the host has been turned into a return value that the host chooses
+whether to act on. A server does not call the host. It answers, and says what
+it still needs.
 
 ::: {.callout-warning appearance="simple"}
 **Three things a 2025 tutorial will tell you that are now deprecated.**
@@ -184,6 +203,27 @@ Backward compatibility with the handshake-based revisions (`2025-11-25` and
 earlier) is specified rather than assumed, which is what you would want from a
 protocol people have already deployed.
 
+Three consequences land on whoever writes the server, and they are the ones
+that turn "stateless" from an adjective into work:
+
+- **Cross-call state becomes your problem, explicitly.** With sessions and the
+  `Mcp-Session-Id` header gone, a server that needs to remember something
+  between calls mints its own **handle** and passes it back as an ordinary tool
+  argument the model carries forward. That is a design you can see and audit,
+  which is the point, but it is also a design you now have to write.
+- **Change notifications moved to one opt-in stream.** `resources/subscribe`
+  and the HTTP GET endpoint are replaced by `subscriptions/listen`, a single
+  long-lived stream the client opts into by notification type.
+  Request-scoped notifications such as progress still flow on the response
+  stream of the request they belong to.
+- **A broken stream loses the request.** SSE resumability — `Last-Event-ID` and
+  event ids — is gone, so a client must re-issue a dropped request with a new
+  id. Any tool that is not idempotent needs that fact designed for, which is
+  @sec-tool-design's argument arriving over the wire.
+
+`ping`, `logging/setLevel` and `notifications/roots/list_changed` are removed
+outright rather than deprecated; log level is now a per-request `_meta` field.
+
 Beyond the core, the specification defines opt-in **extensions**, negotiated by
 both sides: **Tasks** for long-running work with polling and durable handles,
 **Skills over MCP** for structured agent instructions, and **MCP Apps** for
@@ -206,10 +246,22 @@ gets a deadline, and exceeding it returns a structured error rather than
 silence. If the work legitimately takes minutes, that is what the **Tasks**
 extension is for, rather than a long request nobody can cancel.
 
-**Return errors the model can act on.** @sec-tool-design measured this: an
-actionable error message took recovery from 1.7% to 100%, and a stack trace was
-*worse* than a bare `"Error"`. Across a process boundary the temptation to pass
-the raw exception through is stronger, and the cost is the same.
+**Return errors the model can act on, and return them the right way.**
+@sec-tool-design measured this: an actionable error message took recovery from
+1.7% to 100%, while a stack trace — the thing you get by doing nothing — named
+the value that failed and never what would have worked. Across a process
+boundary the temptation to pass the raw exception through is stronger, and the
+cost is the same. There is also a protocol distinction worth getting right: a
+*tool* that fails is a successful call carrying an error result the model can
+read and react to, while a JSON-RPC error is a failure of the call itself and
+the model may never see it. Sending a bad argument back as a JSON-RPC error is
+how you get a model that cannot recover because it was never told.
+
+**Publish an `outputSchema` if your result has a shape.** A tool may declare
+one and return `structuredContent` alongside its text, so the host gets a value
+it can validate and route rather than a string it has to re-parse.
+Revision 2026-07-28 loosened both to full JSON Schema 2020-12, which makes this
+worth doing rather than a curiosity.
 
 Two more that are specific to being a server:
 
@@ -225,10 +277,16 @@ Two more that are specific to being a server:
 A stdio server inherits the user's machine and its permissions. A remote server
 does not, and needs a real authorization story: the specification builds on
 OAuth 2.1, and as of 2026-07-28 **Dynamic Client Registration is deprecated in
-favour of Client ID Metadata Documents**. The practical points are ordinary
-web-security ones — scope tokens to the least you need, keep them out of the
-model's context, and remember that the *host* holds the credential while the
-*model* merely triggers its use.
+favour of Client ID Metadata Documents**. Most of the practical points are
+ordinary web-security ones — scope tokens to the least you need, keep them out
+of the model's context, and remember that the *host* holds the credential while
+the *model* merely triggers its use. Three, though, are normative in the
+specification rather than advice, and are the kind of thing an SDK will not do
+for you: an authorization server *should* return the `iss` parameter and a
+client **must** validate it against the recorded issuer before redeeming a
+code; client credentials are bound to the authorization server that issued them,
+so a client **must** key them by issuer, **must not** reuse them elsewhere, and
+**must** re-register when the authorization server changes.
 
 ## Security: the description is the attack surface {#sec-mcp-security}
 
@@ -252,6 +310,16 @@ Three concrete failure modes:
 
 : Three ways a server attacks a host {tbl-colwidths="[18,52,30]"}
 
+Those three are about a server attacking through the *model*. There is a
+fourth direction that needs no model at all: the client is parsing input from a
+server it does not control. @cve2025mcpremote is the reference case — a widely
+used remote-MCP bridge took the `authorization_endpoint` URL from the server's
+own response and passed it, unescaped, into a shell command to open a browser,
+so a malicious server got arbitrary code execution on the user's machine at
+CVSS 9.6. No prompt injection, no model in the loop, just a URL that was not
+escaped. Connecting to a server is running its data through your parser, and
+that is the ordinary supply-chain question rather than the exotic one.
+
 The reviewing question for a third-party server is therefore not "is this
 package popular" but **"what would this description do if it were adversarial,
 and would I notice"**. Read every description as you would read a script you
@@ -264,8 +332,9 @@ criticism of MCP — it is true of any tool-calling system — but MCP makes it
 easy to install a lot of tools without noticing, so the arithmetic is worth
 doing.
 
-The official filesystem server publishes 14 tools. Serialised as tool
-definitions and tokenised:
+The official filesystem server published 14 tools when this was measured — a
+number that moves between releases, so pin the version before you reuse the
+figure. Serialised as tool definitions and tokenised:
 
 ```text
 official MCP filesystem server, 14 tools
@@ -286,10 +355,25 @@ turn — and you pay for all of them on every call.]{.hl} With three servers
 installed, a twenty-step session spends about **75,000 tokens on tool
 definitions alone**, before anybody says anything.
 
-Two honest caveats before that number is used as an argument. Prompt caching
-makes a stable prefix much cheaper than the raw count suggests, and definitions
-are the most cacheable thing in the context. And 89 tokens is small next to
-what a good tool *saves*.
+Three honest caveats before that number is used as an argument.
+
+The 89 is **this server's** average, and the filesystem server has unusually
+terse definitions: short names, few parameters, no long prose. A server whose
+tools take a dozen optional filters will be several times that. Use 89 as a
+floor and measure your own; @sec-tool-design cites a published catalogue
+costing 77,000 tokens of definitions before a single call, which is what the
+other end of the range looks like.
+
+Prompt caching makes a stable prefix much cheaper than the raw count suggests,
+and definitions are the most cacheable thing in the context. Revision
+2026-07-28 leans into that deliberately: list results now carry required
+`ttlMs` and `cacheScope` fields so a client can cache them rather than
+re-fetching, and servers **should** return tools from `tools/list` in a
+deterministic order specifically to improve prompt-cache hit rates. An unstable
+tool ordering is a cache miss on every call, which is a bug with no error
+message.
+
+And 89 tokens is small next to what a good tool *saves*.
 
 The point is not that the overhead is ruinous; it is that it is **invisible and
 multiplicative**, and that nobody installing an eighth server is doing this sum.
@@ -566,6 +650,7 @@ anything you read.
 | tool use at scale, and its failure modes | @qin2024toolllm |
 | the loop the protocol serves | @yao2023react |
 | why constraints beat prose in a schema | @willard2023efficient |
+| what connecting to an untrusted server costs when the parser is the bug | @cve2025mcpremote |
 
 : The primary sources {tbl-colwidths="[46,54]"}
 
