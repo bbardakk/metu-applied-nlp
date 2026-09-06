@@ -7,8 +7,8 @@ her sayı XL-Sum Türkçe üzerinde ölçüldü [@hasan2021xlsum] — 27.176 eğ
 3.397 test BBC Türkçe haberi; her birinin yanında gazetecinin yazdığı tek
 cümlelik bir özet var. Çıkarımsal sistemler 3.397'nin tamamında, LLM ise 500
 haberlik bir örneklemde puanlandı; hangisi olduğu geçtiği yerde yazıyor.
-@sec-ozetleme-rouge, Türkçe üzerine yayımlanmış her ROUGE sayısını değiştiren
-bir tokenizer kusurunu raporluyor; bu yüzden buradaki ROUGE hazır kütüphaneden
+@sec-ozetleme-rouge, hazır tokenizer'la hesaplanmış her Türkçe ROUGE sayısını
+değiştiren bir tokenizer kusurunu raporluyor; bu yüzden buradaki ROUGE hazır kütüphaneden
 alınmadı, elle yazıldı ve o aracın token'layabildiği metinlerde `rouge-score`
 ile on ondalık basamağa kadar doğrulandı. Yazılım: `rouge-score` 0.1.2,
 `snowballstemmer` 3.1.1, NumPy 2.5.2, Python 3.14.5; yerel LLM `ollama` 0.24.0
@@ -108,25 +108,31 @@ onun kaynakta birebir geçen en uzun parçalarını açgözlü biçimde bulun:
 
 ```text
 coverage   0.527    share of summary words found anywhere in the article
-density    1.05     mean squared length of the extractive fragments
+density    1.05     sum of squared fragment lengths, over summary length
 novel     47.3%     summary words that never appear in the article
 verbatim   0/500    summaries that are a copied article sentence
 ```
 
-1,05'lik bir yoğunluk, eşleşen parçaların aslında **tek tek kelimeler**
-olduğu anlamına geliyor. Kopyalanmış bir ifade neredeyse hiç yok. Karşılaştırma
+1,05'lik yoğunluk ile 0,527'lik kapsam birlikte, uzunlukla ağırlıklandırılmış
+ortalama çıkarımsal parçayı $1{,}05 / 0{,}527 \approx$ **iki kelimeye**
+koyuyor. Her eşleşme tek bir kelime olsaydı yoğunluk tam olarak kapsama eşit
+olurdu; özet bütün cümlecikleri yeniden kullansaydı yoğunluk onlu sayılara
+çıkardı. İki kelime, XSum rejimi: ara sıra bir isim öbeği hayatta kalıyor,
+ifade biçimi kalmıyor. Karşılaştırma
 için: özetleme sezgilerinin çoğunun üzerinde oluştuğu derlem olan CNN /
 DailyMail'in özetleri, haberin kendi cümleciklerini yeniden kullanan madde
 başlıklarından kuruluyor. Aynı ölçümü onun 400 test haberinde koşturmak
 karşıtlığı somutlaştırıyor:
 
-| derlem | kapsam | yoğunluk | lead-3 R-1 | oracle R-1 |
-|:--|--:|--:|--:|--:|
-| CNN / DailyMail (İngilizce) | 0,845 | — | 29,44 | **40,58** |
-| XL-Sum Türkçe | 0,527 | 1,05 | 14,03 | **24,89** |
+| derlem | ref kelime | kapsam | yoğunluk | lead-3 R-1 | oracle R-1 |
+|:--|--:|--:|--:|--:|--:|
+| CNN / DailyMail (İngilizce) | ~56 | 0,845 | — | 29,44 | **40,58** |
+| XL-Sum Türkçe | ~21 | 0,527 | 1,05 | 14,03 | **24,89** |
 
-: Aynı kod, iki derlem; her biri kendi dili için doğru olan tokenizer'la
-{tbl-colwidths="[34,16,16,16,18]"}
+: Aynı kod, iki derlem; her biri kendi dili için doğru olan tokenizer'la, iki
+tarafta da gövdeleme yapılmamış yüzey biçimleri. Referans uzunluğu sütunu şunun
+için var: tek cümlelik oracle, o sütun olmadan derlemler arasında
+karşılaştırılabilir değil {tbl-colwidths="[28,12,14,14,16,16]"}
 
 [XL-Sum Türkçe tam ters rejimde ve bölümün tamamı bundan çıkıyor.]{.hl} Bu
 özetler *yeniden yazılmış*; @narayan2018xsum bu tarza aşırı özetleme (extreme
@@ -209,9 +215,12 @@ Bu tablodan okunacak üç şey var.
 **Lead-3 burada güçlü değil.** Yerleşik kanaat — "lead-3'ü hep raporlayın,
 eğitilmiş modelleri yener" — özetleme hakkında değil, CNN / DailyMail hakkında
 bir olgu; aynı kod orada onu 29,44 R-1 ile puanlıyor. Bu derlemde lead-3
-**14,03** alıyor ve lead-2 onu geçiyor. Üçüncü cümleyi eklemek 17 kelime
-ekliyor, bilgi eklemiyor. [Lead baseline'ını her zaman raporlayın; güçlü
-olduğunu asla varsaymayın.]{.hl}
+**14,03**, lead-2 ise **14,04** alıyor. Bunu lead-2'nin onu geçmesi diye
+okumayın: 3.397 haberde 0,01 ROUGE-1 bir beraberliktir ve bir sütun ötede
+üçüncü cümlenin bir şey *kattığı* görünüyor — R-2, 3,61'den 3,74'e çıkıyor.
+Recall'da kattığını precision'da, on yedi kelime karşılığında ödüyor ve ikisi
+birbirini götürüyor. [Lead baseline'ını her zaman raporlayın; güçlü olduğunu
+asla varsaymayın.]{.hl}
 
 **TextRank 25 saniyesini hak etmiyor.** Cümle benzerliği grafiğini kurup
 üzerinde merkezîlik çalıştırmak — @sec-kumeleme-konu makinesi, yeni model yok
@@ -219,8 +228,17 @@ olduğunu asla varsaymayın.]{.hl}
 yöntem ve bu derlemde ilk cümleyi almaktan yuvarlama farkı kadar uzakta.
 
 **Bölümü asıl belirleyen sayı oracle.** Oracle, her haber için referansa karşı
-en yüksek ROUGE-1'i veren tek cümleyi seçiyor — cevabı önce okuduğu için bir
-sistem değil, bir *tavan*. Aldığı puan: **24,89**.
+**ROUGE-1 F1**'i en büyüten tek kaynak cümlesini seçiyor — cevabı önce okuduğu
+için bir sistem değil, bir *tavan*. Aldığı puan: **24,89**.
+
+O satırı nasıl okuyacağınıza dair iki uyarı. Yanındaki `9,31` ve `20,39`,
+R-1'in seçtiği *cümlenin* R-2 ve R-L puanları; o metrikler için oracle değil —
+bir R-2 oracle'ı başka bir cümle seçer ve daha yüksek puan alır. Ve bu bir
+**tek cümlelik** tavan; yani derlemler arasında ancak referans uzunlukları
+karşılaştırılabilirse karşılaştırılabilir: XL-Sum Türkçe referansları tek
+cümlede kabaca 21 kelime, CNN / DailyMail'inkiler üç dört cümlede kabaca 56 —
+bu da ikincisinde tek bir çıkarılmış cümlenin ulaşabileceği recall'ı yapısal
+olarak sınırlıyor.
 
 ::: {.callout-warning appearance="simple"}
 Bu derlemde tek cümlelik hiçbir çıkarımsal sistem 24,89 ROUGE-1'i aşamaz,
@@ -234,7 +252,9 @@ size soyutlayıcı bir modele uzanıp uzanmayacağınızı söylüyor.
 
 ::: {.column-margin}
 Bu oracle'ı elinize geçen her özetleme derleminde koşturun. Yüksekse — CNN /
-DailyMail'inki 50'nin üstünde — çıkarım hem uygulanabilir hem ucuzdur ve
+DailyMail'in *üç cümlelik* oracle'ı 50'nin üstünde, buradaki tek cümlelik
+oracle'ın aynı derlemde aldığı 40,58'e karşı; hangisini hesapladığınızı söyleyin,
+çünkü ikisi birbirinin yerine geçmez — çıkarım hem uygulanabilir hem ucuzdur ve
 üretmeye geçmeden önce onu tüketmelisiniz. Buradaki gibi düşükse, referans
 özetler birer kompozisyondur ve çıkarım yapısal olarak tavanlıdır. İki satır
 kod ve mimariyi belirliyor.
@@ -347,7 +367,7 @@ word tokens, correct Turkish tokenization    6,682
 tokens after rouge-score                     9,660   1.45x as many
 words left intact                            3,713    55.6%
 words split or mutilated                     2,969    44.4%
-average pieces per mutilated word             1.96
+average pieces per mutilated word             2.00
 ```
 
 [Türkçe kelimelerin yüzde kırk dördü tokenizer'dan sağ çıkmıyor ve enkaz her
@@ -367,11 +387,20 @@ oracle sentence                   24.89                  30.28        +21.7%
 
 Hasarı olduğundan büyük göstermek de kendi başına bir hata olurdu, o yüzden
 kesin konuşalım: **sıralama değişmiyor.** İki tokenizer altında da lead-2 >
-lead-3 > TextRank > lead-1. Yok olan şey *karşılaştırılabilirlik* — yayımlanmış
-her Türkçe ROUGE sayısı, okurlarının sandığı nicelikten kabaca %60 daha büyük
-ve bu fark sistemin ne kadar kopyaladığına göre değişiyor. Rastgele bir
-baseline %80 kazanıyor, oracle %22. [Şişme sistemin bir fonksiyonu; dolayısıyla
-sıra ayakta kalsa bile sistemler arasındaki farklar yanlış.]{.hl}
+lead-3 > TextRank > lead-1. Yok olan şey *karşılaştırılabilirlik* — hazır
+`rouge-score` ya da `evaluate` varsayılanıyla hesaplanmış her Türkçe ROUGE sayısı,
+ki çoğu öyle, okurlarının sandığı nicelikten kabaca %60 daha büyük ve bu fark
+sistemin ne kadar kopyaladığına göre değişiyor: rastgele bir baseline %80
+kazanıyor, oracle %22. [Şişme sistemin bir fonksiyonu; dolayısıyla sıra ayakta
+kalsa bile sistemler arasındaki farklar yanlış.]{.hl}
+
+Hepsi değil, ve istisnaları bilmeye değer, çünkü çözüm onlar. XL-Sum'ın kendi
+yazarları `rouge-score`'un dil başına tokenizer ve gövdeleyici taşıyan bir
+çatalını yayımladı — Türkçe de içinde — ve yayımlanmış Türkçe sayıları o araçla
+üretildi; aynı boşluk HuggingFace `evaluate` üzerinde 2022'den beri açık bir
+issue. Yani kusur belgelenmiş; asıl eksik olan şey, bir sayının *hangi
+uygulamadan* çıktığını söyleme alışkanlığı. Tokenizer'ı, tıpkı bir rastgelelik
+tohumu gibi, puanın yanına yazın.
 
 ::: {.column-margin}
 Bizim kendi tokenizer'ımız da aynı ailedeki bir düzeltmeye ihtiyaç duydu ve bu,
@@ -392,6 +421,43 @@ max absolute difference vs rouge-score, 900 comparisons:  0.0000000000
 ```
 
 Uygulamalar birebir aynı. Türkçedeki bütün fark tokenization'dan geliyor.
+
+### Çözüm, tek bir argüman
+
+Yukarıdakilerin hiçbiri ROUGE'u yeniden yazmayı gerektirmiyor; gerektirseydi
+zaten kötü bir ders olurdu. `rouge-score` 0.1.2 bir `tokenizer=` argümanı
+alıyor — string'den string listesine giden bir `tokenize` metodu olan herhangi
+bir nesne — yani kusur tek bir kurucu uzaklıkta:
+
+``` python
+import re
+from rouge_score import rouge_scorer
+
+class TurkishTokenizer:
+    def tokenize(self, text):
+        # önce Türkçe farkındalıklı küçük harf, sonra Unicode harf ve rakamlar
+        text = text.replace("I", "ı").replace("İ", "i").lower()
+        return re.findall(r"\w+", text, flags=re.UNICODE)
+
+scorer = rouge_scorer.RougeScorer(
+    ["rouge1", "rouge2", "rougeLsum"],
+    use_stemmer=False,                  # Porter yalnızca İngilizce; aşağıya bakın
+    tokenizer=TurkishTokenizer())
+```
+
+`use_stemmer` konusunda da kesin olun, çünkü bir sonraki tuzak o. Varsayılanı
+zaten `False` ve `True` yaptığınızda uyguladığı gövdeleyici *Porter*, yani
+İngilizce. Türkçe için doğru cevap "kapalı bırakın" değil "değiştirin" — bir
+sonraki alt bölümün konusu da bu.
+
+Artan çaba sırasıyla üç seçenek daha: XL-Sum'ın kendi `rouge-score` çatalı —
+44 dili için dil başına tokenizer ve Snowball gövdeleyici taşıyor; bir BPE
+tokenizer varyantı — dil sorusunu tamamen atlıyor, karşılığında alt kelimeleri
+puanlıyor; ve `sacrerouge` — `sacrebleu`'nun BLEU için yaptığını ROUGE için
+yapıyor, ön işlemeyi raporlanan puanın içine sabitliyor, böylece iki makalenin
+sayısı aynı şeyi ifade ediyor. Bir Türkçe ROUGE sayısı yayımlıyorsanız yanına
+tokenizer'ın adını yazın. Bir makaledeki o tek cümle, bütün bu araçlardan daha
+değerli.
 
 ### İkinci şikâyet: kimsenin raporlamadığı bir normalleştiriciye bağlı
 
@@ -731,7 +797,13 @@ lead-1  (control)      100            0       521            0       0    ( 0.0%
 lead-2  (control)      173            0       809            0       0    ( 0.0%)
 ```
 
-İkisinde de sıfır; sonraki tabloyu okumaya değer kılan da bu. Buraya gelmek üç
+İkisinde de sıfır — ki bu, yanlış pozitif oranını ortadan kaldırmıyor,
+*sınırlıyor*. 150'de sıfır, %95 üst sınırı **%2,5** demektir ve model oranı
+%3,3 olarak geri geldiğinde bu önemli hâle gelir: kontrolün çözünürlüğü, o
+%3,3'ün ne kadarının gerçek olduğunu söylemeye yetmiyor. Bunu *vekil ölçü,
+kopyalanmış metinde referanslarda ateşlediği oranın yakınında bile
+ateşlemiyor* diye okuyun; alt bölümün ihtiyaç duyduğu karşılaştırma bu. Sonraki
+tabloyu okumaya değer kılan da bu. Buraya gelmek üç
 deneme aldı; iki başarısızlık @sec-ozetleme-vekil-hatalari bölümünde, çünkü
 düzeltmenin kendisinden daha öğretici.
 
@@ -769,13 +841,28 @@ Bu bölümdeki en şaşırtıcı sayı bir modelle ilgili değil.
 system                nums  unsupported   propers  unsupported   summaries flagged
 lead-1  (control)      100            0       521            0       0    ( 0.0%)
 lead-2  (control)      173            0       809            0       0    ( 0.0%)
-LLM (qwen3.5:9b)        61            0       494            3       3    ( 2.0%)
+LLM (qwen3.5:9b)        61            0       494            3       5    ( 3.3%)
 reference (human)       74           33       644          173      86    (57.3%)
 ```
 :::
 
-[Referans özetler, desteklenmemiş içeriği modelin neredeyse otuz katı oranında
-iddia ediyor.]{.hl}
+[Referans özetler, desteklenmemiş içeriği modelin kabaca on yedi katı oranında
+iddia ediyor]{.hl} — aynı 150 haberde %3,3'e karşı %57,3.
+
+$n = 150$'de bunlar 86 ve 5 özet demek. %95 Wilson aralıkları **[49,3, 65,0]**
+ve **[1,4, 7,6]**: geniş bir farkla örtüşmüyorlar, iddia da bu. Nokta
+kestirimleri iddia değil; aralarındaki oran ise hiç değil — iki küçük oranın
+oranı, aktarabileceğiniz en oynak şeydir.
+
+::: {.column-margin}
+O satırın sağdaki iki sütunu birbiriyle uzlaşmıyor ve dürüst olan şey bunu
+yuvarlayıp geçmek yerine söylemek: üç desteklenmemiş özel isimden beş
+işaretlenmiş özet çıkamaz. Bu alt bölümün geri kalanının kullandığı sayı beş —
+aşağıdaki hakem karşılaştırmasının %3,3 diye raporladığı sayı o ve oradaki
+%90,7'lik uyum yalnızca beşle aritmetik olarak mümkün. Bu tablodaki madde
+sayılarını yeniden sayılması gereken sayılar, özet başına oranı ise
+aktarılacak sayı olarak görün.
+:::
 
 Bu bir ölçüm hatası değil — kontroller temiz — ve BBC gazetecilerinin haber
 uydurması da değil. Derlemin nasıl kurulduğuyla ilgili. XL-Sum'ın "özet"i,
@@ -796,7 +883,7 @@ onlar.
    desteklenmemiş arka planını yeniden üreten model daha yüksek puan alıyor.
    Bunu reddeden model daha düşük alıyor.
 2. **Prompt'umuz modele yalnızca metindekini kullanmasını söyledi ve model
-   uydu** — referansın %57,3'üne karşı %2,0. Metrik onu, istediğimiz şeyi
+   uydu** — referansın %57,3'üne karşı %3,3. Metrik onu, istediğimiz şeyi
    yaptığı için cezalandırıyor.
 3. **Bu derlem üzerinde fine-tuning, bir modele halüsinasyon görmeyi
    öğretirdi**; çünkü eğitim sinyali %57,3 oranında desteklenmemiş iddia
@@ -827,7 +914,11 @@ birini çiğnemek sonucu sessizce geçersiz kılıyor:
 2. **Hakem, bir şema altında tek bir dar soruyu cevaplıyor.** "Bu özete 1-5
    arası puan ver" değil — *bu özetteki her iddia kaynak tarafından
    destekleniyor mu?* — iki değerli bir enum ile. Tek eksenli bir ölçüt yeniden
-   üretilebilir; beş puanlık genel kalite skoru bir ruh hâlidir.
+   üretilebilir; beş puanlık genel kalite skoru bir ruh hâlidir. Bu bölümün size
+   borçlu olduğu ve vermediği bir şey: hakemin prompt'unun tamamı —
+   @sec-ozetleme-soyutlayici üretim prompt'unu bastığı gibi. Yargılanmış bir
+   oran, bir modelin olduğu kadar bir prompt'un da özelliğidir ve %33,3 o prompt
+   olmadan yeniden üretilebilir değil.
 3. **İnsan referansı da aynı koşullarda yargılanıyor.** Hakemin skorlarının ne
    anlama geldiğini bilmenin tek yolu bu — ve @sec-ozetleme-sadakat bölümünün
    gösterdiği gibi, referans kendiliğinden tavan değil.
@@ -862,6 +953,15 @@ reference (human)               86            50     35        56.0%
 birinde örtüşüyorlar.]{.hl} O %90,7'lik uyum neredeyse tamamen *temiz*
 özetler üzerindeki uyum; iki yöntemden herhangi biri bir sorun gördüğünde
 neredeyse hiç kesişmiyorlar.
+
+Ham uyumun burada yanlış istatistik olmasının sebebi de bu ve
+@sec-veri-etiketleme bunu zaten söylemişti. Şansa göre düzeltin. Modelin
+özetlerinde iki yöntem $\kappa = 0{,}08$'e ulaşıyor; ham olarak çok daha az
+uyuştukları referanslarda ise $\kappa = 0{,}16$. İkisi de
+@sec-veri-etiketleme'nin *zayıf* dediği bantta ve %90,7, "temiz"in yüksek taban
+oranının düzeltilmemiş bir sayıya yaptığı şey. **Zamanın %90'ında uyuşan ve
+$\kappa = 0{,}08$ olan iki yöntem birbirini doğrulamış değildir; ikisi de çoğu
+zaman hayır demiştir.**
 
 Kuramın öngördüğü şey bu ve unutulması kolay:
 
@@ -1093,7 +1193,7 @@ görüyor, yoksa kullanıcının beklemediği doğru bir şeyi mi yüzeye çıka
 Bir cümleyi işaret etmelerini isteyin. (2) Parçalama — bir map-reduce sınırı,
 tıpkı halüsinasyon gibi okunan, yerel olarak doğru ama birlikte yanlış çıktı
 üretir. (3) Prompt: açık bir dayandırma talimatı var mı? Böyle bir talimat
-eklemek, buradaki ölçülen oranı hiç sorulmamış bir modelden %2–7'lik bir
+eklemek, buradaki ölçülen oranı hiç sorulmamış bir modelden %3–7'lik bir
 modele getirdi. (4) Ancak ondan sonra model ve çözümleme parametreleri.
 
 **S: Bunu otomatik olarak nasıl yakalarsınız?**
@@ -1301,8 +1401,9 @@ düzeltin — bu bölüm iki ayrı hatayı böyle buldu.
 
 - **ROUGE, özetin doğru olup olmadığını göremez** ve bu derlemde etkin biçimde
   yanlışlığı ödüllendiriyor: insan referansları vakaların **%33–57'sinde**
-  desteklenmemiş içerik iddia ediyor; metinde kalması söylenen bir model için
-  bu oran **%2–7**. Böyle bir derlem üzerinde fine-tuning, modele halüsinasyon
+  desteklenmemiş içerik iddia ediyor — iki yöntem boyunca %95 aralıkları
+  [26, 65] arasına yayılıyor; metinde kalması söylenen bir model için bu oran
+  **%3–7**. Böyle bir derlem üzerinde fine-tuning, modele halüsinasyon
   görmeyi öğretir ve metrik bunu bir iyileşme olarak raporlar.
 
 - **Bir sadakat metriğini kopyalanmış metin üzerinde doğrulayın.** Lead-2
