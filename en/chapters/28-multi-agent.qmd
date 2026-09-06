@@ -57,7 +57,7 @@ work and fails in a different way.
 
 | topology | shape | when it fits | what it costs |
 |:--|:--|:--|:--|
-| **Hub-and-spoke** | one coordinator, N specialists, no lateral links | the default when you split at all. The coordinator is a *context firewall*: specialists' raw observations never reach it | the coordinator becomes a bottleneck and a single point of failure |
+| **Hub-and-spoke** (also called *supervisor* or *orchestrator-worker*) | one coordinator, N specialists, no lateral links | the default when you split at all. The coordinator is a *context firewall*: raw observations reach it only through a specialist's report | the coordinator becomes a bottleneck and a single point of failure — and the firewall is only as strong as the discipline in that report's format, since a specialist that pastes a stack trace has removed it |
 | **Sequential** | a pipeline of agents, each consuming the last | stages with genuinely different requirements — extract, then verify, then write | [it is a pipeline. Ask whether it needs agents at all]{.con} |
 | **Parallel fan-out** | N specialists on independent slices, results merged | read-heavy work over separable inputs: many documents, many repositories | merging is a real design problem, not a `join` |
 | **Loop / debate** | agents critique or refine each other's output | narrow: where an independent check genuinely catches things | expensive, and @sec-reasoning measured self-correction failing to fix what it could not already see |
@@ -92,8 +92,10 @@ The first justification — context — is the one people assert and nobody
 computes. It is arithmetic, so here it is.
 
 A single agent re-sends its whole transcript on every model call, so its cost
-grows with the *square* of the number of steps. That is the term everything
-below is fighting.
+has a quadratic term: *n*·*F* + *o*·*n*(*n*−1)/2. The linear part is the fixed
+prefix paid once per call and the quadratic part is the accumulated
+observations — which is already the answer to why the split *loses* on short
+work with small results, where the linear term still dominates.
 
 A coordinator with specialists fights it by paying a fixed cost in each agent —
 system prompt plus tool definitions, which @sec-mcp measured at 89 tokens per
@@ -101,7 +103,33 @@ tool — in exchange for two things: each specialist starts from a clean window,
 and the coordinator sees summaries instead of raw results.
 
 Taking the fixed cost as 1,450 tokens (a system prompt plus fourteen tool
-definitions) and a specialist's report back as 120:
+definitions) and a specialist's report back as 120. Here is the whole model,
+because every conclusion below depends on assumptions that are easier to argue
+with when they are written down:
+
+```text
+all costs are prompt tokens; output tokens are not counted
+
+  F = 1,450   fixed prefix per agent (system prompt + 14 tool defs)
+  R =   120   a specialist's report back to the coordinator
+  o           tokens returned by one observation
+  n           total steps of work
+
+  single = sum_{i=0}^{n-1} (F + i*o)       = n*F + o*n(n-1)/2
+  three  = 3 * sum_{i=0}^{n/3-1} (F + i*o) + sum_{i=0}^{2} (F + i*R)
+
+Five assumptions, and all five flatter the split:
+  - the whole transcript is re-sent every call; no truncation, no compaction
+  - no prompt caching (see below, where it changes three of the nine cells)
+  - the n steps divide into three disjoint thirds with no duplicated work
+  - the coordinator makes exactly three calls whatever n is, never re-plans,
+    and never runs a final synthesis - a constant 4,710 tokens in every cell
+  - output tokens are free and every agent is charged at the same rate
+```
+
+The three observation sizes below bracket what tools actually return: ~200
+tokens is a list of search hits, ~800 a function body or a small API response,
+~3,000 a file read or a fetched page.
 
 ```text
  steps  obs size   single agent   3 specialists    ratio
@@ -120,9 +148,9 @@ And the crossover — how large an observation has to be before three
 specialists become cheaper than one agent:
 
 ```text
-    6 steps  ->    400 tokens per observation
-   12 steps  ->    100 tokens per observation
-   24 steps  ->     50 tokens per observation
+    6 steps  ->    393 tokens per observation
+   12 steps  ->     98 tokens per observation
+   24 steps  ->     25 tokens per observation
 ```
 
 :::: {.anlp-fig}
@@ -183,7 +211,7 @@ specialists become cheaper than one agent:
 
   <rect x="26" y="260" width="712" height="44" rx="4" class="chip"/>
   <text x="382" y="278" class="t-xs t-b t-mid">THE CROSSOVER MOVES LEFT AS THE WORK GETS LONGER</text>
-  <text x="382" y="293" class="t-xs t-muted t-mid">6 steps needs 400 tokens per observation to break even &#8212; 12 steps needs 100, and 24 steps needs 50</text>
+  <text x="382" y="293" class="t-xs t-muted t-mid">6 steps needs 393 tokens per observation to break even &#8212; 12 steps needs 98, and 24 steps needs 25</text>
 </svg>
 ```
 
@@ -215,12 +243,51 @@ specialists do not.
 produces.]{.hl} Long transcripts with big observations are what splitting is
 for. Short ones are not.
 
-::: {.column-margin}
-Note what this model deliberately does not include: prompt caching, which
-makes the single agent's repeated prefix cheaper than the raw arithmetic
-suggests and therefore pushes the crossover further out. If your provider
-caches well, treat these numbers as an upper bound on the saving.
-:::
+### Two assumptions that decide the whole table
+
+**The one doing all the work is that the *n* steps divide into three disjoint
+thirds.** Real specialists read the same document twice, a coordinator splits
+the task badly, one specialist rediscovers what another found. Call the
+duplication factor *d*, so each specialist takes *d·n*/3 steps. The headline
+cell moves like this:
+
+```text
+  24 steps, 3,000-token observations
+
+    d = 1.0 (printed)     291,510 against 862,800      0.34x
+    d = 1.5                650,910 against 862,800      0.75x
+    d = 2.0              1,154,310 against 862,800      1.34x
+```
+
+At *d* = 2 there is **no observation size at any point on the axis** that makes
+splitting cheaper. Measure your duplication before you trust the ratio; it is
+the parameter the conclusion actually hangs on, and it is not in the table.
+
+**The second is prompt caching, and it is not a footnote.** Every turn of an
+agent loop sends an exact prefix of the previous turn, which is the pattern
+caching is built for — and the single agent, with the longest repeated prefix,
+is the biggest beneficiary. Charging cached reads at 0.1× and cache writes at
+1.25× of the base rate, which is a common published schedule:
+
+```text
+  steps / obs      raw ratio    with caching
+     6 /   200        1.20x        2.27x
+     6 /   800        0.76x        1.35x   <- flips
+     6 / 3,000        0.42x        0.80x
+    12 /   200        0.84x        1.60x   <- flips
+    12 /   800        0.52x        1.00x   <- exactly level
+    12 / 3,000        0.35x        0.75x
+    24 /   200        0.63x        1.09x   <- flips
+    24 /   800        0.42x        0.76x
+    24 / 3,000        0.34x        0.65x
+```
+
+The crossovers move from 393 / 98 / 25 tokens per observation to
+**1,643 / 810 / 268** — four to eleven times further out — and three of the
+nine cells change sign. Caching does not shave the saving; on short work it
+removes it. @sec-mcp makes the same point from the other end, that tool
+definitions are the most cacheable thing in a context. If your provider caches,
+the single agent is a much stronger baseline than the first table admits.
 
 ## The saving is paid for in information {#sec-multi-agent-honest}
 
@@ -237,10 +304,43 @@ coordinator.
 
 **Errors compound across a boundary you cannot see through.** A specialist
 that is 90% right hands a confident report to a coordinator that has no way to
-check it. Three such specialists give roughly 0.9³ — about 73% — and that is
-before the coordinator's own synthesis, which @sec-agent-anatomy measured as
-the step that actually breaks: tool use was perfect at every step count while
-accuracy fell from 100% to 40%, purely in aggregation.
+check it. Three such specialists give 0.9³ — about 73% — **if their errors are
+independent and all three have to be right**. Neither is guaranteed: three
+specialists running the same model over the same corpus fail in correlated
+ways, and perfectly correlated errors put the system back at 90%. So the honest
+figure is not a point but the band **[73%, 90%]**, whose position you have to
+measure rather than compute — and the band is wide enough to be the whole
+decision. Either way it is before the coordinator's own synthesis, which
+@sec-agent-anatomy measured as the step that actually breaks: tool use was
+perfect at every step count while accuracy fell from 100% to 40%, purely in
+aggregation.
+
+**The most visible production system measures the opposite trade, and it
+belongs here rather than in a link at the end.** @anthropic2025multiagent
+reports its research system beating single-agent Claude Opus 4 by 90.2% on an
+internal research eval while spending about **15× the tokens of a chat**, with
+token usage alone explaining roughly 80% of the performance variance on one of
+their benchmarks. Read that together with the arithmetic above and the two
+results do not conflict: the split can save context tokens *per unit of work
+done* and still cost far more in total, because the agents you added do more
+work rather than the same work in thirds. @sec-multi-agent-cost is a saving on
+the transcript. It is not a saving on the bill.
+
+There is a second lever there that this chapter's token arithmetic cannot see,
+and it is probably the bigger one: that system runs an expensive coordinator
+over cheaper specialists. Cost per token is a dial a single agent does not
+have, and it belongs in the comparison before the token counts do — along with
+the fact that output tokens are typically three to five times the input rate
+and are counted as free above.
+
+**A specialist's report is untrusted input.** Whatever a specialist read — a
+web page, a ticket, a PDF — can reach the coordinator through its summary, and
+the coordinator has no way to tell a finding from an instruction. The context
+firewall filters volume, not authority. Give reports a fixed schema the
+coordinator parses rather than reads, and never let a low-permission
+specialist's prose decide what a high-permission coordinator writes: that is a
+confused deputy with a language model in it, and @sec-agent-security is where
+it gets taken seriously.
 
 **Debugging gets qualitatively harder.** One agent produces one transcript.
 Five agents produce five, plus the delegation decisions between them, and the
@@ -274,10 +374,37 @@ discipline.
 
 : Four ways shared state fails {tbl-colwidths="[26,74]"}
 
-The mitigations are the boring ones, and they are boring because they work:
+Those four are the classic concurrency bugs, and they are the ones your
+distributed-systems training prepares you for. The ones that actually dominate
+in practice are not concurrency bugs at all. @cemri2025whyfail annotated 1,600+
+traces from seven multi-agent frameworks and built a taxonomy of fourteen
+failure modes ($\kappa$ = 0.88 between annotators) clustered in three
+categories, and none of the most common ones appear above:
+
+| problem | how it shows up here |
+|:--|:--|
+| **Role misspecification** | a specialist quietly does a neighbouring agent's job, or refuses work it was given, because the boundary lived in a prompt |
+| **Information withholding** | a specialist knows something and does not put it in the report — which is the section above, measured, and the reason the coordinator cannot recover it |
+| **Ignoring another agent's input** | a report arrives and the coordinator reasons past it |
+| **Premature termination** | the system stops with the task half done and reports a result |
+| **No verification step** | nothing checks the synthesis, which is exactly the step @sec-agent-anatomy found breaking |
+
+: Five ways the agents themselves fail [@cemri2025whyfail] {tbl-colwidths="[26,74]"}
+
+The mitigations for the first table are the boring ones, and they are boring
+because they work:
 
 - **Give each agent its own workspace.** A branch, a scratch directory, a
   transaction. Merge deliberately, at a point you chose.
+- **Name what you are doing.** Append-only proposals is *event sourcing*; a
+  single mutating owner is the *single-writer principle*; per-agent workspaces
+  merged deliberately is *optimistic concurrency*. The literature on all three
+  is thirty years old and better than anything an agent framework will hand you.
+- **Decide the transaction boundary explicitly.** Is one delegated subtask
+  atomic, or can it half-succeed? If it can, every side effect needs a
+  compensating action — the *saga* pattern — because there is no distributed
+  transaction to roll back for you. @sec-tool-design's idempotency requirement
+  is the other half of this.
 - **Make writes single-threaded.** One agent — usually the coordinator — owns
   every mutation. Specialists propose; the owner applies.
 - **Make tools idempotent**, per @sec-tool-design, because retries are certain
@@ -358,7 +485,9 @@ agents — splitting is *more* expensive, because you pay the per-agent fixed
 cost three extra times. Twenty-four steps with 3,000-token observations costs
 **0.34×** — a two-thirds saving, because a single agent carries every
 observation through every later call. The dial is material produced, not
-difficulty.
+difficulty. Then say what the arithmetic assumes: no prompt caching, and no
+duplicated work between the specialists. Relax either one and the split can
+stop paying entirely.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -563,6 +692,8 @@ easier to evaluate once you have a baseline.
 | why self-critique does not rescue a wrong answer | @huang2024large; @madaan2023selfrefine |
 | planning as a separate search | @yao2023tree |
 | what a long shared context does to retrieval | @hsieh2024ruler |
+| why these systems fail in practice, over 1,600 traces | @cemri2025whyfail |
+| the production case for fan-out, and its 15x token bill | @anthropic2025multiagent |
 
 : The primary sources {tbl-colwidths="[46,54]"}
 
@@ -575,11 +706,16 @@ easier to evaluate once you have a baseline.
 - **Compute the split before you build it.** Six steps with 200-token results
   costs **1.20×** as three agents; twenty-four steps with 3,000-token results
   costs **0.34×**. The dial is how much material the work produces, not how
-  hard it is.
+  hard it is. Both numbers assume no prompt caching and no duplicated work
+  between specialists: turn caching on and the 0.34× becomes 0.65× while three
+  of the nine cells change sign, and let each specialist repeat half a
+  neighbour's work and the whole table stops paying.
 - **The saving is paid for in information.** The coordinator sees summaries
   because that *is* the mechanism, so it reasons about a lossy compression —
-  and three specialists at 90% give about 73% before the coordinator's own
-  synthesis, the step @sec-agent-anatomy measured as the first to break.
+  and three specialists at 90% give somewhere in **[73%, 90%]** — 73% if their
+  errors are independent, 90% if they are perfectly correlated, which is a band
+  you measure rather than compute — all before the coordinator's own synthesis,
+  the step @sec-agent-anatomy measured as the first to break.
 - **Read-heavy work parallelises; write-heavy work does not.** Concurrent
   writes turn an architecture into a distributed system with lost updates that
   raise no error and bugs that will not reproduce.
