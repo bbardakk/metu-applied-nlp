@@ -98,11 +98,36 @@ alike two sentences are, and `multilingual-e5-base` [@wang2024e5] is a
 Reaching for the first because it is the famous one is a common mistake, and
 running only it would have understated dense retrieval.
 
+**One instruction from E5's model card that this chapter should have recorded
+and did not.** `multilingual-e5-base` is an *asymmetric* retrieval model: it is
+trained with a `query: ` prefix on queries and a `passage: ` prefix on
+documents, and the card is explicit that it behaves measurably worse without
+them. This is exactly the setting where the prefixes matter most — an
+asymmetric query-document task is what they exist for — and it is the most
+common silent error in an embedding pipeline; @sec-clustering makes the same
+point for the symmetric case, where the card prescribes `query: ` on both sides.
+Our runs do not state which convention they used. If the prefixes were omitted,
+E5's numbers below are a lower bound, and both of this chapter's headline
+margins — lexical retrieval's lead in condition A and the damage RRF does —
+would shrink, because both scale with the gap between the two parents. Record
+the prefixes beside the model name when you run this.
+
 ## What the measurements say {#sec-retrieval-results}
 
 Both conditions run against the same corpus, so the two tables below are
 directly comparable — and the point is how little they have in common. 800
-queries per condition, 7,165 documents, a single relevant document per query.
+queries per condition, 7,165 documents, and **one relevant document per query
+by construction** — each query is built from one target document and that
+document is treated as the only correct answer.
+
+That last assumption is not verified, and it is not symmetric. On 7,165
+sentences of news text, three content words will often describe more than one
+sentence, and the system that surfaces a near-paraphrase is precisely the dense
+one — so unlabelled relevant documents push dense recall@1 down and leave BM25's
+alone. The fix is the one this chapter's own interview section prescribes: pool
+the top-10 of every system on a subsample and label the union by hand. We did
+not do it. Until someone does, read condition A's dense numbers as a floor
+rather than an estimate.
 
 ### Condition A — keyword queries, inflected
 
@@ -115,8 +140,8 @@ BM25 surface form                           27.5%   54.1%     34.9     39.4
 BM25 stemmed                                96.0%   99.8%     97.7     98.2
 dense: paraphrase-MiniLM (similarity model) 10.6%   28.2%     15.6     18.6
 dense: multilingual-e5-base (retrieval)     35.9%   63.7%     44.5     49.1
-hybrid RRF, surface + e5                    37.6%   71.6%     47.6     53.3
-hybrid RRF, stemmed + e5                    63.2%   96.5%     73.7     79.2
+hybrid RRF (unweighted), surface + e5       37.6%   71.6%     47.6     53.3
+hybrid RRF (unweighted), stemmed + e5       63.2%   96.5%     73.7     79.2
 ```
 
 [Stemmed BM25 wins by sixty points.]{.hl} A hundred lines of suffix-stripping
@@ -138,8 +163,8 @@ BM25 surface form                           23.2%   43.5%     28.9     32.3
 BM25 stemmed                                23.8%   41.9%     29.1     32.1
 dense: paraphrase-MiniLM (similarity model) 93.8%   98.1%     95.4     96.0
 dense: multilingual-e5-base (retrieval)     96.2%   99.9%     97.8     98.3
-hybrid RRF, surface + e5                    49.4%   99.6%     71.6     78.7
-hybrid RRF, stemmed + e5                    48.1%   99.6%     70.9     78.2
+hybrid RRF (unweighted), surface + e5       49.4%   99.6%     71.6     78.7
+hybrid RRF (unweighted), stemmed + e5       48.1%   99.6%     70.9     78.2
 ```
 
 [Dense wins by seventy-two points.]{.hl} The English query and the Turkish
@@ -147,6 +172,21 @@ document share almost no vocabulary, so BM25 is reduced to matching proper
 nouns and numbers — which is exactly why it still scores 23.8% rather than
 zero, and worth noticing, because those are precisely the cases dense
 retrieval is worst at.
+
+**But say what condition B is favourable to, the way we said it for condition
+A.** The query here is a *full professional translation of the document*, and
+that is the most in-distribution input a multilingual bi-encoder can receive:
+both of these models were trained on parallel sentence pairs, so this task is
+closer to bitext mining than to search. Real cross-lingual queries are short and
+question-shaped and do not cover the whole document. So read 96.2% as "dense
+retrieval solves translation matching" rather than "dense retrieval solves
+cross-lingual search", and read the seventy-two-point margin as an upper bound
+on the dense advantage — exactly as condition A's sixty-point margin is an upper
+bound on the lexical one. **Each condition hands its winner a query drawn from
+the target document itself.** The missing arm is condition B′: three content
+words from the *English translation*, which is condition A's cross-lingual
+twin. It would put a floor under the dense margin, and it is the run we would
+add first.
 
 ::: {.column-margin}
 Stemming is worth **68 points** in condition A and **0.6 points** in condition
@@ -167,9 +207,24 @@ condition B     dense e5 alone             96.2%  R@1
                 hybrid surface + e5        49.4%  R@1      -46.8
 ```
 
-**Reciprocal rank fusion made things worse in both conditions**, and badly.
-That is the opposite of the standard claim that hybrid retrieval beats both
-parents [@cormack2009reciprocal], and the reason is visible in the mechanism.
+**Unweighted reciprocal rank fusion made things worse in both conditions**, and
+badly. That is the opposite of the standard claim that hybrid retrieval beats
+both parents [@cormack2009reciprocal], and the reason is visible in the
+mechanism.
+
+Be precise about what was measured, because the claim is narrower than "hybrid
+retrieval is oversold". These rows are *unweighted*, *rank-based* fusion at a
+constant $k$ this chapter does not report — and the widget below exists to show
+you that $k$ changes the answer, which makes not reporting it a real gap. Two
+standard repairs went untried. **Weighted RRF** — $\sum w_s/(k + \text{rank}_s)$
+with a per-system weight fitted on held-out queries — is the obvious one, and
+this chapter defers it to an exercise rather than running it. **Score-based
+fusion** is the better one: @bruch2024fusion analyses exactly this question and
+finds that a convex combination of normalised scores beats RRF both in and out
+of domain, with a single parameter that needs very few examples to tune. So the
+finding to carry is this one: *unweighted rank fusion of unequal parents is
+harmful, because rank fusion throws away precisely the score-magnitude
+information that would tell it which parent to trust.*
 
 [RRF assumes the systems it is fusing are comparably good.]{.hl} It scores
 each document by $\sum 1/(k + \text{rank})$ across the lists, which treats a
@@ -194,7 +249,7 @@ viewof rrfGoldStrong = Inputs.range([1, 10], {step: 1, value: 1,
 ```{ojs}
 //| echo: false
 viewof rrfGoldWeak = Inputs.range([1, 60], {step: 1, value: 40,
-  label: "its rank in the weak system (60 = not returned)"})
+  label: "its rank in the weak system (60 = the bottom of a 60-deep list)"})
 ```
 
 ```{ojs}
@@ -973,10 +1028,14 @@ afterwards, and most teams have never measured it.
   on keyword queries; dense **96.2%** against BM25 **23.8%** cross-lingually.
   A retrieval number without its query distribution is not interpretable.
 
-- **Hybrid fusion is not free, and it is not always positive.** RRF cost
+- **Unweighted RRF is not free, and it is not always positive.** It cost
   **32.8** and **46.8** recall@1 points against the better parent in the two
-  conditions. It weights a rank-1 hit from a weak system like a rank-1 hit
-  from a strong one, so unequal parents produce a worse child.
+  conditions, because rank fusion weights a rank-1 hit from a weak system like a
+  rank-1 hit from a strong one. Note the word *unweighted*: rank fusion discards
+  score magnitude, which is the only signal that separates a
+  confident-and-right system from a confident-and-wrong one. Weighted RRF and
+  score-normalised fusion [@bruch2024fusion] keep it, for the price of one
+  fitted parameter, and neither was measured here.
 
 - **The damage lands on recall@1, not recall@10.** In condition B, fusion took
   R@10 from 99.9% to 99.6% and R@1 from 96.2% to 49.4%. Which metric you watch
