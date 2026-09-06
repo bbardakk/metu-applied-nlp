@@ -6,7 +6,13 @@ Turkish product-review corpus as @sec-bake-off and @sec-classification —
 233,508 de-duplicated reviews — but on a **balanced** sample rather than the
 natural 93.7%-positive distribution, so that accuracy is readable against a
 50% floor and the effect being measured is the prompt rather than the class
-prior. Software: `ollama` 0.24.0 serving `qwen3.5:9b`, Python 3.14.5.
+prior. Every prompt variant measured here is **zero-shot**: the in-context
+learning half of the title is carried by the literature and by
+@sec-classification's few-shot numbers rather than by a measurement of its own.
+The $k$-shot curve this chapter ought to have — accuracy against number of
+demonstrations, run twice with gold and with random labels — is
+@sec-prompting-exercises' third exercise, and it is the measurement we would add
+first. Software: `ollama` 0.24.0 serving `qwen3.5:9b`, Python 3.14.5.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -61,6 +67,26 @@ conveying was the *shape* of the task — the label space, the format, the
 distribution of inputs — not the input-to-label mapping.
 
 That is worth knowing before you spend a week curating perfect examples.
+
+Two lines of work say *how* that narrowing happens, and they are worth having
+because "task inference" is otherwise just a phrase. @xie2022explanation
+formalises it as implicit Bayesian inference: the demonstrations sharpen a
+posterior over latent concepts the model already acquired in pretraining, which
+is why the *distribution* of the examples matters more than their correctness.
+@olsson2022induction gives the circuit-level version — attention heads that
+complete `[A][B] … [A] → [B]`, which appear at exactly the point in training
+where in-context learning ability jumps. After @sec-transformers, that is the
+hardware answer to "how can examples in a prompt work without changing a
+weight".
+
+And a limit on @min2022rethinking worth carrying, because this chapter repeats
+it several times. @pan2023incontext separates **task recognition** — the
+demonstrations tell the model *which* task — from **task learning**, where they
+teach it the mapping. Random labels leave task recognition intact, which is what
+Min et al. measured; task learning does exist, grows with model scale, and is
+exactly what random labels destroy. So "the labels do not matter" is true of the
+recognition part and false of the learning part, and it is not a licence to use
+wrong labels.
 
 ::: {.column-margin}
 It also predicts the failure mode. If demonstrations mostly convey format,
@@ -194,8 +220,37 @@ product review is positive or negative. **A competent reader would call them
 the same instruction.**
 
 They differ in formatting, in the surface form of the labels, in where the
-review sits relative to the instruction, in delimiters, and in politeness.
-None changes the task, the criteria, or the meaning of either label.
+review sits relative to the instruction, in delimiters, and in politeness. None
+changes the task or the criteria.
+
+Three of them do change what the labels *are*, and that turns out to be
+informative rather than a flaw in the design: `A`/`B` and `1`/`0` strip the
+labels of meaning entirely, and `olumlu`/`olumsuz` changes their language. Hold
+that in mind for the table — the semantically empty `A`/`B` finishes **second**,
+ahead of the meaningful Turkish pair by more than ten points. The model is not
+reading the labels as words. It is reading them as slots.
+
+| variant | what it changes against `baseline` |
+|:--|:--|
+| `baseline` | — instruction, then the review, then `Answer:`; labels `positive` / `negative` |
+| `label positive/negative` | label surface form |
+| `label A/B` | label surface form, meaning removed |
+| `label 1/0` | label surface form, meaning removed |
+| `label olumlu/olumsuz` | label surface form, language changed to Turkish |
+| `bulleted` | the instruction laid out as bullets |
+| `numbered` | the instruction laid out as numbered lines |
+| `triple quotes` | the review wrapped in `"""…"""` |
+| `xml delimiters` | the review wrapped in `<review>…</review>` |
+| `review first` | the review moved above the instruction |
+| `polite` | a *lütfen* prefix and a *teşekkürler* suffix |
+| `role prefix` | a one-sentence persona prepended |
+
+: What each variant changes {tbl-colwidths="[34,66]"}
+
+One thing this chapter owes you and does not supply: the full text of all
+twelve. The table above names what changes; it does not let you reproduce the
+run, and a prompt experiment whose prompts are not printed is not reproducible.
+Print yours.
 
 All twelve ran on the same 150 balanced reviews, same model, temperature 0,
 fixed seed. Every response parsed; nothing was dropped.
@@ -218,6 +273,17 @@ review first                75.33%   [ 67.9,  81.5]
 spread 75.33% – 90.00% = 14.67 points     mean 82.06   sd 5.57
 ```
 
+**A range needs something to be a range against.** If all twelve prompts were
+equally good and each score were an independent draw at $n = 150$, the standard
+error on one estimate would be 3.13 points and the *expected* spread of twelve
+such draws about **10 points** — from sampling noise alone. So 14.67 is roughly
+one and a half times what chance would hand you, not an order of magnitude
+above it. The paired design makes the true null tighter than the independent
+calculation, so the effect is probably real; the number to report is a
+permutation one — shuffle the twelve variant labels across the item-level
+results ten thousand times and read off where 14.67 falls. We did not run that,
+and it is the first thing to add if you repeat this experiment.
+
 ::: {.anlp-widget}
 ```{=html}
 <div class="widget-title">Twelve prompts, one task, one model — ranked</div>
@@ -227,13 +293,13 @@ spread 75.33% – 90.00% = 14.67 points     mean 82.06   sd 5.57
 //| echo: false
 promptData = [
   {variant: "label positive/negative", acc: 90.00, lo: 84.2, hi: 93.8, kind: "label surface form"},
-  {variant: "label A/B",               acc: 88.67, lo: 82.6, hi: 92.8, kind: "label surface form"},
+  {variant: "label A/B",               acc: 88.67, lo: 82.6, hi: 92.8, kind: "label meaning removed"},
   {variant: "bulleted",                acc: 87.33, lo: 81.1, hi: 91.7, kind: "formatting"},
   {variant: "numbered",                acc: 87.33, lo: 81.1, hi: 91.7, kind: "formatting"},
-  {variant: "label 1/0",               acc: 86.67, lo: 80.3, hi: 91.2, kind: "label surface form"},
+  {variant: "label 1/0",               acc: 86.67, lo: 80.3, hi: 91.2, kind: "label meaning removed"},
   {variant: "triple quotes",           acc: 82.00, lo: 75.1, hi: 87.3, kind: "delimiter"},
   {variant: "baseline",                acc: 79.33, lo: 72.2, hi: 85.0, kind: "baseline"},
-  {variant: "label olumlu/olumsuz",    acc: 78.00, lo: 70.7, hi: 83.9, kind: "label surface form"},
+  {variant: "label olumlu/olumsuz",    acc: 78.00, lo: 70.7, hi: 83.9, kind: "label language"},
   {variant: "xml delimiters",          acc: 77.33, lo: 70.0, hi: 83.3, kind: "delimiter"},
   {variant: "polite",                  acc: 76.67, lo: 69.3, hi: 82.7, kind: "politeness"},
   {variant: "role prefix",             acc: 76.00, lo: 68.6, hi: 82.1, kind: "persona"},
@@ -257,11 +323,11 @@ Plot.plot({
       y: "variant", x: "acc", fill: "kind",
       sort: {y: "x", reverse: true}}),
     promptShowCI
-      ? Plot.ruleX(promptData, {y: "variant", x1: "lo", x2: "hi", stroke: "#333"})
+      ? Plot.ruleX(promptData, {y: "variant", x1: "lo", x2: "hi", stroke: "currentColor"})
       : null,
     Plot.text(promptData, {y: "variant", x: "acc", dx: 22, fontSize: 11,
       text: d => d.acc.toFixed(2)}),
-    Plot.ruleX([79.33], {stroke: "#C1666B", strokeDasharray: "4,3"})
+    Plot.ruleX([79.33], {stroke: "currentColor", strokeOpacity: 0.45, strokeDasharray: "4,3"})
   ].filter(m => m)
 })
 ```
@@ -293,9 +359,22 @@ worst 'review first'             75.33%
     best right, worst wrong                32
     worst right, best wrong                10
   McNemar exact test                    p = 0.0009
+  Bonferroni/Holm over 66 pairs         p = 0.062
 ```
 
-The difference is not noise. And the stronger statistic is the one that does
+The difference survives an uncorrected paired test — and *best against worst* is
+the extreme of the $\binom{12}{2} = 66$ possible pairs, chosen after looking at
+the data, so the uncorrected number is not the one to quote. Corrected for those
+66 comparisons it lands at **p = 0.062**: suggestive, not decisive, on 150
+items. Note that Holm's first step uses the same multiplier as Bonferroni, so
+the more powerful procedure does not rescue it either.
+
+The honest primary test is the omnibus one — Cochran's Q across all twelve
+variants on the same 150 items — because that is the question actually being
+asked: *does the prompt matter at all?* Run Q first, then Holm-corrected
+pairwise McNemar for the pairs you want to name. We report the pair because it
+is the one people quote; treat the effect as a **spread**, which the next
+statistic measures directly and without this problem. And the stronger statistic is the one that does
 not involve accuracy at all:
 
 ```text
@@ -305,10 +384,37 @@ the prompt decides the answer on           46/150 = 30.7%
 two variants disagree on: median 12.0% of reviews, max 28.7%
 ```
 
-**On three reviews in ten, the answer is determined by the prompt's
-formatting rather than by the review.** The model has an opinion on 69.3% of
-this corpus; on the rest, what you get depends on whether you wrote a bulleted
-list or a paragraph.
+**On three reviews in ten, the answer is determined by the prompt's formatting
+rather than by the review.** Note what that first number is and is not: twelve
+variants *agreeing* does not mean the agreed answer is right, and this run does
+not report accuracy on the unanimous 104 separately. Add that row when you
+repeat the experiment — it is the difference between "the model has an opinion"
+as a measurement and as a figure of speech, and the next subsection shows how
+much rests on it.
+
+### Is the prompt deciding, or is it moving a threshold?
+
+Follow the arithmetic before you accept the framing, because it points somewhere
+more useful. If the 104 unanimous reviews are all correct, then the mean score
+of 82.06% — 123.1 of 150 — leaves **19.1 of the 46 contested reviews correct.
+That is 41.5%, below the 50% floor of a balanced task.** The best variant gets
+31 of the 46 and the worst gets 9.
+
+Twelve prompts answering at random on hard items would sit at 50%. Sitting
+*below* 50% on average, with the extremes at 67% and 20%, is a different
+picture: twelve prompts at twelve different **thresholds**, each systematically
+leaning toward one label.
+
+Which points at a fix the prompt-engineering framing hides.
+@zhao2021calibrate showed that much of this sensitivity is *label bias* — the
+model's prior over the answer tokens, shifted by surface features of the
+prompt — and that estimating it on a content-free input and dividing it out
+removes most of the variance. So the honest version of this section's result is:
+**before calibration the prompt is worth 14.67 points.** How much of that
+survives *after* is the experiment to run next, and reporting each variant's
+$P(\text{predict positive})$ on a balanced set — which should be 50% and
+almost certainly is not — is the one-column diagnostic that would have shown
+this without any of the arithmetic above.
 
 Both of those readouts describe the same 150 reviews, cut two different ways:
 
@@ -370,14 +476,23 @@ scores whose confidence intervals overlap.
 
 ### What that means for everything else you measure
 
-Put this next to @sec-classification's result on the same model family. There,
-writing the instruction in English rather than Turkish — the single most
-repeated piece of prompting folklore — was worth **+0.54 macro-F1, $p =
-0.54$**, indistinguishable from nothing. Here, changing the *bullet
-formatting* is worth eight points.
+Put this next to @sec-classification's result on the same model. There, writing
+the *instruction* in English rather than Turkish — the single most repeated
+piece of prompting folklore — was worth **+0.54 macro-F1**, with a 95% interval
+running only to +2.25: not a demonstration that the effect is gone, but a
+ceiling of about two points on whatever remains. Here, changing the *bullet
+formatting* is worth eight.
 
-[The variable everyone argues about turned out to be noise, and the variable
-nobody mentions turned out to be the largest effect in the experiment.]{.hl}
+Read the table again before concluding that language does not matter, though,
+because it complicates the folklore rather than killing it. Changing the *label*
+from `positive`/`negative` to `olumlu`/`olumsuz` cost **12 points** — the largest
+single effect in this experiment. Instruction language did almost nothing; label
+language did more than any formatting change. "Does language matter?" is not one
+question, and the two halves of it gave opposite answers on the same model.
+
+[The variable everyone argues about was noise where they argue about it, and the
+largest effect in the experiment was two words nobody thinks of as a
+variable.]{.hl}
 
 Three consequences, and the third is the one that changes how you work:
 
@@ -387,9 +502,11 @@ Three consequences, and the third is the one that changes how you work:
    *set* of prompts and report the distribution, or accept that you have not
    compared the models.
 2. **Your reported accuracy needs an error bar you have not been computing.**
-   The sampling interval on 150 documents is about ±6 points. The *prompt*
-   interval, on the same data, is 14.67. The second is larger and almost never
-   reported.
+   The sampling interval on 150 documents spans about 12 points end to end. The
+   prompt spread, on the same data, is 14.67 — the same order of magnitude,
+   which is the point: one of those error bars is computed and printed and the
+   other is neither. Note also that they move in opposite directions. Add
+   documents and the sampling interval shrinks; the prompt spread does not.
 3. **Prompt changes need regression tests, not review.** No reviewer reading
    "moved the review above the instruction" would predict −4 points, because
    the change is semantically empty. Only a measurement catches it, which is
@@ -399,7 +516,13 @@ Three consequences, and the third is the one that changes how you work:
 @sclar2024quantifying is the systematic version of this experiment across
 tasks and models, and it finds the same thing at scale: spurious formatting
 features move scores by amounts comparable to real model differences.
-@lu2022fantastically found the same for the *order* of demonstrations. The
+@lu2022fantastically found the same for the *order* of demonstrations, and their
+result is the sharper one: permuting a *fixed* set of examples moved scores from
+near state-of-the-art to near chance, the examples identical and only their
+sequence changed. The `review first` variant above is the zero-shot shadow of
+that effect; in a few-shot prompt the ordering degree of freedom is larger than
+the formatting one measured here, and you are almost certainly not measuring
+it. The
 literature has been clear about this for years; the practice has not caught
 up, because the prompt still feels like a message rather than a component.
 :::
@@ -441,19 +564,28 @@ temperature 0.7, fixed seed            100.0%              0 / 30
 temperature 0.7, no seed                 3.3%             29 / 30
 ```
 
-Good news and a trap. **Temperature 0 was deterministic here with or without a
-seed, and a fixed seed made even temperature 0.7 deterministic.** But without
-either, 29 of 30 documents gave a different answer across ten runs — so an
-evaluation run at default settings is measuring the sampler as much as the
-prompt.
+Good news and a trap. **At temperature 0 this setup returned identical output on
+all 30 documents across ten repeats, with or without a seed, and a fixed seed
+did the same at temperature 0.7.** Read that as *no variation in 300 calls*
+rather than as a proof of determinism: zero events in 30 items still leaves room
+for a true variation rate of up to about 10%. Without either, 29 of 30 documents
+gave a different answer across ten runs — so an evaluation at default settings
+is measuring the sampler as much as the prompt.
 
 ::: {.callout-warning appearance="simple"}
-That table is a single local server answering one request at a time. **Hosted
-APIs are frequently not deterministic even at temperature 0**, because
-requests are batched and batch composition changes the order of floating-point
-reductions. Do not assume; run the ten-repeat check against the endpoint you
-will actually ship on, and if it is not deterministic, your eval needs repeats
-and an interval rather than a single number.
+That table is a single local server answering one request at a time, and *that*
+is the load-bearing condition — not that the server is local. What breaks
+determinism is **batch invariance**: the reduction kernels behind matmul,
+normalisation and attention take different code paths at different batch sizes,
+so the same prompt in a batch of one and in a batch of seventeen can decode
+differently even at temperature 0 [@he2025nondeterminism]. Hosted APIs batch
+your request with strangers, which is why they are frequently non-deterministic
+at temperature 0 — but a local server is not automatically safe either. Change
+the batch size, the context length, the KV-cache reuse or the backend and the
+same thing happens. Do not assume; run the ten-repeat check against the endpoint
+*and the configuration* you will actually ship on, and if it is not
+deterministic, your eval needs repeats and an interval rather than a single
+number.
 :::
 
 ### 2. Build a small evaluation set, and freeze it
@@ -752,10 +884,14 @@ bar means for the model comparison you most recently believed.
    overlap. Compute an unpaired comparison and a McNemar test on the same
    data. Report both, and say which you would put in a report and why.
 
-3. **Randomise the demonstration labels.** Reproduce @min2022rethinking on your
-   task: few-shot with correct labels, with shuffled labels, and zero-shot.
-   How much of the benefit survives randomisation? What does the answer tell
-   you about what your examples are doing?
+3. **The $k$-shot curve this chapter does not have.** Run your task at
+   $k \in \{0, 1, 2, 4, 8, 16, 32\}$ demonstrations, twice: once with the gold
+   labels and once with the labels shuffled. Plot both curves. If they rise
+   together, the demonstrations are conveying *format*; if the gold curve pulls
+   away, they are conveying the *mapping* — which is @min2022rethinking against
+   @pan2023incontext on your own data. Then permute a fixed set of four
+   demonstrations eight ways at fixed $k$ and report that spread too; per
+   @lu2022fantastically it may be the larger of the two effects.
 
 4. **The role prefix, on your task.** Run the same prompt with and without
    *You are an expert…*. Predict the sign before you run it. Report both.
