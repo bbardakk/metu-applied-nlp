@@ -91,12 +91,17 @@ rather than free text:
 
 : Span naming, as the specification defines it {tbl-colwidths="[20,42,38]"}
 
-The operation names are a closed set, and reading the current list tells you
-what the working group thinks an agent *is*: `chat`, `text_completion`,
-`generate_content`, `embeddings`, `execute_tool`, `invoke_agent`,
-`create_agent`, `invoke_workflow`, `create_memory`, `fetch_response`. Memory
-and workflow operations arriving in a tracing spec is a fair summary of where
-@sec-memory and @sec-deployment ended up.
+The operation names are an **open** enum with a well-known list — the
+specification's own wording is that if one of the listed values applies you
+MUST use it, and otherwise you MAY define your own — and reading that list
+tells you what the working group thinks an agent *is*: `chat`,
+`text_completion`, `generate_content`, `embeddings`, `retrieval`,
+`execute_tool`, `plan`, `invoke_agent`, `create_agent`, `invoke_workflow`,
+`fetch_response`, plus a family of memory operations. A planning phase, a
+retrieval operation distinct from embedding, and memory CRUD arriving in a
+tracing spec is a fair summary of where @sec-memory, @sec-rag and
+@sec-deployment ended up. The list grows; check it rather than copying this
+one.
 
 The attributes worth knowing by heart are few, out of 65 in the span document
 alone:
@@ -216,20 +221,21 @@ Half the volume is the prompt and completion text — and [these are toy prompts
 so 48.3% is a floor, not an estimate]{.hl}. The runs above averaged 301 prompt
 tokens. @sec-summarization measured a realistic single-shot request at **890
 prompt tokens**, and @sec-serving worked with contexts of 4,258. Holding the
-measured structure fixed and scaling only the text:
+measured structure fixed at 1,636 bytes per run and scaling the measured 1,531
+bytes of content linearly in prompt size:
 
-| prompt size per call | bytes per run | content share |
-|:--|--:|--:|
-| 301 tokens (measured here) | 3,167 | 48.3% |
-| 890 tokens (@sec-summarization) | 10,180 | 83.9% |
-| 4,258 tokens (@sec-serving) | 42,513 | 96.2% |
+| prompt size per call | bytes per run | content share | against structure alone |
+|:--|--:|--:|--:|
+| 301 tokens (measured here) | 3,167 | 48.3% | 1.9× |
+| 890 tokens (@sec-summarization) | 6,163 | 73.4% | 3.8× |
+| 4,258 tokens (@sec-serving) | 23,294 | 93.0% | 14.2× |
 
 : Trace volume against prompt size, structure held fixed
-{tbl-colwidths="[40,28,32]"}
+{tbl-colwidths="[34,22,22,22]"}
 
 At a million runs a month that is 4.8M spans and **1.6 GB of structure against
-10.2 GB with realistic prompts recorded** — a six-fold difference that is
-entirely the decision to log content, and a twenty-six-fold one at long context.
+6.2 GB with realistic prompts recorded** — a near-fourfold difference that is
+entirely the decision to log content, and a fourteen-fold one at long context.
 
 So the decision to record prompts is a storage decision, a retention decision
 and a privacy decision at the same time, and it should be made deliberately
@@ -244,8 +250,19 @@ group by on the span, because you cannot add them retrospectively.
 
 The four that are almost always wanted, and none of which are in the GenAI
 conventions because they are yours rather than the model's: user id, team or
-tenant, feature, and environment. Attach them once at the root and let them
-propagate.
+tenant, feature, and environment.
+
+**Attaching them is not as simple as it sounds, and the obvious way does not
+work.** Span attributes are *not* inherited in OpenTelemetry: writing `user.id`
+on the root span does not put it on any child, and nothing in the SDK or the
+protocol propagates it. What propagates with the context is **Baggage**. So set
+the keys in baggage at the root, and install a span processor that copies those
+baggage keys onto every span it sees — `BaggageSpanProcessor` in the
+`opentelemetry-python` contrib packages does exactly this. Environment is the
+exception: it belongs on the **Resource**, which *is* attached to every span
+the SDK emits. Some backends roll attributes up to the trace level and give the
+impression that inheritance happened; that is a backend feature, not the
+specification.
 
 [The number worth reporting is not spend, it is spend per unit of value.]{.hl}
 Cost per session flatters a feature nobody finishes; @sec-agent-eval made the
@@ -344,9 +361,9 @@ It is a storage decision, a retention decision and a privacy decision at once,
 so make it once, deliberately.
 
 Measured here, content was 48.3% of trace volume on toy prompts of 301 tokens.
-At @sec-summarization's realistic 890 tokens it is 83.9%, and at
-@sec-serving's long contexts 96.2% — a six- to twenty-six-fold difference in
-bytes that is entirely this one setting.
+Scaling that content linearly to @sec-summarization's realistic 890 tokens puts
+it at 73.4%, and at @sec-serving's long contexts 93.0% — a four- to
+fourteen-fold difference in bytes that is entirely this one setting.
 
 The usual resolution is to sample: structure on every run, content on a small
 percentage and on every error. That keeps debugging possible where it matters
@@ -522,8 +539,11 @@ explaining the bill.
 
 ### Step 3 — add your own dimensions
 
-User, team, feature, environment. Attach them at the root and confirm they
-propagate to every child span. Then produce cost per feature for a day.
+User, team, feature, environment. Put the first three in baggage at the root,
+install a baggage span processor, and confirm they appear on every child span —
+if they do not, the processor is missing, because span attributes do not
+propagate on their own. Environment goes on the Resource. Then produce cost per
+feature for a day.
 
 ### Step 4 — produce cost per unit of value
 
@@ -639,8 +659,8 @@ counted on a specific day.
   here: **4.8 spans and 3,167 bytes per run**, of which **48.3% was prompt and
   completion text** — and that was on 301-token prompts. Holding the structure
   fixed and scaling the text to @sec-summarization's realistic 890 tokens gives
-  10,180 bytes and **83.9% content**; at @sec-serving's 4,258-token contexts,
-  **96.2%**. [Whether you log prompts is a six- to twenty-six-fold decision
+  6,163 bytes and **73.4% content**; at @sec-serving's 4,258-token contexts,
+  **93.0%**. [Whether you log prompts is a four- to fourteen-fold decision
   about your monitoring bill.]{.hl}
 
 - **Sampling content is a cost control and a privacy control at once.**

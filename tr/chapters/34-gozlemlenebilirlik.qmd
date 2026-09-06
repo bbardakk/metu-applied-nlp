@@ -97,12 +97,16 @@ metin değil, kalıplı:
 
 : Şartnamenin tanımladığı hâliyle span adlandırma {tbl-colwidths="[20,42,38]"}
 
-İşlem adları kapalı bir küme ve mevcut listeyi okumak, çalışma grubunun bir
-ajanın *ne olduğunu* düşündüğünü söylüyor: `chat`, `text_completion`,
-`generate_content`, `embeddings`, `execute_tool`, `invoke_agent`,
-`create_agent`, `invoke_workflow`, `create_memory`, `fetch_response`. Bir izleme
-şartnamesine bellek ve iş akışı işlemlerinin girmesi, @sec-bellek ile
-@sec-dagitim'in vardığı yerin adil bir özeti.
+İşlem adları **açık** bir enum ve iyi bilinen bir listesi var — şartnamenin
+kendi ifadesiyle, listedeki değerlerden biri uyuyorsa onu kullanmak ZORUNDA
+(MUST) sınız, uymuyorsa kendi değerinizi tanımlayabilirsiniz (MAY). O listeyi
+okumak, çalışma grubunun bir ajanın *ne olduğunu* düşündüğünü söylüyor: `chat`,
+`text_completion`, `generate_content`, `embeddings`, `retrieval`,
+`execute_tool`, `plan`, `invoke_agent`, `create_agent`, `invoke_workflow`,
+`fetch_response`, artı bir bellek işlemleri ailesi. Bir izleme şartnamesine bir
+planlama fazının, gömmeden ayrı bir erişim işleminin ve bellek CRUD'unun
+girmesi; @sec-bellek, @sec-rag ve @sec-dagitim'in vardığı yerin adil bir özeti.
+Liste büyüyor; bunu kopyalamak yerine kontrol edin.
 
 Yalnızca span belgesindeki 65 öznitelikten, ezbere bilmeye değer olanlar az:
 
@@ -221,20 +225,21 @@ Hacmin yarısı prompt ve tamamlama metni — ve [bunlar oyuncak prompt'lar, yan
 %48,3 bir tahmin değil, bir taban]{.hl}. Yukarıdaki koşular ortalama 301 prompt
 token'ı tuttu. @sec-ozetleme gerçekçi, tek seferlik bir isteği **890 prompt
 token'ı** olarak ölçtü ve @sec-servis 4.258'lik bağlamlarla çalıştı. Ölçülen yapı
-sabit tutulup yalnızca metin ölçeklendiğinde:
+koşu başına 1.636 baytta sabit tutulup ölçülen 1.531 baytlık içerik prompt
+boyutuyla doğrusal ölçeklendiğinde:
 
-| çağrı başına prompt boyutu | koşu başına bayt | içerik payı |
-|:--|--:|--:|
-| 301 token (burada ölçülen) | 3.167 | %48,3 |
-| 890 token (@sec-ozetleme) | 10.180 | %83,9 |
-| 4.258 token (@sec-servis) | 42.513 | %96,2 |
+| çağrı başına prompt boyutu | koşu başına bayt | içerik payı | yalnız yapının katı |
+|:--|--:|--:|--:|
+| 301 token (burada ölçülen) | 3.167 | %48,3 | 1,9 |
+| 890 token (@sec-ozetleme) | 6.163 | %73,4 | 3,8 |
+| 4.258 token (@sec-servis) | 23.294 | %93,0 | 14,2 |
 
 : Prompt boyutuna karşı iz hacmi, yapı sabit tutulmuş
-{tbl-colwidths="[40,28,32]"}
+{tbl-colwidths="[34,22,22,22]"}
 
 Ayda bir milyon koşuda bu, 4,8 milyon span ve **gerçekçi prompt'lar kaydedilirken
-10,2 GB'a karşı 1,6 GB yapı** demek — tümüyle içeriği kütüklemeye karar vermekten
-gelen altı kat fark ve uzun bağlamda yirmi altı kat.
+6,2 GB'a karşı 1,6 GB yapı** demek — tümüyle içeriği kütüklemeye karar vermekten
+gelen dört kata yakın bir fark ve uzun bağlamda on dört kat.
 
 Yani prompt'ları kaydetme kararı aynı anda bir depolama kararı, bir saklama
 kararı ve bir mahremiyet kararıdır ve bir varsayılanı açık bırakarak değil,
@@ -249,7 +254,18 @@ span'e koyun, çünkü onları geriye dönük ekleyemezsiniz.
 
 Neredeyse her zaman istenen ve hiçbiri GenAI uzlaşımlarında olmayan dördü —
 çünkü onlar modelin değil sizin: kullanıcı kimliği, takım ya da kiracı, özellik
-ve ortam. Kökte bir kez iliştirin ve yayılmalarına izin verin.
+ve ortam.
+
+**Bunları iliştirmek kulağa geldiği kadar basit değil ve bariz yol işe
+yaramıyor.** OpenTelemetry'de span öznitelikleri *miras alınmaz*: kök span'e
+`user.id` yazmak onu hiçbir alt span'e koymaz ve ne SDK ne de protokol bunu
+yayar. Bağlamla birlikte yayılan şey **Baggage**'dır. Yani anahtarları kökte
+baggage'a koyun ve gördüğü her span'e o baggage anahtarlarını kopyalayan bir span
+processor kurun — `opentelemetry-python`'ın contrib paketlerindeki
+`BaggageSpanProcessor` tam olarak bunu yapıyor. Ortam istisnadır: o,
+SDK'nın ürettiği her span'e *iliştirilen* **Resource**'a aittir. Bazı
+backend'ler öznitelikleri iz düzeyinde toplayıp miras alınmış izlenimi verir; bu
+bir backend özelliğidir, şartname değil.
 
 [Raporlanmaya değen sayı harcama değil, değer birimi başına harcamadır.]{.hl}
 Oturum başına maliyet kimsenin bitirmediği bir özelliği kayırır;
@@ -348,9 +364,9 @@ Bu aynı anda bir depolama, bir saklama ve bir mahremiyet kararı; öyleyse bir 
 kasıtlı olarak verin.
 
 Burada ölçüldüğü hâliyle içerik, 301 token'lık oyuncak prompt'larda iz hacminin
-%48,3'üydü. @sec-ozetleme'nin gerçekçi 890 token'ında %83,9 ve @sec-servis'in
-uzun bağlamlarında %96,2 — tümüyle bu tek ayardan gelen, baytta altı ilâ yirmi
-altı kat fark.
+%48,3'üydü. O içerik doğrusal ölçeklendiğinde @sec-ozetleme'nin gerçekçi 890
+token'ında %73,4 ve @sec-servis'in uzun bağlamlarında %93,0 — tümüyle bu tek
+ayardan gelen, baytta dört ilâ on dört kat fark.
 
 Alışıldık çözüm örneklemek: her koşuda yapı, küçük bir yüzdede ve her hatada
 içerik. Bu, hata ayıklamayı önemli olduğu yerde mümkün tutar ve her kullanıcının
@@ -525,8 +541,10 @@ açmadan *önce* yapın ki sayı faturayı açıklamak yerine kararı bilgilendi
 
 ### Adım 3 — kendi boyutlarınızı ekleyin
 
-Kullanıcı, takım, özellik, ortam. Bunları kökte iliştirin ve her çocuk span'e
-yayıldıklarını doğrulayın. Sonra bir gün için özellik başına maliyet üretin.
+Kullanıcı, takım, özellik, ortam. İlk üçünü kökte baggage'a koyun, bir baggage
+span processor kurun ve her alt span'de göründüklerini doğrulayın — görünmüyorlarsa
+processor eksiktir, çünkü span öznitelikleri kendiliğinden yayılmaz. Ortam
+Resource'a gider. Sonra bir gün için özellik başına maliyet üretin.
 
 ### Adım 4 — değer birimi başına maliyet üretin
 
@@ -641,10 +659,10 @@ kontrol edin; o oran belirli bir günde sayıldı.
 - **İçerik kaydını açmadan önce telemetri hacmini tahmin edin.** Burada
   ölçüldü: **koşu başına 4,8 span ve 3.167 bayt**, bunun **%48,3'ü prompt ve
   tamamlama metni** — ve bu, 301 token'lık prompt'lardaydı. Yapı sabit tutulup
-  metin @sec-ozetleme'nin gerçekçi 890 token'ına ölçeklendiğinde 10.180 bayt ve
-  **%83,9 içerik**; @sec-servis'in 4.258 token'lık bağlamlarında **%96,2**.
-  [Prompt'ları kütükleyip kütüklemediğiniz, izleme faturanız hakkında altı ilâ
-  yirmi altı katlık bir karardır.]{.hl}
+  metin @sec-ozetleme'nin gerçekçi 890 token'ına ölçeklendiğinde 6.163 bayt ve
+  **%73,4 içerik**; @sec-servis'in 4.258 token'lık bağlamlarında **%93,0**.
+  [Prompt'ları kütükleyip kütüklemediğiniz, izleme faturanız hakkında dört ilâ
+  on dört katlık bir karardır.]{.hl}
 
 - **İçeriği örneklemek aynı anda bir maliyet ve bir mahremiyet denetimidir.**
   Her koşuda yapı, küçük bir payda ve her hatada içerik. Dışa aktarmadan önce,
