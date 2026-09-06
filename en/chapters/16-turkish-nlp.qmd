@@ -40,14 +40,16 @@ vocabulary never closes. [↩](#term-agglutinative){.term-back}
 :::
 
 ::: {#gloss-vowel-harmony .column-margin .term-gloss}
-**Vowel harmony** — the rule that a suffix's vowels are chosen to match the
-last vowel of the stem, so one suffix has several surface forms (*evler* but
-*kitaplar*). It multiplies the number of distinct strings a tokenizer must
-account for. [↩](#term-vowel-harmony){.term-back}
+**Vowel harmony** — the rule that a suffix's vowels agree with the stem's last
+vowel in *backness*, and — for four-way suffixes — in *rounding* as well, so one
+suffix has two or four surface forms (*evler* but *kitaplar*; *evim*, *kitabım*,
+*okulum*, *gözüm*). It multiplies the number of distinct strings a tokenizer
+must account for. [↩](#term-vowel-harmony){.term-back}
 :::
 
 *Ev* is house; *evler* houses; *evlerimiz* our houses; *evlerimizden* from our
-houses. English needs four words for the last one.
+houses. One Turkish word, four morphemes — plural, possessive, case — where
+English needs three separate words and a preposition to say the same thing.
 
 Everyone knows this. What it *costs* is rarely measured, and the measurement
 needs a corpus where both languages say the same thing — which is exactly
@@ -194,11 +196,43 @@ Stemming the corpus and counting the forms each stem produced:
   çocuk     31 forms   çocuk, çocuğu, çocuğa, çocukla, çocuğun, çocukta, ...
 ```
 
-The mean of 1.84 is misleading downward — 75% of stems appear only once in a
-corpus this small, and the stemmer under-merges. The informative row is the
+The mean of 1.84 is misleading downward for two reasons, and only one of them
+is measured here: most stems in a corpus this small appear exactly once, which
+drags the mean towards 1 regardless of the language, and the stemmer
+under-merges wherever the stem itself changes shape (rule 4 above). The informative row is the
 top: **thirty-nine forms of one everyday noun in 141,000 tokens**, and the
 list is nowhere near exhausted. @sec-bake-off, on a larger corpus, found 895
 forms sharing the stem *kulla*.
+
+### The rules behind the forms
+
+Four rules generate almost every Turkish surface form, and all four are already
+at work in the list above. Naming them matters here, because the fourth is
+exactly where the stemmers later in this chapter go wrong.
+
+**1. Suffix order is fixed.** A Turkish noun is
+`STEM (+PLURAL) (+POSSESSIVE) (+CASE) (+CLITIC)`, never any other order:
+*ev-ler-imiz-den*, never \**ev-den-ler-imiz*.
+
+**2. Backness harmony (*büyük ünlü uyumu*)** gives two-way suffixes: the plural
+*-lAr* surfaces as *-ler* after a front vowel (*ev-ler*) and *-lar* after a back
+one (*kitap-lar*).
+
+**3. Rounding harmony (*küçük ünlü uyumu*)** gives four-way suffixes: the
+first-person possessive *-Im* surfaces as *-im* (*ev-im*), *-ım* (*kitab-ım*),
+*-um* (*okul-um*) and *-üm* (*göz-üm*). This is the rule that multiplies forms
+fastest, and it is the one the usual one-sentence summary of vowel harmony
+leaves out.
+
+**4. Consonants change too — and not only at the seam.** Voicing inside the
+stem (*kitap* → *kitab-ı*, *çocuk* → *çocuğ-u*), devoicing of the suffix
+(*arkadaş* + *-dI* → *arkadaş-tı*), and a buffer consonant inserted between two
+vowels (*ülke* + *-I* → *ülke-y-i*). All three are in the list above and none of
+them is a suffix change.
+
+Rule 4 is the one that breaks stemmers. **The stem is not constant**, so a
+rule-based stemmer that only strips suffixes has no way to merge *kitap* with
+*kitabı*, and every such failure is a document a query will not find.
 
 ### Where this shows up
 
@@ -255,17 +289,26 @@ Every mainstream `lower()` applies the English rules unless told otherwise.
 On the WMT16 Turkish source:
 
 ```text
-  words containing I or İ                                    438
-  where str.lower() differs from Turkish lowercasing         438   (100%)
+  tokens in the WMT16 Turkish source                      46,243
+  tokens containing I or İ                                   438   (0.95%)
+  of those, where str.lower() differs from Turkish rules     438   (100%, by construction)
 
     'İtiraf'      str.lower() 'i̇tiraf'       Turkish 'itiraf'
     'İngilizce'   str.lower() 'i̇ngilizce'    Turkish 'ingilizce'
     'İşlerin'     str.lower() 'i̇şlerin'      Turkish 'işlerin'
 ```
 
-**Every single one.** Not a long tail — a total failure on any word beginning
-with a capital dotted İ, which in Turkish includes a large share of proper
-nouns and every sentence-initial word starting with *i*.
+**The 100% is not a finding.** The two case mappings differ for both letters —
+`I` goes to `ı` in Turkish and `i` in English, `İ` goes to `i` in Turkish and
+`i` plus a combining dot in English — so *every* token containing either letter
+must come out different. It is arithmetic, and reporting it as a measurement
+would be the kind of thing this book keeps telling you to check for.
+
+The finding is the **0.95%**. One token in a hundred is silently corrupted, and
+they are not a random one in a hundred: a capital dotted İ appears
+disproportionately in proper nouns and in every sentence-initial word starting
+with *i*, which are exactly the tokens a retrieval or NER system cares about
+most.
 
 ::: {.anlp-widget}
 ```{=html}
@@ -351,17 +394,36 @@ And it does not go away when you normalize:
 
 NFC does not recombine, because `i` + combining dot is not canonically
 equivalent to `i` — the composed character `i̇` does not exist as a single code
-point. There is no Unicode-level fix. The fix is to not create the problem:
+point. There is no Unicode-level fix.
+
+There is no standard-library fix either, and the folk answer is wrong: `str.casefold()`
+is not locale-aware, and on `TAVSİYE` it produces the identical eight codepoints
+that `lower()` does, combining dot included. A reader who reaches for it because
+"casefold is the more correct lowercasing" gets exactly the bug they were trying
+to avoid. Python has no Turkish casing at all; ICU does
+(`PyICU`, `icu.UnicodeString(s).toLower(icu.Locale("tr"))`). For most pipelines
+the cheaper answer is to not create the problem:
 
 ```python
+import unicodedata
+
 def tr_lower(s):
+    # NFC first: a decomposed İ (I + U+0307) has to become the precomposed
+    # character, or the replace below misses it and the combining mark survives.
+    s = unicodedata.normalize("NFC", s)
     return s.replace("İ", "i").replace("I", "ı").lower()
 
 def tr_upper(s):
+    s = unicodedata.normalize("NFC", s)
     return s.replace("i", "İ").replace("ı", "I").upper()
 ```
 
-Four lines, applied before anything else touches the text.
+Six lines, applied before anything else touches the text — and the NFC line is
+not optional. Text arrives decomposed more often than you would like: from HTML
+forms, from some macOS filenames, from OCR. Without the normalisation,
+`tr_lower` on a decomposed `İstanbul` returns `ı̇stanbul` — the combining dot is
+still there and it is now over the *wrong* vowel, which is worse than what you
+started with.
 
 ::: {.column-margin}
 This is why the bug survives: the code that causes it is `text.lower()`, which
@@ -397,13 +459,16 @@ Stripping is the tempting one-liner. Measured on the same corpus:
 
      'oldu'   <-  oldu, öldü          (it happened / he died)
      'bas'    <-  bas, baş            (press / head)
-     'once'   <-  once, önce          (once / before)
-     'mi'     <-  mi, mı              (two different question particles)
+     'sac'    <-  saç, sac            (hair / sheet metal)
+     'yasa'   <-  yasa, yaşa          (law / live!)
 ```
 
 Only 72 collisions, which sounds harmless until you read them. *Oldu* and
-*öldü* are "it happened" and "he died". [The merge rate is low and the cost
-per merge is total]{.hl}, which is the worst shape a preprocessing decision
+*öldü* are "it happened" and "he died". Not every merge in that list of 72
+costs something, and it is worth checking rather than counting: *mi* and *mı*
+also collapse together, but they are the same question particle under vowel
+harmony, so nothing is lost. [The merge rate is low and the cost per merge is
+total]{.hl}, which is the worst shape a preprocessing decision
 can have: it will not show up in aggregate metrics and it will produce
 individually catastrophic errors.
 
@@ -422,9 +487,13 @@ still work.
 
 Two things make analysis harder than it sounds:
 
-**Ambiguity.** *Yüzü* can be *his face*, *the swimmer*, or *a hundred of it*,
-depending on which analysis you take. A morphological analyser returns all of
-them; picking the right one is *morphological disambiguation*, and it needs
+**Ambiguity.** *Yüzü* is at least four different words: *yüz* "face" with the
+third-person possessive (*his face*), *yüz* "face" with the accusative (*the
+face*), *yüz* "hundred" with either, and *yüz* "surface" with a possessive. A
+sharper case is *koyun*, which is three separate stems in one surface form:
+*koyun* "sheep", *koy* "bay" with a possessive, and *koy-* "put" in the
+second-person plural imperative. A morphological analyser returns all the
+readings; picking the right one is *morphological disambiguation*, and it needs
 sentence context. So the tidy pipeline — analyse, then model — has a
 sentence-level model inside its first step.
 
@@ -487,11 +556,32 @@ character 4-grams            74.9%       94.9%        55.7
 it to 95.3%.]{.hl} One preprocessing step, a 3.4× improvement, and no model
 involved at all.
 
-Read the setup before you take the headline anywhere: 69% of query terms were
-deliberately chosen to be a different inflection, and a query only succeeds if
-enough of its three terms match. That is harsher than an average query and
-gentler than the worst one — a user searching a Turkish corpus types the
-dictionary form, and the corpus almost never contains it.
+Read the setup before you take the headline anywhere, because three separate
+things could inflate that 3.4× on their own.
+
+**How the queries were made decides whether the number is circular.** If a
+query term were produced by applying a suffix rule, the same rule-based stemmer
+would be scored against its own inverse and 95.3% would be near-tautological.
+The forms here are drawn from elsewhere in the corpus rather than generated,
+which avoids that — but the design is still *known-item* retrieval: the query
+comes from the target document, so a stem match is guaranteed once stemming
+works at all. Read 95.3% as an upper bound on what stemming can recover, not as
+what a user's query will do.
+
+**And part of the gain is string surgery rather than morphology.** Since
+version 3.0.0, `snowballstemmer`'s Turkish algorithm truncates a token at its
+first apostrophe. So the chapter's own headline example, `İstanbul'da` →
+`İstanbul`, is not a morphological analysis; it is a `split("'")`. On a news
+corpus full of inflected proper nouns that step alone is worth a share of the
+gap, and we did not separate it. Two rows would: apostrophe truncation with no
+stemming, and Snowball with the apostrophe step disabled. They are the first
+thing to run before quoting 3.4× anywhere.
+
+Finally, 69% of query terms were deliberately chosen to be a different
+inflection, and a query only succeeds if enough of its three terms match. That
+is harsher than an average query and gentler than the worst one — a user
+searching a Turkish corpus usually types the dictionary form, which the corpus
+often does not contain in that shape.
 
 Three practical consequences:
 
@@ -629,9 +719,16 @@ BERTurk (monolingual)      91.49   92.35    91.92   91.82     476.6      10.3
 mBERT  (multilingual)      92.25   93.27    92.76   92.67     537.5       8.8
 ```
 
-**The multilingual model won, by 0.84 span F1.** That is the opposite of what
-this section was set up to show, and it is worth working through rather than
-explaining away.
+**The multilingual model came out ahead, by 0.84 span F1.** That is the
+opposite of what this section was set up to show, and it is worth working
+through rather than explaining away — starting with what the number can carry.
+Both rows are a single training run at a single seed. At this model scale on
+this task the seed-to-seed spread on span F1 is a few tenths of a point, so
+0.84 is around one or two standard deviations of it: enough to notice, not
+enough to settle. Five seeds per row is the measurement this table is missing,
+and until they exist the defensible statement is that **this experiment did not
+separate the two models**. Everything below is about why a gap this small is
+unsurprising rather than about who won.
 
 ### First, the comparison is fairer than it looks
 
@@ -664,16 +761,21 @@ larger — because most of that vocabulary belongs to other languages.
 
 ### Second, the confound that most likely explains it
 
-**WikiANN is built from Wikipedia. mBERT was pretrained on Wikipedia.**
+**WikiANN is built from Wikipedia, and both models saw Wikipedia — in very
+different proportions.**
 
-That is not a small coincidence; it is a domain match between the benchmark
-and one model's pretraining corpus, and it is the most plausible reason for
-the result. BERTurk was trained on a broader Turkish mix, so on this
-particular corpus it is the one working out of domain.
+mBERT was pretrained on Wikipedia alone, in 104 languages. BERTurk's 35 GB
+corpus is a filtered OSCAR dump plus OPUS corpora plus a Wikipedia dump plus a
+corpus contributed by Kemal Oflazer, so Wikipedia is a *minority* of its
+training data rather than all of it. The domain match is therefore a difference
+of degree rather than of kind — which is exactly the shape of thing that
+produces a gap of a few tenths of a point, and the most plausible reason for
+one this size.
 
 [The honest reading is therefore not "multilingual models are better for
-Turkish".]{.hl} It is: *on a Wikipedia-derived task, the model pretrained on
-Wikipedia won by 0.84 points, despite tokenizing the language worse.*
+Turkish".]{.hl} It is: *on a Wikipedia-derived task, the model whose pretraining
+was entirely Wikipedia edged ahead by 0.84 points from one seed, despite
+tokenizing the language worse — and one seed cannot tell that from noise.*
 
 ### So what this section actually gives you is a protocol
 
@@ -802,10 +904,11 @@ tokenizer spends more tokens per Turkish word, which costs money and context
 (@sec-pretraining), and it spends vocabulary on languages you are not using.
 
 But do not assume the accuracy follows. @sec-turkish-nlp-decide ran both on
-the same task and **the multilingual model won by 0.84 span F1**, despite
-needing 19% more tokens for the same text — because the benchmark's domain
-matched its pretraining corpus. Measure fertility first, domain second, and
-the task third.
+the same task and **the two came out within 0.84 span F1 of each other**, with
+the multilingual one ahead despite needing 19% more tokens for the same text —
+on a benchmark whose domain matched its pretraining corpus, from a single seed.
+Measure fertility first, domain second, and the task third; and run more than
+one seed before you call a gap that size a result.
 :::
 
 ## Interview questions {#sec-turkish-nlp-interview}
@@ -851,7 +954,7 @@ over-merges and under-merges, and still took recall@1 from **28.0% to 95.3%**
 on this chapter's retrieval task — a 3.4× improvement from one preprocessing
 step, no model involved. Reach for a real morphological analyzer when you need
 the analysis itself rather than a matching key: recovering case to decide who
-did what to whom, disambiguating `yüzü` (face / hundred / swim), or generating
+did what to whom, disambiguating `yüzü` (his face / the face / a hundred), or generating
 forms. The engineering answer is that the stemmer is the default and the
 analyzer is a requirement you should be able to justify.
 
@@ -1055,7 +1158,7 @@ chapter is downstream of believing that result.
   against 91.92 span F1 — with identical transformer bodies (85.5M each; the
   parameter gap is all embedding table) and *despite* tokenizing Turkish 19%
   worse. The likely reason is domain: the benchmark is built from Wikipedia
-  and mBERT was pretrained on Wikipedia. There is no general verdict here,
+  and mBERT was pretrained on Wikipedia alone. There is no general verdict here,
   only a protocol — fertility on your text, domain overlap, both models on
   your task with an identical recipe, then the operational columns.
 
