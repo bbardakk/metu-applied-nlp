@@ -7,7 +7,13 @@ sample so that accuracy reads against a 50% floor. Two models were used
 deliberately — `qwen3.5:9b` and `llama3.2:3b` — because
 @sec-decoding-constrained's finding is that constrained decoding buys almost
 nothing on one and a great deal on the other. Software: `ollama` 0.24.0,
-Python 3.14.5. The sampling explorer below is fully functional.
+Python 3.14.5. The sampling explorer below is fully functional. Two things about the runs that the
+rest of this chapter depends on and that are worth pinning wherever you repeat
+them: the model tags resolve to `ollama`'s default 4-bit quantisation, which
+changes the logit distribution and is therefore part of every calibration
+number in @sec-decoding-logprobs; and each latency figure below is a single
+timed run on a laptop, so read the ratios rather than the seconds and treat
+anything under about 1.5× as within the noise of a warm machine.
 :::
 
 **Learning objectives.** After this chapter you can:
@@ -30,6 +36,18 @@ character of the output more than most people expect.
 - **Top-k** keeps only the $k$ highest-probability tokens, then renormalizes.
 - **Top-p (nucleus)** keeps the smallest set of tokens whose cumulative
   probability exceeds $p$, then renormalizes [@holtzman2020curious].
+
+**The order these run in is fixed, and it is the part that surprises people.**
+In vLLM and in `transformers`, one decoding step applies: the
+repetition/frequency/presence penalties to the raw logits, then temperature,
+then top-k, then top-p, then min-p, then samples. Two consequences follow.
+Because temperature runs *before* top-p, raising the temperature changes which
+tokens fall inside the nucleus — so the common claim that temperature "only
+changes the contrast, never the ranking" is true of temperature alone and
+misleading in a pipeline that also truncates; the explorer below lets you watch
+the nucleus change membership. And because the penalties run *before*
+temperature, the same penalty value bites far harder at $\tau = 0.2$ than at
+$\tau = 1.5$. If you are tuning both, tune the temperature first.
 
 ### Explore: temperature, top-k, and top-p
 
@@ -211,9 +229,26 @@ The usual controls, and what each costs:
 | Sampling (top-p, min-p) | takes a non-argmax token sometimes, breaking the loop | variety you may not want in an extraction task |
 | Repetition penalty | divides the logit of any already-used token | punishes legitimately repeated words — names, technical terms, `null` |
 | No-repeat n-gram | forbids any n-gram already emitted | forbids real repeated phrases; ruinous in structured output where `{"type":` recurs |
-| Frequency / presence penalty | a softer, count-scaled version of the above | same failure mode, milder |
+| Presence penalty | a flat subtraction the first time a token appears | same failure mode, milder; does not escalate |
+| Frequency penalty | a subtraction proportional to how often it has appeared | escalates with every repeat, so long outputs drift |
 
 : Four ways to stop a loop, and what each one costs {tbl-colwidths="[26,38,36]"}
+
+The repetition penalty $\theta$ acts on the raw logit, and its sign handling is
+the part implementations get wrong:
+
+$$
+z_i' = \begin{cases} z_i / \theta & z_i \ge 0 \\ z_i \cdot \theta & z_i < 0 \end{cases}
+$$
+
+Dividing a *negative* logit by $\theta > 1$ raises it towards zero — that is a
+reward, not a penalty — which is why the two branches are not cosmetic and why
+the reference implementations special-case the sign [@keskar2019ctrl]. The
+OpenAI-style penalties avoid the problem by being additive and acting on counts
+instead:
+$z_i' = z_i - \alpha_{\text{presence}}\,\mathbb{1}[c_i > 0] - \alpha_{\text{freq}}\,c_i$,
+where $c_i$ is how many times token $i$ has already appeared. Presence fires
+once; frequency keeps scaling.
 
 [The penalties are blunt instruments and they are the wrong tool for
 structured output.]{.hl} A JSON object legitimately repeats keys, braces and
@@ -234,6 +269,17 @@ $-\infty$. Invalid output stops being unlikely and becomes **unreachable**.
 grammar allows. Guarantees the *shape* of the output and says nothing about
 whether it is true. [↩](#term-constrained-decoding){.term-back}
 :::
+
+One property of that mechanism is easy to miss and worth stating before the
+measurements, because it bounds what they mean. **Masking at each step is not
+the same as sampling from the model's distribution conditioned on the
+grammar.** A token that is locally legal may lead only to dead ends, and local
+masking has no way to renormalise for that — so what you get is a distribution
+over grammatical strings whose likelihoods are no longer proportional to the
+model's own [@park2024grammar]. In practice it shows up as grammatical output
+the unconstrained model would have ranked lower. Grammar-aligned decoding fixes
+it at extra cost; every library in @sec-decoding-tools ships the cheap,
+distorting version, which is the right default and worth knowing you are using.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -289,8 +335,8 @@ whether it is true. [↩](#term-constrained-decoding){.term-back}
   <text x="635" y="237" class="t-xs t-mono t-mid t-muted">positive</text>
   <text x="635" y="250" class="t-xs t-mid t-muted">0</text>
 
-  <text x="10" y="240" class="t-xs t-muted">unchanged — the sampler still</text>
-  <text x="10" y="254" class="t-xs t-muted">chooses freely among four</text>
+  <text x="10" y="240" class="t-xs t-muted">three of the four are now</text>
+  <text x="10" y="254" class="t-xs t-muted">unreachable, not merely unlikely</text>
 
   <text x="10" y="286" class="t-xs t-b t-warm">the grammar guarantees the shape and says nothing about whether the content is right</text>
 </svg>
@@ -343,6 +389,19 @@ level including nested objects with a nullable field. Enforcement took that to
 produce the JSON you describe; the grammar is insurance on the last one or two
 percent.]{.hl}
 
+**Two qualifications on that null, and they matter more than the null does.**
+First, it is a null on 150 items: the 95% interval around an 88% accuracy is
+roughly ±5 points, so this experiment could not have detected a two- to
+five-point degradation even if one were there. Second, the task here is
+*classification*. @tam2024format found that format restriction **helps**
+classification and **hurts** multi-step reasoning — GSM8K-style tasks lost
+several points under JSON mode with near-zero parsing failures, which locates
+the loss in the reasoning rather than in the parsing. So this chapter's result
+is a narrow subset of theirs rather than a contradiction of it, and it does not
+license the general claim. Do not carry "enforcement is free" into a
+chain-of-thought task; the safe pattern there is to let the model reason
+unconstrained and constrain only the final answer field.
+
 **On a weak model, it is the difference between working and not.**
 `llama3.2:3b` fell to **79.3% schema-valid** on the nested-plus-array schema —
 one output in five unusable. Enforcement took it to 100%, and **accuracy rose
@@ -351,8 +410,12 @@ scored as wrong. The grammar did not make the model smarter; it stopped a
 formatting failure from being counted as a reasoning failure.
 
 **The cost is latency, and it is not where you would guess.** Overhead ranged
-from 1.2× to **17×** (0.53 s to 9.26 s on the weak model at L4), and it was
+from **1.01× to 17.5×** (0.53 s to 9.26 s on the weak model at L4), and it was
 not monotone in schema complexity — L1 and L3 were cheap, L2 and L4 expensive.
+The two ends sit on different models, which is itself the finding: on
+`qwen3.5:9b` the grammar costs between 1.006× and 1.13× — **essentially
+free** — and on `llama3.2:3b` between 1.5× and 17.5×. A grammar is cheap where
+the model already agrees with the schema and expensive where it does not.
 
 The two expensive ones share a property: the schema demands something the
 model does not want to produce, an unnatural enum in one case and a nullable
@@ -430,7 +493,8 @@ Alongside each token, the model reports the log probability it assigned — its
 signal available about how sure the model is, it costs nothing extra to
 obtain, and most pipelines throw it away.
 
-The question is whether it is *usable*. Measured on 400 balanced reviews, with
+The question is whether it is *usable*. Measured with `qwen3.5:9b` on 400
+balanced reviews, with
 the answer constrained to a single token — `A` for positive, `B` for negative
 — so that the first generated token *is* the answer and its probability can be
 renormalised over just those two alternatives into a proper binary
@@ -485,17 +549,34 @@ confidence bin      n    accuracy   mean confidence
 ECE = 7.04%
 ```
 
-Two things to read here. The model is **overconfident in the middle** — items
-it calls 92.6% likely are right 68.0% of the time.
+Ten equal-width bins over $[0.50, 1.00)$, and say so, because ECE is sensitive
+to that choice and this binning is not flattering anyone: 284 of the 400 items
+land in the top bin, which alone contributes about 44% of the 7.04%. An
+equal-mass binning, or a Brier score — which needs no bins at all — is the more
+honest summary of the same data.
 
-And the bottom bin is worse than useless: when the model is genuinely torn
-between `A` and `B`, it is right **33.3%** of the time, which is below chance
-on a balanced binary task.
+Two things to read here, and they are not equally solid. The model is
+**overconfident in the middle**: the bin it called 92.6% likely was right 17 of
+25 times, a 68.0% rate whose 95% Wilson interval runs $[48, 83]$ — entirely
+below the confidence it stated. That is the firm finding.
 
-That last row is the one to remember. [A near-0.5 logprob does not mean "coin
-flip"; on this task it meant "actively wrong".]{.hl} Do not read the number as
-a probability. @sec-classification's calibration machinery — a held-out slice
-and an isotonic or Platt map — applies here unchanged if you need one.
+The one people quote is the bottom bin, and it deserves more caution than it
+usually gets: 5 correct out of 15, a 33.3% point estimate with an interval of
+$[15, 58]$. That interval contains 50%, so this does not establish "below
+chance". What it does establish is the operational point anyway — **a near-0.5
+logprob carries no usable information** — and it is the version to repeat.
+
+[A near-0.5 logprob does not mean "coin flip" in the sense of "half right"; it
+means the number is not telling you anything.]{.hl} Do not read the number as a
+probability.
+
+Two fixes, in order of effort. **Temperature scaling** [@guo2017calibration]
+fits a single scalar $T$ on a held-out slice and divides the logits by it — the
+same $\exp(z/\tau)$ from @sec-decoding-sampling, used after the fact instead of
+during generation. Because it is monotone it leaves the AUC and the abstention
+curve of the next section *exactly* unchanged while typically cutting ECE by a
+factor of two or more, so there is no reason not to try it first. If one scalar
+is not enough, @sec-classification's isotonic or Platt map is the next step.
 
 ### It is immediately useful for abstention
 
@@ -560,7 +641,7 @@ why a broken calibration does not stop you from using the signal:
   <circle cx="325.2" cy="142.7" r="4" class="head-rose"/>
   <circle cx="368.2" cy="59.1" r="4" class="head-accent"/>
 
-  <text x="80" y="253" class="t-xs t-rose">33.3% — below chance</text>
+  <text x="80" y="253" class="t-xs t-rose">33.3% (n = 15)</text>
   <text x="319" y="146" class="t-xs t-rose t-end">68.0%</text>
   <text x="214" y="296" class="t-sm t-muted t-mid">the model's stated confidence</text>
 
@@ -601,7 +682,8 @@ Left: each dot is one confidence bin, placed at the confidence the model
 stated and the accuracy it actually reached. A calibrated model would put every
 dot on the dashed diagonal; this one scatters, and the two rose dots are the
 failures worth remembering — the bin the model called a coin flip came in
-*below* chance at 33.3%, and the bin it called 92.6% came in at 68.0%. Right:
+in at 33.3% on only 15 items, and the bin it called 92.6% came in at 68.0% on
+25. Right:
 the same 400 reviews sorted by that same miscalibrated confidence, then
 truncated from the least-confident end. Accuracy climbs at every step, which
 is the whole point — the ordering is right even where the numbers are wrong.
@@ -688,7 +770,7 @@ retry and a shrug. For **tool calls, 2% is a wrong action or a stack trace on
 every fiftieth request**, and the answer is yes without further discussion.
 
 Then measure the cost rather than assuming it is small: overhead here ranged
-from 1.2× to 17×, worst where the schema demanded something the model did not
+from 1.01× to 17.5×, worst where the schema demanded something the model did not
 want to produce.
 :::
 
@@ -724,7 +806,8 @@ punctuation.
 
 Not as a probability. Measured on 400 items: the bin of answers the model
 rated 0.90–0.95 was right **68.0%** of the time. Expected calibration error
-was 7.04%, and the near-0.5 bin was right **33.3%** — worse than chance.
+was 7.04%, and the near-0.5 bin was right **33.3%** on 15 items — an interval
+wide enough to contain chance, and narrow enough to rule out usefulness.
 
 But the *ranking* was good — AUC 0.8268 for predicting its own correctness —
 which is enough to route on. Use logprobs to order items, not to quote
@@ -769,7 +852,7 @@ Compile the schema into an automaton over the tokenizer's vocabulary, and at
 each step mask the logits of every token that could not legally continue.
 Invalid output becomes unreachable rather than unlikely. The good follow-up:
 it guarantees syntax and nothing else, and it costs latency — measured here
-from 1.2× to 17×, worst when the schema demands something the model does not
+from 1.01× to 17.5×, worst when the schema demands something the model does not
 want to produce.
 
 **Q: Why is beam search standard in translation and absent from chat?**
@@ -826,7 +909,7 @@ Worth knowing about, not used above:
 | library | current version | when you would reach for it |
 |:--|:--|:--|
 | `outlines` | 1.3.3 | the reference implementation of the automaton in @sec-decoding-constrained [@willard2023efficient]; use it when you need the grammar in your own process rather than behind a server flag |
-| `xgrammar` | 0.2.5 | the same idea optimised for throughput; what to reach for when the 17× overhead measured above is unacceptable |
+| `xgrammar` | 0.2.5 | the same idea optimised for throughput; what to reach for when the 17.5× overhead measured above is unacceptable |
 | `lm-format-enforcer` | 0.11.3 | schema enforcement that plugs into `transformers` and `vLLM` generation loops |
 | `guidance` | 0.3.1 | interleaves generation with fixed template text, so the model only fills the holes |
 | `pydantic` / `jsonschema` | 2.13.4 / 4.26.0 | validating the values after the grammar has guaranteed the shape — the step @sec-decoding-constrained argues you still owe |
@@ -858,7 +941,7 @@ another, and the failure is invisible without this check.
 
 ### Step 4 — measure the latency cost, per schema
 
-Time both modes. The overhead here ranged from 1.2× to 17× and was not
+Time both modes. The overhead here ranged from 1.01× to 17.5× and was not
 monotone in schema complexity, so your schema's cost is an empirical question.
 If it is large, find out which part of the schema is expensive by removing
 fields one at a time.
@@ -945,7 +1028,7 @@ in your evaluation should be reported.
   it was 100% valid and accuracy rose **70.7% → 88.0%**, because a formatting
   failure had been counted as a reasoning failure.
 
-- **The grammar's cost is latency and it is unpredictable** — 1.2× to **17×**
+- **The grammar's cost is latency and it is unpredictable** — 1.01× to **17.5×**
   here, and not monotone in schema complexity. It was worst where the schema
   demanded what the model did not want to produce. Measure it on your schema.
 
@@ -960,7 +1043,7 @@ in your evaluation should be reported.
 - **Logprobs discriminate well and calibrate badly.** AUC **0.9492** against
   the label and **0.8268** for predicting its own correctness, at **7.04%**
   ECE — with the 0.90–0.95 bin right only 68.0% of the time and the near-0.5
-  bin right **33.3%**, below chance. Rank with them; do not quote them.
+  bin right **33.3%** on 15 items. Rank with them; do not quote them.
 
 - **Abstention is the cheapest accuracy you will buy.** Dropping the
   least-confident 20% took accuracy from **86.75% to 92.50%** with no model

@@ -9,7 +9,13 @@ tabana karşı okunuyor. İki model bilerek kullanıldı — `qwen3.5:9b` ve
 `llama3.2:3b` — çünkü @sec-cozumleme-kisitli'nin bulgusu, kısıtlı çözümlemenin
 birinde neredeyse hiçbir şey, diğerinde ise çok şey kazandırdığı. Yazılım:
 `ollama` 0.24.0, Python 3.14.5. Aşağıdaki örnekleme gezgini tümüyle çalışır
-durumda.
+durumda. Koşular hakkında, bu bölümün geri kalanının dayandığı ve
+tekrarladığınız her yerde sabitlemeye değer iki şey: model etiketleri
+`ollama`'nın varsayılan 4 bit nicelemesine çözülüyor — bu, logit dağılımını
+değiştirir ve dolayısıyla @sec-cozumleme-logprob'daki her kalibrasyon sayısının
+bir parçasıdır; ve aşağıdaki her gecikme rakamı bir dizüstünde tek bir zamanlı
+koşu, yani saniyeleri değil oranları okuyun ve 1,5 katın altındaki her şeyi
+ısınmış bir makinenin gürültüsü içinde sayın.
 :::
 
 **Öğrenme hedefleri.** Bu bölümün sonunda:
@@ -35,6 +41,18 @@ beklediğinden fazla değiştiriyor.
   normalize eder.
 - **Top-p (nucleus)** kümülatif olasılığı $p$'yi aşan en küçük token kümesini
   tutar, sonra yeniden normalize eder [@holtzman2020curious].
+
+**Bunların çalışma sırası sabit ve insanları asıl şaşırtan kısım o.** vLLM'de
+ve `transformers`'ta tek bir çözümleme adımı şunu uygular: ham logit'lere
+tekrar/frekans/varlık cezaları, sonra sıcaklık, sonra top-k, sonra top-p, sonra
+min-p, sonra örnekleme. Bundan iki sonuç çıkıyor. Sıcaklık top-p'den *önce*
+çalıştığı için, sıcaklığı yükseltmek hangi token'ların çekirdeğe (nucleus)
+düşeceğini değiştirir — yani sıcaklığın "yalnızca kontrastı değiştirdiği,
+sıralamayı asla değiştirmediği" yolundaki yaygın ifade tek başına sıcaklık için
+doğru, ama aynı zamanda kırpma yapan bir hatta yanıltıcı; aşağıdaki gezgin
+çekirdeğin üyelik değiştirmesini izlemenizi sağlıyor. Ve cezalar sıcaklıktan
+*önce* çalıştığı için, aynı ceza değeri $\tau = 0{,}2$'de $\tau = 1{,}5$'tekinden
+çok daha sert ısırır. İkisini birlikte ayarlıyorsanız önce sıcaklığı ayarlayın.
 
 ### Keşfedin: sıcaklık, top-k ve top-p
 
@@ -213,9 +231,26 @@ Alışıldık kontroller ve her birinin bedeli:
 | Örnekleme (top-p, min-p) | bazen argmax olmayan bir token alır, döngüyü kırar | bir çıkarım görevinde istemeyeceğiniz çeşitlilik |
 | Tekrar cezası | zaten kullanılmış her token'ın logit'ini böler | meşru biçimde tekrarlanan kelimeleri cezalandırır — adlar, teknik terimler, `null` |
 | No-repeat n-gram | zaten üretilmiş her n-gram'ı yasaklar | gerçek tekrarlanan öbekleri yasaklar; `{"type":` gibi ifadelerin tekrarlandığı yapılandırılmış çıktıda yıkıcıdır |
-| Frekans / varlık cezası | yukarıdakinin daha yumuşak, sayıyla ölçeklenen hâli | aynı kusur biçimi, daha hafifi |
+| Varlık cezası | zaten görülmüş her token'dan sabit bir miktar çıkarır | ikili; bir kez geçmek on kez geçmekle aynı maliyette |
+| Frekans cezası | kaç kez geçtiğiyle orantılı bir miktar çıkarır | her tekrarla tırmanır, bu yüzden uzun çıktılar kayar |
 
 : Bir döngüyü durdurmanın dört yolu ve her birinin bedeli {tbl-colwidths="[26,38,36]"}
+
+Tekrar cezası $\theta$ ham logit üzerinde çalışıyor ve uygulamaların yanlış
+yaptığı kısım işaret davranışı:
+
+$$
+z_i' = \begin{cases} z_i / \theta & z_i \ge 0 \\ z_i \cdot \theta & z_i < 0 \end{cases}
+$$
+
+*Negatif* bir logit'i $\theta > 1$ ile bölmek onu sıfıra doğru **yükseltir** —
+yani ceza değil ödül olur; iki dalın süs olmamasının ve referans
+uygulamaların işareti özel olarak ele almasının sebebi bu [@keskar2019ctrl].
+OpenAI tarzı cezalar problemi, toplamsal olup sayımlar üzerinde çalışarak
+aşıyor:
+$z_i' = z_i - \alpha_{\text{varlık}}\,\mathbb{1}[c_i > 0] - \alpha_{\text{frekans}}\,c_i$;
+burada $c_i$, $i$ token'ının kaç kez geçtiği. Varlık bir kez ateşlenir, frekans
+ölçeklenmeye devam eder.
 
 [Cezalar kör aletlerdir ve yapılandırılmış çıktı için yanlış araçtır.]{.hl} Bir
 JSON nesnesi meşru biçimde anahtarları, süslü parantezleri ve tırnak
@@ -237,6 +272,18 @@ gramerin izin verdiği token'lara maskelemek. Çıktının *biçimini* garanti e
 doğru olup olmadığı hakkında hiçbir şey söylemez.
 [↩](#term-constrained-decoding){.term-back}
 :::
+
+Bu mekanizmanın gözden kaçması kolay bir özelliği var ve ölçümlerden önce
+söylenmeye değer, çünkü onların ne anlama geldiğini sınırlıyor. **Her adımda
+maskelemek, modelin dağılımından gramere koşullu örneklemekle aynı şey
+değildir.** Yerel olarak yasal bir token yalnızca çıkmazlara götürüyor olabilir
+ve yerel maskelemenin bunu yeniden normalleştirmesinin bir yolu yok — ortaya
+çıkan şey, olabilirlikleri artık modelin kendisininkiyle orantılı olmayan,
+gramere uygun dizgiler üzerinde bir dağılım [@park2024grammar]. Pratikte bu,
+kısıtsız modelin daha aşağı sıralayacağı gramere uygun çıktı olarak görünüyor.
+Gramerle hizalanmış çözümleme bunu fazladan bir maliyetle düzeltiyor;
+@sec-cozumleme-araclar'daki her kütüphane ucuz ve bozan sürümü gönderiyor — ki
+doğru varsayılan odur ve onu kullandığınızı bilmeye değer.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -292,8 +339,8 @@ doğru olup olmadığı hakkında hiçbir şey söylemez.
   <text x="635" y="237" class="t-xs t-mono t-mid t-muted">positive</text>
   <text x="635" y="250" class="t-xs t-mid t-muted">0</text>
 
-  <text x="10" y="240" class="t-xs t-muted">değişmedi — örnekleyici hâlâ</text>
-  <text x="10" y="254" class="t-xs t-muted">dört aday arasından serbestçe seçiyor</text>
+  <text x="10" y="240" class="t-xs t-muted">dördün üçü artık olası değil,</text>
+  <text x="10" y="254" class="t-xs t-muted">erişilemez</text>
 
   <text x="10" y="286" class="t-xs t-b t-warm">gramer biçimi garanti eder ve içeriğin doğru olup olmadığı hakkında hiçbir şey söylemez</text>
 </svg>
@@ -345,6 +392,19 @@ null olabilen bir alan dâhil her zorluk düzeyinde. Zorlama bunu %100'e çıkar
 doğruluğu değiştirmedi. [Modern talimat ayarlı modeller tarif ettiğiniz JSON'ı
 çoğunlukla üretir; gramer son bir iki yüzdelik için sigortadır.]{.hl}
 
+**O null sonuç üzerine iki çekince ve ikisi de null'ın kendisinden önemli.**
+Birincisi, bu 150 kalemde bir null: %88'lik bir doğruluğun %95 aralığı kabaca
+±5 puan, yani bu deney başka yerde raporlanan iki ila beş puanlık bozulmayı
+orada olsa bile saptayamazdı. İkincisi, buradaki görev *sınıflandırma*.
+@tam2024format, format kısıtlamasının sınıflandırmaya **yardım ettiğini** ve
+çok adımlı akıl yürütmeye **zarar verdiğini** buldu — GSM8K türü görevler JSON
+kipinde birkaç puan kaybetti, üstelik ayrıştırma hatası sıfıra yakınken; yani
+kayıp ayrıştırmada değil akıl yürütmede. Dolayısıyla bu bölümün sonucu onlarınkiyle
+çelişmiyor, onun dar bir alt kümesini yeniden üretiyor ve genel iddiayı
+karşılamıyor. "Zorlama bedava" cümlesini bir düşünce zinciri görevine taşımayın;
+oradaki güvenli kalıp, modeli kısıtsız akıl yürüttürüp yalnızca son cevap alanını
+kısıtlamak.
+
 **Zayıf bir modelde ise çalışmakla çalışmamak arasındaki farktır.**
 `llama3.2:3b`, iç içe artı dizi şemasında **%79,3 şema-geçerliliğine** düştü —
 beş çıktıdan biri kullanılamaz. Zorlama onu %100'e çıkardı ve **doğruluk
@@ -352,8 +412,8 @@ beş çıktıdan biri kullanılamaz. Zorlama onu %100'e çıkardı ve **doğrulu
 bir yanlış sayılıyordu. Gramer modeli akıllandırmadı; bir biçimlendirme
 kusurunun bir akıl yürütme kusuru olarak sayılmasını durdurdu.
 
-**Bedel gecikmedir ve tahmin edeceğiniz yerde değildir.** Ek yük 1,2 kat ile
-**17 kat** arasında değişti (zayıf modelde L4'te 0,53 saniyeden 9,26 saniyeye)
+**Bedel gecikmedir ve tahmin edeceğiniz yerde değildir.** Ek yük **1,01 kat ile
+17,5 kat** arasında değişti (zayıf modelde L4'te 0,53 saniyeden 9,26 saniyeye)
 ve şema karmaşıklığında tekdüze değildi — L1 ve L3 ucuz, L2 ve L4 pahalıydı.
 
 Pahalı olan ikisi bir özelliği paylaşıyor: şema, modelin üretmek istemediği bir
@@ -430,7 +490,8 @@ Model her token'ın yanında ona atadığı log olasılığı da bildirir — to
 olduğuna dair mevcut en ucuz sinyaldir, elde etmesi fazladan hiçbir şeye mal
 olmaz ve çoğu hat onu çöpe atar.
 
-Soru bunun *kullanılabilir* olup olmadığı. 400 dengeli yorumda ölçüldü; cevap
+Soru bunun *kullanılabilir* olup olmadığı. `qwen3.5:9b` ile 400 dengeli yorumda
+ölçüldü; cevap
 tek bir token'a kısıtlandı — olumlu için `A`, olumsuz için `B` — böylece
 üretilen ilk token cevabın *kendisi* oluyor ve olasılığı yalnızca bu iki
 seçenek üzerinden yeniden normalize edilerek düzgün bir ikili olasılığa
@@ -484,18 +545,34 @@ confidence bin      n    accuracy   mean confidence
 ECE = 7.04%
 ```
 
-Burada okunacak iki şey var. Model **ortada aşırı güvenli** — %92,6 olası dediği
-maddelerde zamanın %68,0'ında haklı.
+$[0{,}50, 1{,}00)$ üzerinde on eşit genişlikli kutu — ve bunu söyleyin, çünkü ECE
+bu seçime duyarlı ve bu kutulama kimseyi kayırmıyor: 400 maddenin 284'ü en üst
+kutuya düşüyor ve tek başına %7,04'ün yaklaşık %44'ünü o kutu üretiyor. Eşit
+kütleli bir kutulama ya da hiç kutuya ihtiyaç duymayan Brier skoru, aynı verinin
+daha dürüst özeti.
 
-Ve en alt kutu işe yaramaz olmanın ötesinde: model `A` ile `B` arasında
-gerçekten kararsız kaldığında zamanın **%33,3'ünde** haklı; bu da dengeli bir
-ikili görevde şansın altında.
+Burada okunacak iki şey var ve ikisi aynı sağlamlıkta değil. Model **ortada
+aşırı güvenli**: %92,6 olası dediği kutuda 25 maddenin 17'sinde haklı; %68,0'lık
+bu oranın %95 Wilson aralığı $[48, 83]$ — tamamen beyan ettiği güvenin altında.
+Sağlam olan bulgu bu.
 
-Akılda tutulacak satır o son satır. [0,5'e yakın bir logprob "yazı tura" demek
-değildir; bu görevde "etkin biçimde yanlış" demekti.]{.hl} Sayıyı bir olasılık
-olarak okumayın. @sec-siniflandirma'nın kalibrasyon makinesi — ayrılmış bir
-dilim ve bir izotonik veya Platt eşlemesi — sayının kendisine ihtiyacınız varsa
-burada aynen geçerli.
+İnsanların aktardığı ise en alt kutu ve genellikle gördüğünden fazla ihtiyat
+hak ediyor: 15'te 5 doğru, yani %33,3'lük bir nokta kestirimi ve $[15, 58]$
+aralığı. O aralık %50'yi içeriyor; dolayısıyla bu, "şansın altında" iddiasını
+kurmuyor. Kurduğu şey zaten operasyonel olan nokta: **0,5'e yakın bir logprob
+kullanılabilir hiçbir bilgi taşımıyor** — tekrarlanacak sürüm de bu.
+
+[0,5'e yakın bir logprob "yarısı doğru" anlamında "yazı tura" demek değildir;
+sayının size hiçbir şey söylemediği anlamına gelir.]{.hl} Sayıyı bir olasılık
+olarak okumayın.
+
+Çaba sırasına göre iki çözüm. **Sıcaklık ölçekleme** [@guo2017calibration],
+ayrılmış bir dilimde tek bir skaler $T$ uyduruyor ve logit'leri ona bölüyor —
+@sec-cozumleme-ornekleme'deki aynı $\exp(z/\tau)$, üretim sırasında değil sonradan
+kullanılmış hâliyle. Monoton olduğu için bir sonraki alt bölümün AUC'sini ve
+çekimserlik eğrisini *aynen* koruyor, ECE'yi ise tipik olarak iki kat ya da
+fazlasıyla düşürüyor; önce onu denememek için hiçbir sebep yok. Tek bir skaler
+yetmiyorsa @sec-siniflandirma'nın izotonik ya da Platt eşlemesi bir sonraki adım.
 
 ### Çekimserlik için hemen kullanışlı
 
@@ -560,7 +637,7 @@ kalibrasyonun sinyali kullanmanızı neden engellemediğini gösteriyorlar:
   <circle cx="325.2" cy="142.7" r="4" class="head-rose"/>
   <circle cx="368.2" cy="59.1" r="4" class="head-accent"/>
 
-  <text x="80" y="253" class="t-xs t-rose">%33,3 — şansın altında</text>
+  <text x="80" y="253" class="t-xs t-rose">%33,3 (n = 15)</text>
   <text x="319" y="146" class="t-xs t-rose t-end">%68,0</text>
   <text x="214" y="296" class="t-sm t-muted t-mid">modelin belirttiği güven</text>
 
@@ -600,7 +677,7 @@ kalibrasyonun sinyali kullanmanızı neden engellemediğini gösteriyorlar:
 Sol: her nokta bir güven kutusu; modelin belirttiği güvene ve gerçekte ulaştığı
 doğruluğa yerleştirilmiş. Kalibre bir model her noktayı kesikli köşegene
 koyardı; bu model saçılıyor ve iki gül rengi nokta akılda tutulmaya değer
-kusurlar — modelin yazı tura dediği kutu %33,3 ile şansın *altında* geldi ve
+kusurlar — modelin yazı tura dediği kutu yalnızca 15 maddede %33,3 ile geldi ve
 %92,6 dediği kutu %68,0'da. Sağ: aynı 400 yorum, aynı kalibre olmayan güvene
 göre sıralanmış ve en az güvenilen uçtan kırpılmış. Doğruluk her adımda
 tırmanıyor; mesele de bu — sayılar yanlış olduğu yerde bile sıralama doğru.
@@ -687,7 +764,7 @@ Tümüyle sonrasında ne olduğuna bağlı. Bir tabloya çıkarım için %2 bir 
 deneme ve bir omuz silkmedir. **Araç çağrıları için %2, her ellinci istekte
 yanlış bir eylem ya da bir yığın izidir** ve cevap daha fazla tartışmasız evettir.
 
-Sonra bedeli küçük varsaymak yerine ölçün: buradaki ek yük 1,2 kat ile 17 kat
+Sonra bedeli küçük varsaymak yerine ölçün: buradaki ek yük 1,01 kat ile 17,5 kat
 arasındaydı ve en kötüsü şemanın modelin üretmek istemediği bir şeyi talep
 ettiği yerdeydi.
 :::
@@ -723,7 +800,8 @@ yapamayacağı sonucuna varmadan önce, görevi mi yoksa noktalamasını mı
 
 Bir olasılık olarak hayır. 400 maddede ölçüldü: modelin 0,90–0,95 verdiği
 cevap kutusu zamanın **%68,0'ında** doğruydu. Beklenen kalibrasyon hatası
-%7,04'tü ve 0,5'e yakın kutu **%33,3** doğruydu — şanstan kötü.
+%7,04'tü ve 0,5'e yakın kutu 15 maddede **%33,3** doğruydu — şansı içerecek
+kadar geniş, işe yararlığı dışlayacak kadar dar bir aralık.
 
 Ama *sıralama* iyiydi — kendi doğruluğunu öngörmek için AUC 0,8268 — ki bu
 yönlendirmeye yeter. Logprob'ları maddeleri sıralamak için kullanın, yüzde
@@ -768,7 +846,7 @@ uyarlanan min-p'den ayırın.
 Şemayı tokenizer'ın sözlüğü üzerinde bir otomata derleyin ve her adımda yasal
 olarak devam edemeyecek her token'ın logit'ini maskeleyin. Geçersiz çıktı olası
 olmaktan çıkıp erişilemez olur. İyi devam sorusu: sözdizimini garanti eder,
-başka hiçbir şeyi; ve gecikmeye mal olur — burada 1,2 kat ile 17 kat arasında
+başka hiçbir şeyi; ve gecikmeye mal olur — burada 1,01 kat ile 17,5 kat arasında
 ölçüldü ve en kötüsü şema modelin üretmek istemediği bir şeyi talep ettiğinde.
 
 **S: Beam search neden çeviride standart, sohbette yok?**
@@ -826,7 +904,7 @@ Bilmeye değer, yukarıda kullanılmadı:
 | kütüphane | güncel sürüm | ne zaman uzanırsınız |
 |:--|:--|:--|
 | `outlines` | 1.3.3 | @sec-cozumleme-kisitli'deki otomatın referans uygulaması [@willard2023efficient]; graması bir sunucu bayrağının arkasında değil kendi süreçinizde istediğinizde |
-| `xgrammar` | 0.2.5 | aynı fikrin verim için optimize edilmiş hâli; yukarıda ölçülen 17 katlık ek yük kabul edilemez olduğunda uzanılacak şey |
+| `xgrammar` | 0.2.5 | aynı fikrin verim için optimize edilmiş hâli; yukarıda ölçülen 17,5 katlık ek yük kabul edilemez olduğunda uzanılacak şey |
 | `lm-format-enforcer` | 0.11.3 | `transformers` ve `vLLM` üretim döngülerine takılan şema zorlaması |
 | `guidance` | 0.3.1 | üretimi sabit şablon metniyle iç içe geçirir; böylece model yalnızca boşlukları doldurur |
 | `pydantic` / `jsonschema` | 2.13.4 / 4.26.0 | gramer biçimi garanti ettikten sonra değerleri doğrulamak — @sec-cozumleme-kisitli'nin hâlâ borçlu olduğunuzu savunduğu adım |
@@ -858,7 +936,7 @@ kontrol olmadan kusur görünmezdir.
 
 ### Adım 4 — gecikme bedelini şema başına ölçün
 
-İki modu da zamanlayın. Buradaki ek yük 1,2 kat ile 17 kat arasındaydı ve şema
+İki modu da zamanlayın. Buradaki ek yük 1,01 kat ile 17,5 kat arasındaydı ve şema
 karmaşıklığında tekdüze değildi; dolayısıyla sizin şemanızın bedeli ampirik bir
 sorudur. Büyükse, şemanın hangi kısmının pahalı olduğunu alanları teker teker
 çıkararak bulun.
@@ -946,7 +1024,7 @@ nasıl raporlanması gerektiğine karar verir.
   doğruluk **%70,7 → %88,0** yükseldi, çünkü bir biçimlendirme kusuru bir akıl
   yürütme kusuru olarak sayılıyordu.
 
-- **Gramerin bedeli gecikmedir ve öngörülemez** — burada 1,2 kat ile **17 kat**
+- **Gramerin bedeli gecikmedir ve öngörülemez** — burada 1,01 kat ile **17,5 kat**
   arası ve şema karmaşıklığında tekdüze değil. En kötüsü şemanın modelin üretmek
   istemediğini talep ettiği yerdeydi. Kendi şemanızda ölçün.
 
@@ -961,8 +1039,8 @@ nasıl raporlanması gerektiğine karar verir.
 
 - **Logprob'lar iyi ayırt eder, kötü kalibre olur.** Etikete karşı AUC
   **0,9492** ve kendi doğruluğunu öngörmek için **0,8268**; **%7,04** ECE ile —
-  0,90–0,95 kutusu yalnızca %68,0 doğru ve 0,5'e yakın kutu **%33,3**, şansın
-  altında. Onlarla sıralayın; onları alıntılamayın.
+  0,90–0,95 kutusu yalnızca %68,0 doğru ve 0,5'e yakın kutu 15 maddede
+  **%33,3**. Onlarla sıralayın; onları alıntılamayın.
 
 - **Çekimserlik satın alacağınız en ucuz doğruluktur.** En az güvenilen %20'yi
   düşürmek doğruluğu **%86,75'ten %92,50'ye** çıkardı; model değişikliği yok.
