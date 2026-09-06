@@ -63,9 +63,12 @@ traffic makes a good worked example: the identifiers have published check
 digits, so correctness is verifiable rather than a matter of taste.
 
 The corpus is 480 synthetic Turkish support messages built from eight templates
-with randomised slots. Ground truth is known by construction: **360 national ID
-numbers (TCKN)** and **120 IBANs** are planted, of which 15% carry a
-single-digit typo — a user mistyping their own identifier. Alongside them sit
+with randomised slots. Ground truth is known by construction: **360 national ID numbers (TCKN)** and **120 IBANs** are planted. Each planted
+identifier independently receives a single-digit typo with probability 0.15, so
+the *realised* rates are **55 of 360 (15.3%)** for TCKN and **15 of 120
+(12.5%)** for IBAN. That distinction matters below, because every recall figure
+in this section is measured against the realised rate rather than the nominal
+one. Alongside them sit
 **540 eleven-digit strings that are not national IDs**: mobile numbers written
 without spaces, order references, cargo tracking codes, invoice numbers, meter
 readings. That collision is the entire problem. A Turkish mobile number written
@@ -106,10 +109,39 @@ TCKN has a published two-digit checksum. Applying it lifts precision from 40% to
 **99.0%**, which is the result everybody expects, and costs **15.3 points of
 recall**, which is the result nobody plans for.
 
+::: {.column-margin}
+**The rule.** An eleven-digit string $d_1 \ldots d_{11}$ is a valid TCKN when
+$d_1 \neq 0$ and
+
+$$d_{10} = \big(7(d_1{+}d_3{+}d_5{+}d_7{+}d_9) - (d_2{+}d_4{+}d_6{+}d_8)\big)
+\bmod 10$$
+
+$$d_{11} = \Big(\textstyle\sum_{i=1}^{10} d_i\Big) \bmod 10$$
+
+Both check digits are determined by the first nine, which is why the check costs
+exactly two digits of the eleven-digit space. IBAN's is ISO 7064 mod-97: move
+the first four characters to the end, map letters to numbers (A = 10 … Z = 35),
+and require the resulting integer to be congruent to 1 modulo 97.
+:::
+
 Look at what it drops. The detector found 305 of the 360 planted identifiers,
 and 305 is exactly the number of planted identifiers that are not mistyped. The
-recall loss is not approximately the typo rate; it *is* the typo rate,
-mechanically. And the dropped items are the worst possible thing to drop:
+recall loss is not approximately the typo rate; it *is* the typo rate — and
+that is a theorem rather than a measurement. The eleventh digit is the sum of
+the first ten modulo ten, so changing any single digit shifts that sum and the
+check *always* fails. Exhaustively: across every single-digit substitution on
+20,000 valid numbers, 0 of 1.96 million passed.
+
+Which sharpens the caveat rather than the finding. The typo model here is a
+single random digit, and that is precisely the error class a checksum is
+designed to catch every time. Give it a more realistic mistake — two adjacent
+digits transposed — and the equality breaks: the eleventh digit does not change
+at all under a swap, the tenth shifts by $8(b-a)$, and that is zero whenever
+$b-a \equiv 0 \pmod 5$. Measured over 178,000 transpositions, **9.9% pass
+undetected**. So on real typing the recall loss would be *smaller* than the typo
+rate, and the argument below survives with a different mechanism underneath it.
+
+And the dropped items are the worst possible thing to drop:
 
 [A mistyped national ID is still a national ID sitting in your logs.]{.hl} It is
 still personal data, it still identifies a person to anyone who can read it in
@@ -135,7 +167,8 @@ two detectors fail on *different* items. The checksum misses mistyped
 identifiers; context misses unlabelled ones; neither miss implies the other.
 
 So take the union. **Precision 99.1%, recall 93.6%** — nearly all of the
-checksum's precision with two-thirds of its recall loss recovered.
+checksum's precision with **three-fifths** of its recall loss recovered: 8.9 of
+the 15.3 points, or 32 of the 55 mistyped identifiers.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -195,8 +228,8 @@ IBAN, 120 planted
 
 `TR` followed by 24 digits does not collide with anything else in this traffic,
 so the pattern is already perfect. Adding the ISO 7064 mod-97 check buys **zero**
-precision and discards **12.5%** of real IBANs — again, exactly the mistyped
-ones.
+precision and discards **12.5%** of real IBANs — 15 of 120, this corpus's
+realised typo rate for IBANs, and again exactly the mistyped ones.
 
 [Validate where the pattern is ambiguous; do not validate where it is not.]{.hl}
 This is the sort of thing that gets applied uniformly because it feels rigorous,
@@ -746,7 +779,7 @@ is @sec-agent-security, and its sources are there.
 - **Combine signals that fail differently.** The checksum misses mistyped
   identifiers; a context word misses unlabelled ones. Their union reached
   **99.1% precision at 93.6% recall** — nearly all of the checksum's precision
-  with two-thirds of its recall loss recovered.
+  with three-fifths of its recall loss recovered: 8.9 of the 15.3 points.
 
 - **Do not validate where the pattern is unambiguous.** `TR` + 24 digits was
   already **100% precise**, so the IBAN checksum bought nothing and discarded
