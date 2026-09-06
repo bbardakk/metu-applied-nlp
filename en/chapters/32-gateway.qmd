@@ -275,13 +275,28 @@ The consequence is arithmetic rather than opinion. The lowest true pair is
 0.609 and the highest false pair is 0.982, so **the two classes overlap
 completely and no single threshold separates them**.
 
-The best cut available still gets five of fifteen wrong, and every one of those
-five errors is served to a user as a confident answer with nothing logged.
+The two error types are not interchangeable, so sweep the thresholds with that
+in mind. A *miss* costs a model call and the user never knows. A *false hit*
+costs a wrong answer, served confidently, with nothing logged. Across every cut
+on this set the fewest total errors — five — belongs to the degenerate
+threshold that caches nothing at all, and all five of those are misses. The
+best cut that actually serves anything sits at 0.982 and returns exactly one
+cache hit: the sentence and its negation. **On this sample, every hit a
+threshold could have earned you was wrong.**
 
-This is @sec-embeddings' point about negation arriving with a bill attached: a
-model trained to place related sentences near each other places *is covered* and
-*is not covered* nearly on top of one another, because they are related. They
-are also opposite, and a cache cannot tell.
+Read as a detector, cosine similarity scores an **AUROC of 0.44** here — below
+the 0.5 a coin flip would give. Five positives against ten negatives puts an
+enormous interval on that, so the honest reading is not "similarity is
+anti-correlated with sameness". It is that fifteen pairs cannot find you a
+threshold, and they can tell you the search will not be easy.
+
+This is the sentence-level cousin of @sec-embeddings' antonym result, where
+`increase`/`decrease` scored **0.881** — higher than `cat`/`dog` at 0.880. At
+the sentence level it gets worse rather than better: negation adds one short
+token to a long sentence and pooling averages it away, so *is covered* and *is
+not covered* land nearly on top of one another. They are related, which is what
+the model was trained to capture. They are also opposite, and a cache cannot
+tell.
 
 ::: {.callout-warning appearance="simple"}
 **The instrument had a defect, and finding it is the lesson.** The table above
@@ -304,11 +319,23 @@ collapses to one constant token:
 
 All 21 pairs of weekday names are identical to each other; so are January and
 February, and Ankara and Istanbul. Lowercase text behaves normally. It
-reproduces on both `/api/embed` and `/api/embeddings`. Whether the fault is in
-the GGUF conversion, the tokenizer or the server we did not determine — and for
-this chapter it does not matter, because [a semantic cache built on that
-embedder would have served Monday's answer to Sunday's question, at similarity
-1.000, forever, with nothing in any log.]{.hl}
+reproduces on both `/api/embed` and `/api/embeddings`.
+
+**What this is and is not.** It is one machine's reproducible observation, and
+three things a defect report would need are missing from it. The model was
+pulled by its floating tag rather than by digest, which is the exact failure
+@sec-gateway-versions is about, arriving in this chapter's own instrument. The
+same weights were not run through a second stack — `sentence-transformers` on
+the original checkpoint — so the fault has not been isolated to the GGUF
+conversion, the tokenizer or the server. And `nomic-embed-text` expects a task
+prefix (`search_query: `, `search_document: `), which was not used; whether the
+collapse survives one is untested, and since prefixes are lowercase it is a
+plausible interaction rather than an idle question. Treat it as an observation,
+not a characterised defect, and pin a digest before you report one.
+
+None of that changes what the chapter takes from it, because [a semantic cache
+built on that embedder would have served Monday's answer to Sunday's question,
+at similarity 1.000, forever, with nothing in any log.]{.hl}
 
 It is the same shape as @sec-summarization's `rouge-score` tokenizer and
 @sec-text-as-data's Turkish lowercasing: the tool did not fail, it returned
@@ -324,6 +351,24 @@ So treat the two caches as different features with different bars:
 | Semantic | [a wrong answer, silently]{.con} | only with a measured false-positive rate on your own traffic, and never on anything consequential |
 
 : Two caches that share a name {tbl-colwidths="[18,38,44]"}
+
+And note that accuracy is not the only axis a semantic cache moves. It is also
+a store of prompts and answers sitting inside the one component every request
+passes through, which makes three things the gateway's problem rather than
+somebody else's:
+
+- **Key by tenant, and by user where the data is personal.** A cache keyed on
+  the embedding alone will serve one customer's answer to another customer's
+  question. That is not a quality defect, it is a data leak, and it looks
+  exactly like a cache hit in every metric you have.
+- **The retention rule applies to the cache.** Cache entries hold the prompt.
+  A policy that says you do not log prompts is untrue the moment a semantic
+  cache stores them, so give the cache the same TTL and the same redaction as
+  @sec-gateway-policy gives the log.
+- **Decide what invalidates an entry.** A price changes, a policy is updated,
+  a document is retracted — and a cached answer keeps being served with no
+  version attached to it. If you cannot name the event that clears an entry,
+  the entry is permanent.
 
 If you do build one, the measurement that makes it defensible is the one nobody
 runs: sample the cache *hits*, check by hand how many were genuinely the same
@@ -480,9 +525,10 @@ logged.
 
 Sample the hits and check by hand what fraction were genuinely the same
 question, and report it with an interval. Note also that embedding similarity
-does not track meaning where it matters most: @sec-embeddings showed a sentence
-and its negation sitting close together, which is exactly the pair a cache must
-not conflate.
+does not track meaning where it matters most: @sec-embeddings showed antonyms
+scoring higher than related words, and the sentence-level version of that is
+measured above — a sentence and its negation at 0.982, the top of the list.
+That is exactly the pair a cache must not conflate.
 :::
 
 ::: {.callout-note collapse="true"}
