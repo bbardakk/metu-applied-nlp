@@ -10,8 +10,9 @@ Everything in this book runs in one of three places:
 
 - **Your browser.** Every interactive widget is self-contained — nothing to
   install, nothing to run.
-- **A Python environment.** Executable chapters need Python ≥ 3.11 and a short
-  dependency list.
+- **A Python environment.** Every measurement in this book was run on **Python
+  3.14.5**. Anything from 3.11 will run the code; only 3.14.5 is the version the
+  numbers came from.
 - **A local model server.** Parts IV–VII call a model. Every measurement in
   those parts used `ollama` on a laptop rather than a hosted API, so that the
   numbers cost nothing to reproduce and do not depend on a provider's current
@@ -21,33 +22,54 @@ Everything in this book runs in one of three places:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-chapters.txt
 ```
 
-Or with `uv`, which is faster and resolves the same versions:
+Or with `uv`, which is faster and — because every line is pinned with `==` —
+resolves exactly the same versions:
 
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install -r requirements.txt
+uv pip install -r requirements-chapters.txt
 ```
 
-The versions the book's measurements used, and which `requirements.txt` pins:
+::: {.column-margin}
+The repository also has a `requirements.txt`, and it is a different thing: the
+handful of packages that render the book. Installing that one will not give you
+the chapter code.
+:::
+
+Below is what `requirements-chapters.txt` pins. Each version is the one a
+chapter's own *"The stack these numbers came from"* table reports, and where two
+chapters disagree both are shown, because that disagreement is a fact about the
+book rather than something to average away.
 
 | package | version | used by |
 |:--|:--|:--|
 | `numpy` | 2.5.2 | almost everything numeric |
-| `scikit-learn` | 1.8.2 | @sec-bake-off, @sec-classification |
-| `scipy` | 1.18.1 | @sec-llm-eval's sizing arithmetic |
-| `transformers` | 5.15.1 | @sec-sequence-labeling, @sec-machine-translation, @sec-turkish-nlp |
-| `torch` | 2.13.0 | the models those chapters fine-tune |
+| `pandas` | 3.0.5 | the corpus-shaping chapters |
+| `scikit-learn` | 1.9.0 | @sec-bake-off, @sec-classification |
+| `scipy` | 1.18.0 / **1.18.1** | @sec-llm-eval's sizing arithmetic; take the later one |
+| `imbalanced-learn` | 0.14.2 | @sec-classification's resampling |
+| `transformers` | 5.15.0 / **5.15.1** | @sec-sequence-labeling, @sec-machine-translation, @sec-turkish-nlp |
+| `torch` | 2.13.0 | the models those chapters fine-tune — see @sec-setup-gpu |
 | `datasets` | 5.0.1 | every corpus the book loads |
+| `sentence-transformers` | **5.7.0** / 6.0.0 | @sec-embeddings, @sec-retrieval; the 6.0 rows are later chapters |
 | `sacrebleu` | 2.6.0 | @sec-machine-translation |
+| `seqeval` | 1.2.2 | @sec-sequence-labeling's span scoring |
+| `sklearn-crfsuite` | 0.5.0 | @sec-sequence-labeling's CRF |
 | `snowballstemmer` | 3.1.1 | @sec-turkish-nlp |
 | `rouge-score` | 0.1.2 | @sec-summarization — read that chapter before trusting it |
-| `matplotlib` | 3.11.1 | figures you reproduce yourself |
-| `jupyter` | 1.1.1 | the notebooks |
+| `datasketch` | 2.0.0 | @sec-data-annotation's near-duplicate detection |
+| `umap-learn` | 0.5.12 | @sec-clustering |
+| `ollama` | 0.24.0 | the local model server every Part IV–VII measurement calls |
+| `pytest` | 9.1.1 | running the book's own checks |
 
-: Pinned versions, as measured {tbl-colwidths="[26,14,60]"}
+: Pinned versions, as measured {tbl-colwidths="[26,18,56]"}
+
+Two packages that used to be in this table are not measurement dependencies and
+have been moved out: `matplotlib` and `jupyter` render the book rather than
+produce any number in it.
 
 [Pin these rather than taking latest.]{.hl} Several of the book's findings are
 about specific tool behaviour — @sec-summarization's ROUGE tokenizer bug,
@@ -55,20 +77,58 @@ about specific tool behaviour — @sec-summarization's ROUGE tokenizer bug,
 the very thing a chapter is demonstrating. That is a good outcome for the world
 and a confusing one mid-exercise.
 
+## Accelerators {#sec-setup-gpu}
+
+`pip install torch` resolves to a different wheel on every platform, and the
+fine-tuning chapters produce slightly different numbers on different backends.
+The book's fine-tuning and embedding measurements ran on **Apple Silicon
+through PyTorch's MPS backend** — four chapters say so in their own version
+tables — so that is the configuration the numbers came from.
+
+- **Apple Silicon.** `pip install torch` is enough; MPS is built in. Setting
+  `PYTORCH_ENABLE_MPS_FALLBACK=1` avoids a hard failure on the few operations
+  that still have no MPS kernel.
+- **NVIDIA.** Install the CUDA wheel explicitly rather than letting `pip`
+  choose, or you may silently get the CPU build:
+  `pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu126`.
+- **CPU only.** Everything runs. The fine-tuning chapters take several times
+  longer, and nothing else changes.
+
+Expect small numerical differences across backends. If a fine-tuning result in
+@sec-sequence-labeling or @sec-machine-translation is a point or two from the
+book's, the backend is the first thing to check and usually the whole answer.
+
 ## A local model {#sec-setup-ollama}
 
-Parts IV–VII need a model to call. Install [ollama](https://ollama.com), then:
+Parts IV–VII need a model to call. Install [ollama](https://ollama.com), then
+pull the models the chapters you want actually used:
 
 ```bash
-ollama pull qwen2.5:7b
+ollama pull qwen3.5:9b        # ~6 GB   — most of the book's measurements
+ollama pull llama3.2:3b       # ~2 GB   — the small-model rows and the serving chapters
+ollama pull gemma3:27b        # ~17 GB  — needs roughly 20 GB of memory
+ollama pull qwen3.6:35b       # ~21 GB  — needs roughly 24 GB of memory
+ollama pull nomic-embed-text  # ~0.3 GB — the gateway chapter's embedding path
 ollama serve
 ```
 
-The book used `ollama` 0.24.0. The models each chapter used are named in its
-status callout; `llama3.2:3b` is the smallest that will run the examples and
-`qwen2.5:7b` is the general default. A 27B model was used in @sec-governance
-and needs roughly 20 GB of memory — skip it if you do not have that, and the
-chapter's argument survives without the top rung.
+The book used `ollama` 0.24.0. Which model a chapter used is in its status
+callout, and the distribution is lopsided:
+
+| model | chapters that measured with it |
+|:--|:--|
+| **`qwen3.5:9b`** | 12, 13, 14, 15, 17, 18, 20, 22, 23, 24, 25, 26, 27, 29, 30, 38 — the default, and the one to pull first |
+| `llama3.2:3b` | 12, 18, 31, 33, 34, 38 |
+| `gemma3:27b` | 12, 14, 21, 22, 38 |
+| `qwen3.6:35b` | 7, 12 |
+| `qwen2.5:7b` | 35, 36, 38 |
+| `nomic-embed-text` | 32 |
+
+: Which chapter needs which model {tbl-colwidths="[24,76]"}
+
+If memory is tight, pull the first two and skip the rest: every chapter that
+uses a large model also reports a smaller one, and the arguments survive without
+the top rung — @sec-multimodal and @sec-llm-eval say so explicitly.
 
 Everything talks to the HTTP API directly:
 
@@ -86,13 +146,32 @@ as zero and looks like a catastrophic quality result. @sec-governance's
 measurement hit exactly that.
 :::
 
+## What this costs in disk and memory {#sec-setup-budget}
+
+Worth knowing before the first `pull` rather than after.
+
+| you want to run | disk | memory |
+|:--|--:|--:|
+| Parts I–III (no model server) | ~4 GB | 8 GB |
+| Everything with `qwen3.5:9b` | ~10 GB | 16 GB |
+| Adding `gemma3:27b` | ~27 GB | 20 GB+ |
+| Adding `qwen3.6:35b` as well | ~48 GB | 24 GB+ |
+
+: Budget before you start {tbl-colwidths="[52,24,24]"}
+
+Memory here is what the model needs resident, and on a unified-memory machine
+that is the same pool your editor is using. @sec-serving explains why the
+number that actually binds is the KV cache rather than the weights, and why the
+context length you configure is a memory decision.
+
 ## Colab {#sec-setup-colab}
 
-Every executable chapter links its notebook with an *Open in Colab* badge —
-zero local setup, and a free GPU when a chapter needs one. Parts I–III do not.
-The local-model chapters do not work on Colab's free tier without adaptation;
-substitute a hosted API and expect your numbers to differ from the book's,
-which is itself a useful lesson about pinning.
+Colab is the shortest path to a GPU for the fine-tuning chapters, and the
+notebooks are not published yet — the badges are on the roadmap rather than in
+the book, so for now copy the code blocks. The local-model chapters do not work
+on Colab's free tier without adaptation; substitute a hosted API and expect your
+numbers to differ from the book's, which is itself a useful lesson about
+pinning.
 
 ## Windows {#sec-setup-windows}
 
@@ -107,6 +186,7 @@ encoding, which mangles Turkish text silently. That last one is
 
 ## Getting help {#sec-setup-help}
 
-Open a GitHub issue with the chapter name in the title, or use the comment box
-at the bottom of any page. If a number in the book does not reproduce, that is
-worth an issue — say which chapter, which version you have, and what you got.
+Open a GitHub issue with the chapter name in the title. If a number in the book
+does not reproduce, that is worth an issue — say which chapter, which package
+and model versions you have, which accelerator backend, and what you got. The
+first three are usually the answer.

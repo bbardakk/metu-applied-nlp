@@ -31,11 +31,16 @@ independent, so they run in parallel. @sec-serving's prefill-versus-decode split
 is a direct consequence — reading a prompt is many dot products at once,
 writing a token is one after another.
 
-**Dimensionality reduction finds the directions that carry the variance.**
+**Dimensionality reduction finds the directions that carry the most signal.**
 Singular value decomposition factors a matrix into directions ordered by how
-much of the data's spread each explains, so keeping the first few is the best
-low-dimensional summary available. @sec-embeddings uses it; @sec-clustering
-relies on the intuition.
+much of its *squared magnitude* each accounts for, and truncating after the
+first few gives the best low-rank approximation there is — that is the
+Eckart–Young theorem, and it is why "keep the top components" is a theorem
+rather than a heuristic. One qualifier that matters in practice: those
+directions describe *variance* only if you centred the columns first. On raw
+counts the leading direction is usually just the mean, which is why a
+first component that correlates with document length is a sign you skipped a
+step. @sec-embeddings uses it; @sec-clustering relies on the intuition.
 
 ::: {.column-margin}
 If one fact from this section survives: **similarity is geometry**. Nearly
@@ -74,6 +79,59 @@ the exponential controls how much — high temperature flattens the distribution
 temperature approaching zero makes it pick the maximum. That is the single
 parameter behind @sec-decoding, and behind @sec-machine-translation's
 measurement that the same setting is right for chat and wrong for translation.
+
+## Inference on measurements {#sec-math-inference}
+
+This is the mathematics the book leans on most, because almost every chapter
+ends in a proportion measured on a small sample. Four tools cover nearly all of
+it.
+
+**A proportion needs an interval, and Wilson's is the one to use.** The
+textbook $\hat{p} \pm z\sqrt{\hat{p}(1-\hat{p})/n}$ breaks exactly where this
+book lives: at $\hat{p} = 1$ it gives zero width, and near 0 it gives negative
+bounds. The Wilson interval solves the same problem the other way round and
+behaves at the edges:
+
+$$\frac{\hat{p} + \frac{z^2}{2n}}{1 + \frac{z^2}{n}} \;\pm\;
+\frac{z}{1 + \frac{z^2}{n}}\sqrt{\frac{\hat{p}(1-\hat{p})}{n} + \frac{z^2}{4n^2}}$$
+
+Thirty out of thirty is not 100% ± 0; it is [88.6, 100]. @sec-llm-eval makes
+the case, and most chapters after it report one.
+
+**Paired data needs a paired test, and McNemar's is it.** When two systems run
+on the same items, what carries the information is the *disagreements*: $b$
+items the first got right and the second wrong, $c$ the other way. The items
+they both got right or both got wrong tell you nothing about which is better.
+The exact test is a binomial sign test on those discordant pairs, $2 \cdot
+P(X \le \min(b,c))$ for $X \sim \text{Binomial}(b+c, 0.5)$, and it routinely
+finds differences that two overlapping marginal intervals would call
+inconclusive. @sec-prompting and @sec-llm-eval both turn on this.
+
+**Anything that is not a proportion gets a bootstrap.** Resample the *items*
+with replacement a few thousand times, recompute the statistic each time, and
+take the 2.5th and 97.5th percentiles. It needs no distributional assumption,
+which is why it is the default for a ROUGE mean or an average rating. Resample
+at the level the data is clustered at: two judgments of the same document are
+not two independent facts.
+
+**Power decides how big the sample has to be, and it is a question you can
+answer before you collect anything.** For two proportions at significance
+$\alpha$ and power $1-\beta$, the minimum detectable difference $\Delta$ needs
+
+$$n \;\approx\; \frac{\left(z_{\alpha/2}\sqrt{2\bar{p}\bar{q}} +
+z_{\beta}\sqrt{p_1 q_1 + p_2 q_2}\right)^2}{\Delta^2}$$
+
+which is the arithmetic behind @sec-llm-eval's finding that a hundred-item eval
+set cannot see a five-point improvement. The useful direction is backwards:
+start from the difference that would change a decision, and solve for $n$.
+
+::: {.column-margin}
+The failure mode all four are guarding against is the same one: a number
+reported without an interval, compared against another number reported without
+an interval, on a sample too small to separate them. It is the most common
+mistake in this field's published results, and it is arithmetic rather than
+statistics.
+:::
 
 ## Optimization {#sec-math-optimization}
 
@@ -131,8 +189,21 @@ Every symbol the book uses, and where it first appears.
 : Notation used in this book {tbl-colwidths="[22,48,30]"}
 
 Two conventions worth stating because they are inconsistent in the wider
-literature. **Bold means a vector or matrix; plain means a scalar** —
-$\mathbf{v}$ is a vector, $v_i$ is one number in it. And **$k$ is always a count
-of retained things**, whether that is beam width (@sec-machine-translation),
-neighbours (@sec-retrieval) or documents (@sec-rag); the book never uses $k$ as
-an index.
+literature, and one collision worth warning about.
+
+**Bold means a vector or matrix; plain means a scalar** — $\mathbf{v}$ is a
+vector, $v_i$ is one number in it.
+
+**$k$ is usually a count of retained things** — beam width
+(@sec-machine-translation), neighbours (@sec-retrieval), documents (@sec-rag).
+It is an index in two places, both of them sums over classes or samples rather
+than over a vector's components: @sec-bake-off's macro-$F_1$ averages over $K$
+classes, and @sec-embeddings' negative-sampling loss sums over $K$ negatives.
+The distinction to hold is that $i$ indexes components and $k$ indexes a set
+whose size is itself a parameter.
+
+**$V$ carries two meanings and they are a chapter apart.** $\lvert V \rvert$ is
+the vocabulary size from @sec-text-as-data onwards; $V$ unadorned is the value
+matrix in @sec-transformers' attention. Nothing disambiguates them but context,
+which is the convention the literature has settled on and not one this book can
+fix on its own.
