@@ -93,7 +93,9 @@ Text tokens and image patches sit in one stream and attend to each other.
 ```
 
 ::: {.fig-cap}
-There is no separate image pathway. Patches become vectors, the question
+There is no separate image pathway **in this design** — @sec-multimodal-contrastive
+describes the alternative, where a frozen language model attends into the image
+through cross-attention instead. Patches become vectors, the question
 becomes vectors, and one sequence goes into the same stack — which is why a
 model that can read text can be taught to read pages without changing its
 architecture.
@@ -106,16 +108,39 @@ them, four font sizes, two languages, sparse pages and dense ones — cost
 **exactly the same 290 prompt tokens**:
 
 ```text
-  font size   image tokens   what is on the page
-       34 px           290   ~5 lines, comfortable
-       22 px           290   ~7 lines
-       15 px           290   ~10 lines
-       11 px           290   ~14 lines, tight
+  font size   image tokens   lines the page can hold at this size
+       34 px           290   ~5, comfortable
+       22 px           290   ~7
+       15 px           290   ~10
+       11 px           290   ~14, tight
 ```
 
-[An image costs a flat rate.]{.hl} The vision encoder resizes to a fixed grid,
-so 256 image tokens plus the prompt is what you pay whether the page holds a
-sentence or a spreadsheet.
+Every page in that ladder carries the *same* sentence; the last column is page
+capacity, not content. Holding the content constant is the point of the design,
+so the only thing varying is how many encoder pixels each character gets.
+
+Two accountings appear in this chapter and it is worth separating them here.
+**290** is the whole prompt as the server reports it: 256 image tokens, the
+image delimiters, and the 34-token instruction. **260** is the image alone —
+the 256 vectors plus its delimiters — and it is the number used in the
+text-versus-image comparison below, because the instruction is identical in both
+arms and cancels. Wherever this chapter says "as an image, 260", it means the
+*marginal* cost of attaching the picture.
+
+[For this model, an image costs a flat rate.]{.hl} The vision encoder resizes to
+a fixed 896×896 grid and pools the patch grid down to 256 soft vectors, so 256
+image tokens plus the prompt is what you pay whether the page holds a sentence
+or a spreadsheet — provided the image is roughly square and the model's
+crop-and-tile path does not fire. A wide screenshot split into crops sends each
+crop through the encoder separately and costs a multiple of this.
+
+**Do not generalise the flat rate.** It is a property of one encoder design, not
+of vision-language models. The dominant 2025–2026 families do the opposite:
+dynamic-resolution encoders map a native-resolution image to a *variable*-length
+token sequence, and tiling designs cut a page into fixed crops and scale the
+number of crops with the input, so image cost grows with megapixels and the
+budgeting lesson inverts. Measure your own model with one image at two
+resolutions before you plan a bill around either behaviour.
 
 Two things follow, and the second one predicts the rest of the chapter.
 
@@ -143,11 +168,19 @@ A flat-rate encoder partially absorbs an agglutinative language's token tax.
 Hold that thought until @sec-multimodal-ocr, which measures what you give up to
 collect it.
 
-**As the page gets denser, the budget does not grow.** Fourteen lines of
-11-pixel type has to fit through the same 256 vectors as five lines of
-34-pixel type. Nothing about the model changes; the information per token
-does. So if transcription accuracy falls with font size, that is not the model
-getting confused — it is a bottleneck you can compute in advance.
+**Smaller type means fewer encoder pixels per character.** The page content is
+identical at all four rungs — the same sentence, only drawn smaller — so nothing
+about the information on the page changes. What changes is *sampling*. The
+encoder resizes every page to 896×896 and cuts it into patches, and below some
+glyph height a character does not survive that resize with enough pixels to be
+told apart from its neighbours. So if transcription accuracy falls with font
+size, that is not the model getting confused; it is a sampling limit you can
+compute in advance from your canvas size and the encoder's input resolution.
+
+The fixed token budget makes it worse in a second and separate way: because the
+encoder emits the same 256 vectors regardless, you cannot buy your way out by
+paying for more tokens. Cropping and re-rendering are the only levers, which is
+the recipe @sec-multimodal-ocr arrives at from the other end.
 
 **What we will look at.** First where the alignment comes from, because a
 projected patch means nothing to a language model until something teaches the
@@ -195,13 +228,31 @@ compare. You are no longer restricted to the categories someone enumerated at
 training time, which is what made vision models useful in places nobody had
 labelled a dataset for.
 
-**It buys a shared space, which is what a VLM is built on.** Once image
-vectors live somewhere a language model can interpret, you can attach a
-projection to a pretrained LLM and fine-tune on image–instruction pairs —
-Flamingo [@alayrac2022flamingo] and then LLaVA [@liu2023visual] are the designs
-everything now follows. The vision encoder in this chapter's model is a
-descendant of CLIP with a different loss [@zhai2023sigmoid], and its fixed
-output size is why an image costs a flat rate.
+**It buys a shared space, which is what a VLM is built on.** Once image vectors
+live somewhere a language model can interpret, two designs become available, and
+they are worth separating because they are architecturally opposite and they
+cost different things.
+
+*Cross-attention.* Flamingo [@alayrac2022flamingo] **freezes** the language
+model entirely, compresses a variable number of patches into a fixed set of
+latents with a resampler, and inserts gated cross-attention blocks between the
+frozen layers. The image never enters the text sequence at all; it is a second
+pathway the text attends *into*. Cheap to train, and it leaves the language
+model's text behaviour untouched.
+
+*Projection into one sequence.* LLaVA [@liu2023visual] does the simpler thing: a
+small MLP projects each patch vector to the language model's hidden size, those
+vectors are concatenated with the text tokens, and the whole thing is
+instruction-tuned. One stream, one attention, no new modules — which is the
+design in the figure above, and the one most open VLMs now follow.
+
+Knowing which you have in front of you tells you what you can change: a frozen
+language model cannot be fine-tuned through the image path, and a single-stream
+model has no separate image pathway to intervene on.
+
+The vision encoder in this chapter's model is a descendant of CLIP with a
+different loss [@zhai2023sigmoid], and its fixed pooled output size is why an
+image costs a flat rate here.
 
 What contrastive pretraining does *not* buy is any guarantee about detail. The
 objective rewards matching an image to its caption, and a caption describes what
@@ -221,7 +272,16 @@ every language.
 
 @sec-turkish-nlp's method transfers directly, and this is the reason to use it
 here. Take the WMT16/17/18 Turkish–English test sets, which are professional
-translations, so the two languages say the same thing. Render each sentence as
+translations, so the two languages say the same thing.
+
+**One caveat this design has to answer and does not.** WMT test sets are a
+decade old and public, so the model may well have memorised some of these
+sentences — and a memorised sentence can be "transcribed" without being read,
+which pushes CER down. The bias is unlikely to be symmetric: the English side of
+WMT is copied across the web far more often than the Turkish side, so
+contamination would inflate exactly the ratio this section reports. The control
+is a ladder on sentences published after the model's cutoff, and it has not been
+run. Until it is, treat the 5× as an upper bound on the gap. Render each sentence as
 a page image in the same font at four sizes, from a comfortable scan down to a
 bad phone photo. Any gap between the two languages cannot be a content gap.
 
@@ -301,11 +361,20 @@ which one you show decides whether anyone acts on it.`
 
 ### What it says
 
-[Turkish costs about five times the error rate of English, at every
-resolution, on identical content.]{.hl} 6.5× at 34 px, 5.0× at 22, 5.9× at 15,
-5.0× at 11. The ratio is remarkably stable; what changes is the absolute
-damage, and at 11 pixels it becomes a real number — 6.67% of characters wrong
-against English's 1.33%.
+[Turkish costs about five times the error rate of English, at every resolution,
+on identical content.]{.hl} 6.5× at 34 px, 5.0× at 22, 5.9× at 15, 5.0× at 11.
+
+Before reading that as four confirmations, convert the percentages back into
+events. Forty sentences is about 8,880 English characters and 9,320 Turkish
+ones, so the top two English rungs are **four and five wrong characters**, and
+the Turkish ones are twenty-four and twenty-three. A ratio of two counts that
+small carries an enormous interval — the 6.5× at 34 px is 24 edits against 3.6 —
+so "remarkably stable" is the wrong description. The rung that is statistically
+solid is the bottom one, where the counts are 622 against 118, and the honest
+reading is **one ratio measured firmly at 11 px and not contradicted anywhere
+above it**. What changes down the ladder is the absolute damage, and at 11
+pixels it becomes a real number — 6.67% of characters wrong against English's
+1.33%.
 
 This is @sec-turkish-nlp's pattern arriving through a door that chapter never
 opened. There is no tokenizer here, no stemmer, no lowercasing — just pixels
@@ -379,6 +448,25 @@ gemma3:27b, 30 tables of 8 invented rows, 180 questions
 **It refused every single time.** Ninety opportunities to invent a plausible
 number for a plausible city, and it took none of them. The one error in the
 other column was a misread digit, not an invention.
+
+**The control this contrast needs, and does not have.** These tables were
+rendered at a size the model can comfortably read; the transcription failure it
+is being contrasted with happens at 11 pixels, where the page is barely legible.
+So the two halves of the chapter's headline are measured in two different
+resolution regimes, and the honest question is whether refusal *survives*
+illegibility. Re-render the same 30 tables at 11 px and ask the same 180
+questions: if the refusal rate holds, the asymmetry is about the kind of
+question; if it collapses, the asymmetry was about easy images against hard
+ones and the claim inverts. That run is one afternoon and it is the first thing
+we would add.
+
+Two more things this section owes you, both of which change how the 100% reads.
+A refusal rate is a property of the *prompt* at least as much as of the model —
+"write the value, or say it is not in the table" invites refusal in a way that
+"what is the value for Trabzon?" does not — and the prompts are not reproduced
+here. Nor are the decoding settings: the whole argument is about what
+distribution the model emits, so whether this was greedy or sampled is not a
+detail. Record both when you run it.
 
 ### The two results together are the finding
 
@@ -760,6 +848,7 @@ both ways. The ratio is the first thing to know and takes two minutes.
 | attaching vision to a frozen language model | @alayrac2022flamingo |
 | instruction tuning for images | @liu2023visual |
 | objects asserted that were never in the picture | @rohrbach2018object |
+| the model every measurement here ran on | @gemmateam2025gemma3 |
 
 : The primary sources {tbl-colwidths="[46,54]"}
 
