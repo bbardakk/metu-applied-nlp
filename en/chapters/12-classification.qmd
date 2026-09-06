@@ -7,7 +7,9 @@ reviews, recovered rather than re-drawn, for reasons @sec-classification-setup
 explains. The LLM comparisons in @sec-classification-llm and
 @sec-classification-crossover use a stratified 2,000-document subsample of that
 same test slice, with every competing model re-scored on it;
-@sec-classification-llm says why, and what it costs in resolution. Software: `scikit-learn` 1.9.0, `transformers` 5.15.0, PyTorch 2.13.0,
+@sec-classification-llm says why, and what it costs in resolution. Data:
+`fthbrmnby/turkish_product_reviews` on Hugging Face, 235,165 rows as downloaded
+and 233,508 after exact-text deduplication. Software: `scikit-learn` 1.9.0, `transformers` 5.15.0, PyTorch 2.13.0,
 `imbalanced-learn` 0.14.2, `scipy` 1.18.0 on Python 3.14.5; encoder training on
 an Apple M-series GPU; local LLMs through `ollama` 0.24.0.
 :::
@@ -34,8 +36,10 @@ an Apple M-series GPU; local LLMs through `ollama` 0.24.0.
 
 @sec-bake-off ended with a leaderboard. Seven representations, 40,000 Turkish
 product reviews, one held-out set of 10,000, and a winner: tf-idf over word
-unigrams and bigrams, fed to logistic regression, at
-**76.21 [macro-F1](#gloss-macro-f1){#term-macro-f1 .term-ref}**.
+unigrams and bigrams, fed to a **class-weighted** logistic regression, at
+**76.21 [macro-F1](#gloss-macro-f1){#term-macro-f1 .term-ref}**. That the
+reference point is itself class-weighted matters, and
+@sec-classification-imbalance will charge it for that.
 This chapter's job is to find out what it takes to beat that, and what each
 increment costs.
 
@@ -94,10 +98,17 @@ recovered split.
 ::: {.column-margin}
 Note the near-miss. "plain sample 50k" lands within 120 dimensions of the target
 and within 0.5 accuracy points — close enough that a careless check would accept
-it. [Agreement on one statistic is not evidence; agreement on four unrelated
-statistics simultaneously is]{.hl}. If you ever have to recover somebody's
-experimental setup, pick the quantity that is most sensitive to the thing you
-are trying to pin down, not the quantity you happen to have written down.
+it. Be careful about *why* the match convinces, though: these are not four
+independent witnesses. `dims` is a deterministic function of which documents
+landed in the training half, and the three scores are three readings of one
+fitted model on one test set, so they move together. The argument is not *four
+agreements* but **one very sharp agreement**: 101,659 is a six-digit count two
+different 50,000-row samples have no reason to share, and the near-miss row
+shows the coarser statistics would not have separated them. Nor did we prove
+uniqueness — we enumerated four plausible constructions and one matched exactly.
+If you ever have to recover somebody's experimental setup, pick the quantity
+that is most sensitive to the thing you are trying to pin down, not the quantity
+you happen to have written down.
 :::
 
 The by-product was a correction to a *different* chapter. Intersecting the two
@@ -106,6 +117,21 @@ subsamples showed that @sec-clustering and @sec-bake-off share 23,819 of their
 exactly 46,839 positive and 3,161 negative reviews, and they are less than half
 the same corpus. @sec-clustering's margin note now says so. No validator would
 have caught that; only intersecting the two sets and counting would.
+
+**And the forensics were avoidable, which is the lesson the story does not
+state.** What @sec-bake-off recorded was prose — "stratified, seed 42". What it
+should have recorded is the call itself and a fingerprint of the result:
+
+``` python
+train_df, test_df = train_test_split(
+    df, train_size=50_000, stratify=df["label"], random_state=42)
+print(hashlib.sha256(
+    ",".join(map(str, sorted(train_df.index))).encode()).hexdigest()[:12])
+```
+
+Three chapters depend on that one call, and one of them drew a different sample
+without anybody noticing. Print the call, print the hash, and the fingerprint
+stops being a detective story.
 
 ### The split, and the slice this chapter adds
 
@@ -142,7 +168,15 @@ data, from what the mistakes cost you.
 
 [Every threshold in this chapter is chosen on `cal` and reported on
 `test`.]{.hl} Where a number was obtained by tuning on test, it is labelled an
-**oracle** and used only as an upper bound to measure regret against. That
+**oracle** and used only as an upper bound to measure regret against.
+
+**And every threshold is stated on the complaint side:** flag the review when
+$P(\text{complaint})$ exceeds $t$. A low $t$ therefore means *catch more
+complaints*. Elsewhere you will meet the other convention — the same operating
+point written as 0.834 on the *satisfied* side — so when you compare notes with
+somebody, establish which side you are both talking about before comparing
+numbers. One convention, stated once, is worth more than any amount of care
+afterwards. That
 distinction does most of the work in @sec-classification-costs.
 
 :::: {.anlp-fig}
@@ -215,7 +249,8 @@ only reason we say so.
 The baseline reproduces exactly:
 
 ```text
-tf-idf 1-2 gram + LogisticRegression, 101,659 features, 31.7 non-zeros per row
+tf-idf 1-2 gram + LogisticRegression(class_weight="balanced"),
+101,659 features, 31.7 non-zeros per row
 
 accuracy      92.57
 macro-F1      76.21
@@ -237,7 +272,7 @@ literature would lead you to expect.
 |:--|:--|
 | Does fine-tuning beat 40,000 labels' worth of tf-idf? | [Yes — with 2,000 labels]{.pro} |
 | Is the sparse baseline therefore obsolete? | [No. Below ~1,000 labels it wins, and it trains in 1.2 seconds]{.con} |
-| Does resampling fix class imbalance? | [No. Moving one threshold beat every resampling method]{.con} |
+| Does resampling fix class imbalance? | [No. Moving one threshold matched the best of them, for free]{.con} |
 | Does class weighting cost anything? | [Yes: it multiplied calibration error by 3.6×]{.con} |
 | Is the model's "probability" a probability? | [Not until you fix it — and the fix is two parameters]{.con} |
 | Does the textbook cost-optimal threshold work? | [Only on calibrated scores. On raw scores it overspends by up to 56%]{.con} |
@@ -267,20 +302,6 @@ Before adding parameters, find out what the cheap thing does *at your label
 budget* rather than at the budget somebody else had. @sec-bake-off reported one
 point on a curve. Here is the curve, same vectoriser, same classifier, same test
 set, training on stratified subsets of `train`:
-
-```{ojs}
-//| echo: false
-budgetRows = [
-  {n: 200,   tfidf: 55.46, tfidf_negf1: 14.63, tfidf_secs: 0.1, dims: 720},
-  {n: 500,   tfidf: 60.82, tfidf_negf1: 25.32, tfidf_secs: 0.1, dims: 1762},
-  {n: 1000,  tfidf: 61.60, tfidf_negf1: 27.03, tfidf_secs: 0.1, dims: 3458},
-  {n: 2000,  tfidf: 67.42, tfidf_negf1: 38.77, tfidf_secs: 0.2, dims: 6586},
-  {n: 5000,  tfidf: 72.77, tfidf_negf1: 49.18, tfidf_secs: 0.3, dims: 15828},
-  {n: 10000, tfidf: 73.44, tfidf_negf1: 50.87, tfidf_secs: 0.4, dims: 29149},
-  {n: 20000, tfidf: 75.00, tfidf_negf1: 54.03, tfidf_secs: 0.6, dims: 54822},
-  {n: 40000, tfidf: 76.21, tfidf_negf1: 56.47, tfidf_secs: 1.2, dims: 101659}
-]
-```
 
 ```text
 labels   macro-F1   complaint-F1   features   fit time
@@ -324,7 +345,18 @@ is nothing to overfit.
 ## Fine-tuning encoder models {#sec-classification-finetune}
 
 The competitor is BERTurk, the Turkish BERT released as
-`dbmdz/bert-base-turkish-cased` [@schweter2020berturk]. It was pretrained on
+`dbmdz/bert-base-turkish-cased` [@schweter2020berturk].
+
+::: {.column-margin}
+BERTurk is a 2020 checkpoint. We use it because it is the strongest
+widely-used *Turkish-specific* encoder and because @sec-bake-off used it — not
+because it is the frontier. The 2024–2026 encoder revival rebuilt the same
+110M-parameter budget with rotary embeddings, unpadding and an 8,192-token
+context: ModernBERT [@warner2025modernbert] and the multilingual families that
+followed it cover Turkish and train markedly faster. Either of this chapter's
+cost headlines would move on one of them. We did not re-run the sweep, which is
+the honest boundary of the 970× figure.
+::: It was pretrained on
 roughly 35 GB and 4.4 billion tokens of Turkish — filtered OSCAR, a Wikipedia
 dump, OPUS corpora, and a corpus contributed by Kemal Oflazer — with a
 32,000-token vocabulary, on a TPU v3-8.
@@ -392,6 +424,28 @@ labels   macro-F1   complaint-F1   complaint-P   complaint-R   steps
 20,000      83.71          69.41         72.26         66.77   1,875
 40,000      85.02          71.92         72.32         71.52   3,750
 ```
+
+**Two caveats before you read the numbers, and the first is about what is not
+here.** Every point on this curve is a single training run at a single seed. At
+the small budgets that matters most: with a randomly initialised classification
+head and 500 examples, macro-F1 varies by seed on a scale of points, so the
+15.1-point jump between 500 and 1,000 labels is a jump we have measured once.
+Three seeds at 500, 1,000 and 2,000 would put an error bar on the crossover and
+it is the measurement this section most needs. Note also that every bootstrap
+interval in this chapter resamples the *test set*, not the optimiser: they
+describe evaluation noise and say nothing about training noise.
+
+**The second caveat is one the `steps` column makes visible.** The epoch
+schedule changes at 2,000, so the 2,000-label model gets 1,260 updates and the
+5,000-label model only 471 — nearly **seven times** more gradient updates per
+example. That is the most likely reason complaint precision *falls* from 66.48
+to 60.22 across that one step, and why the 5,000-label model scores *below* the
+2,000-label one on the shared subsample in @sec-classification-llm (81.21
+against 82.00). A learning curve that dips as the budget grows is not normal,
+and a schedule change is the first thing to suspect. Both of this chapter's
+headline crossovers sit at exactly the budget that got the most training per
+example. We did not re-run 5,000 at 20 epochs to separate the two, so read every
+crossover below as *at this schedule*.
 
 Three readings, and the third is the one that changes how you plan a project.
 
@@ -541,7 +595,12 @@ Every number so far has been macro-F1, on the assertion — inherited from
 rather than assert it.
 
 Take one model, the uncorrected tf-idf baseline, and move nothing except the
-threshold at which it declares a review a complaint:
+threshold at which it declares a review a complaint. The table below is read on
+**`test`**, and it is illustration rather than selection: it exists to show what
+the metrics do across the range, not to pick an operating point. The operating
+point actually used in @sec-classification-imbalance was chosen on `cal` and
+lands at 0.166 — one grid step from the best row here, which is roughly the
+regret you should expect from doing it properly.
 
 ```text
    t      acc   bal-acc    prec     rec   compF1   macroF1     MCC
@@ -567,7 +626,9 @@ catching half the complaints to catching none of them is not measuring the
 system.]{.hl}
 
 Worse than useless, it is actively misleading. The *highest* accuracy in the
-table is 95.16 at $t = 0.25$. The best model in the table is at $t = 0.15$,
+table is 95.16 at $t = 0.25$. The best model in the table is at $t = 0.15$ — an
+*oracle*, by the rule in @sec-classification-setup, since we are reading the
+maximum off the test set —
 where macro-F1 is 78.00 and accuracy is 0.93 points *lower*. Tuning on accuracy
 picks the wrong operating point, and it does so confidently.
 
@@ -670,8 +731,29 @@ coin flip                      acc 50.21   macroF1 38.57   bal-acc 51.44   MCC  
 A model that has never seen a feature scores 93.68% accuracy — the
 [base rate](#gloss-base-rate){#term-base-rate .term-ref}. Every accuracy figure
 in this chapter has to be read against that floor, and most of them are within
-two points of it. Matthews correlation, by contrast, gives all three degenerate
-baselines a flat zero — which is what you want from a summary statistic.
+two points of it. **Matthews correlation**, by contrast, gives all three
+degenerate baselines a flat zero — which is what you want from a summary
+statistic. It is worth knowing what it is, because the chapter recommends it
+twice and never says: MCC is the Pearson correlation between the predicted and
+the true label, treated as two 0/1 variables,
+
+$$
+\mathrm{MCC} = \frac{TP \cdot TN - FP \cdot FN}
+{\sqrt{(TP{+}FP)(TP{+}FN)(TN{+}FP)(TN{+}FN)}}
+$$
+
+running from $-1$ to $+1$, and exactly 0 for *any* model that ignores its
+input — which is precisely what accuracy fails to do here.
+
+**One metric is missing from that table on purpose, and it is the one you will
+meet first.** `classification_report` prints **weighted-F1** by default: the
+per-class F1 scores averaged by *support*. On this corpus the support is 93.68%
+one class, so the always-satisfied model's weighted-F1 is
+$0.9368 \times 96.74 = 90.62$ — higher than any macro-F1 anywhere in this
+chapter, for a model with no features. Weighted-F1 is accuracy wearing an F1
+costume. If you report one number on imbalanced data, report macro-F1 or MCC;
+if you report weighted-F1, print the majority-class rate next to it so the
+reader can do the subtraction.
 
 ::: {#gloss-base-rate .column-margin .term-gloss}
 **base rate** — how much of the corpus belongs to a class. It doubles as the
@@ -888,7 +970,7 @@ threshold chosen on the held-out `cal` slice, and scored on `test`.
 ```text
 treatment                     acc   macroF1   compF1   comp-P   comp-R      AP     AUC
 no correction, t=0.5        94.28     58.24    19.44     88.5     10.9   60.30   93.24
-threshold moved to 0.834    94.64     77.66    58.19     57.4     59.0   60.30   93.24
+threshold moved to 0.166    94.64     77.66    58.19     57.4     59.0   60.30   93.24
 class_weight=balanced       92.63     76.09    56.21     45.0     74.8   60.81   93.44
 random oversampling         93.63     77.63    58.72     49.7     71.7   61.46   93.45
 random undersampling        81.08     62.98    37.10     23.5     88.3   52.49   92.15
@@ -899,7 +981,7 @@ SMOTE                       92.32     74.72    53.62     43.4     70.3   58.05  
 ```{=html}
 <div class="fig-title">Five treatments change the ranking. One changes the decision.</div>
 <svg viewBox="0 0 764 268" style="max-width:744px" role="img"
-     aria-label="A horizontal bar chart of macro-F1 on the test set for six treatments of class imbalance, with the axis starting at 45 rather than 0. A dashed vertical reference line at 48.37 marks the macro-F1 of a model that always answers satisfied. The bars are: no correction with the threshold left at one half, 58.24, trained on 32,000 rows, average precision 60.30; threshold moved to 0.834, 77.66, the same 32,000 rows and the identical average precision of 60.30, highlighted as the winner; class weight balanced, 76.09, 32,000 rows, average precision 60.81; random oversampling, 77.63, 59,954 rows, average precision 61.46; random undersampling, 62.98, only 4,046 rows, average precision 52.49, drawn in a warning colour; and SMOTE, 74.72, 59,954 rows, average precision 58.05. A footer notes that the first two rows share an identical average precision because they are the same fitted model read at two different thresholds.">
+     aria-label="A horizontal bar chart of macro-F1 on the test set for six treatments of class imbalance, with the axis starting at 45 rather than 0. A dashed vertical reference line at 48.37 marks the macro-F1 of a model that always answers satisfied. The bars are: no correction with the threshold left at one half, 58.24, trained on 32,000 rows, average precision 60.30; threshold moved to 0.166 on the complaint side, 77.66, the same 32,000 rows and the identical average precision of 60.30, highlighted as the winner; class weight balanced, 76.09, 32,000 rows, average precision 60.81; random oversampling, 77.63, 59,954 rows, average precision 61.46; random undersampling, 62.98, only 4,046 rows, average precision 52.49, drawn in a warning colour; and SMOTE, 74.72, 59,954 rows, average precision 58.05. A footer notes that the first two rows share an identical average precision because they are the same fitted model read at two different thresholds.">
   <text x="10" y="18" class="t-xs t-b t-muted">TREATMENT</text>
   <text x="200" y="18" class="t-xs t-b t-muted">MACRO-F1 ON TEST</text>
   <text x="650" y="18" class="t-xs t-b t-muted t-mid">ROWS FITTED</text>
@@ -918,7 +1000,7 @@ SMOTE                       92.32     74.72    53.62     43.4     70.3   58.05  
   <text x="725" y="47" class="t-xs t-mid t-b">60.30</text>
 
   <rect x="200" y="62" width="373" height="18" rx="4" class="box-accent"/>
-  <text x="10" y="75" class="t-xs t-b t-accent">threshold moved to 0.834</text>
+  <text x="10" y="75" class="t-xs t-b t-accent">threshold moved to 0.166</text>
   <text x="581" y="75" class="t-xs t-b t-accent">77.66</text>
   <text x="650" y="75" class="t-xs t-mid t-muted">32,000</text>
   <text x="725" y="75" class="t-xs t-mid t-b t-accent">60.30</text>
@@ -968,7 +1050,8 @@ significant figures are the same model.
 
 Row two is the whole section. **The same model as row one** — not retrained, not
 reweighted, not resampled, the identical fitted coefficients — goes from 58.24
-to 77.66 macro-F1 because we compared its score against 0.834 instead of 0.5.
+to 77.66 macro-F1 because we flagged a review when $P(\text{complaint})$ passed
+0.166 instead of 0.5.
 
 The proof that nothing about the model changed is in the last two columns.
 Average precision and AUC are *identical* to four significant figures in rows
@@ -977,13 +1060,25 @@ cannot reorder anything. [All five of the other treatments are attempts to
 change a ranking in order to fix a decision. Only the last one fixes the
 decision directly.]{.hl}
 
-Against that, the retraining methods look expensive:
+**One thing the table does not do fairly, and you should hold it against the
+headline.** Only one of the six rows was allowed to choose its threshold; the
+other five are read at 0.5. That is a tuned arm racing untuned ones. The
+chapter's own argument says how it would come out otherwise: average precision
+depends only on the ranking, and the ranking is oversampling 61.46, class
+weights 60.81, uncorrected 60.30 — so if every arm were given its own threshold
+on `cal`, oversampling would probably end up marginally *ahead*, not behind. We
+did not run those three rows. **Read this section as a result about price, not
+about ranking:** moving one threshold buys the same operating point the best
+resampling method buys, at zero training cost — it does not beat it.
+
+Against that, the retraining methods look expensive at the price they charge:
 
 - **Class weights** reach 76.09, 1.57 points *below* the free option, and cost a
   refit.
-- **Random oversampling** reaches 77.63, statistically indistinguishable from
+- **Random oversampling** reaches 77.63, within three hundredths of a point of
   moving the threshold, on 59,954 rows instead of 32,000 — nearly double the
-  training time for a tie.
+  training time for what looks like a tie. We did not test that gap formally,
+  and "within a tenth of a point" is all the table entitles us to say.
 - **Random undersampling** is a disaster: 62.98. It threw away 27,954 of 32,000
   documents to achieve parity, and the majority class it discarded was carrying
   most of the information about what a *non*-complaint looks like. Precision
@@ -997,8 +1092,10 @@ should not pretend it is. Chawla et al. evaluated nine low-dimensional dense
 numeric datasets — Pima, Phoneme, Adult, Satimage and so on — and explicitly
 listed text as *future work*, noting it "would have to be applied in conjunction
 with a feature selection algorithm" [@chawla2002smote]. Interpolating between
-two sparse 83,281-dimensional tf-idf rows produces a point that corresponds to no
-document anyone could write. We measured it because it is what practitioners
+two sparse tf-idf rows — 83,281 dimensions here rather than the 101,659 quoted
+elsewhere, because this section fits on the 32,000-document `fit` slice rather
+than the full 40,000 — produces a point that corresponds to no document anyone
+could write. We measured it because it is what practitioners
 reach for, not because the authors claimed it would work here.
 :::
 
@@ -1018,10 +1115,10 @@ not for it.
 ## Is that number a probability? {#sec-classification-calibration}
 
 Moving the threshold works. But it raises a question the previous section
-quietly skipped: 0.834 came from a sweep on held-out data. If you wanted to
+quietly skipped: 0.166 came from a sweep on held-out data. If you wanted to
 *derive* a threshold instead — from a cost matrix, say — you would need the
-model's output to mean something. So: when the classifier says 0.834, is that a
-probability?
+model's output to mean something. So: when the classifier says a review is 0.834
+likely to be satisfied, is that a probability?
 
 Everything here is fitted on the 8,000-document `cal` slice, which no model in
 this section was trained on, and scored on `test`. That separation is the whole
@@ -1048,6 +1145,20 @@ BERTurk, class-weighted — raw       2.53  49.84   0.0318    0.1442    0.933
   — Platt                           1.25  31.65   0.0275    0.1062    0.936
   — isotonic                        0.56  45.84   0.0265    0.0984    0.936
 ```
+
+**Every ECE in that table carries an estimator floor, and several of the
+differences are below it.** ECE compares an observed frequency against a mean
+prediction inside each bin, and an observed frequency is a binomial draw: even
+with perfect calibration the two differ by chance. With our bin occupancies that
+noise alone produces an expected $|\text{ECE}|$ of about **half a point**. So
+Platt's 0.94 against isotonic's 0.69 — a gap of 0.25 — is not a measurement of a
+difference between the two methods, and neither is BERTurk's 0.56, which is not
+distinguishable from perfect. What *does* survive the floor is the raw-versus-
+calibrated gap (3.96 → 0.9) and the class-weighting penalty (3.96 → 14.18), both
+an order of magnitude above it. Estimating ECE without bias is its own small
+literature [@kumar2019verified; @roelofs2022mitigating]; the practical rule is
+to distrust any calibration difference smaller than about a point unless you
+have bootstrapped it.
 
 Those numbers are summaries of a picture, and the picture is more informative
 than the summary. Each dot below is one of the fifteen bins, plotted at its mean
@@ -1256,8 +1367,10 @@ reproduce is in the other column: [BERTurk's *maximum* calibration error is
 49.84, the worst raw figure in the table]{.hl}. Somewhere there is a bin where
 the model says one thing and the data says something 50 points away — and
 @sec-classification-errors will show you exactly which documents live there.
-Calibrating fixes the average (isotonic takes ECE to 0.56, the best number in
-the chapter, with the best Brier and log loss too) and leaves the tail at 45.84.
+Calibrating fixes the average (isotonic takes ECE to 0.56 — indistinguishable
+from perfect at this bin structure, and with the best Brier and log loss in the
+chapter, which are the statistics that *are* sharp here) and leaves the tail at
+45.84.
 
 ::: {.column-margin}
 This BERTurk was fine-tuned on the 32,000-document `fit` slice, not the 40,000
@@ -1298,6 +1411,18 @@ Both numbers are correct, and they are answering different questions: how well
 the probability of *satisfied* is calibrated, versus how well the confidence in
 whichever label won is calibrated. [Quoting an ECE without saying which one you
 computed is wrong.]{.hl}
+
+There is a second degree of freedom, and on this corpus it is the larger one:
+**how many bins, and how they are drawn.** Ours are fifteen of equal width, and
+on a distribution this skewed the top bin holds 73% of the test set while ten
+bins hold fewer than a hundred documents each — so the statistic is decided by a
+handful of bins. Equal-mass (adaptive) binning puts the same number of documents
+in every bin and gives a different number for the same model
+[@nixon2019measuring]. Both schemes are biased upward by binomial noise, which
+is where the half-point floor above comes from, and there are estimators
+designed to reduce it [@kumar2019verified; @roelofs2022mitigating]. Report the
+bin count, the binning scheme, and — if the difference you are claiming is under
+a point — a bootstrap interval.
 
 ## Choosing the threshold from a cost matrix {#sec-classification-costs}
 
@@ -1475,7 +1600,7 @@ re-scored on the 2,000-document subsample     acc   macro-F1  95% CI
 
 always "satisfied"                           93.70    48.37
 tf-idf + LR, class-weighted                  93.40    78.20   [74.77, 81.36]
-tf-idf + LR, threshold moved to 0.834        95.40    80.23   [76.35, 83.60]
+tf-idf + LR, threshold moved to 0.166        95.40    80.23   [76.35, 83.60]
 BERTurk fine-tuned,    200 labels            92.25    52.65   [49.77, 55.93]
 BERTurk fine-tuned,    500 labels            93.70    59.47   [55.04, 63.97]
 BERTurk fine-tuned,  1,000 labels            94.95    72.78   [68.12, 77.02]
@@ -1512,10 +1637,10 @@ They are what fits on a machine you can carry.
 
 | model | parameters | on disk | note |
 |:--|--:|--:|:--|
-| `llama3.2:3b` | 3.2B | 2.0 GB | the small-model end of the range |
-| `qwen3.5:9b` | 9.7B | 6.6 GB | dense, the workhorse |
+| `llama3.2:3b` | 3.2B | 2.0 GB | the small-model end of the range; **no thinking mode**, which is why it is the control in the `think: false` check |
+| `qwen3.5:9b` | 9.7B | 6.6 GB | dense, the workhorse — **and a reasoning model**, which the broken run below is entirely about |
 | `gemma3:27b` | 27.4B | 17.4 GB | dense, the largest here |
-| `qwen3.6:35b-a3b` | 36.0B total, ~3B active | 23.9 GB | mixture-of-experts (@sec-moe) |
+| `qwen3.6:35b-a3b` | 36.0B total, ~3B active | 23.9 GB | mixture-of-experts (@sec-moe), **also a reasoning model** |
 
 : The four local models, all `Q4_K_M` quantised {tbl-colwidths="[30,22,16,32]"}
 
@@ -1580,6 +1705,23 @@ Three changes fixed it, and only the first is about the bug:
    hours of GPU time producing a table of majority-class baselines.
 3. Smoke-test all six model/condition combinations on 24 documents each before
    committing the machine to an overnight queue.
+
+::: {.callout-tip appearance="simple"}
+**The rule those three fixes do not state, and should.** All three are specific
+to this incident: one is a bug fix, two are sentries. The general rule is
+simpler and it is the one to carry away — **an unparseable answer is not a
+prediction.** Never let it fall through to a label: not to the majority class,
+not to a random class, not to the previous document's answer. Emit a third
+outcome, `unparseable`, and carry it into every metric you report: accuracy over
+the documents that parsed, and the parse rate, side by side. A model that
+answers 60% of the time at 95% accuracy is a different product from one that
+answers every time at 57%, and a fallback label makes those two look identical.
+Note that the abort guard alone would not have saved us: a run parsing at 55%
+passes it and still quietly imputes the majority class on the other 45%. Log the
+raw response, the finish reason and the length of the reasoning field on every
+call, because the field you need for the diagnosis is always the one you did not
+think to record.
+:::
 
 ::: {.column-margin}
 This is the same lesson as the 27× inference outlier in
@@ -1745,7 +1887,11 @@ qwen3.5:9b            79.53    80.07    +0.54 [ -1.14,  +2.25]   0.5382
 The folklore says: write the instruction in English even when the data is
 Turkish. On the 3B model that is worth **+16.90 macro-F1** and is about as
 unambiguous as a measurement gets. On the 9B model the same change is
-[+0.54 points, indistinguishable from noise]{.hl}.
+[+0.54 points, $[-1.14, +2.25]$]{.hl} — which is not a demonstration that the
+effect is gone. It is a demonstration that *if* an effect remains, it is smaller
+than about two and a half macro-F1 points. That is a useful bound and a weaker
+statement than "noise", and the distinction is worth keeping: the same design
+would also have failed to resolve a real two-point gain.
 
 The Turkish-instruction failure on `llama3.2:3b` is not a subtle degradation. It
 labels 96.03% of complaints correctly and reaches 15.34% precision doing it —
@@ -1774,7 +1920,10 @@ Same shape as the language result.
 [**In-context learning**](#gloss-in-context-learning){#term-in-context-learning .term-ref}
 with 8 labelled examples — four of each class, drawn from `fit` so that no test
 document is ever in a prompt — moves `gemma3:27b` by 7.17 points and the two
-`qwen3` models by amounts that do not clear their own noise.
+`qwen3` models by amounts their intervals cannot separate from zero. Read those
+the same way as the language result: `qwen3.6:35b-a3b`'s $+0.51$ carries
+$[-1.51, +2.48]$, so what the run establishes is a *ceiling* of about two and a
+half points, not the absence of a gain.
 
 ::: {#gloss-in-context-learning .column-margin .term-gloss}
 **in-context learning** — learning a task from examples placed in the prompt. No
@@ -1882,8 +2031,17 @@ human.
 Measured as a detector of its own errors, stated confidence scores an
 [AUROC of 0.667]{.hl}. BERTurk's own top-label probability, on the same 2,000
 documents, scores **0.843** across 1,325 distinct values. Both models are
-somewhat able to flag their own mistakes; the trained one is substantially
-better at it and gives you a dial rather than a switch.
+somewhat able to flag their own mistakes; the trained one is better at it and
+gives you a dial rather than a switch.
+
+Read that gap with one caveat, because the chapter has already told you the
+reason and not drawn the consequence. AUROC awards half credit on ties, and
+77.45% of the LLM's documents share a single confidence value — so roughly
+three-fifths of all document pairs are ties for it, and none are for BERTurk.
+Part of 0.667-against-0.843 is a worse signal and part of it is a *coarser* one,
+and this comparison does not separate them. The practical conclusion survives
+either way — nine values give you a switch, 1,325 give you a dial — but do not
+read the gap as "the LLM's confidence is 0.18 of AUROC worse".
 
 The one useful split is real, though: at stated confidence ≥ 95 the model is
 right 95.56% of the time (n = 1,599), and below 95 it is right 82.54%
@@ -1927,20 +2085,35 @@ BERTurk  2,000 labels  vs  qwen3.6:35b-a3b 8-shot       -0.08 [ -3.78,  +3.61]  
 BERTurk 40,000 labels  vs  qwen3.6:35b-a3b 8-shot       +4.73 [ +1.56,  +7.90]   p = 0.0028
 ```
 
-[At 2,000 labels the fine-tuned encoder and the best prompted model are a dead
-heat — a difference of 0.08 macro-F1 points, p = 0.97.]{.hl} At 1,000 labels the
-LLM wins by 8.79 points and the result is not close. At 40,000 the encoder wins
-by 4.73 and that result is not close either.
+[At 2,000 labels the fine-tuned encoder and the best prompted model are
+**statistically indistinguishable at this sample size**.]{.hl} That is a weaker
+claim than a tie, and the interval says how much weaker. With 126 complaints in
+the subsample the paired standard error is 1.89 macro-F1 points, so this design
+can only rule out differences larger than about **3.2 points** (the 90% interval
+runs $[-3.18, +3.02]$, which is what an equivalence test would work with) and
+has 80% power only against differences above **5.3 points**. Read the 2,000-label
+row as *we could not tell them apart*, not as *they are the same*: a genuine
+equivalence claim at, say, ±1 point would need roughly ten times this many
+documents at this class balance. Note also that our own +4.73 at 40,000 labels
+sits *below* that 80%-power threshold — it reached significance, but the design
+was not built to guarantee it would.
+
+At 1,000 labels the LLM wins by 8.79 points and the result is not close. At
+40,000 the encoder wins by 4.73 and that result is not close either.
 
 So the crossover on this task sits at roughly **2,000 labelled documents**, and
-the useful way to hold it is as three regimes rather than a verdict:
+the useful way to hold it is as three regimes rather than a verdict — plus a
+fourth option that the "prompt or fine-tune" framing hides:
 
 - **Under ~1,000 labels.** Prompt. The encoder has not yet learned what a
   complaint is — at 500 labels it scores 59.47 macro-F1 on this subsample
   against the majority baseline's 48.37, catching 14.29% of complaints — and no
   *learning-rate sweep* changes that. A different recipe might: `setfit`
-  (@sec-classification-tools) is built for exactly this budget and we did not
-  measure it, which is the honest boundary of this bullet.
+  (@sec-classification-tools) is contrastive fine-tuning of a sentence encoder
+  plus a logistic head, it is built for exactly this budget, and it routinely
+  reports usable macro-F1 from 8–64 examples per class
+  [@tunstall2022setfit]. We did not measure it, and running it at 200, 500 and
+  1,000 labels is the single measurement most likely to change this bullet.
 - **Around 2,000.** Genuinely a coin flip on quality. Decide on cost, latency,
   operational control, and whether you need a threshold. All four of those point
   the same way, which is the subject of the next subsection.
@@ -1949,6 +2122,18 @@ the useful way to hold it is as three regimes rather than a verdict:
   becomes decisive is interpolation from the encoder's own learning curve, not a
   measurement. What is measured is the direction, and that the encoder is the
   only one of the two that hands you a score.
+- **The option this framing leaves out.** You do not have to choose between
+  paying the prompted model forever and labelling by hand. Spend it *once*:
+  label your unlabelled pool with the big model, then fine-tune the encoder on
+  those labels — the LLM as annotator, the encoder as student
+  [@hsieh2023distilling; @gilardi2023chatgpt]. Our own numbers price it. At
+  352.6 seconds per thousand documents, labelling all 40,000 is under four hours
+  of laptop GPU, and what it buys is a student that serves **142× cheaper** *and*
+  hands back the score, the ROC curve and the threshold that
+  @sec-classification-llm is about to show prompting takes away. The labels are
+  noisy, so the ceiling is the teacher's 81.56 rather than a human annotator's;
+  whether the student closes that gap is exactly the measurement we did not
+  make, and it is the one we would make first.
 
 This is consistent with the published picture rather than a contradiction of it.
 Edwards and Camacho-Collados found fine-tuning ahead by 0.119 micro-F1 with full
@@ -2159,8 +2344,8 @@ you *what* it is wrong about, and that is the question that decides whether you
 ship. This section is the habit: after the metrics, read the mistakes.
 
 We compare the two *trained* models at the operating points already chosen —
-tf-idf at $t = 0.834$ on the satisfied side, which is $0.166$ on the complaint
-side, and BERTurk at 40,000 labels read at $0.5$. On the 10,000-document test
+tf-idf at $t = 0.166$ on the complaint side, and BERTurk at 40,000 labels read
+at $0.5$. On the 10,000-document test
 set that is 373 complaints caught out of 632 for tf-idf against 452 for BERTurk,
 at 57.38% and 72.32% precision.
 
@@ -2441,7 +2626,7 @@ AUC is 93.24 *both* before and after. Those two statistics depend only on the
 order the model puts documents in. Identical to four significant figures means
 the model is byte-for-byte the same; all that changed is where we cut.
 
-The cheat would be picking 0.834 by sweeping thresholds on the test set. That is
+The cheat would be picking 0.166 by sweeping thresholds on the test set. That is
 why every threshold in this chapter is chosen on the 8,000-document `cal` slice
 and only then applied to test. The chapter does report test-swept thresholds —
 labelled **oracle** — but only as an upper bound to measure regret against, never
@@ -2552,8 +2737,12 @@ Treat any page claiming to list "the questions company X asks" as marketing.
    undersampling, SMOTE and class weights. The better answer starts by asking
    what breaks, because the answer is usually the *threshold*, not the model.
    Give the measurement: on a 6.32% minority class, moving one threshold reached
-   77.66 macro-F1 against 76.09 for class weights, 74.72 for SMOTE and 62.98 for
-   undersampling, with no refit and no extra rows. Then note that SMOTE was
+   77.66 macro-F1 against 76.09 for class weights, 77.63 for oversampling, 74.72
+   for SMOTE and 62.98 for undersampling — with no refit and no extra rows. Then
+   give the caveat, because it is the part that shows you understand the design:
+   only the threshold arm was tuned, and average precision says a tuned
+   oversampling arm would probably edge ahead. The finding is that the threshold
+   is *free*, not that it is best. Then note that SMOTE was
    evaluated on nine low-dimensional dense numeric datasets and that its authors
    listed text as future work [@chawla2002smote] — that is the sentence that
    shows you read the paper rather than the blog post about it.
@@ -2582,8 +2771,11 @@ Treat any page claiming to list "the questions company X asks" as marketing.
    how much held-out data you have: Niculescu-Mizil and Caruana found Platt ahead
    below roughly 200–1,000 calibration points and isotonic level or better above
    that [@niculescu2005predicting]. Name the size of your calibration set. Ours
-   is 8,000, and isotonic won 0.69 to 0.94 — consistent with their finding, which
-   is why we can say it rather than assume it.
+   is 8,000, and isotonic came out at 0.69 against Platt's 0.94 — a gap inside
+   our own estimator's noise, so what we can say is that **both are adequate at
+   this calibration-set size**, which is what their result predicts. Saying
+   "isotonic won" would be reading a quarter of a point off a statistic whose
+   floor is half a point.
 
 5. **How would you pick the decision threshold for a production classifier?**
    Never 0.5 by default. Get a cost ratio from whoever owns the consequences,
@@ -2600,8 +2792,11 @@ Treat any page claiming to list "the questions company X asks" as marketing.
    fine-tuned BERTurk by **8.79 macro-F1 at 1,000 labels**, tied it to **0.08
    points at 2,000** ($p = 0.97$), and lost by **4.73 at 40,000** — all paired-
    bootstrapped on the same 2,000 documents. Then price the tie: the encoder
-   classifies a document **142× cheaper**, so a dead heat on quality is not a
-   dead heat. The part most candidates miss is the third axis. A zero-shot model
+   classifies a document **142× cheaper** *in this arrangement* — a batched
+   encoder against a single-stream 4-bit local server, which is the comparison a
+   small team actually faces; a properly batched hosted API narrows the gap
+   without changing the per-token arithmetic underneath — so a dead heat on
+   quality is not a dead heat. The part most candidates miss is the third axis. A zero-shot model
    returns the *word* `ŞİKAYET`, so you give up the ROC curve, the calibration
    map, the cost-derived threshold and the sweep — every instrument in this
    chapter. Our best prompted run sat at 56.98% precision and 80.95% recall and
@@ -2622,6 +2817,24 @@ Treat any page claiming to list "the questions company X asks" as marketing.
    complaints will systematically under-flag on a stream that runs at 15%. Then
    check for leakage into the offline number, and specifically whether any
    threshold or calibrator was fitted on the evaluation set.
+
+### What carries over to more than two classes
+
+Everything in this chapter is binary, and that is a choice rather than an
+oversight: imbalance, thresholds and costs are clearest with one cut. Say which
+parts move.
+
+Three things carry over unchanged: **macro-F1**, the **majority-class floor**,
+and reading your errors sorted by confidence. Two change shape. A single
+threshold becomes **one threshold per class**, each tuned on `cal`, and Elkan's
+formula becomes an argmin over a full $K \times K$ cost matrix,
+$\hat{y} = \arg\min_i \sum_j p_j C_{ij}$. Calibration changes most: Platt and
+isotonic are binary maps, so multi-class needs either one-vs-rest calibration or
+a matrix- or vector-scaling variant — and this is the setting where the
+top-label ECE of @guo2017calibration finally becomes the natural statistic
+rather than a simplification. Multi-label is a third case again: $K$ independent
+binary problems with $K$ independent thresholds, and a macro-F1 averaged over
+labels whose base rates may differ by two orders of magnitude.
 
 ## The 2026 toolbox {#sec-classification-tools}
 
@@ -2647,6 +2860,7 @@ Worth knowing about, not used above:
 | library | current version | when you would reach for it |
 |:--|:--|:--|
 | `setfit` | 1.1.3 | the contrastive few-shot recipe of @tunstall2022setfit as one object. The right first try when you have tens of labels per class rather than hundreds |
+| ModernBERT and its multilingual descendants | 2025–2026 | the encoders to try *before* BERTurk on a new project [@warner2025modernbert] — same fine-tuning recipe, rotary embeddings, an 8,192-token context and markedly faster training |
 | `sentence-transformers` | 5.7.0 | frozen embeddings plus a linear head — often within a point or two of full fine-tuning at a fraction of the training cost |
 | `peft` / `accelerate` | 0.20.0 / 1.14.0 | LoRA and distributed training when the encoder no longer fits the way it did here (@sec-post-training) |
 | `netcal` | 1.4.0 | calibration methods and diagrams beyond what `scikit-learn` ships, including binning and beta calibration |
@@ -2857,13 +3071,14 @@ the chapter you need rather than a bigger encoder.
   the distance is usually small enough to be embarrassing.
 - **A threshold is a free 19 points.** The identical fitted model — the same
   coefficients, byte for byte — goes from **58.24 to 77.66 macro-F1** because we
-  compared its score against 0.834 instead of 0.5. Average precision stayed at
+  flagged at 0.166 instead of 0.5. Average precision stayed at
   60.30 and AUC at 93.24 through the change, which is the proof that nothing
   about the model moved.
 - **Try the threshold before you touch the data.** Across five imbalance
-  treatments, moving the cut (77.66) matched or beat oversampling (77.63),
-  class weighting (76.09) and SMOTE (74.72), and undersampling actively
-  destroyed the model (62.98, average precision down from 60.30 to 52.49
+  treatments, moving the cut reached 77.66 against oversampling's 77.63, class
+  weighting's 76.09 and SMOTE's 74.72 — at zero training cost, and with only the
+  threshold arm tuned, so read it as *the same operating point for free* rather
+  than as a win. Undersampling actively destroyed the model (62.98, average precision down from 60.30 to 52.49
   because 87.4% of the training rows were thrown away). @elkan2001foundations,
   who is routinely cited *in support of* rebalancing, argues the opposite: learn
   from the data as given, then compute the decision.
@@ -2910,8 +3125,10 @@ the chapter you need rather than a bigger encoder.
   paired bootstrap resamples of the *difference*.
 - **LLM folklore is true for weak models and noise for strong ones.** Writing
   the instruction in English was worth **+16.90** macro-F1 on a 3B model and
-  **+0.54** ($p = 0.54$) on a 9B one; eight examples were worth **+7.17** on
-  `gemma3:27b` and **+0.51** ($p = 0.62$) on `qwen3.6:35b-a3b`. Both rules were
+  **+0.54 (95% interval up to +2.25)** on a 9B one; eight examples were worth
+  **+7.17** on `gemma3:27b` and **+0.51 (up to +2.48)** on `qwen3.6:35b-a3b`.
+  Quote the intervals rather than the p-values: what the strong-model runs
+  establish is a ceiling of two-and-a-half points, not a zero. Both rules were
   real once. Re-measure them on the model you are shipping.
 - **Prompting costs you the threshold.** Every prompted run here was
   recall-biased on the minority class — the best reached 56.98% precision at
@@ -2928,7 +3145,7 @@ the chapter you need rather than a bigger encoder.
 - **The ensemble opportunity is real and usually unaffordable.** The best LLM
   and BERTurk disagree on 94 of 2,000 documents, and an oracle picking the winner
   each time would gain 5.81 macro-F1 points. Collecting them means paying 142×
-  more per document. Cross-tabulate to find the opportunity; price it before you
+  more per document in the arrangement we measured. Cross-tabulate to find the opportunity; price it before you
   believe in it.
 - **Replacing a model is a trade.** BERTurk fixes 332 test documents and breaks
   149 that tf-idf handled — a net 183, or 1.83 accuracy points. Build the
@@ -2958,6 +3175,7 @@ the chapter you need rather than a bigger encoder.
   majority-class baseline, because a reasoning model spent its 24-token budget
   inside a `thinking` field the parser never read, and every unparseable answer
   fell through to the majority label. A bad number gets investigated; a good one
-  gets published. Design against that asymmetry — abort on a low parse rate,
-  smoke-test before the overnight queue — because your own scepticism will not
-  fire when the result is what you hoped for.
+  gets published. Design against that asymmetry — never impute a label on a parse
+  failure, abort on a low parse rate, smoke-test before the overnight queue —
+  because your own scepticism will not fire when the result is what you hoped
+  for.
