@@ -4,6 +4,9 @@
 **Chapter status: drafted.** One small local measurement — a contradiction
 probe on `qwen3.5:9b` through `ollama` 0.24.0, short prompts, minutes to run —
 plus published results where the question needs scale this book cannot supply.
+The probe is greedy and one sample per item, so the only sampling noise left is
+the thirty-item draw itself; the three prompt templates and the bucketing rule
+are what a reproduction needs and are not yet published alongside it.
 @sec-context-engineering covers what happens *within* a run; this chapter is
 about what survives *between* them. Software: NumPy 2.5.2 on Python 3.14.5.
 :::
@@ -108,9 +111,15 @@ What gets remembered is a policy, and if you do not choose one you have chosen
 |:--|:--|:--|
 | **Rule-based** | you write the extractor: these fields, from these events | [predictable and auditable]{.pro}; the right default for anything that matters |
 | **Model-decided** | the agent calls a `remember` tool when it judges something durable | flexible, and it will remember things you would not have — including things it should not |
-| **User-confirmed** | the system proposes, the person approves | [highest precision and the only one that gives real consent]{.pro}; costs a interaction each time |
+| **User-confirmed** | the system proposes, the person approves | [highest precision and the only one that gives real consent]{.pro}; costs an interaction each time |
 
 : Three write policies {tbl-colwidths="[20,44,36]"}
+
+There is a second axis the table does not have, and it decides your security
+posture rather than your precision: **what can reach this write path**.
+Rule-based writes only what you named. User-confirmed writes only what a person
+approved. Model-decided writes anything the model read — including tool output
+and any document it was handed.
 
 Three rules that survive contact with production:
 
@@ -128,6 +137,18 @@ think this about me* — which is a question you will be asked.
 stated three times are different things. The cheapest useful policy is a
 confirmation threshold: write on the second occurrence, or on an explicit
 statement, and not on an inference.
+
+**Never write attacker-controlled text as a fact.** This is the rule the other
+three do not imply, and it is the one that makes memory qualitatively worse
+than a bad prompt rather than the same problem again. A `remember` tool the
+model can call *after reading a web page, a document, or a support ticket* is a
+write path an attacker reaches without an account on your system: they put the
+sentence in the content, the model judges it durable, and it survives every
+later session. A one-shot injection becomes a permanent one, which is the
+sentence @sec-agent-security picks this chapter up on. The mitigation is the
+provenance field you already have — record the `source`, refuse writes whose
+source is retrieved content rather than a person's statement, and never let a
+recalled memory carry instructions into a system prompt.
 
 ::: {.column-margin}
 The failure mode of remembering everything is not storage cost — storage is
@@ -149,13 +170,20 @@ three conditions with identical facts. Scored on whether the answer matches
 the **newer** value. Half the items list the newer fact first, so position is
 separated from recency.
 
+**Scoring.** Every answer goes in exactly one of three buckets, so the columns
+sum to 100% of the thirty items: *newer* if it names the July value and only
+that, *older* if it names the March value and only that, *hedged* if it names
+both, neither, or refuses. The 0.0% in the bare row is 0 of 30, not a rounded
+small number.
+
 ```text
 qwen3.5:9b, 30 contradictions per condition, n = 30
+paired: the same thirty items run through all three conditions
 
  condition     chose newer   95% CI        hedged   newer listed first / last
- bare                 0.0%   [ 0.0, 11.4]   83.3%          0.0%  /   0.0%
- dated               33.3%   [19.2, 51.2]   66.7%         33.3%  /  33.3%
- dated+rule          83.3%   [66.4, 92.7]   16.7%         66.7%  / 100.0%
+ bare            0/30  0.0%   [ 0.0, 11.4]   83.3%          0.0%  /   0.0%
+ dated          10/30 33.3%   [19.2, 51.2]   66.7%         33.3%  /  33.3%
+ dated+rule     25/30 83.3%   [66.4, 92.7]   16.7%         66.7%  / 100.0%
 ```
 
 Three things, in order of how much they should change what you build.
@@ -171,9 +199,35 @@ sentence — *when facts conflict, use the most recently recorded one* — took 
 to 83.3%. That is a large, cheap improvement and it is still one answer in six
 going the other way.
 
+Both steps are larger than three overlapping intervals can show, because the
+three conditions ran on the *same* thirty items and the comparison between
+them is therefore paired. Nothing was correct in `bare`, so the bare-to-dated
+step has ten discordant pairs all in one direction: McNemar's exact test gives
+p = 0.002. The dated-to-rule step adds fifteen net, and across every split of
+the discordant pairs consistent with those margins the exact p runs from
+6 × 10⁻⁵ to 0.004. The Wilson intervals in the table size each proportion;
+they are not the test of the difference.
+
+**The rule interacts with position, and that is the least comfortable number
+here.** In the `dated+rule` condition the model was right on 15 of 15 items
+where the newer fact was listed *last*, and on 10 of 15 where it was listed
+*first* — 100% against 66.7%, two-sided Fisher exact p = 0.042. In `bare` and
+`dated` the split is flat (0/0 and 33.3/33.3), so this is not a general
+position effect; it appears only once the rule is there. Read conservatively,
+an explicit rule buys somewhere between two thirds and all of it, depending on
+an ordering you did not think you were choosing. Which is one more argument for
+the conclusion below: resolve in retrieval, inject one fact, and there is no
+ordering left to get wrong.
+
 [Conflict resolution belongs in your retrieval code, not in your prompt.]{.hl}
 Resolve before you inject: return one fact, the one your policy chose, and the
-model has nothing to be inconsistent about.
+model has nothing to be inconsistent about. That is also the design the
+published systems converged on. @rasmussen2025zep builds the store on a
+bi-temporal graph and *invalidates* the superseded edge when a fact changes, so
+the agent is never handed both; @chhikara2025mem0 makes extraction,
+consolidation and the update policy the library's job rather than the prompt's.
+This measurement is a small local argument for an architecture other people
+arrived at from the other direction.
 
 **The default behaviour is hedging, not lying.** In the bare condition the
 model picked the *older* fact 16.7% of the time and gave both or neither
@@ -501,8 +555,8 @@ Worth knowing about, not used above:
 | library | current version | when you would reach for it |
 |:--|:--|:--|
 | `letta` | 0.16.8 | self-managed memory paging, the MemGPT lineage |
-| `mem0ai` | 2.0.19 | extraction, update and conflict policies as a library |
-| `zep-python` | 2.0.2 | temporal knowledge-graph memory, when *when* matters as much as *what* |
+| `mem0ai` | 2.0.19 | extraction, update and conflict policies as a library [@chhikara2025mem0] |
+| `zep-python` | 2.0.2 | temporal knowledge-graph memory, when *when* matters as much as *what* [@rasmussen2025zep] |
 | `langmem` | 0.0.30 | memory primitives for LangGraph agents |
 | `pgvector` | 0.5.0 | episodes in the database that already holds your facts — usually the right answer |
 
@@ -591,6 +645,8 @@ episode. If facts are living in a vector index, you have found your first task.
 | topic | source |
 |:--|:--|
 | an agent that pages its own memory | @packer2023memgpt |
+| extraction, consolidation and update as a library | @chhikara2025mem0 |
+| invalidating a superseded fact instead of storing both | @rasmussen2025zep |
 | what a long context does and does not retain | @hsieh2024ruler; @modarressi2025nolima |
 | retrieval quality as memory grows | @thakur2021beir |
 | the loop this all hangs from | @yao2023react |
