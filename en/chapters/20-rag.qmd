@@ -85,16 +85,41 @@ possible version of the task: one verbatim string, a distinctive key
 (`ZRG-14`), a numeric answer, and a question that repeats the key exactly.
 Attention is *extremely* good at that.
 
-@liu2024lost's effect appears when the
-model has to do more than locate a string — multi-document question answering,
-where the relevant passage must be identified on meaning rather than matched on
-a rare token, and at context lengths well beyond these. Their measurements were
-also taken on a 2023 generation of models, and long-context handling is
-precisely the thing that has had the most engineering attention since.
+This is not just my intuition about my own test; the controlled version has
+been run. @modarressi2025nolima removed the literal lexical overlap between the
+question and the needle and measured what happens: of thirteen models claiming
+128K support, eleven fell below half their short-context baseline at 32K, and
+GPT-4o dropped from 99.3% to 69.7%. A needle you can match on a token is a
+different task from a needle you have to infer, and `ZRG-14` is about as
+matchable as a needle gets.
+
+Be careful with @liu2024lost too, in the other direction. That paper contains
+*two* experiments, and only one is multi-document question answering. The other
+is key–value retrieval over UUIDs — a pure string lookup with no semantic cue
+at all, which is structurally the test I built — and there the U-shape appeared
+for some models and not for others. So a flat result on one 9B model is not a
+contradiction of that paper; it sits inside the variance the paper itself
+reports. What the multi-document half adds is the harder condition, where the
+relevant passage must be identified on meaning rather than matched on a rare
+token, and that is where the effect is most robust.
+
+Note that context length is not the difference between us: their
+multi-document setting tops out at 30 hundred-word passages, roughly 4,000
+tokens, which is a quarter of my longest condition. The difference is the
+needle, not the haystack. Their measurements were also taken on a 2023
+generation of models, and long-context handling is precisely the thing that has
+had the most engineering attention since.
+
+One caveat the table cannot show. With 40 queries per cell, a perfect score has
+a 95% Wilson lower bound of **91.2%** — so this design can rule out the
+thirty-point mid-context collapse @liu2024lost reported, and cannot rule out an
+eight-point one. The claim is "no *large* positional effect", not "no positional
+effect".
 
 So the honest statement of what I measured is narrow, and I would rather write
 the narrow true thing than the wide familiar one: **on this model, at up to
-16,775 tokens, with a lexically easy needle, position did not matter at all.**
+16,775 tokens, with a lexically easy needle, no positional effect large enough
+for forty queries per cell to see.**
 
 If your retrieval task looks like that, stop worrying about position. If it
 does not, this table tells you nothing about your case — and the way to find
@@ -113,9 +138,20 @@ the measurement actually lands.
 ```
 
 [The cost of not retrieving is not that the model gets it wrong. It is that
-you pay 148 times over to be equally right.]{.hl} You pay it on every request,
-forever, and attention cost grows faster than linearly in sequence length, so
-the latency bill grows faster than the token bill.
+you pay 148 times over to be equally right.]{.hl} You pay it on every request
+that cannot be served from a cache, and attention cost grows faster than
+linearly in sequence length, so the latency bill grows faster than the token
+bill.
+
+**Prompt caching is the honest rebuttal to that number and it deserves stating
+plainly.** A stable corpus prefix can be cached: cached input is typically
+billed at around a tenth of fresh input and the prefill is skipped. That turns
+148× into something nearer 15× — smaller, still not free, and available only
+while the prefix does not change, which is exactly the case retrieval exists
+for. Note also that the 113-token baseline assumes *perfect* retrieval of
+exactly one document; a real system passes $k$ chunks and pays to build and
+query an index. The two structural arguments below are the ones caching does
+not touch.
 
 That reframes the whole chapter. Retrieval is not a workaround for a model that
 cannot read long inputs — this one reads them fine. Retrieval is [how you stop
@@ -323,11 +359,42 @@ sentence-aligned ~200w       7,674    162   69.5%   88.5%   77.9    97.2%  100.0
 
 ### What it says
 
-[The best chunk size in one condition is the worst in the other.]{.hl} 400-word
-chunks lead condition A at **72.5%** and come last in condition B at **93.8%**.
-Fifty-word chunks are last in A at **57.0%** and near the top of B at **96.5%**.
-The two columns are not noisy versions of one ranking; they are close to
-opposite orderings of the same eleven systems.
+Four things bound this table before any of it can be read, and all four are
+properties of the design rather than of chunking.
+
+**The sweep is narrower than eleven rows suggest.** The mean article is 366
+words, so a 400-word window leaves most articles intact — 4,074 chunks from
+3,397 articles — and `fixed 400w` is close to a noisy copy of `whole article`.
+The range actually swept is 50 to 200 words.
+
+**Rank is not a fair axis when the units differ in size.** At rank 1 the
+whole-article index hands the generator 366 words and the 50-word index hands
+it 51, so part of condition A's ordering is simply *more text wins*. The
+comparison the table is missing is recall at an equal word budget — whole
+article at $k{=}1$ against 200w at $k{=}2$, 100w at $k{=}4$, 50w at $k{=}7$.
+Note which way that cuts: condition B's 50-word index already beats the
+400-word one with a *sixth* of the text, so equalising the budget would
+strengthen that finding, not weaken it.
+
+**Recall@5 is not deduplicated by article.** Five chunks from a 50-word index
+can be five slices of one document; five chunks from the whole-article index
+are necessarily five different documents. Fine-grained indexes are therefore
+penalised at rank 5 for spending their slots well, and an unknown part of the
+ten-point R@5 gap in condition A is that artefact rather than chunking.
+
+**And $n = 400$ per condition, so a 95% interval is about ±4.6 points in A and
+±1.9 in B.** Differences smaller than that are not distinguishable here. The
+queries are shared across all eleven systems, so a paired McNemar test could be
+computed from the existing data and is the right instrument; we report the
+unpaired numbers, which is the weaker choice.
+
+With those in hand: [the best chunk size in one condition is the worst in the
+other.]{.hl} Chunks at or above article length lead condition A — 72.5% and
+71.8%, indistinguishable from each other — and come last in condition B at
+93.8%. Fifty-word chunks are last in A at **57.0%** and near the top of B at
+**96.5%**. That is a 15-point swing in A and a reversal in B, both well outside
+the intervals above. The two columns are not noisy versions of one ranking;
+they are close to opposite orderings of the same eleven systems.
 
 Ranked side by side, the two columns are hard to mistake for noise:
 
@@ -438,18 +505,26 @@ sides.
 Two more results in that table were not obvious to me before running it.
 
 **Overlap earns its cost, but only for facts.** At 100 words, adding a 25-word
-overlap moved condition B from 95.5% to **97.5%** and condition A from 66.5% to
-65.8% — a real gain where a fact can straddle a boundary, nothing at all where
-the query describes the whole document. So overlap is not a general-purpose
+overlap moved condition B from 95.5% to **97.5%** — 18 errors in 400 down to
+10 — and condition A from 66.5% to 65.8%, which is a fifth of that condition's
+noise band and should be read as no movement at all. So: a gain where a fact
+can straddle a boundary, nothing where the query describes the whole
+document. So overlap is not a general-purpose
 safety margin. It is a specific repair for a specific failure, and if your
 questions are not fact-shaped you are paying 29% more index for no return.
 
-**Structure beat arithmetic, measured.** Sentence-aligned chunks of about 100
-words scored **97.8%** in condition B against fixed 100-word windows' 95.5% —
-and did it with *fewer* chunks than the overlapping variant that came second
-(14,500 against 15,983). Packing whole sentences costs nothing and outperforms
-both the naive split and the padded one, because the boundary it refuses to
-cross is the one that carries the fact.
+**Structure beat arithmetic — with one confound named.** Sentence-aligned
+chunks of about 100 words scored **97.8%** in condition B against fixed 100-word
+windows' 95.5%, and did it with *fewer* chunks than the overlapping variant that
+came second (14,500 against 15,983). One caveat before crediting all of that to
+structure: the sentence-aligned index averages **86** words per chunk against
+the fixed index's **99**, and condition B already rewards smaller chunks.
+Interpolating the fixed-size series, an 86-word *fixed* window would be expected
+somewhere near 95.8%, so roughly two of those 2.3 points look attributable to
+the boundary and the rest to size. A size-matched control — `fixed 86w, no
+overlap` — is the missing row in that table. What survives either way is that
+packing whole sentences costs nothing and beats both the naive split and the
+padded one.
 
 ::: {.column-margin}
 Note what the R@5 and R@10 columns do while R@1 swings by fifteen points: in
@@ -492,8 +567,18 @@ Two document types where fixed-size chunking simply fails:
 
 ### So what should you do?
 
-Measure it, on your corpus, with queries shaped like the ones you will get. But
-if you need a starting point before you have that:
+**One boundary on all of this first: every number above is BM25.** The mechanism
+behind condition B — short chunks winning because they are almost entirely about
+the query — *is* BM25's length normalisation, which is a property of the scorer
+as much as of the cutting. A dense retriever has no length normalisation. It has
+a maximum sequence length that truncates and a mean pooling that dilutes a long
+chunk's signal, and those produce a different optimum. The direction is probably
+similar; the numbers are not transferable, and the pipeline diagram at the top of
+this chapter shows an embedding stage, so a reader is entitled to assume
+otherwise unless we say this.
+
+Measure it, on your corpus, with your retriever, with queries shaped like the
+ones you will get. But if you need a starting point before you have that:
 
 - Chunk on **structure** — sentences, paragraphs, sections, clauses, rows — and
   pack to a target size rather than cutting at one.
@@ -854,6 +939,7 @@ literature is relevant to you.
 | the original formulation | @lewis2020rag |
 | the map of everything since | @gao2023rag |
 | how models use a long context | @liu2024lost |
+| why a literal needle is the wrong test | @modarressi2025nolima |
 | irrelevant context as an active harm | @shi2023large |
 | evaluating the two halves separately | @es2024ragas |
 | deciding whether to retrieve at all | @asai2024selfrag |
@@ -864,14 +950,18 @@ literature is relevant to you.
 
 - **The needle test found nothing, and that is the chapter's first lesson.**
   Sixteen conditions, 640 queries, **100% at every context size and every
-  position** up to 16,775 tokens. Lost-in-the-middle did not reproduce here —
-  because a verbatim string with a rare key is the easiest thing attention can
-  do, not because the phenomenon is imaginary. A benchmark everything passes
-  is not measuring your risk.
-- **What survives is the cost, and it is enormous.** Eighty documents instead
-  of the one that mattered: **148× the input tokens for identical accuracy**,
-  paid on every request, with attention cost growing faster than linearly in
-  sequence length. Retrieval is not a crutch for a model that cannot read; it
+  position** up to 16,775 tokens — with 40 queries per cell, which is enough
+  power to exclude a large positional collapse and not a small one.
+  Lost-in-the-middle did not reproduce here because a verbatim string with a
+  rare key is the easiest thing attention can do, not because the phenomenon is
+  imaginary: @modarressi2025nolima removes the lexical overlap and watches
+  eleven of thirteen long-context models fall below half their short-context
+  baseline. A benchmark everything passes is not measuring your risk.
+- **What survives is the cost, and it is large.** Eighty documents instead of
+  the one that mattered: **148× the input tokens for identical accuracy**, paid
+  on every request that cannot be served from a cache — prompt caching brings
+  that nearer 15×, and only while the prefix is stable — with attention cost
+  growing faster than linearly in sequence length. Retrieval is not a crutch for a model that cannot read; it
   is how you stop paying for 79 documents you did not need.
 - **Two reasons to retrieve are permanent and have nothing to do with window
   size.** The model is frozen and your documents are not, and a prompt cannot
@@ -886,10 +976,12 @@ literature is relevant to you.
   chunks bought **+2.0 points** on fact-level queries and **−0.7** on
   article-level ones, for 29% more index. It fixes facts that straddle a
   boundary and nothing else.
-- **Structure beat arithmetic, measured.** Sentence-aligned chunks of ~100
-  words reached **97.8%** where fixed 100-word windows reached 95.5% — and beat
-  the overlapping variant with a **9% smaller** index. The cheapest way to stop
-  cutting through a fact is to cut where the text already breaks.
+- **Structure beat arithmetic, mostly.** Sentence-aligned chunks of ~100 words
+  reached **97.8%** where fixed 100-word windows reached 95.5% — and beat the
+  overlapping variant with a **9% smaller** index. Roughly two of those points
+  survive controlling for the fact that the sentence-aligned chunks are also
+  smaller (86 words against 99). The cheapest way to stop cutting through a
+  fact is to cut where the text already breaks.
 - **Watch the metric your consumer actually reads.** Recall@1 swung fifteen
   points across these configurations while recall@5 stayed between 97.2% and
   100%. If your generator reads five chunks, the whole chunking table is a
