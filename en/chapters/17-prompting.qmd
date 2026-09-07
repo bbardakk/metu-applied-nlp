@@ -53,12 +53,16 @@ misleading word for it.
 
 [In-context learning](#gloss-in-context-learning){#term-in-context-learning .term-ref}
 is the first of those: you put input-output pairs in the prompt, and the model
-does better on the next input, **with no weight updated and nothing retained
+does better on the next input, **with no parameter updated and nothing retained
 after the call**.
 
-So it is not learning in the sense @sec-post-training uses the word. A better
-description is *task inference*: the examples narrow down which of the many
-tasks the model already knows how to do you are asking for.
+So it is not learning in the sense @sec-post-training uses the word — nothing is
+fitted, nothing persists. That is a claim about the *mechanism*, not about what
+the model can pick up: a mapping it genuinely acquires from the context is still
+acquired from the context, and the next section names exactly that case. A
+useful working description of the common case is *task inference*: the examples
+narrow down which of the many tasks the model already knows how to do you are
+asking for.
 
 That framing predicts something odd, and the prediction holds.
 @min2022rethinking replaced the labels in the demonstrations with **random**
@@ -131,9 +135,12 @@ strongest when it disambiguates *style*, which is a real and frequent need.
 
 **Structure.** Sections, delimiters, an explicit place for the input. The job
 is to make the boundary between your instruction and the user's data
-unambiguous — for the model, and for the injection-safety reasons
-@sec-agent-security covers. `<review>...</review>` is not decoration; it is
-the difference between data and instruction.
+unambiguous. `<review>...</review>` is not decoration; it is what tells the
+model which span is data. Be precise about what it is not: a delimiter *marks*
+that boundary, it does not *enforce* it. Text inside the tags is still text the
+model reads, and a review that closes the tag and issues its own instruction is
+the standard attack — @sec-agent-security is where that is treated as the
+security problem it is, and structure alone is not a defence.
 
 **Demonstrations.** Input-output pairs. The job, per @min2022rethinking, is
 mainly to fix the *format and label space*. Use them when the output shape is
@@ -384,8 +391,10 @@ the prompt decides the answer on           46/150 = 30.7%
 two variants disagree on: median 12.0% of reviews, max 28.7%
 ```
 
-**On three reviews in ten, the answer is determined by the prompt's formatting
-rather than by the review.** Note what that first number is and is not: twelve
+**On three reviews in ten, the answer changed across the twelve tested prompt
+variants.** The review, the model, the temperature and the seed were all held
+fixed, so the prompt is what moved — though "the prompt" here covers role,
+ordering and politeness, not formatting alone. Note what that first number is and is not: twelve
 variants *agreeing* does not mean the agreed answer is right, and this run does
 not report accuracy on the unanimous 104 separately. Add that row when you
 repeat the experiment — it is the difference between "the model has an opinion"
@@ -828,11 +837,17 @@ being readable artefacts, which is a real trade rather than a free win.
 Take a task you actually do — one where you have been iterating on a prompt by
 feel. The lab converts it into something with a version and an error bar.
 
-### Step 1 — freeze fifty items
+### Step 1 — freeze two sets, not one
 
-Label them yourself. Include the failures you already know about; that is what
-makes the set useful rather than decorative. Write them to a file and stop
-editing it.
+Label a **development** set you will iterate on and a **final** set you will
+open once, at the end. Fifty each is a workable minimum. Include the failures
+you already know about; that is what makes them useful rather than decorative.
+Split before you look at anything, write both to files, and stop editing them.
+
+Everything from step 2 to step 5 runs on the development set. Every number you
+report on the development set is a number you selected for, and reporting it as
+your system's accuracy is the mistake this whole chapter is about — you would
+be quoting a score tuned on the set that produced it.
 
 ### Step 2 — measure reproducibility before anything else
 
@@ -851,16 +866,26 @@ that tells you how seriously to take every comparison you have made so far.
 
 ### Step 4 — pick the winner with a paired test
 
-Best against worst, McNemar on the disagreements. Report the number of items
-where they differ, not just the two accuracies.
+Best against worst on the development set, McNemar on the disagreements. Report
+the number of items where they differ, not just the two accuracies — and if you
+picked the pair after seeing all six, correct for the
+$\binom{6}{2} = 15$ comparisons you could have made.
 
 ### Step 5 — rewrite the winner as a specification
 
-Output contract, explicit failure value, constraints near the end. Re-run.
-Report whether the score moved and whether the *parse* failures went to zero,
-which is usually the larger win.
+Output contract, explicit failure value, constraints near the end. Re-run on
+the development set. Report whether the score moved and whether the *parse*
+failures went to zero, which is usually the larger win.
 
-### Step 6 — put it under version control and break it on purpose
+### Step 6 — open the final set, once
+
+Run the prompt you chose on the set you have not touched, and report *that*
+number as your system's accuracy with an interval on it. Expect it to be lower
+than the development figure; the gap is what your iteration cost you in
+optimism, and it is worth knowing. If you go back and change the prompt after
+seeing it, you have spent the set and need a new one.
+
+### Step 7 — put it under version control and break it on purpose
 
 Template with slots in a file, version string logged with each output. Then
 make a semantically empty edit — reorder two sentences — and run the
@@ -941,8 +966,10 @@ will land differently once you have seen your own spread.
 
 ## What to remember {#sec-prompting-summary}
 
-- **In-context learning is task inference, not learning.** No weight changes
-  and nothing survives the call. @min2022rethinking randomised the labels in
+- **In-context learning updates no parameters.** Nothing is fitted and nothing
+  survives the call, which is why *task inference* describes the common case
+  better than *learning* — with the caveat below that task learning is real and
+  grows with scale. @min2022rethinking randomised the labels in
   the demonstrations and most of the benefit remained, which says examples
   mainly convey format and label space rather than the mapping.
 
@@ -951,16 +978,18 @@ will land differently once you have seen your own spread.
   model and one task — 75.33% to 90.00%. That is not a writing difference; it
   is a component with an effect size.
 
-- **On 30.7% of items, the prompt decided the answer.** All twelve variants
-  agreed on only 69.3% of the reviews; two variants disagreed on a median of
-  12% and as much as 28.7%. Your model has an opinion on most items and the
-  formatting decides the rest.
+- **On 30.7% of items, the answer changed across the twelve variants.** All
+  twelve agreed on only 69.3% of the reviews; two variants disagreed on a
+  median of 12% and as much as 28.7%. Your model has a stable answer on most
+  items and the prompt moves the rest.
 
 - **The spread is real, and paired testing is how you show it.** Best against
   worst: overlapping confidence intervals, 42 disagreements, McNemar
-  **$p = 0.0009$**. Comparing two accuracies would have called it
-  inconclusive; the pairing throws away the 108 items that carry no
-  information and finds the signal.
+  **$p = 0.0009$** — but that pair was chosen after seeing the data, so the
+  number to quote is the one corrected for all 66 pairs, **$p = 0.062$**.
+  Comparing two accuracies would have called it inconclusive; the pairing finds
+  a signal the unpaired test cannot, and the correction says how much of it to
+  believe.
 
 - **Which means a single-prompt model comparison is unreliable.** If prompt
   variance is 14.67 points, "model A beat model B by 5" measured with one

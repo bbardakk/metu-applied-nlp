@@ -229,7 +229,7 @@ Alışıldık kontroller ve her birinin bedeli:
 | kontrol | ne yapar | neyi bozar |
 |:--|:--|:--|
 | Örnekleme (top-p, min-p) | bazen argmax olmayan bir token alır, döngüyü kırar | bir çıkarım görevinde istemeyeceğiniz çeşitlilik |
-| Tekrar cezası | zaten kullanılmış her token'ın logit'ini böler | meşru biçimde tekrarlanan kelimeleri cezalandırır — adlar, teknik terimler, `null` |
+| Tekrar cezası | zaten kullanılmış her token'ın logit'ini $-\infty$ yönünde yeniden ölçekler — pozitifken bölerek, negatifken çarparak (aşağıya bakın) | meşru biçimde tekrarlanan kelimeleri cezalandırır — adlar, teknik terimler, `null` |
 | No-repeat n-gram | zaten üretilmiş her n-gram'ı yasaklar | gerçek tekrarlanan öbekleri yasaklar; `{"type":` gibi ifadelerin tekrarlandığı yapılandırılmış çıktıda yıkıcıdır |
 | Varlık cezası | zaten görülmüş her token'dan sabit bir miktar çıkarır | ikili; bir kez geçmek on kez geçmekle aynı maliyette |
 | Frekans cezası | kaç kez geçtiğiyle orantılı bir miktar çıkarır | her tekrarla tırmanır, bu yüzden uzun çıktılar kayar |
@@ -264,12 +264,19 @@ Yukarıdakilerin hepsi bütün sözlük üzerindeki bir dağılımı yeniden bi�
 [Kısıtlı çözümleme](#gloss-constrained-decoding){#term-constrained-decoding .term-ref}
 daha katı bir şey yapar: her adımda bir gramere göre hangi token'ların çıktıyı
 yasal olarak sürdürebileceğini hesaplar ve diğerlerinin logit'lerini
-$-\infty$ yapar. Geçersiz çıktı olası olmayı bırakır ve **erişilemez** olur.
+$-\infty$ yapar. Geçersiz çıktı olası olmayı bırakır ve **erişilemez** olur — o
+kelimeye üç koşul iliştirerek. Şema, kütüphanenin gerçekten desteklediği bir şema
+olmalı; desteklenmeyen anahtar kelimeler genellikle dayatılmak yerine yok sayılır.
+Üretimin *bitmesi* gerekir: token sınırına takılan, zaman aşımına uğrayan ya da
+bağlantısı kopan bir koşu, o ana kadar yasal ama belge olarak geçersiz bir ön ek
+bırakır. Ve bir gramer yapıyı kısıtlar, anlamı değil; zorunlu bir alan makul bir
+uydurmayla doldurulabilir. Sonucu yine de ayrıştırıp doğrulayın; garanti çok şey
+kazandırır ve "artık kontrol etme" demek değildir.
 
 ::: {#gloss-constrained-decoding .column-margin .term-gloss}
 **kısıtlı kod çözme** (constrained decoding) — her adımda logit'leri bir
-gramerin izin verdiği token'lara maskelemek. Çıktının *biçimini* garanti eder ve
-doğru olup olmadığı hakkında hiçbir şey söylemez.
+gramerin izin verdiği token'lara maskelemek. *Tamamlanmış* bir üretimin
+*biçimini* garanti eder ve doğru olup olmadığı hakkında hiçbir şey söylemez.
 [↩](#term-constrained-decoding){.term-back}
 :::
 
@@ -348,9 +355,13 @@ doğru varsayılan odur ve onu kullandığınızı bilmeye değer.
 
 ::: {.fig-cap}
 Makine, tokenizer'ın sözlüğü üzerinde bir sonlu durum makinesidir
-[@willard2023efficient]: JSON Schema'yı (ya da regex'i, ya da CFG'yi) bir otomata
-derleyin, hangi durumda olduğunuzu izleyin ve her durum için izin verilen sonraki
-token kümesini önceden hesaplayın. @geng2023grammar genel yapılandırılmış NLP
+[@willard2023efficient]: regex'i — ya da iç içe geçmesi sınırlı bir JSON
+Schema'yı — bir otomata derleyin, hangi durumda olduğunuzu izleyin ve her durum
+için izin verilen sonraki token kümesini önceden hesaplayın. Genel bir bağlamdan
+bağımsız gramer (CFG) sonlu durum makinesine *sığmaz*, çünkü sınırsız iç içe
+geçme bir yığın gerektirir; CFG kabul eden kütüphaneler bunun yerine artımlı bir
+ayrıştırıcı (yığınlı otomat) koşturur — adım başına daha pahalıdır ve karşılığında
+keyfî özyineleme verir. @geng2023grammar genel yapılandırılmış NLP
 görevleri için aynı fikirdir.
 :::
 ::::
@@ -559,12 +570,14 @@ Sağlam olan bulgu bu.
 İnsanların aktardığı ise en alt kutu ve genellikle gördüğünden fazla ihtiyat
 hak ediyor: 15'te 5 doğru, yani %33,3'lük bir nokta kestirimi ve $[15, 58]$
 aralığı. O aralık %50'yi içeriyor; dolayısıyla bu, "şansın altında" iddiasını
-kurmuyor. Kurduğu şey zaten operasyonel olan nokta: **0,5'e yakın bir logprob
-kullanılabilir hiçbir bilgi taşımıyor** — tekrarlanacak sürüm de bu.
+kurmuyor. Kurduğu şey zaten operasyonel olan nokta: **0,5'e yakın bir etiket
+olasılığı kullanılabilir hiçbir bilgi taşımıyor** — tekrarlanacak sürüm de bu.
+(Model bir log olasılık bildirir; 0,5 olasılıktır ve log cinsinden yaklaşık
+$-0{,}69$ eder. Eşiklemeden önce çevirin.)
 
-[0,5'e yakın bir logprob "yarısı doğru" anlamında "yazı tura" demek değildir;
-sayının size hiçbir şey söylemediği anlamına gelir.]{.hl} Sayıyı bir olasılık
-olarak okumayın.
+[0,5'e yakın bir etiket olasılığı "yarısı doğru" anlamında "yazı tura" demek
+değildir; sayının size hiçbir şey söylemediği anlamına gelir.]{.hl} Sayıyı
+kalibre bir olasılık olarak okumayın.
 
 Çaba sırasına göre iki çözüm. **Sıcaklık ölçekleme** [@guo2017calibration],
 ayrılmış bir dilimde tek bir skaler $T$ uyduruyor ve logit'leri ona bölüyor —
@@ -589,8 +602,13 @@ abstain on the least-confident    kept    accuracy on what is kept
 ```
 
 **En az güvenilen beşte biri bir insana ya da daha büyük bir modele göndermek,
-doğruluğu modeli hiç değiştirmeden %86,75'ten %92,50'ye çıkarıyor.** Bu, çoğu
-prompt mühendisliğinin ürettiğinden büyük bir kazanç ve bir eşiğe mal oluyor.
+tutulan maddelerdeki doğruluğu modeli hiç değiştirmeden %86,75'ten %92,50'ye
+çıkarıyor.** Paydayı okuyun: %92,50, modelin tuttuğu 320 madde üzerindeki
+doğruluğudur, hattın tamamının doğruluğu değil. Diğer 80'in neye mal olduğu —
+bir insanın ya da daha büyük bir modelin hata oranı — burada ölçülmedi ve uçtan
+uca sayı ikisinin kapsama ağırlıklı bileşimidir. Doğruluğu ve kapsamı *her zaman*
+birlikte raporlayın. Yine de bu, çoğu prompt mühendisliğinin ürettiğinden büyük
+bir kazanç ve bir eşiğe mal oluyor.
 
 ::: {.column-margin}
 Bu kitaptaki en ucuz yönlendirme sinyalidir ve her şeyle birlikte çalışır: bir
@@ -800,7 +818,7 @@ yapamayacağı sonucuna varmadan önce, görevi mi yoksa noktalamasını mı
 
 Bir olasılık olarak hayır. 400 maddede ölçüldü: modelin 0,90–0,95 verdiği
 cevap kutusu zamanın **%68,0'ında** doğruydu. Beklenen kalibrasyon hatası
-%7,04'tü ve 0,5'e yakın kutu 15 maddede **%33,3** doğruydu — şansı içerecek
+%7,04'tü ve 0,5 olasılığa en yakın kutu 15 maddede **%33,3** doğruydu — şansı içerecek
 kadar geniş, işe yararlığı dışlayacak kadar dar bir aralık.
 
 Ama *sıralama* iyiydi — kendi doğruluğunu öngörmek için AUC 0,8268 — ki bu
@@ -895,7 +913,7 @@ Bu bölümdeki her şey aşağıdaki sürümlerle tek bir dizüstü bilgisayarda
 | kütüphane | kullanılan sürüm | burada ne işe yarıyor |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | `qwen3.5:9b` ve `llama3.2:3b`'yi sunmak ve şemayı zorlayan `format` parametresi |
-| Python stdlib | 3.14.5 | şema doğrulaması ve çekimserlik eğrisi, yirmi satırlık `json` ve `numpy` |
+| Python | 3.14.5 | şema doğrulaması, standart kütüphanedeki `json` modülüyle yirmi satır; çekimserlik eğrisi ise standart kütüphanede olmayan `numpy`'ı kullanıyor |
 
 : Bu sayıların çıktığı yığın {tbl-colwidths="[24,16,60]"}
 
@@ -1039,7 +1057,7 @@ nasıl raporlanması gerektiğine karar verir.
 
 - **Logprob'lar iyi ayırt eder, kötü kalibre olur.** Etikete karşı AUC
   **0,9492** ve kendi doğruluğunu öngörmek için **0,8268**; **%7,04** ECE ile —
-  0,90–0,95 kutusu yalnızca %68,0 doğru ve 0,5'e yakın kutu 15 maddede
+  0,90–0,95 kutusu yalnızca %68,0 doğru ve 0,5 olasılığa en yakın kutu 15 maddede
   **%33,3**. Onlarla sıralayın; onları alıntılamayın.
 
 - **Çekimserlik satın alacağınız en ucuz doğruluktur.** En az güvenilen %20'yi

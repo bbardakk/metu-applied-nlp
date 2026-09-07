@@ -30,8 +30,13 @@ why retrieve?
 There are three answers everyone gives — **cost**, because you pay for every
 input token on every request; **access control**, because a prompt cannot
 enforce who may see which document; and **recency**, because a cached prompt
-goes stale. All three are true, and the fourth one, the one that gets repeated
-most confidently, is that **a model does not use a long context evenly**.
+goes stale. All three are true, with one qualification worth making now: the
+second and third are things retrieval *lets you build*, not properties the
+label confers. A retrieval layer gives you a place to filter by permission and
+a place to re-index, and an unfiltered index over documents a user may not read
+is a leak with extra steps, while an index nobody refreshes is as stale as the
+prompt it replaced. The fourth answer, the one repeated most confidently, is
+that **a model does not use a long context evenly**.
 
 That fourth claim is the only one of the four that is a factual assertion about
 model behaviour rather than about your infrastructure, so it is the one worth
@@ -336,7 +341,15 @@ measured the wrong thing and produced a confident, wrong rule.
   of the article, re-inflected through stem-mates so the surface forms differ
   from the text. *Where is this specific detail?*
 
-A hit means any chunk of the source article. Build times are not reported: an
+A hit means any chunk of the source article. Read that definition against each
+condition before reading the numbers. In condition A it is the right target —
+the question *is* the article. In condition B it is a proxy and a generous one:
+retrieving the correct article's *other* paragraph counts as a success even
+though the sentence the query was drawn from is not in the returned chunk, so
+condition B's numbers bound article-level retrieval rather than measuring
+fact-level evidence. Getting the stricter number needs supporting-span
+annotation — record which sentence each query came from and require the chunk
+to contain it — which this run does not have. Build times are not reported: an
 earlier run's timings were contaminated by a concurrent job on the same
 machine, and a number I cannot stand behind does not belong in a table.
 
@@ -383,10 +396,15 @@ penalised at rank 5 for spending their slots well, and an unknown part of the
 ten-point R@5 gap in condition A is that artefact rather than chunking.
 
 **And $n = 400$ per condition, so a 95% interval is about ±4.6 points in A and
-±1.9 in B.** Differences smaller than that are not distinguishable here. The
-queries are shared across all eleven systems, so a paired McNemar test could be
-computed from the existing data and is the right instrument; we report the
-unpaired numbers, which is the weaker choice.
+±1.9 in B.** Do not turn that into "smaller differences are indistinguishable",
+which is the error this book keeps warning about: those are intervals on single
+proportions, and the systems here are compared on the *same* 400 queries. A
+paired test conditions on the queries the two systems disagree about and can
+resolve gaps far inside an unpaired interval. The queries are shared across all
+eleven systems, so a paired McNemar test could be computed from the existing
+data and is the right instrument; we report the unpaired numbers, which is the
+weaker choice, and the intervals above should be read as a caution against
+over-reading small gaps rather than as a test that settles them.
 
 With those in hand: [the best chunk size in one condition is the worst in the
 other.]{.hl} Chunks at or above article length lead condition A — 72.5% and
@@ -506,7 +524,8 @@ Two more results in that table were not obvious to me before running it.
 
 **Overlap earns its cost, but only for facts.** At 100 words, adding a 25-word
 overlap moved condition B from 95.5% to **97.5%** — 18 errors in 400 down to
-10 — and condition A from 66.5% to 65.8%, which is a fifth of that condition's
+10, which is eight queries changing hands and wants the paired test above
+before it is called decisive — and condition A from 66.5% to 65.8%, which is a fifth of that condition's
 noise band and should be read as no movement at all. So: a gain where a fact
 can straddle a boundary, nothing where the query describes the whole
 document. So overlap is not a general-purpose
@@ -529,8 +548,11 @@ padded one.
 ::: {.column-margin}
 Note what the R@5 and R@10 columns do while R@1 swings by fifteen points: in
 condition B every configuration is between 97.2% and 100% at rank 5. If your
-generator reads five chunks, this entire table is a rounding error. If it reads
-one, the table is your system. @sec-retrieval made the same point about fusion,
+generator reads five chunks, this entire table is a rounding error *for
+article-level retrieval*, which is what these columns measure — whether the
+chunk that arrives actually carries the answering sentence is a different
+question this run does not score. If your generator reads one, the table is
+your system. @sec-retrieval made the same point about fusion,
 and it generalises: [the metric that matters is the one your consumer actually
 reads.]{.hl}
 :::
@@ -546,7 +568,10 @@ door.
 
 Overlap is the crude repair: repeat the last *n* words of each chunk at the
 start of the next, so a fact that straddles a boundary appears whole in at
-least one chunk.
+least one chunk — provided the fact is shorter than the overlap and does not
+straddle two boundaries. A 25-word overlap does nothing for a claim whose
+subject and qualifier are forty words apart, which is why it is a repair and
+not a guarantee.
 
 It costs index size in direct proportion, and the table above
 says it is a *substitute* for structure rather than an alternative to it —

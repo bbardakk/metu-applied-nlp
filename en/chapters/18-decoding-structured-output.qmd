@@ -227,7 +227,7 @@ The usual controls, and what each costs:
 | control | what it does | what it breaks |
 |:--|:--|:--|
 | Sampling (top-p, min-p) | takes a non-argmax token sometimes, breaking the loop | variety you may not want in an extraction task |
-| Repetition penalty | divides the logit of any already-used token | punishes legitimately repeated words — names, technical terms, `null` |
+| Repetition penalty | rescales the logit of any already-used token toward $-\infty$ — dividing it when positive, multiplying when negative (see below) | punishes legitimately repeated words — names, technical terms, `null` |
 | No-repeat n-gram | forbids any n-gram already emitted | forbids real repeated phrases; ruinous in structured output where `{"type":` recurs |
 | Presence penalty | a flat subtraction the first time a token appears | same failure mode, milder; does not escalate |
 | Frequency penalty | a subtraction proportional to how often it has appeared | escalates with every repeat, so long outputs drift |
@@ -262,12 +262,19 @@ Everything above reshapes a distribution over the whole vocabulary.
 [Constrained decoding](#gloss-constrained-decoding){#term-constrained-decoding .term-ref}
 does something stricter: at each step it computes which tokens could legally
 continue the output under a grammar, and sets the logits of all the others to
-$-\infty$. Invalid output stops being unlikely and becomes **unreachable**.
+$-\infty$. Invalid output stops being unlikely and becomes **unreachable** —
+with three conditions on that word. The schema has to be one the library
+actually supports, since unsupported keywords are commonly ignored rather than
+enforced. The generation has to *finish*: a run that hits your token limit, a
+timeout, or a dropped connection leaves a prefix that is legal so far and
+invalid as a document. And a grammar constrains structure, not semantics, so a
+required field can be filled with a plausible fabrication. Parse and validate
+the result anyway; the guarantee is worth a lot and it is not "never check".
 
 ::: {#gloss-constrained-decoding .column-margin .term-gloss}
 **constrained decoding** — masking the logits at each step to the tokens a
-grammar allows. Guarantees the *shape* of the output and says nothing about
-whether it is true. [↩](#term-constrained-decoding){.term-back}
+grammar allows. Guarantees the *shape* of a completed generation and says
+nothing about whether it is true. [↩](#term-constrained-decoding){.term-back}
 :::
 
 One property of that mechanism is easy to miss and worth stating before the
@@ -344,9 +351,12 @@ distorting version, which is the right default and worth knowing you are using.
 
 ::: {.fig-cap}
 The machinery is a finite-state machine over the tokenizer's vocabulary
-[@willard2023efficient]: compile the JSON Schema (or regex, or CFG) into an
-automaton, track which state you are in, and precompute for each state the set
-of allowed next tokens. @geng2023grammar is the same idea for general
+[@willard2023efficient]: compile the regex — or a JSON Schema whose nesting is
+bounded — into an automaton, track which state you are in, and precompute for
+each state the set of allowed next tokens. A general context-free grammar does
+*not* fit in a finite-state machine, because unbounded nesting needs a stack;
+libraries that accept a CFG run an incremental parser (a pushdown automaton)
+instead, which costs more per step and buys back arbitrary recursion. @geng2023grammar is the same idea for general
 structured NLP tasks.
 :::
 ::::
@@ -563,12 +573,14 @@ below the confidence it stated. That is the firm finding.
 The one people quote is the bottom bin, and it deserves more caution than it
 usually gets: 5 correct out of 15, a 33.3% point estimate with an interval of
 $[15, 58]$. That interval contains 50%, so this does not establish "below
-chance". What it does establish is the operational point anyway — **a near-0.5
-logprob carries no usable information** — and it is the version to repeat.
+chance". What it does establish is the operational point anyway — **a label
+probability near 0.5 carries no usable information** — and it is the version to
+repeat. (The model reports a log-probability; 0.5 is the probability, which is
+about $-0.69$ in logs. Convert before you threshold.)
 
-[A near-0.5 logprob does not mean "coin flip" in the sense of "half right"; it
-means the number is not telling you anything.]{.hl} Do not read the number as a
-probability.
+[A label probability near 0.5 does not mean "coin flip" in the sense of "half
+right"; it means the number is not telling you anything.]{.hl} Do not read the
+number as a calibrated probability.
 
 Two fixes, in order of effort. **Temperature scaling** [@guo2017calibration]
 fits a single scalar $T$ on a held-out slice and divides the logits by it — the
@@ -593,8 +605,13 @@ abstain on the least-confident    kept    accuracy on what is kept
 ```
 
 **Sending the least-confident fifth to a human, or to a larger model, takes
-accuracy from 86.75% to 92.50%** without changing the model at all. That is a
-larger gain than most prompt engineering produces, and it costs one threshold.
+accuracy on the retained items from 86.75% to 92.50%** without changing the
+model at all. Read the denominator: 92.50% is the model's accuracy on the 320
+it kept, not the accuracy of the whole pipeline. What the other 80 cost — a
+human's error rate, or a bigger model's — is not measured here, and the
+end-to-end number is the coverage-weighted combination of the two. Report
+accuracy *and* coverage together, always. Even so it is a larger gain than most
+prompt engineering produces, and it costs one threshold.
 
 ::: {.column-margin}
 This is the cheapest routing signal in the book, and it composes with
@@ -806,7 +823,7 @@ punctuation.
 
 Not as a probability. Measured on 400 items: the bin of answers the model
 rated 0.90–0.95 was right **68.0%** of the time. Expected calibration error
-was 7.04%, and the near-0.5 bin was right **33.3%** on 15 items — an interval
+was 7.04%, and the bin nearest probability 0.5 was right **33.3%** on 15 items — an interval
 wide enough to contain chance, and narrow enough to rule out usefulness.
 
 But the *ranking* was good — AUC 0.8268 for predicting its own correctness —
@@ -900,7 +917,7 @@ Everything in this chapter ran on one laptop with the versions below.
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | serving `qwen3.5:9b` and `llama3.2:3b`, and the `format` parameter that enforces a schema |
-| Python stdlib | 3.14.5 | the schema validation and the abstention curve are twenty lines of `json` and `numpy` |
+| Python | 3.14.5 | schema validation is twenty lines of the stdlib `json` module; the abstention curve uses `numpy`, which is not stdlib |
 
 : The stack these numbers came from {tbl-colwidths="[24,16,60]"}
 
@@ -1042,7 +1059,7 @@ in your evaluation should be reported.
 
 - **Logprobs discriminate well and calibrate badly.** AUC **0.9492** against
   the label and **0.8268** for predicting its own correctness, at **7.04%**
-  ECE — with the 0.90–0.95 bin right only 68.0% of the time and the near-0.5
+  ECE — with the 0.90–0.95 bin right only 68.0% of the time and the bin nearest 0.5
   bin right **33.3%** on 15 items. Rank with them; do not quote them.
 
 - **Abstention is the cheapest accuracy you will buy.** Dropping the

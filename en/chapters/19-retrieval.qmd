@@ -231,9 +231,11 @@ each document by $\sum 1/(k + \text{rank})$ across the lists, which treats a
 rank-1 hit from a useless system exactly like a rank-1 hit from an excellent
 one.
 
-When one parent is at 96% and the other at 36%, the weak parent's confident
-garbage arrives with full weight and displaces the strong parent's correct
-answer.
+When one parent is at 96% and the other at 36%, the weak parent's top-ranked
+irrelevant documents arrive with full weight and displace the strong parent's
+correct answer. Note that "confidence" is not the word: rank fusion never sees
+a confidence score, which is exactly the information that would have told it
+which parent to trust.
 
 ::: {.anlp-widget}
 ```{=html}
@@ -643,7 +645,7 @@ regression stays invisible.
 
 | metric | asks | use it when |
 |:--|:--|:--|
-| **[recall@k](#gloss-recall-k){#term-recall-k .term-ref}** | is the right document in the top *k* at all? | the consumer reads all *k* — which includes every RAG system |
+| **[recall@k](#gloss-recall-k){#term-recall-k .term-ref}** | what share of the relevant documents is in the top *k*? With one relevant document per query — this chapter's setup — that reduces to *is it there at all*, which is also called hit rate or success@k | the consumer reads all *k* — which includes every RAG system |
 | **MRR** | how high is the *first* right answer? | the user reads one result and stops |
 | **nDCG@k** | are the relevant documents near the top, weighted by how relevant? | graded relevance, several relevant documents |
 | **precision@k** | what share of the *k* is relevant? | the cost of a wrong result is per-result |
@@ -651,15 +653,18 @@ regression stays invisible.
 : Four metrics, four questions {tbl-colwidths="[16,42,42]"}
 
 ::: {#gloss-recall-k .column-margin .term-gloss}
-**recall@k** — did the right document appear anywhere in the top *k*. The
-number that bounds everything downstream: a generator cannot ground an answer
-in a document the retriever never returned.
+**recall@k** — the share of a query's relevant documents that appear in the top
+*k*. When there is exactly one relevant document, as here, it collapses to
+*did the right document appear at all* — the quantity often called hit rate or
+success@k. The number that bounds everything downstream: a generator cannot
+ground an answer in a document the retriever never returned.
 [↩](#term-recall-k){.term-back}
 :::
 
 [If you report one number for the retrieval stage of a RAG system, report
-recall@k for the *k* you actually pass to the model.]{.hl} It is a hard
-ceiling: @sec-rag's generator can only work with what arrives, so a retrieval
+recall@k for the *k* you actually pass to the model.]{.hl} It is a ceiling on
+what *grounding* can deliver: @sec-rag's generator can only ground in what
+arrives, so a retrieval
 recall@10 of 80% means 20% of answers are ungroundable before generation
 begins — and no amount of prompting fixes them.
 
@@ -773,8 +778,16 @@ set is easy, every model looks the same and you will pick by download count.
 
 Because a generator cannot ground an answer in a document it never received.
 If recall@10 is 80% and you pass ten chunks, then 20% of questions are
-unanswerable before the model is invoked, and prompt engineering cannot reach
+ungroundable before the model is invoked, and prompt engineering cannot reach
 them.
+
+State the ceiling precisely, because "unanswerable" is slightly stronger than
+what recall@k bounds. The model may still answer some of that 20% from its
+parametric knowledge, and a fact may appear in a document your relevance
+judgements did not mark as the right one. Neither is grounded in retrieved
+evidence, which is the thing you were buying — so treat recall@k as the bound
+on *grounded* answers, and measure end-to-end answer accuracy separately if you
+want the other number.
 
 This is why the two stages want different metrics. Stage one is judged on not
 missing; stage two — the reranker, or the generator — is judged on choosing
@@ -922,8 +935,13 @@ questions, and anything crossing a language boundary.
 
 ### Step 2 — label relevance, then build BM25
 
-For each query, the document that answers it. Fifty labelled queries is
-enough to distinguish systems that differ by ten points. Then build BM25 — and
+For each query, the document that answers it. Fifty labelled queries is a
+workable starting point for a ten-point gap — but treat that as a rule of
+thumb, not a power calculation. What it actually takes depends on the baseline
+rate, on how correlated the two systems' errors are (a paired test on shared
+queries needs far fewer than an unpaired one), and on how many comparisons you
+plan to make. If the gap you care about is five points rather than ten, or the
+systems agree on almost everything, budget for several hundred. Then build BM25 — and
 if your language is morphologically rich, build it twice, with and without
 stemming, because @sec-turkish-nlp says that one step can be worth sixty
 points.
@@ -949,8 +967,12 @@ a retrieval error look identical in the final number and have different fixes.
 ### Step 6 — add a reranker and find where the shortlist saturates
 
 Cross-encoder over the top 10, 25, 50, 100. Plot final accuracy against
-latency. The shortlist size is a cleaner dial than any ANN parameter and its
-effect is monotone.
+latency. The shortlist size is a cleaner dial than any ANN parameter — but do
+not assume the curve only goes up. A larger pool raises the *recall* the
+reranker gets to work with, which is monotone; final accuracy is not, because
+each extra candidate is also another chance for the reranker to score a
+distractor above the right answer. Plot it rather than extrapolating it, and
+expect a plateau or a slight decline past some size.
 
 ### What to hand in
 
