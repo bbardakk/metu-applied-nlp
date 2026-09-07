@@ -561,9 +561,11 @@ directions — a forced `</think>` to cut a trace short, which is our guillotine
 and a *suppressed* end-of-thinking with the word `Wait` appended to make the
 model keep going, which they measure recovering wrong answers.[^budget-api]
 
-So read the numbers below as a **bound, not an estimate**: this is how much
-accuracy a naive cap costs, which is the worst case a smarter implementation is
-measured against. We record how often the cap was hit, because a budget that
+So read the numbers below as a **deliberately harsh truncation baseline**, not
+as an estimate of what a production budget costs: this is what a naive cap does,
+and a smarter policy should be measured against it. Calling it a proven
+worst-case bound over all smarter policies would be a stronger claim than
+anything measured here supports. We record how often the cap was hit, because a budget that
 truncates 90% of traces and a budget that truncates 5% of them are different
 regimes wearing the same number.
 
@@ -661,11 +663,17 @@ vs no-thinking baseline, two-proportion z-test (n=200 each)
   budget  2048:  z = +0.00   NOT separable
 ```
 
-**Not one budget is distinguishable from not thinking at all.** The 95% interval
-on every row is about $\pm 7$ points wide, and every row's interval contains
-every other row's estimate. The 512 row is bolded because it is the largest
-number in the column, not because it is the best budget — at $z = +0.33$ that
-bolding is decoration, and you should read it with suspicion.[^paired-test]
+**None of the tested budgets shows a statistically clear improvement over not
+thinking at all.** The 95% interval on every row is about $\pm 7$ points wide,
+and the intervals overlap heavily — though not universally: the 128-token row's
+interval, 54.1–67.5, excludes both the baseline's 70.0 and the 512 row's 71.5.
+That is worth pausing on, because it cuts the other way from the usual mistake.
+Non-overlapping intervals are not a significance test either: the two-sample
+test on that same pair gives $z = -1.89$, which does not reject at the 5% level.
+Interval containment and a hypothesis test answer different questions, and only
+the second one is the one being asked here. The 512 row is bolded because it is
+the largest number in the column, not because it is the best budget — at
+$z = +0.33$ that bolding is decoration, and you should read it with suspicion.[^paired-test]
 
 [^paired-test]: The $z$-test above is the *wrong* test, and wrong in the
     conservative direction. Every budget saw the same 200 problems in the same
@@ -693,9 +701,13 @@ bolding is decoration, and you should read it with suspicion.[^paired-test]
     means. Declaring that margin *before* the sweep is the one line of planning
     we would add if we ran this again.
 
-**What *is* solidly measured is the cost, and the truncation.** Those columns are
-not proportions of 200 coin flips; they are means over hundreds of thousands of
-tokens, and they are sharp:
+**What *is* solidly measured is the cost, and the truncation.** Those columns
+are not proportions of 200 coin flips; they are means of a quantity that varies
+far less across problems than a right-or-wrong outcome does. Be precise about
+why that helps: the unit of observation is still the problem, $n$ is still 200,
+and an interval on mean tokens per problem would need a problem-level bootstrap
+— which we did not run. What makes these columns safe to read is the *size* of
+the differences, not a large token count:
 
 - **Tokens grow monotonically and steeply:** 1.00×, 1.65×, 2.12×, 3.11×, 4.91×,
   6.74×. There is nothing ambiguous about the bill.
@@ -1917,9 +1929,13 @@ the 42 problems the model got right alone and wrong with company:
 | answered the planted number | 12 |
 | answered a **third** wrong number, neither gold nor planted | **30** |
 
-**Seventy-one percent of the damage is not persuasion. It is disruption.** The
-model was not talked into the teaching assistant's answer; it was knocked off
-its own. A confident irrelevant claim in the context window degraded arithmetic
+**Seventy-one percent of those flips are not persuasion. They are
+disruption.** Be careful with the denominator: 30/42 is the share of the
+*right-alone-to-wrong-with-company* transitions, not a share of the net
+accuracy loss. The traffic went both ways — 42 problems flipped right to wrong
+and 16 flipped wrong to right, for the net 26 problems, or 13 points, in the
+table. The model was not talked into the teaching assistant's answer; it was
+knocked off its own. A confident irrelevant claim in the context window degraded arithmetic
 that had nothing to do with it — which means that if you monitor only for
 *"did the model repeat the injected answer"*, you will miss the majority of the
 harm the injection caused. @sec-agent-security returns to this when we look at
@@ -2253,9 +2269,13 @@ metric rather than a diagnostic you check after something looks wrong.
 Usually the five samples — and the more interesting finding is that voting
 wastes most of what you paid for.
 
-Parallel sampling gives you equal tokens, *independent* errors, and the latency
-of a single trace if you can batch. Sequential budget gives you one trace whose
-errors are correlated with themselves.
+Parallel sampling gives you equal tokens, *less correlated* errors, and the
+latency of a single trace if you can batch. Do not upgrade that to independent:
+the samples are drawn independently, but the errors are not, because the same
+model on the same problem makes the same systematic mistakes — a misread
+question or a wrong formula recurs across samples, which is exactly why voting
+cannot fix a problem the model consistently misunderstands. Sequential budget
+gives you one trace whose errors are correlated with themselves.
 
 But measure the aggregation step. Across our five-sample run [the correct answer
 was somewhere in the set **85.8%** of the time; majority voting returned it
@@ -2278,9 +2298,11 @@ not assume. We measured it by planting a wrong answer in the context and
 checking whether the trace disclosed the influence.
 
 The result that should change how you read traces: [when we planted a wrong
-answer, **71%** of the accuracy we lost went to answers that were *neither* the
-right one nor the planted one]{.hl}. A detector that only asked "did the model
-repeat the injected answer?" would have missed most of the damage.
+answer, **71%** of the problems that flipped from right to wrong landed on a
+third number — *neither* the right one nor the planted one]{.hl}. (That is
+30 of 42 flips; the net accuracy loss is smaller, 26 problems, because 16 went
+the other way.) A detector that only asked "did the model repeat the injected
+answer?" would have missed most of the damage.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -2322,8 +2344,11 @@ Candidates who have only read about it talk about benchmark scores.
    therefore has to be budgeted per request rather than per model.
 
 2. **How do you decide the thinking budget for a production system?** Sweep it
-   and plot **cost per correct answer**, not accuracy, because accuracy is
-   monotone in budget and will always tell you to spend more. Find the minimum,
+   and plot **cost per correct answer**, not accuracy. Do not claim accuracy is
+   monotone in budget — this chapter's own sweep goes 70.0, 61.0, 63.5, 71.5,
+   67.5, 70.0, and more budget may improve, plateau or deteriorate. The reason
+   to plot cost per correct answer is that it prices the tokens, which do rise
+   monotonically. Find the minimum,
    then check three things: what fraction of traces hit the cap at your chosen
    setting; whether the accuracy differences along the curve are statistically
    separable at your sample size (in our sweep, at $n = 200$, none of them were);

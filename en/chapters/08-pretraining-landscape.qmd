@@ -45,7 +45,7 @@ is usable, what the run costs in hardware and hours and money, why a Turkish
 sentence costs more than its English translation, and how to tell one model
 release from another when every one of them is announced as state of the art.
 
-### Three stages, and only the first one is expensive
+### Three stages, and the first one dominates the data bill
 
 A deployable assistant is not the output of one training run. It is the output
 of a short pipeline, and [the stages differ in what they are *for*, not just
@@ -173,9 +173,11 @@ is the one whose data you can actually afford.
 
 The instruction data is far too small to teach a language.
 
-Five million tokens is roughly forty novels. Nothing learns English syntax —
-let alone Python semantics and the geography of Anatolia — from forty novels.
-A model with billions of parameters would simply memorise them.
+Five million tokens is roughly forty novels. Nothing reaches an assistant's
+command of English syntax — let alone Python semantics and the geography of
+Anatolia — from forty novels. A model can certainly learn *something* from a
+corpus that size; what it cannot do is acquire broad general competence there,
+and a model with billions of parameters would mostly memorise them.
 
 What five million carefully written tokens *can* do is teach a **format**.
 That a question is followed by an answer rather than by another question. That
@@ -438,6 +440,15 @@ Wikipedia 3.4 times while reading less than half of the filtered web crawl.
 The authors say why in one sentence: the weights are deliberately *not*
 proportional to size, and they accept "a small amount of overfitting in
 exchange for higher quality training data" [@brown2020language].
+
+Two bookkeeping notes before you reuse this table. The mix column is the
+paper's own rounded figures and sums to 101%, not 100%. And the last column is
+the paper's reported epoch count, not something you can recompute from the
+other two: share × 300B ÷ tokens available gives 3.5 for WebText2 against the
+2.9 printed, and 3.0 for Wikipedia against the 3.4 printed. Both columns are
+rounded, and the epochs come from the actual sampling schedule rather than from
+these rounded shares. Read the table for the *shape* of the argument — quantity
+is not weight — and not as a set of numbers that close.
 
 Four years later Llama 3 reports its mixture by *topic* rather than by source,
 which itself tells you what the field learned to care about: roughly [50%
@@ -838,7 +849,7 @@ four separate bills.
 |:--|:--|
 | context window | a 128,000-token window holds about 104,000 English-equivalent tokens of Turkish |
 | API cost | one million English-equivalent tokens costs the price of 1.23 million |
-| latency | generation is per token, so a Turkish answer takes about 23% longer |
+| latency | generation is per token, so at the same tokens-per-second a Turkish answer takes about 23% longer |
 | pretraining compute | at fixed FLOPs, a Turkish corpus buys about 19% less content than an English one |
 
 Watch the direction of that last number, because it is the single easiest
@@ -1678,14 +1689,19 @@ touches it.
 ::: {.callout-note collapse="true"}
 ## 2. Your model tokenizes Turkish badly. Can you fine-tune your way out of it?
 
-No, and this is the reason the tokenizer belongs in a pretraining chapter
-rather than a preprocessing one.
+Not with an ordinary fine-tune, and that is why the tokenizer belongs in a
+pretraining chapter rather than a preprocessing one.
 
 Changing the tokenizer changes the embedding table, which changes every weight
-downstream. [The tokenizer is how the compute budget gets divided between
-languages, and the division is permanent.]{.hl} A user of a 1.98× tokenizer
-pays that surcharge in context window, in latency, and on every API invoice,
-for the entire life of the model.
+downstream. It is not impossible: you can extend the vocabulary, initialise the
+new embeddings from the pieces they replace, and continue pretraining until the
+model settles — a documented and occasionally worthwhile procedure. What it is
+not is cheap or safe. It costs a pretraining-scale run, it risks degrading
+everything the model already does well, and it is a different project from
+fine-tuning. [The tokenizer is how the compute budget gets divided between
+languages, and undoing that division costs what making it cost.]{.hl} Absent
+that project, a user of a 1.98× tokenizer pays the surcharge in context window,
+in latency, and on every API invoice, for the life of the model.
 
 Llama 3 shows the decision being made deliberately: 100,000 tokens from
 `tiktoken` plus **28,000 added specifically for non-English languages**,
@@ -1700,10 +1716,13 @@ step.
 Unanswerable until you ask what went in the denominator, and asking is the
 whole point of the question.
 
-The same GPU has a dense peak and a much higher sparsity peak, and quoting
-against the second makes any run look twice as efficient. Llama 3's Table 4
-reports 430 TFLOP/s per GPU; $430/989 = 43.5\%$, which confirms they used the
-dense figure. Not everyone does.
+The same GPU has a dense peak and a sparsity peak twice as large, and the
+denominator decides the answer: dividing by the larger one *halves* the
+reported MFU. Llama 3's Table 4 reports 430 TFLOP/s per GPU; against the H100's
+dense BF16 peak that is $430/989 = 43.5\%$, and against the 2:4-sparsity peak
+the same run reports $430/1{,}979 = 21.7\%$. The 43.5% confirms they used the
+dense figure. Two MFUs are comparable only when they used the same peak, and
+nobody is obliged to tell you which they used.
 
 The second trap is the numerator. Reconstructing Llama 3.1 405B from $6ND$
 alone gives 34.5%; adding the attention term gives **36.0–37.1%**, and the
@@ -1727,8 +1746,8 @@ layers. Two more for the **backward pass through the weights**, because the
 optimiser needs to know what to change.
 
 So the forward pass is $2ND$ and is only a third of the bill — which
-immediately tells you that inference costs roughly $2ND$ per token, not $6ND$,
-and that is the number that decides whether serving or training dominates your
+immediately tells you that inference costs roughly $2N$ FLOPs *per token*
+(hence $2ND$ for $D$ tokens), not $6N$, and that is the number that decides whether serving or training dominates your
 budget. It also tells you why $6ND$ is a *pretraining* law and does not
 transfer unchanged to fine-tuning with frozen weights.
 :::

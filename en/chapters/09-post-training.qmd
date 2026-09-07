@@ -180,11 +180,15 @@ algorithm.
 :::
 ::::
 
-Notice what stages 2 and 3 have in common: neither one is trying to teach the
-model anything about the world. The 15.6 trillion tokens already happened. A
-stage-2 run touching a few million tokens cannot meaningfully revise a world
-model built from four orders of magnitude more text — and [when people try to
-use it that way, that is precisely when fine-tuning disappoints]{.hl}.
+Notice what stages 2 and 3 have in common: neither one is where the model's
+knowledge of the world mostly comes from. That is not a claim that supervised
+fine-tuning *cannot* teach facts — it demonstrably can, and continued
+pretraining on domain text is a standard way to add some. The claim is about
+scale and reliability: a stage-2 run touching a few million tokens cannot
+broadly or dependably revise a world model built from four orders of magnitude
+more text, and [when people reach for it as their knowledge-update mechanism,
+that is precisely when fine-tuning disappoints]{.hl}. @sec-rag exists because
+retrieval is the mechanism that does that job.
 
 ## Supervised fine-tuning {#sec-sft}
 
@@ -365,8 +369,11 @@ cannot — and the reason is not the model.
 
 ### Where the memory actually goes
 
-Count the bytes one parameter costs during mixed-precision AdamW training,
-which is what every mainstream stack does by default.
+Count the bytes one parameter costs during mixed-precision AdamW training in
+the configuration mainstream stacks default to — bf16 compute with an fp32
+master copy and fp32 optimizer moments. Other configurations exist and cost
+differently: 8-bit optimizer states, fused fp32-free schemes and sharded
+optimizers all change this table. The 16 is a default, not a law.
 
 | what is stored | bytes per parameter | why it exists |
 |:--|--:|:--|
@@ -1434,6 +1441,17 @@ adapter deleted. Deleting it would recover the original model exactly and the
 measurement would be a tautology. What is being asked is: *when you deploy the
 LoRA-adapted model, has that model's grip on Turkish loosened?*
 
+One limit of the probe, stated before the numbers rather than after. The
+masked-language head is frozen at its pretrained weights while the encoder
+underneath moves, so a rising loss measures *the encoder drifting away from
+that head* — which mixes genuine loss of linguistic information with a
+representation the old head can no longer read. Those are not the same thing,
+and this design cannot separate them. What would separate them is a freshly
+fitted probe on top of each encoder, or a downstream Turkish task the encoder
+has not been tuned on. Read the table as evidence that the representation
+moved, and moved most where the training data was, rather than as a
+measurement of how much Turkish was destroyed.
+
 Two probe sets, because they answer different questions. **General Turkish** is
 1,826 sentences of ordinary prose from a parallel corpus [@zhang2020improving] —
 nothing to do with reviews, nothing to do with sentiment. **Held-out reviews**
@@ -1482,8 +1500,9 @@ detector of forgetting was the in-domain probe, which is precisely the one no
 team builds, because it looks redundant next to the task test set.
 
 ::: {.callout-important appearance="simple"}
-**Every number in this table went down while the number you were watching went
-up.** The full fine-tune is the best sentiment model in the lab — 83.90
+**Both probes deteriorated while the number you were watching improved.**
+Loss rose and top-1 fell on every row and every probe set; the sentiment score
+went the other way. The full fine-tune is the best sentiment model in the lab — 83.90
 macro-F1, the top of that table — and it is the worst Turkish model here, on
 both probes. Neither fact is visible from the other's evaluation. This is the
 trap in its exact shape: not a model that got worse, but a model that got
@@ -1586,9 +1605,14 @@ the classification head — 1,538 parameters — produces a model whose macro-F1
 48.37 and whose accuracy is 93.68. Those are not new numbers. They are exactly
 @sec-bake-off's majority-class baseline. The model learned to answer *positive*
 every time, which on a corpus that is 93.68% positive is a locally sensible
-thing to do. [A frozen encoder with a trainable head is not
-parameter-efficient fine-tuning; it is a linear probe, and on an imbalanced
-task it can collapse]{.hl}. The F1 on the negative class is 0.00.
+thing to do. [A frozen encoder with a trainable head is a linear probe rather
+than an adapter-based method, and on an imbalanced task it can collapse]{.hl} —
+whether you file linear probes under "parameter-efficient fine-tuning" is a
+naming question; what matters is that they change no representation. The F1 on
+the negative class is 0.00. Discount this row by the learning-rate caveat
+above: it was run at the shared rate, and a probe tuned properly — its own
+learning rate, class weights in the loss — would do better than 48.37.
+Exercise 1 is that experiment.
 
 That row is in the table because the difference between it and the LoRA rows is
 the entire argument. LoRA does not train *fewer* weights in the sense of
@@ -1616,16 +1640,21 @@ where you should be standing. This is the rank sweep the arithmetic in
 @sec-lora said would be an afterthought, and on this task it is.
 
 **The full fine-tune wins, and it wins on one class.** 83.90 against $r=8$'s
-82.69 is a real gap, and all of it is the minority class: F1(neg) 70.16 against
-67.23. But look at the accuracy column — [every single LoRA run is *more*
+82.69 is a 1.21-point difference in this run, and the minority class is where
+it comes from: F1(neg) 70.16 against 67.23, worth +2.93 points on that class.
+It is not *all* of the story, though — back out the other half and the full
+fine-tune is slightly *behind* on the majority class, F1(pos) 97.64 against
+98.15. A 2.93-point gain on one class and a 0.51-point loss on the other
+average to the 1.21 you see. But look at the accuracy column — [every single LoRA run is *more*
 accurate overall than the full fine-tune]{.hl} (96.09–96.58 against 95.62).
 Full fine-tuning had enough freedom to move the decision boundary toward the
 negatives, which is what macro-F1 rewards and what plain accuracy punishes.
 Which of those you want is a product decision, not a training one, and the
 table cannot make it for you.
 
-**Rank 1 is the result worth sitting with.** 36,864 adapter parameters — 0.035%
-of the model, a file you could email — take a frozen encoder from 48.37 to
+**Rank 1 is the result worth sitting with.** 38,402 trainable parameters —
+36,864 in the adapters plus the 1,538-parameter head, 0.035% of the model, a
+file you could email — take a frozen encoder from 48.37 to
 80.47 macro-F1, clearing @sec-bake-off's tf-idf baseline by more than four
 points. Whatever LoRA is doing, it is not doing it with capacity.
 
@@ -1750,7 +1779,10 @@ fine-tune.
 ::: {.callout-note collapse="true"}
 ## 2. Freezing the encoder and training just the classifier head — is that parameter-efficient fine-tuning?
 
-No. It is a linear probe, and on this task it collapses completely.
+It is a linear probe rather than an adapter-based method — some people file
+probes under the PEFT umbrella and some do not, so say which you mean. The
+substantive difference is that a probe changes no representation, and on this
+task, at the shared learning rate this lab used, it collapses completely.
 
 Training 1,538 parameters on a frozen encoder produced macro-F1 **48.37** and
 accuracy **93.68** — exactly @sec-bake-off's majority-class baseline, with F1 on
@@ -1759,9 +1791,9 @@ time.
 
 [LoRA does not train a small *part* of the model; it trains a small number of
 weights *throughout* it]{.hl}, and that distinction is the entire argument. Rank
-1 — 36,864 parameters, 0.035% of the model, a file you could email — takes the
-same frozen encoder from 48.37 to **80.47**, clearing the tf-idf baseline by
-four points.
+1 — 38,402 trainable parameters, 0.035% of the model, a file you could email —
+takes the same frozen encoder from 48.37 to **80.47**, clearing the tf-idf
+baseline by four points.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1784,8 +1816,10 @@ the arithmetic in @sec-lora predicted it would be.
 Neither. You are looking at a product decision wearing the costume of a
 training result.
 
-Full fine-tuning scored 83.90 macro-F1 against $r=8$'s 82.69, and all of the
-gap is the minority class (F1(neg) 70.16 against 67.23). But [every single LoRA
+Full fine-tuning scored 83.90 macro-F1 against $r=8$'s 82.69, and the minority
+class is where the difference lives: F1(neg) 70.16 against 67.23, +2.93 points,
+against a 0.51-point *loss* on the majority class (F1(pos) 97.64 against
+98.15). But [every single LoRA
 run is *more* accurate overall]{.hl} — 96.09–96.58 against 95.62.
 
 Full fine-tuning had enough freedom to move the decision boundary toward the

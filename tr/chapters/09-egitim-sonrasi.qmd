@@ -180,12 +180,16 @@ bu.
 :::
 ::::
 
-2. ve 3. aşamanın ortak yanına dikkat edin: ikisi de modele dünya hakkında bir
-şey öğretmeye çalışmıyor. 15,6 trilyon token çoktan yaşandı. Birkaç milyon
-token'a dokunan bir 2. aşama koşusu, dört büyüklük mertebesi daha fazla
-metinden kurulmuş bir dünya modelini anlamlı biçimde revize edemez — ve
-[insanlar onu bu şekilde kullanmaya çalıştığında, fine-tuning tam olarak o
-zaman hayal kırıklığı yaratır]{.hl}.
+2. ve 3. aşamanın ortak yanına dikkat edin: ikisi de modelin dünya bilgisinin
+esas olarak geldiği yer değil. Bu, supervised fine-tuning'in olgu
+*öğretemeyeceği* iddiası değil — öğretebildiği gösterilmiştir ve alan metni
+üzerinde ön eğitime devam etmek bilgi eklemenin standart yollarından biridir.
+İddia ölçek ve güvenilirlik hakkında: birkaç milyon token'a dokunan bir
+2. aşama koşusu, dört büyüklük mertebesi daha fazla metinden kurulmuş bir dünya
+modelini geniş çaplı ya da güvenilir biçimde revize edemez ve [insanlar onu
+bilgi güncelleme mekanizması olarak kullanmaya çalıştığında, fine-tuning tam
+olarak o zaman hayal kırıklığı yaratır]{.hl}. @sec-rag'ın var olma sebebi de bu
+işi yapan mekanizmanın erişim olmasıdır.
 
 ## Supervised fine-tuning {#sec-sft}
 
@@ -371,7 +375,11 @@ ihtimali yüksek donanımda bunu yapamazsınız — ve sebep model değil.
 ### Bellek gerçekte nereye gidiyor
 
 Karma hassasiyetli AdamW eğitimi sırasında tek bir parametrenin kaç bayta mal
-olduğunu sayalım; yaygın kullanılan her yığın varsayılan olarak bunu yapıyor.
+olduğunu, yaygın yığınların varsayılan tuttuğu düzende sayalım: bf16 hesap,
+fp32 ana kopya ve fp32 optimizer momentleri. Başka düzenler de var ve başka
+maliyetleri var — 8 bitlik optimizer durumları, fp32'siz füzyon şemaları ve
+parçalanmış optimizer'lar bu tabloyu değiştirir. 16 bir varsayılandır, bir yasa
+değil.
 
 | ne saklanıyor | parametre başına bayt | neden var |
 |:--|--:|:--|
@@ -1443,6 +1451,16 @@ yoklanıyor. Silmek orijinal modeli birebir geri getirirdi ve ölçüm bir totol
 olurdu. Sorulan şey şu: *LoRA ile uyarlanmış modeli dağıttığınızda, o modelin
 Türkçe üzerindeki tutuşu gevşemiş midir?*
 
+Yoklamanın bir sınırını sayılardan sonra değil önce söyleyelim. Masked-language
+başı ön eğitimdeki ağırlıklarında donmuşken altındaki encoder hareket ediyor;
+dolayısıyla yükselen kayıp *encoder'ın o baştan uzaklaşmasını* ölçüyor — bu da
+gerçek dilsel bilgi kaybıyla, eski başın artık okuyamadığı bir temsili birbirine
+karıştırır. İkisi aynı şey değil ve bu tasarım onları ayıramaz. Ayıracak olan
+şey, her encoder'ın üstüne yeniden uydurulmuş bir yoklama ya da encoder'ın
+üzerinde ayarlanmadığı bir Türkçe alt görev olurdu. Tabloyu, "temsil hareket
+etti ve en çok eğitim verisinin bulunduğu yerde hareket etti" kanıtı olarak
+okuyun; ne kadar Türkçenin yok edildiğinin ölçümü olarak değil.
+
 İki yoklama kümesi var, çünkü farklı sorulara cevap veriyorlar. **Genel
 Türkçe**, paralel bir derlemden alınmış 1.826 cümlelik sıradan düzyazı
 [@zhang2020improving] — yorumlarla da duygu analiziyle de ilgisi yok. **Ayrılmış
@@ -1489,7 +1507,9 @@ masked-language başı geriye kalanı artık okuyamıyor. Doğal sonuç rahatsı
 kurmadığı yoklama; çünkü görev test kümesinin yanında gereksiz görünüyor.
 
 ::: {.callout-important appearance="simple"}
-**Siz izlediğiniz sayı yükselirken bu tablodaki her sayı düştü.** Tam fine-tune,
+**Siz izlediğiniz sayı iyileşirken iki yoklama da kötüleşti.** Her satırda ve
+her yoklama kümesinde kayıp yükseldi, top-1 düştü; duygu skoru ise ters yöne
+gitti. Tam fine-tune,
 labdaki en iyi duygu modeli — 83,90 macro-F1 ile o tablonun tepesinde — ve
 buradaki en kötü Türkçe modeli, hem de iki yoklamada birden. İki olgudan
 hiçbiri diğerinin değerlendirmesinden görünmüyor. Tuzağın tam biçimi bu:
@@ -1598,8 +1618,13 @@ sınıflandırma başını — 1.538 parametre — eğitmek, macro-F1'i 48,37, d
 [4. bölümün](../chapters/04-karsilastirma.html) çoğunluk sınıfı baseline'ının tam olarak aynısı. Model
 her seferinde *olumlu* demeyi öğrendi ve %93,68'i olumlu olan bir derlemde bu,
 yerel olarak makul bir davranış. [Eğitilebilir bir başı olan donmuş bir encoder,
-parametre verimli fine-tuning değildir; doğrusal bir yoklamadır ve dengesiz bir
-görevde çökebilir]{.hl}. Olumsuz sınıftaki F1 tam 0,00.
+adaptör tabanlı bir yöntem değil doğrusal bir yoklamadır ve dengesiz bir görevde
+çökebilir]{.hl} — doğrusal yoklamaları "parametre verimli fine-tuning" başlığı
+altına koyup koymadığınız bir adlandırma meselesi; önemli olan, hiçbir temsili
+değiştirmemeleri. Olumsuz sınıftaki F1 tam 0,00. Bu satırı yukarıdaki öğrenme
+oranı uyarısıyla iskonto edin: ortak oranla koşturuldu ve düzgün ayarlanmış bir
+yoklama — kendi öğrenme oranı, kayıpta sınıf ağırlıkları — 48,37'den iyisini
+yapardı. 1. alıştırma tam olarak bu deney.
 
 O satır tabloda, çünkü onunla LoRA satırları arasındaki fark bütün argümanın
 kendisi. LoRA, modelin daha küçük bir *parçasını* eğitmek anlamında *daha az*
@@ -1627,16 +1652,21 @@ yer düz kısım. Bu, oradaki aritmetiğin (@sec-lora) "sonradan düşünülecek
 dediği rank taraması ve bu görevde gerçekten öyle.
 
 **Tam fine-tune kazanıyor ve tek bir sınıf üzerinden kazanıyor.** $r=8$'in
-82,69'una karşı 83,90 gerçek bir fark ve tamamı azınlık sınıfından geliyor:
-F1(olumsuz) 67,23'e karşı 70,16. Ama doğruluk sütununa bakın — [her bir LoRA
+82,69'una karşı 83,90, bu koşuda 1,21 puanlık bir fark ve farkın geldiği yer
+azınlık sınıfı: F1(olumsuz) 67,23'e karşı 70,16, o sınıfta +2,93 puan. Yine de
+hikâyenin *tamamı* değil — diğer yarıyı geri hesaplayın ve tam fine-tune
+çoğunluk sınıfında hafifçe *geride*: F1(olumlu) 98,15'e karşı 97,64. Bir sınıfta
+2,93 puanlık kazanç ile diğerinde 0,51 puanlık kayıp, gördüğünüz 1,21'e
+ortalanıyor. Ama doğruluk sütununa bakın — [her bir LoRA
 koşusu genel doğrulukta tam fine-tune'dan *daha* isabetli]{.hl} (95,62'ye karşı
 96,09–96,58). Tam fine-tuning'in karar sınırını olumsuzlara doğru kaydıracak
 kadar özgürlüğü vardı; macro-F1'in ödüllendirdiği, düz doğruluğun cezalandırdığı
 şey de bu. Hangisini istediğiniz bir eğitim kararı değil bir ürün kararıdır ve
 tablo bunu sizin yerinize veremez.
 
-**Üzerinde durulmaya değer sonuç rank 1.** 36.864 adaptör parametresi — modelin
-%0,035'i, e-postayla gönderebileceğiniz bir dosya — donmuş bir encoder'ı
+**Üzerinde durulmaya değer sonuç rank 1.** 38.402 eğitilebilir parametre —
+36.864'ü adaptörlerde, 1.538'i baş katmanda, modelin %0,035'i, e-postayla
+gönderebileceğiniz bir dosya — donmuş bir encoder'ı
 48,37'den 80,47 macro-F1'e taşıyor ve [4. bölümün](../chapters/04-karsilastirma.html) tf-idf baseline'ını
 dört puandan fazla geçiyor. LoRA her ne yapıyorsa, bunu kapasiteyle yapmıyor.
 
@@ -1763,7 +1793,11 @@ sayıda adaptörü servis etmede karşılığını verir.
 ::: {.callout-note collapse="true"}
 ## 2. Encoder'ı dondurup yalnızca sınıflandırıcı başını eğitmek — bu parametre verimli fine-tuning midir?
 
-Hayır. Bu doğrusal bir yoklamadır ve bu görevde tamamen çöker.
+Adaptör tabanlı bir yöntem değil, doğrusal bir yoklamadır — kimileri
+yoklamaları PEFT şemsiyesi altına koyar, kimileri koymaz; hangisini
+kastettiğinizi söyleyin. Asıl fark, bir yoklamanın hiçbir temsili
+değiştirmemesidir ve bu görevde, bu labın kullandığı ortak öğrenme oranıyla
+tamamen çöker.
 
 Donmuş bir encoder üzerinde 1.538 parametre eğitmek macro-F1 **48,37** ve
 doğruluk **93,68** üretti — tam olarak [4. bölümün](../chapters/04-karsilastirma.html) çoğunluk sınıfı
@@ -1771,8 +1805,8 @@ baseline'ı; olumsuz sınıftaki F1 ise **0,00**. Model her seferinde *olumlu*
 demeyi öğrendi.
 
 [LoRA modelin küçük bir *parçasını* eğitmez; modelin *her yerinde* az sayıda
-ağırlık eğitir]{.hl} ve bütün argüman bu ayrımdır. Rank 1 — 36.864 parametre,
-modelin %0,035'i, e-postayla gönderebileceğiniz bir dosya — aynı donmuş
+ağırlık eğitir]{.hl} ve bütün argüman bu ayrımdır. Rank 1 — 38.402 eğitilebilir
+parametre, modelin %0,035'i, e-postayla gönderebileceğiniz bir dosya — aynı donmuş
 encoder'ı 48,37'den **80,47**'ye taşıyor ve tf-idf baseline'ını dört puan
 geçiyor.
 :::
@@ -1796,8 +1830,10 @@ ve oradaki aritmetik de (@sec-lora) böyle olacağını öngörmüştü.
 
 Hiçbiri. Eğitim sonucu kılığına girmiş bir ürün kararına bakıyorsunuz.
 
-Tam fine-tuning, $r=8$'in 82,69'una karşı 83,90 macro-F1 aldı ve farkın tamamı
-azınlık sınıfından geliyor (F1(olumsuz) 67,23'e karşı 70,16). Ama [her bir LoRA
+Tam fine-tuning, $r=8$'in 82,69'una karşı 83,90 macro-F1 aldı ve farkın yaşadığı
+yer azınlık sınıfı: F1(olumsuz) 67,23'e karşı 70,16, yani +2,93 puan; buna
+karşılık çoğunluk sınıfında 0,51 puanlık bir *kayıp* var (F1(olumlu) 98,15'e
+karşı 97,64). Ama [her bir LoRA
 koşusu genel doğrulukta *daha* isabetli]{.hl} — 95,62'ye karşı 96,09–96,58.
 
 Tam fine-tuning'in karar sınırını olumsuzlara doğru kaydıracak kadar özgürlüğü

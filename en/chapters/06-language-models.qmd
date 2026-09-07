@@ -41,9 +41,13 @@ cosine, averaged fastText   1.0000
 cosine, tf-idf              1.0000
 ```
 
-Every representation in Part I is a function of the *set* of words in a
-document. Both sentences contain the same set, so both get the same
-vector, and no classifier built on top can ever tell them apart.
+Those are the unigram representations. Both sentences contain the same
+*set* of words, so both get the same vector, and no classifier built on top
+can tell them apart. @sec-bake-off's word-bigram model does better on this
+particular pair — `iyi fiyat` and `fiyat iyi` are different columns — but it
+is still an unordered bag, now of pairs, and it buys that sensitivity by
+multiplying the vocabulary. Order is being approximated by widening the
+unit, not represented.
 
 Here is the same pair scored by the models in this chapter — the
 probability each assigns to the whole sentence, trained on nothing but
@@ -58,14 +62,15 @@ trigram            -12.481    -12.835       2.259
 ```
 
 The unigram model reproduces chapter 4's failure *exactly*: ratio 1.000,
-because a unigram model is a bag of words wearing a probability
-distribution as a hat. The bigram model breaks the tie and prefers the
+because a unigram model multiplies independent per-word probabilities, so
+reordering the words cannot change the product — a bag of words wearing a
+probability distribution as a hat. The bigram model breaks the tie and prefers the
 sentence a Turkish speaker would also prefer, by a factor of about three.
 
 [That factor of three is the whole of Part II in miniature.]{.hl} It is
-the first time in this book that a model has been sensitive to the order
-of the words, and it came from one structural change: conditioning each
-word on the one before it. Everything from here to @sec-reasoning
+the first time in this book that order is *represented* rather than
+approximated by widening the unit, and it came from one structural change:
+conditioning each word on the one before it. Everything from here to @sec-reasoning
 is a longer and longer answer to the question "conditioned on *what*,
 exactly?"
 
@@ -81,8 +86,8 @@ a: kalite iyi        7     b: kalite kötü       1
 Before celebrating, look at *why* it got them apart.
 
 The model has never seen `kötü fiyat` *or* `fiyat kötü` in 858,000 tokens, so
-it has no direct evidence about bad prices at all — both sentences pay a
-lean entirely on the interpolated lower-order term for one bigram. What tips the balance is mostly that
+it has no direct evidence about bad prices at all — both sentences lean
+entirely on the interpolated lower-order term for one bigram. What tips the balance is mostly that
 `iyi fiyat` is a stock Turkish phrase, seen 112 times, and its mirror image is
 not.
 
@@ -249,6 +254,12 @@ tokens counted            857,987
 distinct word forms        72,087
 vocabulary (count >= 2)    29,773
 ```
+
+That 29,773 is the number this chapter's count-based sections mean by $V$:
+word types surviving the count threshold, with the hapax words folded into
+`<unk>`. The neural model later in the chapter reports a 29,774-way softmax —
+one class more, because it must also be able to emit `</s>`. The two numbers
+are the same vocabulary counted for two different jobs.
 
 Two housekeeping decisions do real work later, so they are worth stating
 plainly.
@@ -675,8 +686,10 @@ $$
 P_{+1}(w \mid h) = \frac{c(h, w) + 1}{c(h) + V}
 $$
 
-It is a Dirichlet prior with concentration 1, it is perfectly
-respectable, and on this corpus it is worse than useless:
+It is the posterior mean under a symmetric Dirichlet prior with
+$\alpha_i = 1$ for every word — so the total concentration is $V$, not 1, and
+the MAP estimate under that prior would be the unsmoothed MLE instead. It is
+perfectly respectable, and on this corpus it is worse than useless:
 
 ```text
 ### test perplexity, add-one
@@ -1387,7 +1400,11 @@ learns a dependency ten words back; above one it explodes and training diverges
 in a single step [@bengio1994learning]. In practice you clip the gradient norm
 to stop the explosion [@pascanu2013difficulty], and you change the architecture
 to stop the vanishing — an LSTM's cell state is *added to* rather than
-multiplied by, which gives the gradient a path with no repeated matrix on it.
+multiplied by a weight matrix, which gives the gradient a path with no
+repeated $W_h$ on it. That path is not free of decay: it is still scaled by
+the forget gate at every step, so a gate that sits below one shrinks the
+gradient geometrically all the same. The architecture makes long-range
+learning possible, not automatic.
 
 But look closely at what $h_t$ has to be. One fixed-size vector, carrying
 everything relevant from an arbitrarily long past.
@@ -1419,7 +1436,7 @@ would you actually deploy?
 | Training time | [~1 second]{.pro} | [~2 minutes]{.con} |
 | Novel contexts | [better — 526.7]{.pro} | [worse — 554.4]{.con} |
 | Seen contexts | [273.1]{.con} | [better — 265.9]{.pro} |
-| Generates novel text | [no — 91.6% copied]{.con} | [yes — 0.0% copied]{.pro} |
+| Generates novel text | [barely — 5.8% of its 8-word spans copied at $n=3$, 91.6% at the $n=5$ that makes it fluent]{.con} | [yes — 0.0% copied]{.pro} |
 | Gives you embeddings | [no]{.con} | [yes, free]{.pro} |
 | Adding data | [retrain in seconds]{.pro} | [retrain in minutes]{.con} |
 | Scales with more data | [saturates]{.con} | [keeps improving]{.pro} |
@@ -1464,18 +1481,26 @@ should keep stepping down.
 
 Because they are wrong about different things. The split by seen and
 unseen context shows the neural model ahead on familiar contexts (265.9
-vs 273.1) and behind on novel ones (554.4 vs 526.7). An average of two
-models beats both whenever their errors are less than perfectly
-correlated — the mixture recovers whichever model happens to be right on
-each event. The fitted $\lambda = 0.50$ is itself the evidence: the data
-says the two are worth the same.
+vs 273.1) and behind on novel ones (554.4 vs 526.7), so a mixture can
+recover whichever model happens to be right on each event.
+
+Be careful with the general claim, because the usual version of it is false.
+What interpolation guarantees is weaker: by Jensen's inequality the mixture's
+log loss is never worse than the $\lambda$-weighted average of the two models'
+log losses, so it always beats the *worse* model. Beating the *better* one
+needs their strengths to be genuinely complementary, and adding a weak model
+to a strong one at a badly chosen $\lambda$ makes things worse. Fitting
+$\lambda$ on held-out data is what protects you — it can collapse to 0 or 1.
+Here it came out at 0.50, which is itself the evidence: on this corpus the
+data says the two are worth the same.
 :::
 
 ::: {.callout-note collapse="true"}
 ## A 5-gram model writes fluent Turkish. Why is that bad news rather than good?
 
 Because 91.6% of the eight-word spans it produces are copied verbatim
-from training data. The fluency is retrieval, not generation. Sparsity
+from training data — against 5.8% for the trigram, which is the model that
+actually wins on perplexity. The fluency is retrieval, not generation. Sparsity
 explains it: 98% of training 5-grams occur once, so a four-word context
 usually admits exactly one continuation — the one that followed last
 time. It also means the model cannot be shown to a user without a

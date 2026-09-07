@@ -29,7 +29,7 @@ decoder look back at *all* of the encoder's states and learn which ones
 mattered at each output step, and the length-related collapse went away. Note
 the date: this is 2015, and there is still a recurrent network underneath.
 
-The Transformer's contribution three years later [@vaswani2017attention] was to
+The Transformer's contribution two years later [@vaswani2017attention] was to
 notice that the patch was doing all the work, and to throw away everything
 else. Its answer is almost embarrassingly direct: [let every token look at
 every other token, and learn how much each one matters]{.hl}. If you have ever
@@ -176,9 +176,14 @@ Two things go wrong, and each one alone is fatal.
 
 **Similarity is symmetric.** $x_i \cdot x_j = x_j \cdot x_i$, necessarily. So
 "the verb wants its object" and "the object wants its verb" are forced to be
-the *same statement with the same strength*. Grammar is full of relations that
-run one way and not the other, and a symmetric score cannot express a single
-one of them.
+the *same score*. Be precise about what that does and does not force: the
+attention *weights* can still differ, because softmax normalises each row by
+its own denominator, so $\alpha_{ij} \neq \alpha_{ji}$ in general. What is lost
+is the ability to rank the two directions differently — every row is reading
+the same underlying similarity table, so no head can decide that the verb
+wants its object more than the object wants its verb. Grammar is full of
+relations that run one way and not the other, and a symmetric score table
+cannot distinguish a single one of them.
 
 **Self-similarity swamps everything else.** A token's score against itself is
 $x \cdot x$, its squared length, and here that is the largest entry in every
@@ -190,7 +195,7 @@ layer computes an expensive approximation to *leave every token alone*.
 Strictly, $x_i \cdot x_i$ beats $x_i \cdot x_j$ only when
 $\|x_j\| \le \|x_i\|$ — a longer neighbour can outscore you. Our three toy
 vectors all have $\|x\|^2 = 1.07$, so here the diagonal wins outright. The
-general claim is weaker but still fatal: an unprojected score inflates
+general claim is weaker but still damaging: an unprojected score inflates
 self-similarity by construction, whether or not the two tokens are related.
 :::
 
@@ -231,8 +236,8 @@ Be careful about what that argument proves. Write the score out and the
 projections collapse:
 
 $$
-q_i \cdot k_j \;=\; (x_i W^Q)(x_j W^K)^{\top} \;=\; x_i^{\top}\,\underbrace{W^Q
-W^{K\top}}_{M,\;\; d \times d}\, x_j
+q_i \cdot k_j \;=\; (x_i W^Q)(x_j W^K)^{\top} \;=\; x_i\,\underbrace{W^Q
+W^{K\top}}_{M,\;\; d \times d}\, x_j^{\top}
 $$
 
 Only the **product** $M$ ever touches the score. A single learned $d \times d$
@@ -455,13 +460,19 @@ The ambiguity in the pronoun head is real, and it is the classic
 *Winograd* setup. Only one word changes between these two sentences, and the
 referent of `it` moves from one noun to the other:
 
-- "The robot poured coffee because it was **ready**." → `it` is the **coffee**.
+- "The robot poured coffee because it was **ready**." → `it` leans to the
+  **coffee**.
 - "The robot poured coffee because it was **instructed to**." → `it` is the
   **robot**.
 
-Nothing in the syntax distinguishes them; the grammar is identical. Resolving
-the pronoun takes world knowledge — coffee can be ready, robots take
-instructions — which is exactly what large-scale pretraining buys.
+The first of those is a lean and not a certainty — a robot can be ready too,
+which is why the head above splits 0.46/0.34 rather than committing. The
+canonical version of the schema removes that slack: *the trophy does not fit
+in the suitcase because it is too big* (the trophy) against *too small* (the
+suitcase) [@levesque2012winograd]. Either way the point is the same: nothing
+in the syntax distinguishes the pair; the grammar is identical. Resolving the
+pronoun takes world knowledge, which is exactly what large-scale pretraining
+buys.
 :::
 :::
 
@@ -551,7 +562,7 @@ punchline.
 ### Step 2 — every query meets every key
 
 Score token $i$ against token $j$ with a dot product, $q_i \cdot k_j$. Nine
-tokens pairs, nine numbers, arranged so that [each **row** is one token doing
+token pairs, nine numbers, arranged so that [each **row** is one token doing
 the looking and each **column** is a token being looked at]{.hl}:
 
 $$
@@ -603,7 +614,8 @@ random pairs:
 | 64 | 8.029 | 8.000 | 1.004 |
 | 512 | 22.746 | 22.627 | 1.005 |
 
-The middle two columns agree to about half a percent — the residual is
+The middle two columns agree to within about 1% — 1.10% at $d_k = 8$ and
+under 0.6% for the wider heads. The residual is
 sampling noise from a 20,000-pair estimate, not a systematic gap. That is the
 whole point: the measured spread of raw scores really does grow as
 $\sqrt{d_k}$, so dividing by $\sqrt{d_k}$ really does flatten it to a constant,
@@ -2909,9 +2921,11 @@ model's ability to ask.
 $Q$ is what a token is looking *for*; $K$ is what it offers to be found *by*;
 $V$ is what it actually contributes once found. [$Q$ and $K$ together decide
 **where** information moves; $V$ alone decides **what** moves.]{.hl} Tie them
-and a token's advert becomes identical to its query, which forces every token
-to attend most strongly to itself and makes asymmetric relations —
-*which verb governs me* — inexpressible.
+and a token's advert becomes identical to its query, so the score table becomes
+symmetric and asymmetric relations — *which verb governs me* — become
+inexpressible. It also biases every token toward itself, since $x \cdot x$ is
+the largest score in a row unless a neighbour is longer; that second effect is
+a tendency, not a guarantee.
 
 The worked example in @sec-attention-worked shows this concretely: the score
 that makes the example work could not have been produced by any unprojected
@@ -3013,9 +3027,11 @@ it, and the order gives you away.
    of $d_k$-dimensional vectors grow like $\sqrt{d_k}$ and an unscaled softmax
    saturates.
 
-2. **Why is there a feed-forward network after attention?** Because attention is
-   the only place tokens *mix*, and it is entirely linear in the values — mixing
-   without a non-linearity would collapse. The feed-forward half applies
+2. **Why is there a feed-forward network after attention?** Because attention
+   mixes tokens but, given its weights, does so *linearly in the values* — the
+   non-linearity it does have lives in how the weights are computed, not in what
+   it does with what it moves. The feed-forward sublayer is where each token
+   gets non-linear processing of its own. The feed-forward half applies
    per-token depth: $W_1$ is a bank of detectors and $W_2$ is what each
    broadcasts when it fires. Get the proportion right, because most candidates
    have it backwards: [two thirds of every transformer block's parameters are
