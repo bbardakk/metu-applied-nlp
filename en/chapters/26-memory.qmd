@@ -33,8 +33,11 @@ lifetime, a different storage answer, and a different failure mode.
 : One word, three problems {tbl-colwidths="[14,32,12,20,22]"}
 
 The distinction that matters most in practice is the last column. Working
-memory fails loudly — you hit the window. Episodic memory fails slowly — the
-system gets more expensive and less relevant.
+memory usually fails loudly — you hit the window and something raises. Not
+always: @sec-context-engineering's whole subject is the quieter version, where
+everything fits and the middle of a long context stops being used well.
+Episodic memory fails slowly — the system gets more expensive and less
+relevant.
 
 [Semantic memory fails silently]{.hl}: a fact recorded in March is still
 returned confidently in July, and nothing in the system knows it has expired.
@@ -95,9 +98,15 @@ The architecture that works for most systems is unglamorous and hybrid:
 [Facts go in rows; episodes go in vectors.]{.hl}
 
 The single most common production mistake in this area is putting facts in
-vectors, because it makes *update* and *delete* impossible to do properly —
-and both of those turn out to be requirements rather than nice-to-haves, one
-for correctness and one for law.
+vectors. Not because the storage layer refuses: `pgvector` rows take ordinary
+SQL `UPDATE`, `DELETE` and upsert, and every managed vector store has an
+id-keyed delete. The problem is that a vector store gives you no *key* for the
+fact. Nothing enforces one row per `(user, preferred_channel)`, so a corrected
+preference becomes a second embedding sitting next to the first, both
+retrievable, and similarity search has no reason to prefer the new one. Both
+update and delete turn out to be requirements rather than nice-to-haves — one
+for correctness and one for law — and what makes them work is a keyed fact
+table, with the index as a derived view over it.
 
 ## Write policies: the decision nobody makes on purpose {#sec-memory-write}
 
@@ -133,10 +142,11 @@ it, and how confident the extractor was. Without provenance you cannot resolve
 conflicts, cannot expire anything, and cannot answer *why does the system
 think this about me* — which is a question you will be asked.
 
-**Never write on a single mention.** A preference stated once and a preference
-stated three times are different things. The cheapest useful policy is a
-confirmation threshold: write on the second occurrence, or on an explicit
-statement, and not on an inference.
+**Never write on a single *inferred* mention.** A preference you inferred once
+and a preference stated three times are different things. The cheapest useful
+policy separates the source: write an explicit durable statement the first time
+the user makes it — they told you — and require a second occurrence or a
+confirmation for anything you inferred from behaviour.
 
 **Never write attacker-controlled text as a fact.** This is the rule the other
 three do not imply, and it is the one that makes memory qualitatively worse
@@ -311,9 +321,12 @@ Resolve, then inject. Concretely, four rules that cover almost every case:
   channel*, the ambiguity reaches the model. Make the write path an upsert and
   the ambiguity never exists.
 - **Recency wins by default**, because it is right more often than any other
-  simple rule and it is the one users expect. Where it is wrong — a stated
-  preference should outrank an inferred one regardless of date — encode
-  *that*, explicitly, as a precedence over source rather than time.
+  simple rule and it is the one users expect. Recency of *what*, though: record
+  the time the fact was true and the time you learned it separately, because a
+  late-arriving report of an old event is not news. Where recency is wrong — a
+  stated preference should outrank an inferred one regardless of date, and an
+  authoritative source should outrank a guess — encode *that*, explicitly, as a
+  precedence over source and event time rather than over write time.
 - **Expire on a schedule, not on faith.** Anything time-sensitive gets a TTL
   at write time. A shipping address does not expire; a *current project* does.
 - **Surface conflicts you cannot resolve.** If two sources of equal precedence
@@ -425,10 +438,13 @@ of them is a schema choice that costs nothing on day one.
 ## 1. Should memory go in a vector database?
 
 Episodes yes, facts no. Similarity search is right for *have we discussed
-something like this* and wrong for *what is this user's current preference*,
-because a fact needs update and delete and a vector index offers neither by
-name. Facts go in rows keyed by `(user, key)`; episodes go in an index with
-pointers back to the record. Putting facts in vectors is the most common
+something like this* and wrong for *what is this user's current preference*.
+Be precise about why, because "you cannot delete from a vector store" is not
+it — you can, by id. What a vector index does not give you is a *key*: nothing
+stops two contradictory embeddings of the same preference coexisting, and
+nearest-neighbour search has no notion of which is current. Facts go in rows
+keyed by `(user, key)`, where an upsert makes the contradiction impossible;
+episodes go in an index with pointers back to the record. Putting facts in vectors is the most common
 production mistake in this area, and the bill arrives at the first erasure
 request.
 :::
@@ -452,8 +468,10 @@ still failed, and it fails in a form that no accuracy metric flags.
 ::: {.callout-note collapse="true"}
 ## 3. What should trigger a write to memory?
 
-Not a single mention. The cheapest policy that works is to write on an
-explicit statement or a second occurrence, never on a first inference — and to
+Not a single *inference*. The cheapest policy that works separates the two
+cases: an explicit durable statement — *always email me, never call* — can be
+written the first time, because the user said it; anything you inferred needs a
+second occurrence or a confirmation. And
 record provenance with every write, because without it you cannot resolve
 conflicts, expire anything, or answer why the system believes something. The
 failure mode of remembering everything is not storage cost but retrieval
@@ -525,9 +543,11 @@ well as time.
 **Q: A user asks you to delete everything you know about them. What happens?**
 
 Walk the actual data path: the fact store, the vector index, the episode log,
-backups, and any cache. The honest answer names the hard one — a vector index
-has no names, so removing a specific fact means rebuilding or maintaining a
-mapping you should have built at the start. Say that this is a schema decision
+backups, and any cache. The honest answer names the hard one. Deleting *a
+user* is usually fine — every store can delete by id. Deleting *a fact* is
+where an embedding-only design hurts: you have to know which vectors encode it,
+which means you needed the mapping from fact to embedding all along, and
+derived copies inside summaries are harder still. Say that this is a schema decision
 made on day one, not a feature added later, and that it is the strongest
 practical argument for keeping facts in a relational store.
 

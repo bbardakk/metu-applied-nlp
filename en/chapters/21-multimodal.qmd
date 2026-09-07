@@ -228,10 +228,14 @@ compare. You are no longer restricted to the categories someone enumerated at
 training time, which is what made vision models useful in places nobody had
 labelled a dataset for.
 
-**It buys a shared space, which is what a VLM is built on.** Once image vectors
-live somewhere a language model can interpret, two designs become available, and
-they are worth separating because they are architecturally opposite and they
-cost different things.
+**It buys a shared space, which is what a VLM is built on.** A shared space is
+not the same as intelligibility: nothing about CLIP's geometry makes an
+arbitrary language model able to read those vectors. What it gives you is a
+visual representation organised by *meaning* rather than by pixels, which is a
+good starting point for a learned bridge — and every design below trains that
+bridge. With one available, two architectures become possible, and they are
+worth separating because they are architecturally opposite and they cost
+different things.
 
 *Cross-attention.* Flamingo [@alayrac2022flamingo] **freezes** the language
 model entirely, compresses a variable number of patches into a fixed set of
@@ -246,9 +250,13 @@ vectors are concatenated with the text tokens, and the whole thing is
 instruction-tuned. One stream, one attention, no new modules — which is the
 design in the figure above, and the one most open VLMs now follow.
 
-Knowing which you have in front of you tells you what you can change: a frozen
-language model cannot be fine-tuned through the image path, and a single-stream
-model has no separate image pathway to intervene on.
+Knowing which you have in front of you tells you what you can change. Be
+precise about what "frozen" rules out: gradients still flow *through* a frozen
+language model, which is exactly how the resampler and the gates get trained —
+what is frozen is the language model's own weights, so its text behaviour
+cannot drift and you cannot teach it anything new through the image path. A
+single-stream model, by contrast, has no separate image pathway to intervene
+on.
 
 The vision encoder in this chapter's model is a descendant of CLIP with a
 different loss [@zhai2023sigmoid], and its fixed pooled output size is why an
@@ -408,8 +416,13 @@ is not OCR failing; that is a language model doing what language models do —
 filling an uncertain region with something likely — and it is the specific
 reason a VLM is a different risk profile from a classical OCR engine.
 
-A dedicated OCR system produces garbage when it fails, and garbage is easy to
-detect. A VLM produces *fluent Turkish that was never on the page*.
+A dedicated OCR system, when it fails on a character it cannot resolve, tends
+to produce something visibly wrong. A VLM produces *fluent Turkish that was
+never on the page*. Treat that as a difference of degree rather than a clean
+rule: modern OCR engines also use language models and lexicons, and they will
+happily turn one plausible digit or word into another plausible one. What
+changes with a VLM is how much of the output can be reconstructed from priors
+and how little of it announces itself as a guess.
 
 ::: {.column-margin}
 Which gives a practical rule with teeth: if a downstream step will treat the
@@ -624,9 +637,11 @@ less the page contains.
 ::: {.callout-note collapse="true"}
 ## 2. Why does transcription accuracy fall as the font gets smaller, if the model is unchanged?
 
-Because the token budget does not fall with it. The encoder emits a fixed
-number of vectors regardless of what is on the page, so a denser page pushes
-more information through the same bottleneck. You can predict the direction of
+Because the token budget does not fall with it. Be exact about what is being
+held constant: the *content* is the same sentence in every row, so nothing new
+is being added — what changes is that the characters occupy fewer pixels, and
+the encoder emits a fixed number of vectors regardless. A smaller font means
+fewer encoder pixels per character through the same bottleneck. You can predict the direction of
 this effect before running anything — and it means the fix is resolution and
 cropping, not prompting.
 :::
@@ -635,9 +650,12 @@ cropping, not prompting.
 ## 3. Your VLM reads English documents at 0.2% character error. What will it do on Turkish?
 
 Worse, and by a factor you should measure rather than assume. Here it was
-**about 5× at every resolution** on professionally translated pairs, so the
-content was identical and only the script differed — 6.67% against 1.33% at
-the smallest size. The general lesson is @sec-turkish-nlp's, arriving with no
+**about 5× at every resolution** on semantically matched English and Turkish
+text rendered under identical conditions — 6.67% against 1.33% at the smallest
+size. Note that "identical content" is as far as the control goes: both are
+Latin script, and the Turkish differs in its diacritics, its word forms and its
+morphology as well as its letters, so the experiment isolates the *language*,
+not one property of it. The general lesson is @sec-turkish-nlp's, arriving with no
 tokenizer involved: a pipeline validated on English is not validated for
 another language, even when the component has nothing linguistic in it.
 :::
@@ -854,10 +872,13 @@ both ways. The ratio is the first thing to know and takes two minutes.
 
 ## What to remember {#sec-multimodal-summary}
 
-- **An image is a flat rate.** Every one of the 320 pages in this chapter cost
-  the same **290 prompt tokens** — 256 image vectors plus the prompt —
-  regardless of font size or content. Image cost does not scale with what is on
-  the page, which is the single most useful thing to know when budgeting.
+- **An image is a flat rate — for this encoder.** Every one of the 320 pages in
+  this chapter cost the same **290 prompt tokens** — 256 image vectors plus the
+  prompt — regardless of font size or content, because this model resizes to a
+  fixed grid and pools to a fixed 256 vectors. Dynamic-resolution and tiling
+  encoders, which most 2025–2026 families use, charge a variable number instead.
+  Look up your own encoder's rule before budgeting; that it *has* one is the
+  useful part.
 - **Photographing text you already have costs 4–5×.** The same sentence: 46.6
   tokens as English text, 62.4 as Turkish text, **260 as an image**. The
   premium is *smaller* for Turkish only because @sec-turkish-nlp's tokenizer

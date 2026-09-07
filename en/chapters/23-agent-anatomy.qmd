@@ -59,9 +59,10 @@ def agent(question, tools, model, max_steps=10):
     raise StepLimitExceeded(question, messages)   # 7. it did not finish
 ```
 
-That is an agent. Fourteen statements — count them — and every serious
-framework you will meet is this loop plus opinions about statements 1, 4
-and 7.
+That is an agent. Fourteen statements — count them — and this loop is the
+pattern underneath the frameworks you will meet; what they add is mostly
+opinions about statements 1, 4 and 7, plus the state management, validation,
+scheduling and recovery that a fourteen-line loop does not have.
 
 Three details in there are not decoration. `call.arguments` arrives as a JSON
 *string* on every OpenAI-compatible endpoint, so `**call.arguments` raises
@@ -191,8 +192,11 @@ problem in @sec-agent-anatomy-decay directly: `CEVAP` stops competing with
 `ARA` once both are the same *kind* of thing.
 
 **Detect repetition.** If a call is byte-identical to one already in the
-transcript, the loop has stopped making progress. Return an observation that
-says so rather than the same result again — the chapter's own worst failure
+transcript, the loop has *probably* stopped making progress — with a real
+exception to carve out: polling a job, re-reading a file the agent just wrote,
+or re-querying data that changes are all legitimate repeats. Exempt the tools
+where that is the point, and apply the check to the rest. Return an observation
+that says so rather than the same result again — the chapter's own worst failure
 below is four identical calls in a row, and one line of bookkeeping catches it.
 
 **Bound three budgets, not one.** Steps, wall-clock seconds and tokens fail
@@ -230,10 +234,17 @@ wants a loop at all.
 
 ## The state is a transcript, and that is the whole problem {#sec-agent-anatomy-state}
 
-Ask what an agent's state *is* and the honest answer is uncomfortable: it is
-the list of messages, and nothing else. There is no working memory, no
-variable bindings, no scratch space the model can address. Everything the
-agent knows at step 7 is whatever survived into the transcript by step 6.
+Ask what this agent's state *is* and the honest answer is uncomfortable: it is
+the list of messages, and nothing else. There is no working memory, no variable
+bindings, no scratch space the model can address. Everything the agent knows at
+step 7 is whatever survived into the transcript by step 6.
+
+That is a property of the minimal loop, not a law about agents. The next four
+chapters all buy their way out of it: @sec-context-engineering moves state into
+files the agent reads back, @sec-memory gives it a store that outlives the run,
+and @sec-multi-agent hands sub-tasks to workers with transcripts of their own.
+Read the three consequences below as what you get *by default*, and as the
+reason those chapters exist.
 
 Three consequences fall directly out of that, and they explain most of what
 goes wrong in practice.
@@ -251,10 +262,15 @@ continues to condition on them. This is why an agent that goes wrong often
 keeps going wrong in the same direction — the evidence of its earlier
 confusion is now part of what it is reasoning from.
 
-**There is no rollback.** In ordinary software you would retry a failed step
-from a clean state. Here the failure is in the state. The nearest thing to a
-retry is starting the whole loop again, which is why "just retry it" is a much
-more expensive suggestion for an agent than for an HTTP request.
+**There is no rollback of the transcript by default.** In ordinary software you
+would retry a failed step from a clean state. Here the failure is in the state,
+and this loop keeps every message. You *can* build the rollback — snapshot the
+message list before a step and truncate back to it — and that is cheap and
+worth doing. What no snapshot undoes is the side effects: the email that went
+out, the row that was deleted, the payment that cleared. Keep the two apart in
+your head, because only one of them is under your control, and it is why "just
+retry it" is a more expensive suggestion for an agent than for an HTTP
+request.
 
 ::: {.column-margin}
 One thing takes the sting out of the quadratic term and it is worth knowing
@@ -704,11 +720,15 @@ framework documentation readable.
 :::
 
 ::: {.callout-note collapse="true"}
-## 2. Your agent is wrong 60% of the time on five-step tasks. Where do you look?
+## 2. Your agent is wrong 60% of the time on a task with five lookups. Where do you look?
 
 Not at the tool calls, probably. Measured here, tool use stayed **perfect** —
 exactly the right number of calls, none malformed, none hitting the cap — while
 accuracy fell from 100% to 40%. The failure was in aggregating what came back.
+Note the shape of the task before generalising: the five lookups are
+independent, so the model batched them into two model calls and never ran five
+sequential steps. What fell apart is aggregation under load, not a chain of
+five dependent decisions.
 Check the reasoning over collected observations before you rewrite a schema,
 and decompose the task if you can: fewer things to hold at once is the fix that
 actually works.
@@ -717,11 +737,14 @@ actually works.
 ::: {.callout-note collapse="true"}
 ## 3. What is an agent's state?
 
-The transcript, and nothing else. There is no working memory and no variable
-bindings. Three things follow: cost grows with the number of model calls
-because each one re-sends everything; nothing is ever forgotten, including
-mistakes, which is why a confused agent tends to stay confused in the same
-direction; and there is no rollback, because the failure is *in* the state.
+In the minimal loop, the transcript and nothing else — no working memory, no
+variable bindings. Three things follow: cost grows with the number of model
+calls because each one re-sends everything; nothing is ever forgotten,
+including mistakes, which is why a confused agent tends to stay confused in the
+same direction; and there is no rollback of the transcript unless you build
+one, while side effects never roll back at all. Then say what the rest of this
+part adds: external files, a memory store, and sub-agents with their own
+transcripts are all ways of not living inside one message list.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -750,9 +773,11 @@ what it cost.
 
 When the control flow is not data-dependent. The criterion is branching, not
 difficulty: if you can write the steps down, write them down. A fixed pipeline
-for this chapter's task is correct by construction at every step count, costs
+for this chapter's task has no decision to get wrong at any step count, costs
 nothing per call, and runs in microseconds, against an agent that reaches 40%
-at five lookups. Reach for the loop when what you do second genuinely depends
+at five lookups. (It can still have bugs — it is code — and it needs the same
+tests as any other code; what it does not have is a model choosing what to do
+next.) Reach for the loop when what you do second genuinely depends
 on what you found first.
 :::
 

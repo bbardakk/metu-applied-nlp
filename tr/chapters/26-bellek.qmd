@@ -38,8 +38,10 @@ Bir ajanda "bellek", bir kelimeyi ve başka neredeyse hiçbir şeyi paylaşan ü
 
 : Tek kelime, üç problem {tbl-colwidths="[14,32,12,20,22]"}
 
-Pratikte en önemli ayrım son sütundur. Çalışma belleği gürültülü bozulur —
-pencereye çarparsınız. Epizodik bellek yavaş bozulur — sistem pahalılaşır ve
+Pratikte en önemli ayrım son sütundur. Çalışma belleği genellikle gürültülü
+bozulur — pencereye çarparsınız ve bir şey hata verir. Her zaman değil:
+@sec-baglam-muhendisligi'nin bütün konusu daha sessiz olan sürüm, yani her şeyin
+sığdığı ama uzun bir bağlamın ortasının iyi kullanılmayı bıraktığı hâl. Epizodik bellek yavaş bozulur — sistem pahalılaşır ve
 alaka düşer.
 
 [Anlamsal bellek sessizce bozulur]{.hl}: martta kaydedilmiş bir olgu temmuzda
@@ -99,9 +101,16 @@ sorgusu değildir.
 
 [Olgular satırlara, epizotlar vektörlere gider.]{.hl}
 
-Bu alandaki en yaygın üretim hatası olguları vektörlere koymaktır, çünkü bu
-*güncelleme* ve *silmeyi* düzgün yapmayı imkânsız kılar — ve ikisi de hoş
-olurdu değil gereklilik çıkar; biri doğruluk için, biri yasa için.
+Bu alandaki en yaygın üretim hatası olguları vektörlere koymaktır. Depolama
+katmanı reddettiği için değil: `pgvector` satırları sıradan SQL `UPDATE`,
+`DELETE` ve upsert kabul eder ve her yönetilen vektör deposunun kimlikle silmesi
+vardır. Problem, bir vektör deposunun olguya bir *anahtar* vermemesidir.
+`(kullanıcı, tercih_edilen_kanal)` için tek satır olmasını hiçbir şey dayatmaz;
+dolayısıyla düzeltilmiş bir tercih, birincisinin yanına oturan ikinci bir gömme
+olur, ikisi de erişilebilirdir ve benzerlik aramasının yenisini yeğlemek için bir
+sebebi yoktur. Güncelleme ve silme, hoş olurdu değil gereklilik çıkar — biri
+doğruluk için, biri yasa için — ve onları çalıştıran şey, indeksin üzerinden
+türetilmiş bir görünüm olduğu anahtarlı bir olgu tablosudur.
 
 ## Yazma politikaları: kimsenin bilerek vermediği karar {#sec-bellek-yazma}
 
@@ -136,10 +145,11 @@ yol açtığı ve çıkarıcının ne kadar emin olduğu. Köken olmadan çeliş
 çözemez, hiçbir şeyin süresini dolduramaz ve *sistem benim hakkımda bunu neden
 düşünüyor* sorusunu cevaplayamazsınız — ki bu size sorulacak bir sorudur.
 
-**Tek bir bahis üzerine asla yazmayın.** Bir kez ifade edilmiş bir tercihle üç
-kez ifade edilmiş bir tercih farklı şeylerdir. İşe yarayan en ucuz politika bir
-teyit eşiğidir: ikinci geçişte ya da açık bir ifade üzerine yazın, bir çıkarım
-üzerine değil.
+**Tek bir *çıkarsanmış* bahis üzerine asla yazmayın.** Bir kez çıkarsadığınız
+bir tercihle üç kez ifade edilmiş bir tercih farklı şeylerdir. İşe yarayan en
+ucuz politika kaynağı ayırır: açık ve kalıcı bir ifadeyi kullanıcı ilk
+söylediğinde yazın — size söyledi — davranıştan çıkarsadığınız her şey için ise
+ikinci bir geçiş ya da bir teyit isteyin.
 
 **Saldırganın kontrolündeki metni asla olgu olarak yazmayın.** Diğer üçünün ima
 etmediği kural bu ve belleği kötü bir prompt'tan nitelikçe daha kötü yapan — aynı
@@ -308,9 +318,12 @@ kural:
   tutabiliyorsa belirsizlik modele ulaşır. Yazma yolunu bir upsert yapın ve
   belirsizlik hiç var olmasın.
 - **Varsayılan olarak güncellik kazanır**, çünkü başka herhangi bir basit
-  kuraldan daha sık doğrudur ve kullanıcıların beklediği kuraldır. Yanlış olduğu
-  yerde — ifade edilmiş bir tercih, tarih ne olursa olsun çıkarsanmış olanı
-  yenmeli — *bunu* zaman yerine kaynak üzerinden bir öncelik olarak açıkça
+  kuraldan daha sık doğrudur ve kullanıcıların beklediği kuraldır. Ama *neyin*
+  güncelliği: olgunun doğru olduğu zamanı ve onu öğrendiğiniz zamanı ayrı
+  kaydedin, çünkü eski bir olayın geç gelen bildirimi haber değildir. Güncelliğin
+  yanlış olduğu yerde — ifade edilmiş bir tercih, tarih ne olursa olsun
+  çıkarsanmış olanı yenmeli ve yetkili bir kaynak bir tahmini yenmeli — *bunu*
+  yazma zamanı yerine kaynak ve olay zamanı üzerinden bir öncelik olarak açıkça
   kodlayın.
 - **İnançla değil takvimle süre dolumu.** Zamana duyarlı her şey yazma anında
   bir TTL alır. Bir teslimat adresinin süresi dolmaz; bir *mevcut projenin*
@@ -422,10 +435,14 @@ hiçbir şeye mal olmayan bir şema tercihi.
 ## 1. Bellek bir vektör veritabanına mı konmalı?
 
 Epizotlar evet, olgular hayır. Benzerlik araması *buna benzer bir şeyi konuştuk
-mu* için doğru, *bu kullanıcının mevcut tercihi nedir* için yanlıştır; çünkü bir
-olgu güncelleme ve silme ister ve bir vektör indeksi ikisini de adıyla sunmaz.
-Olgular `(kullanıcı, anahtar)` ile anahtarlanmış satırlara gider; epizotlar,
-kayda geri işaretçileri olan bir indekse. Olguları vektörlere koymak bu alandaki
+mu* için doğru, *bu kullanıcının mevcut tercihi nedir* için yanlıştır. Nedeni
+konusunda kesin olun, çünkü "vektör deposundan silemezsiniz" değil — kimlikle
+silebilirsiniz. Bir vektör indeksinin vermediği şey bir *anahtar*: aynı tercihin
+birbiriyle çelişen iki gömmesinin bir arada durmasını hiçbir şey engellemez ve en
+yakın komşu aramasının hangisinin güncel olduğuna dair bir kavramı yoktur.
+Olgular `(kullanıcı, anahtar)` ile anahtarlanmış satırlara gider — orada bir
+upsert çelişkiyi imkânsız kılar; epizotlar, kayda geri işaretçileri olan bir
+indekse. Olguları vektörlere koymak bu alandaki
 en yaygın üretim hatasıdır ve fatura ilk silme talebinde gelir.
 :::
 
@@ -449,8 +466,10 @@ biçimde başarısız olur.
 ::: {.callout-note collapse="true"}
 ## 3. Belleğe yazmayı ne tetiklemeli?
 
-Tek bir bahis değil. İşleyen en ucuz politika, açık bir ifade ya da ikinci bir
-geçiş üzerine yazmak, asla ilk bir çıkarım üzerine yazmamak — ve her yazmayla
+Tek bir *çıkarım* değil. İşleyen en ucuz politika iki durumu ayırır: açık ve
+kalıcı bir ifade — *bana hep e-posta at, asla arama* — ilk seferinde yazılabilir,
+çünkü kullanıcı söyledi; çıkarsadığınız her şey ikinci bir geçiş ya da bir teyit
+ister. Ve her yazmayla
 kökeni kaydetmektir, çünkü onsuz çelişkileri çözemez, hiçbir şeyin süresini
 dolduramaz ya da sistemin bir şeye neden inandığını açıklayamazsınız. Her şeyi
 hatırlamanın kusur biçimi depolama maliyeti değil erişim kalitesidir: ilgisiz her
@@ -523,9 +542,11 @@ altı cevaptan birini hâlâ ters yönde bıraktı. İlginç devam sorusu, günc
 **S: Bir kullanıcı, hakkında bildiğiniz her şeyi silmenizi istiyor. Ne olur?**
 
 Gerçek veri yolunu yürüyün: olgu deposu, vektör indeksi, epizot kaydı, yedekler
-ve her önbellek. Dürüst cevap zor olanı adlandırır — bir vektör indeksinin adları
-yoktur, dolayısıyla belirli bir olguyu kaldırmak, başta kurmuş olmanız gereken
-bir eşlemeyi yeniden kurmak ya da sürdürmek demektir. Bunun sonradan eklenen bir
+ve her önbellek. Dürüst cevap zor olanı adlandırır. *Bir kullanıcıyı* silmek
+genellikle sorunsuzdur — her depo kimlikle silebilir. Canınızı yakan, yalnızca
+gömmeye dayanan bir tasarımda *bir olguyu* silmektir: hangi vektörlerin onu
+kodladığını bilmeniz gerekir, yani olgudan gömmeye eşlemeye en baştan
+ihtiyacınız vardı; özetlerin içindeki türetilmiş kopyalar ise daha da zordur. Bunun sonradan eklenen bir
 özellik değil birinci günde verilen bir şema kararı olduğunu ve olguları
 ilişkisel bir depoda tutmak için en güçlü pratik argüman olduğunu söyleyin.
 

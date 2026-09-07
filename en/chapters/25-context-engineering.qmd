@@ -43,7 +43,9 @@ case for treating the window as a budget where **every token competes**:
   that state**, which is why a tool returning 50,000 tokens does not slow an
   agent down so much as take the space its later steps needed.
 
-[So the question is never "does it fit". It is "what is each token earning".]{.hl}
+[So there are two questions, not one: "does it fit" — capacity is a real
+constraint — and, for everything that does, "what is each token
+earning".]{.hl} The second is the one nobody asks.
 
 ### The one thing that changes the arithmetic {#sec-context-engineering-cache}
 
@@ -113,9 +115,13 @@ qwen3.5:9b, 60 tasks, two invented figures to find and sum
 Sixty distractors scored *higher* than twelve, which is the first sign that
 what moves in this table is noise rather than context length. The intervals
 overlap heavily — but overlapping intervals are not a test, so here is one.
-The largest gap, 0 against 12 distractors (60/60 versus 53/60), gives a
-two-sided Fisher exact p = 0.013; across four comparisons the Bonferroni line
-is 0.0125, so it fails by a hair and I will not claim it. The comparison the
+The largest gap, 0 against 12 distractors (60/60 versus 53/60), sits on the
+same 60 tasks, so the right instrument is the paired one: all seven
+disagreements run the same way, and exact McNemar gives a two-sided
+$p = 2 \times 2^{-7} = 0.0156$. (Fisher's exact test, which treats the two
+conditions as independent samples, gives 0.013 — close here, and the wrong
+model of the data.) Across four comparisons the Bonferroni line is 0.0125, so
+it fails either way and I will not claim it. The comparison the
 headline rests on, 0 against 60 distractors, gives p = 0.50. So: adding 78×
 the tokens cost nothing this sample can detect, and the dip in the middle sits
 right at the edge of what 60 tasks can resolve either way.
@@ -169,9 +175,13 @@ opposed to the length it accepts. Routinely far shorter than the advertised
 window. [↩](#term-effective-context-length){.term-back}
 :::
 
-**Why this happens, mechanically.** Two things compound. Attention weights are
-a softmax over every key in the context, so the mass any one relevant token can
-receive is divided among more competitors as the context grows — *dilution*. A
+**Why this might happen, mechanically.** Two mechanisms are usually offered,
+and they are plausible rather than established — nothing below is measured in
+this chapter. Attention weights are a softmax over every key in the context, so
+adding keys gives the mass somewhere else to go — *dilution*. Note this is a
+tendency and not an identity: the scores are not fixed while the denominator
+grows, and a model that learns to score the relevant token higher in a longer
+context can hold or increase its share. A
 literal string match survives dilution because it produces one very large
 similarity score the softmax cannot flatten; a semantic association produces
 several medium ones, and medium scores are exactly what dilution erases.
@@ -289,7 +299,7 @@ with very different value per token:
 | **Decisions** the agent made and their reasons | summarised | *what* was decided is needed; the deliberation that produced it usually is not |
 | **Tool results** that are still live | verbatim | these are facts the answer depends on. Summarising a number is how you lose it |
 | **Tool results** already superseded or consumed | drop, or reduce to one line | the ten search results you rejected are pure cost from the moment you rejected them |
-| **Errors** already recovered from | drop | @sec-agent-anatomy's point: a stale error keeps conditioning the model toward the confusion it caused |
+| **Errors** already recovered from | drop the traceback, keep one line of what it taught | @sec-agent-anatomy's point: a stale error keeps conditioning the model toward the confusion it caused — but "the date field wants ISO-8601" is the sentence that stops it happening again, and it costs eight tokens |
 
 : Not all tokens are worth the same {tbl-colwidths="[26,18,56]"}
 
@@ -462,8 +472,12 @@ outright, and no amount of chunking repairs them:
   get a worse answer than a query would have given.
 
 The rule: **when the data has structure, give the agent a way to query the
-structure.** A `run_sql` tool over a real schema beats any amount of embedded
-rows, and a `grep`-and-`read` pair beats embedding a codebase. That is a
+structure.** For the query shapes above — aggregates, joins, follow the callers
+of this function — a `run_sql` tool over a real schema beats embedding rows,
+and a `grep`-and-`read` pair beats embedding a codebase. It is a claim about
+those query shapes, not a general ranking: a question like *where do we handle
+retries* has no exact string to grep for, and that is what embedding search is
+good at. Most real systems want both. That is a
 context-engineering decision, because it determines what ends up in the window
 — and it is usually the difference between an agent that works on your data
 and one that works on a demo.
@@ -491,8 +505,10 @@ models claiming 32K or more, only half held up at 32K.
 ## 2. You ran needle-in-a-haystack and scored 100%. What have you learned?
 
 Almost nothing about your task. NIAH lets the model match a rare string that
-is already in the question, which is the easiest thing attention does — this
-book's own two attempts at it both returned flat 100% curves.
+is already in the question, which is the easiest thing attention does —
+@sec-rag's run returned a flat 100% at every size and position, and this
+chapter's harder local version stayed between 88.3% and 100% with no trend in
+context length.
 @modarressi2025nolima removed exactly that crutch and **11 of 13 models fell
 below half their short-context baseline at 32K**, GPT-4o from 99.3% to 69.7%.
 Test with paraphrases, not literal matches.

@@ -134,8 +134,11 @@ than the one you remember, and the difference is not cosmetic.
 **Clients offer one:** **Elicitation** — a server that needs a missing
 parameter can ask for it, through the host, rather than failing.
 
-*How* it asks is the part a 2025 tutorial will get wrong, and getting it wrong
-produces a server no current host can talk to. There is no longer any such
+*How* it asks is the part a 2025 tutorial will get wrong. Implement the
+revision you negotiated: a server that speaks only the older pattern will fail
+against a host that has negotiated 2026-07-28, and the backward-compatibility
+rules below are what keep the older revisions working where both sides agree on
+them. There is no longer any such
 thing as a server-initiated JSON-RPC request. Revision 2026-07-28 replaces
 `elicitation/create` — along with `sampling/createMessage` and `roots/list` —
 with the **Multi Round-Trip Requests** pattern (SEP-2322): the server *returns*
@@ -225,7 +228,8 @@ that turn "stateless" from an adjective into work:
 outright rather than deprecated; log level is now a per-request `_meta` field.
 
 Beyond the core, the specification defines opt-in **extensions**, negotiated by
-both sides: **Tasks** for long-running work with polling and durable handles,
+both sides: **Tasks** for long-running work with polling and durable handles —
+which is also why the MCP-is-synchronous shorthand is wrong —
 **Skills over MCP** for structured agent instructions, and **MCP Apps** for
 interactive UI rendered inline. The Tasks extension is the one to know about
 if anything you expose takes longer than a request should.
@@ -400,17 +404,28 @@ team wiring one service into one product is not one of them.
 The two protocols get mentioned together and solve different problems.
 
 **MCP connects a host to capabilities.** The server exposes tools; the host's
-model decides what to invoke; the server never sees the conversation.
+model decides what to invoke; the server sees only the arguments it is sent.
+That is an architectural fact, not a privacy guarantee: what goes into those
+arguments is the host's choice, and a host that passes conversation text as a
+parameter has shared it. The protocol keeps the server out of the loop; keeping
+data out of the call is your job.
 
 **A2A connects agents to each other.** The unit is a *task* delegated to
 another agent that has its own model, its own context and its own tools, and
 which reports back. It is a peer relationship rather than an invocation.
 
-The distinction that matters in design: a tool call is synchronous, typed and
-returns a value; a delegated task is asynchronous, has state, may take minutes,
-and may come back with questions. Treating the second as the first is how
-multi-agent systems become unmaintainable — which is @sec-multi-agent's
-subject.
+The distinction that matters in design is *what the unit is*, not how long it
+takes. MCP's unit is a **capability you invoke**: the caller decides what to
+do, the server does that one thing, and the caller keeps the plan. A2A's unit
+is a **task you delegate**: the other side decides how to do it, holds its own
+context, and reports back.
+
+Resist the tempting shortcut that MCP is synchronous and A2A is not. The
+2026-07-28 Tasks extension gives MCP long-running work with polling and durable
+handles, and a fast A2A task can return in a second. What stays true is the
+ownership: a tool call leaves the reasoning with you, a delegated task hands it
+away. Treating the second as the first is how multi-agent systems become
+unmaintainable — which is @sec-multi-agent's subject.
 
 They compose naturally: an agent reached over A2A uses MCP internally to talk
 to its own tools. If you are choosing between them you have probably
@@ -461,10 +476,12 @@ names; pin versions; hash the tool list and re-prompt on change.
 
 About **89 tokens each**, on every call, measured on the official filesystem
 server's 14 tools. Three servers installed is roughly 3,700 tokens per call and
-**75,000 across a twenty-step session** — before anyone says anything. Two
-caveats keep that honest: prompt caching makes a stable prefix much cheaper
-than the raw count, and 89 tokens is small next to what a good tool saves. The
-problem is that the cost is invisible and multiplicative.
+**75,000 across a twenty-step session** — before anyone says anything. Say the
+assumption with the number: it prices *every* definition into *every* call.
+Prompt caching makes a stable prefix much cheaper than the raw count, and a
+host that discloses tools progressively — sending a subset, or a summary until
+one is needed — pays a fraction of it. And 89 tokens is small next to what a
+good tool saves. The problem is that the cost is invisible and multiplicative.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -480,10 +497,12 @@ interpreter, and the security boundary is now yours to build.
 ::: {.callout-note collapse="true"}
 ## 6. Is A2A a competitor to MCP?
 
-No — different problem. MCP connects a host to capabilities: synchronous, typed,
-returns a value. A2A connects agents to each other: a delegated task with its
-own model, context and tools, asynchronous, stateful, possibly slow, possibly
-returning questions. They compose — an agent reached over A2A uses MCP for its
+No — different problem. MCP connects a host to *capabilities*: the caller
+decides what to do and invokes one typed thing. A2A connects agents to each
+other: a delegated task whose owner has its own model, context and tools and
+decides how to carry it out. Do not draw the line at synchronous versus
+asynchronous — MCP's Tasks extension covers long-running work with polling and
+durable handles, so both sides of the line can be either. They compose — an agent reached over A2A uses MCP for its
 own tools — and treating a delegated task like a function call is how
 multi-agent systems become unmaintainable.
 :::
