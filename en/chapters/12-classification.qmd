@@ -167,7 +167,11 @@ data, from what the mistakes cost you.
 :::
 
 [Every threshold in this chapter is chosen on `cal` and reported on
-`test`.]{.hl} Where a number was obtained by tuning on test, it is labelled an
+`test`.]{.hl} One consequence to carry into every cost comparison in this
+chapter: those 8,000 `cal` documents are labelled, so they are part of the
+label budget. A method that needs a calibration slice costs more labels than
+one that does not, and a comparison that prices only the training set is
+understating it. Where a number was obtained by tuning on test, it is labelled an
 **oracle** and used only as an upper bound to measure regret against.
 
 **And every threshold is stated on the complaint side:** flag the review when
@@ -371,7 +375,9 @@ model cards are prose, not data.
 
 Loading the checkpoint and counting gives **110,618,882 parameters**: 24,972,288
 in the embedding table, 85,054,464 in the twelve encoder layers, 590,592 in the
-pooler, and the rest in the pretraining head we throw away. That embedding
+pooler, and the remaining 1,538 in the two-class classification head
+($768 \times 2$ weights plus two biases) that replaces the pretraining head we
+throw away. Those four add up exactly. That embedding
 number is worth pausing on — 22.6% of the model is a lookup table, and it exists
 because the vocabulary is 32,000 tokens wide.
 
@@ -742,8 +748,13 @@ $$
 {\sqrt{(TP{+}FP)(TP{+}FN)(TN{+}FP)(TN{+}FN)}}
 $$
 
-running from $-1$ to $+1$, and exactly 0 for *any* model that ignores its
-input — which is precisely what accuracy fails to do here.
+running from $-1$ to $+1$. Be precise about the zero, because it is the whole
+reason to reach for this metric. For a **constant** predictor the denominator
+is zero — a model that always answers *positive* has $TN = FN = 0$ — so MCC is
+$0/0$, undefined, and `scikit-learn` returns 0 by convention. For a predictor
+that guesses at random, independently of the input, the *expected* MCC is 0 and
+the observed value fluctuates around it with the sample size. Either way the
+answer is "about nothing", which is precisely what accuracy fails to say here.
 
 **One metric is missing from that table on purpose, and it is the one you will
 meet first.** `classification_report` prints **weighted-F1** by default: the
@@ -1318,9 +1329,12 @@ be shown to a human, or multiplied by a cost, or thresholded by a rule somebody
 else writes, class weighting silently breaks all three.]{.hl} This is
 van den Goorbergh et al.'s result, reproduced on text.
 
-**Temperature scaling barely helps here**, and that is a structural fact rather
-than bad luck. Temperature has one parameter; it can sharpen or soften a
-distribution but it cannot move its mean much. What is wrong with the
+**Temperature scaling barely helps here**, and that is structural rather than
+bad luck. Temperature has one parameter and it preserves the ranking and the
+argmax; in a binary problem it can only push probabilities toward 0.5 or toward
+the extremes, symmetrically about the 0.5 cut. That is the wrong shape of
+correction for what is wrong here — it *can* move the mean, but not
+independently of the sharpening, and not in the direction needed. What is wrong with the
 class-weighted model is a *shifted prior* — it thinks complaints are commoner
 than they are. Platt scaling has two parameters, a slope and an intercept
 [@platt1999probabilistic], and the intercept is exactly the knob that fixes a
@@ -2396,7 +2410,8 @@ the two models document by document.
 ```
 ::: {.fig-cap}
 The 7.35-point headline is a net figure. Switching models fixes 332 documents
-and breaks 149 — a real gain, but a third of it is handed back. If those 149
+and breaks 149 — a real gain, but 45% of the gross gain is handed back
+(149/332), leaving a net 183. If those 149
 happen to be your highest-value cases, the aggregate number is lying to you.
 :::
 ::::
@@ -2825,10 +2840,12 @@ oversight: imbalance, thresholds and costs are clearest with one cut. Say which
 parts move.
 
 Three things carry over unchanged: **macro-F1**, the **majority-class floor**,
-and reading your errors sorted by confidence. Two change shape. A single
-threshold becomes **one threshold per class**, each tuned on `cal`, and Elkan's
-formula becomes an argmin over a full $K \times K$ cost matrix,
-$\hat{y} = \arg\min_i \sum_j p_j C_{ij}$. Calibration changes most: Platt and
+and reading your errors sorted by confidence. Two change shape. Single-label
+multi-class has no threshold to tune at all — the classes compete, so the
+decision is an **argmax** over calibrated probabilities, and Elkan's formula
+becomes an argmin over a full $K \times K$ cost matrix,
+$\hat{y} = \arg\min_i \sum_j p_j C_{ij}$. Per-class thresholds belong to the
+multi-label case below, where the classes do not compete. Calibration changes most: Platt and
 isotonic are binary maps, so multi-class needs either one-vs-rest calibration or
 a matrix- or vector-scaling variant — and this is the setting where the
 top-label ECE of @guo2017calibration finally becomes the natural statistic
@@ -3031,9 +3048,12 @@ tables, delete the number.
 ## Where to go deeper {#sec-classification-deeper}
 
 One thing first: plot your classifier's predicted probabilities as a
-histogram. If they pile up at 0 and 1, you have a ranking model that is
-pretending to be a probability model, and @sec-classification-calibration is
-the chapter you need rather than a bigger encoder.
+histogram. If they pile up at 0 and 1, that is a reason to check calibration
+against observed frequencies rather than a verdict on its own — a genuinely
+easy problem produces confident probabilities that are also correct. Make the
+reliability diagram, and if the confidence is not earned,
+@sec-classification-calibration is the chapter you need rather than a bigger
+encoder.
 
 | resource | what it is |
 |:--|:--|

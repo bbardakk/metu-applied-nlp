@@ -82,12 +82,16 @@ only because we went and intersected the samples. The tokenizer half is the
 whole subject of @sec-dotted-i.
 :::
 
-The labels exist. They are used exactly once, in @sec-clustering-payoff, to
-score what the clustering found. Until then they do not appear in any input to
-any algorithm on this page. That discipline is the whole experiment: it is very
-easy to tune an "unsupervised" pipeline until it reproduces a label you have
-been peeking at, and the result is a number that will not survive contact with
-a corpus that has no labels.
+The labels exist, and they are used only for **scoring** — never as an input.
+Nothing on this page fits, selects or tunes anything against them: not the
+representations, not $k$, not the algorithms. They appear in two scoring
+places, and it is worth being exact about both, because "used once" would be
+too tidy. They are the answer key for the adjusted Rand index reported across
+the whole $k$-sweep below, and they are what @sec-clustering-payoff scores the
+triage curve against. That discipline is the whole experiment: it is very easy
+to tune an "unsupervised" pipeline until it reproduces a label you have been
+peeking at, and the result is a number that will not survive contact with a
+corpus that has no labels.
 
 Here is what the chapter will end up reporting, so you can read the middle
 knowing where it goes:
@@ -595,8 +599,12 @@ are all unit length" was still false, and I only knew that because I checked.
 :::
 
 For 0.6% of tf-idf queries some *other* document sits at cosine distance
-exactly 0 — no shared terms is the common case on 19-word reviews, and a tie at
-zero makes the ratio infinite. Those are excluded from the median rather than
+exactly 0, which makes $d_{\min} = 0$ and the ratio infinite. Distance zero means
+cosine similarity *one*: two reviews whose tf-idf vectors are proportional,
+which on 19-word reviews happens whenever two people write the same short
+sentence. (The opposite case — no shared terms at all, which is common here —
+gives cosine similarity 0 and distance 1, and is harmless: it lands in
+$d_{\max}$.) Those are excluded from the median rather than
 patched with an epsilon, because they are a real property of the space.
 Reducing to 256 dimensions with truncated SVD recovers 29.9% of the variance
 and multiplies the contrast by four. That reduction is itself a topic model,
@@ -898,8 +906,11 @@ a genuinely unlabelled corpus:
 : Where each internal index puts its optimum, over $k \in [2, 50]$
 {tbl-colwidths="[28,26,24,22]"}
 
-Calinski-Harabasz picks $k=2$ every time, because it is a variance ratio that
-falls monotonically as $k$ grows on data with no strong cluster structure.
+Calinski-Harabasz picks $k=2$ every time. It is a variance ratio, and on data
+with no strong cluster structure it tends to fall as $k$ grows — a tendency
+these three sweeps show, not a theorem. It is not guaranteed monotone, and a
+corpus with genuine structure at some $k$ can put a peak there, which is what
+the index is for.
 Davies-Bouldin drifts the other way, toward large $k$, for the mirror-image
 reason — but only where it moves at all.
 
@@ -908,7 +919,8 @@ the argmin. On E5 the whole sweep from $k=2$ to $k=50$ lies between 4.44 and
 4.77, which makes the "optimum" at $k=4$ a 7% wobble on a flat line. On MiniLM
 everything from $k=20$ upward sits between 3.23 and 3.28.
 
-[Two of these three optima are noise dressed as a decision.]{.hl}
+[For two of these three, the differences along the curve are too small to
+support choosing a $k$ at all — the argmin is real, and it is not a decision.]{.hl}
 
 Only LSA shows a genuine trend, and even it wanders before it commits: 6.38 at
 $k=2$, *up* to 7.17 at $k=4$, back down to 6.41, up again to 6.52 at $k=6$,
@@ -1040,9 +1052,12 @@ squared distance from every point to its own centre.
 It is popular because it always produces an answer. Which is also exactly the
 problem.
 
-Inertia decreases monotonically by construction — more centres can only bring
+Inertia decreases monotonically in the *optimum* — more centres can only bring
 every point closer to the nearest one — so there is always *a* bend, and where
-you see it depends on your axis limits. @schubert2023stop makes the case at
+you see it depends on your axis limits. (Run k-means independently at each $k$
+and the measured curve can tick upward, because each run lands in its own local
+solution; that is a symptom of the restart lottery, not a counter-example to
+the elbow's uselessness.) @schubert2023stop makes the case at
 length, and the summary is blunt: the elbow criterion should not be used, and
 it survives because it is easy to draw rather than because it is informative.
 
@@ -1803,10 +1818,21 @@ The single number to take away:
 > Reading **13.3%** of the corpus — the one E5 cluster with the worst positive
 > rate — surfaces **56.0%** of every negative review in it.
 
-That is a 4.2× improvement in the return on a fixed reading budget, from an
-unsupervised method, on a corpus whose labels it never saw. If your actual job
-is "find the complaints so we can fix the product", this clustering did the job,
-and the ARI of 0.0075 that it scored on the way is irrelevant to that job.
+That is a 4.2× improvement in the return on a fixed reading budget, from a
+clustering that never saw a label. If your actual job is "find the complaints
+so we can fix the product", this clustering did the job, and the ARI of 0.0075
+that it scored on the way is irrelevant to that job.
+
+Read that as a descriptive result, not as a validated policy. The *clusters*
+are unsupervised, but the **order** they are read in is not: the ten clusters
+were sorted by the negative rate computed from all 49,849 gold labels, and then
+the recall was measured against those same labels. That is an oracle ordering
+scored on its own answer key, and it tells you the clusters are separable
+enough to be worth ranking — not how well a ranking you could actually build
+would do. The deployable version costs a few hundred labels: rank the clusters
+on a small labelled development sample, then measure recall on a disjoint test
+sample. Exercise 8 is that experiment, and the gap between it and this number
+is the honest cost of the shortcut taken here.
 
 The ranking mostly holds along the whole curve, not just at the first point.
 MiniLM is above LSA at every budget, and E5 is above both over the entire range
@@ -2310,6 +2336,14 @@ finding, cost you an afternoon, and has saved you from building a pipeline on it
    of $k$ using no internal validation index at all. State what would make you
    revise it, and explain why this reasoning is *better* founded than an elbow
    plot rather than merely more convenient.
+8. **Turn the triage result into a policy you could deploy.** @sec-clustering-payoff
+   ranks the ten clusters by a negative rate computed from every gold label, then
+   scores recall against those same labels. Redo it honestly: hold out a random
+   test half, label a development sample of 300 documents from the other half,
+   rank the clusters by the negative rate *in that sample only*, and then read
+   the triage curve on the test half. Report how much of the 56.0%-at-13.3%
+   result survives, and how the answer moves as you shrink the development
+   sample to 100 and grow it to 1,000.
 
 ## Where to go deeper {#sec-clustering-deeper}
 

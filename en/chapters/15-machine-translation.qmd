@@ -70,7 +70,7 @@ the alignment interpretation is *earned* by the task's structure. In a
 24-layer language model it is a hypothesis, and usually a wrong one.
 :::
 
-Three years later @vaswani2017attention removed the recurrence and kept only
+Two years later @vaswani2017attention removed the recurrence and kept only
 the attention, which is @sec-transformers' subject. The lineage is worth
 holding on to: the dominant architecture in machine learning began as a repair
 to a translation bug.
@@ -269,7 +269,7 @@ what they cost:
 | [BLEU](#gloss-bleu){.term-ref} | word n-grams | exact phrase matches | any paraphrase; partially-correct words |
 | [chrF](#gloss-chrf){#term-chrf .term-ref} [@popovic2015chrf] | character n-grams | partially-correct words, morphology | meaning; a fluent sentence built of right characters |
 | [COMET](#gloss-comet){#term-comet .term-ref} [@rei2020comet] | learned | meaning, as far as its training data taught it | anything its training data did not contain; and it needs a GPU |
-| Human MQM [@freitag2021experts] | annotated errors | everything, by category and severity | nothing — it just costs money and days |
+| Human MQM [@freitag2021experts] | annotated errors | the widest range, by category and severity | whatever its annotators miss or disagree on — report inter-annotator agreement with the score; and it costs money and days |
 
 : Four ways to score a translation {tbl-colwidths="[16,16,34,34]"}
 
@@ -309,9 +309,12 @@ generation. Translation is the counterexample, and the contrast is worth
 having concretely rather than as a rule of thumb.
 
 The difference is in the task. Open-ended generation has many good answers and
-you want variety, so sampling from the distribution is the point. Translation
-has approximately one good answer, you want the highest-probability sequence,
-and variety is a defect. So translation uses **beam search**: keep the *k*
+you *want* the variety, so sampling from the distribution is the point.
+Translation also has many valid renderings — that is why the metrics in this
+chapter compare against references rather than against a single truth — but the
+variety is not what the user asked for, and a sampled token is as likely to be
+a worse rendering as a different-but-equal one. What you want is the sequence
+the model itself rates highest. So translation uses **beam search**: keep the *k*
 best partial hypotheses at each step and extend all of them, instead of
 committing to the single best token.
 
@@ -339,7 +342,7 @@ sample      0.7   25.90   55.17      1.013       45
 sample      1.0   14.34   45.27      1.111       53
 ```
 
-### Sampling is a disaster here
+### Sampling costs you half the score here
 
 **BLEU 30.17 at beam 4 against 14.34 at temperature 1.0.** The same model,
 the same sentences; the decoder threw away half the quality. Pure sampling
@@ -404,8 +407,12 @@ everything else fixed:
 ```
 
 BLEU moves fourteen times as much as chrF, and it moves in lockstep with
-output *length*. That is not a quality difference; it is BLEU's brevity
-penalty and precision denominator responding to the number of words produced.
+output *length*. Two metrics disagreeing does not by itself settle which one is
+right — a flat chrF is not proof that quality held. What makes the reading safe
+here is the third line: the length ratio moves with BLEU and not with chrF,
+which is exactly the mechanism BLEU's brevity penalty and precision denominator
+respond to. A human or MQM check would settle it; the length ratio is the cheap
+evidence that it is worth checking.
 [If you tune the length penalty against BLEU you are tuning your system to
 produce slightly short output]{.hl}, which is a real and common way to buy a
 point of BLEU that no reader would notice.
@@ -436,9 +443,11 @@ out as separate words: *evinizden* is *from your house*, one token against
 three.
 
 That is the whole mechanism. A word-level metric divides a sentence into
-tokens and asks how many match. Turkish gives it 29% fewer tokens to work
-with, so **each Turkish token is 1.29× as large a share of the score**, and
-one wrong word costs proportionally more.
+tokens and asks how many match. English uses 29% more tokens for the same
+content, so Turkish gives the metric $1 - 1/1.29 = 22.5\%$ fewer tokens to work
+with — the two percentages are the same fact read from opposite ends, and only
+one of them is 29. What follows is that **each Turkish token is 1.29× as large
+a share of the score**, and one wrong word costs proportionally more.
 
 A character-level metric sees essentially the same amount of material in both
 languages — the 1.02 ratio — so it has no such asymmetry.
@@ -822,9 +831,9 @@ with a measurement rather than an argument.
 ## 1. Your Turkish system scores 23 BLEU and your German one scores 34. Is Turkish harder?
 
 You cannot conclude that, because BLEU is not measuring the same amount of
-each sentence in the two languages. Turkish expresses the same content in 29%
-fewer word tokens than English, so a word n-gram metric has fewer slots to
-match and each error costs more of the score.
+each sentence in the two languages. English needs 29% more word tokens for the
+same content, so Turkish gives a word n-gram metric 22.5% fewer slots to match
+and each error costs more of the score.
 
 Measured here: the *same* semantic error — locative to ablative — costs
 14.90 BLEU in Turkish and 12.65 in English. Some of your nine-point gap is
@@ -841,9 +850,10 @@ metric. Then compare.
 You lose about half your quality. Measured on the same model and sentences:
 beam-4 scores **30.17** BLEU, temperature 1.0 sampling scores **14.34**.
 
-Translation has approximately one right answer and you want the
-highest-probability sequence. Sampling deliberately introduces variation, and
-across a sentence the chances of taking a worse token compound. The setting
+Translation admits many valid renderings, but you are not asking the system for
+variety — you want the sequence it rates highest. Sampling deliberately
+introduces variation, and across a sentence the chances of taking a worse token
+compound. The setting
 that makes a chat reply feel natural makes a translation wrong.
 :::
 
@@ -883,7 +893,8 @@ found a metric artefact, not an improvement.
 
 Measured, on identical sentences: the dedicated model wins by 3 BLEU into
 English and 6 into Turkish, at 41–164× the speed. On sentence-level news
-translation there is no contest.
+translation, under this evaluation setup, the dedicated model is the better
+choice on every axis measured.
 
 Reach for the LLM when the benchmark cannot express what you need: document
 context for pronouns and register, a glossary in the prompt, a language pair
@@ -948,10 +959,14 @@ sees meaning. Ranking systems on BLEU alone is the failure.
 **Q: Your MT quality dropped after a model upgrade, but only for one
 customer. Debug it.**
 
-Almost certainly terminology, not quality. Their house vocabulary changed
-under them — the new model translates their term differently — and no
-reference-based metric can see it, because both words are valid translations.
-Measure it directly: take their glossary and count adherence. Then fix it at
+Almost certainly terminology, not quality. Their house vocabulary changed under
+them — the new model translates their term differently — and a corpus-level
+reference metric will not surface it, because both words are valid translations
+and the difference is a rounding error across the test set. It is not
+invisible in principle: a term-focused test set built from their glossary, or
+MQM with a terminology error category, sees it directly. What will not see it
+is the aggregate BLEU you were already running. Measure it directly: take their
+glossary and count adherence. Then fix it at
 decoding or in a prompt, not by retraining.
 
 **Q: You need translation for 40 language pairs and have a budget.**
@@ -1142,8 +1157,8 @@ else's — which is the entire argument of @post2018call.
 
 - **The Turkish penalty is real and it is 1.29.** The same content needs 1.29×
   as many word tokens in English but only 1.02× as many characters, so a word
-  n-gram metric has 29% fewer slots in Turkish and each error costs
-  proportionally more. Measured on the same semantic error in both languages:
+  n-gram metric has 22.5% fewer slots in Turkish ($1 - 1/1.29$) and each error
+  costs proportionally more. Measured on the same semantic error in both languages:
   BLEU charges **14.90** in Turkish against **12.65** in English, while chrF
   charges **3.05** against **5.34**. The two metrics disagree **4.89×** in
   Turkish and **2.37×** in English — which is why the metric you choose decides

@@ -166,7 +166,11 @@ Neredeyse her sınıflandırıcı varsayılan olarak 0,5 ile geliyor, ama 0,5 bi
 :::
 
 [Bu bölümdeki her eşik `cal` üzerinde seçilip `test` üzerinde
-raporlanıyor.]{.hl} Bir sayı test üzerinde ayar yapılarak elde edilmişse
+raporlanıyor.]{.hl} Bunun bu bölümdeki her maliyet karşılaştırmasına taşınacak
+bir sonucu var: o 8.000 `cal` belgesi etiketli, yani etiket bütçesinin parçası.
+Kalibrasyon dilimine ihtiyaç duyan bir yöntem, duymayan birinden daha çok
+etikete mal olur ve yalnızca eğitim kümesini fiyatlandıran bir karşılaştırma
+maliyeti eksik gösterir. Bir sayı test üzerinde ayar yapılarak elde edilmişse
 **oracle** diye etiketleniyor ve yalnızca pişmanlığı ölçeceğimiz bir üst sınır
 olarak kullanılıyor. İşin çoğunu yapan ayrım bu — ileride (@sec-siniflandirma-maliyetler)
 göreceksiniz.
@@ -360,7 +364,9 @@ hatırlatma.
 
 Checkpoint'i yükleyip saymak **110.618.882 parametre** veriyor: 24.972.288'i
 embedding tablosunda, 85.054.464'ü on iki encoder katmanında, 590.592'si
-pooler'da ve kalanı attığımız ön eğitim başlığında. O embedding sayısı üzerinde
+pooler'da ve kalan 1.538'i, attığımız ön eğitim başlığının yerine geçen iki
+sınıflı sınıflandırma başlığında ($768 \times 2$ ağırlık artı iki bias). Bu dört
+sayı birebir toplanıyor. O embedding sayısı üzerinde
 durmaya değer — modelin %22,6'sı bir arama tablosu ve bunun nedeni sözlüğün
 32.000 token genişliğinde olması.
 
@@ -731,8 +737,14 @@ $$
 {\sqrt{(TP{+}FP)(TP{+}FN)(TN{+}FP)(TN{+}FN)}}
 $$
 
-$-1$ ile $+1$ arasında değişir ve girdisini yok sayan *herhangi* bir model için
-tam olarak 0'dır — doğruluğun dengesiz veride tam olarak yapamadığı şey budur.
+$-1$ ile $+1$ arasında değişir. Sıfır konusunda kesin olalım, çünkü bu metriğe
+uzanmanın bütün sebebi o. **Sabit** bir tahminci için payda sıfırdır — her
+seferinde "memnun" diyen bir modelde $TN = FN = 0$ — dolayısıyla MCC $0/0$, yani
+tanımsızdır ve `scikit-learn` uzlaşım gereği 0 döndürür. Girdisinden bağımsız
+rastgele tahmin yürüten bir modelde ise MCC'nin *beklenen* değeri 0'dır ve
+gözlenen değer örneklem büyüklüğüne göre onun etrafında dalgalanır. Her iki
+durumda da cevap "aşağı yukarı hiçbir şey" — doğruluğun dengesiz veride tam
+olarak söyleyemediği şey budur.
 
 **Bir metrik o tablodan bilerek eksik ve ilk karşılaşacağınız o.**
 `classification_report` varsayılan olarak **weighted-F1** basıyor: sınıf başına
@@ -1312,8 +1324,11 @@ bozar.]{.hl} Bu, van den Goorbergh ve arkadaşlarının sonucunun metin üzerind
 yeniden üretilmiş hâli.
 
 **Sıcaklık ölçekleme burada neredeyse hiç yardım etmiyor** ve bu, kötü şanstan
-çok yapısal bir olgu. Sıcaklığın tek bir parametresi var; bir dağılımı
-keskinleştirebilir ya da yumuşatabilir ama ortalamasını pek oynatamaz. Sınıf
+çok yapısal bir olgu. Sıcaklığın tek bir parametresi var; sıralamayı ve
+argmax'ı koruyor ve ikili bir problemde olasılıkları yalnızca 0,5 kesiği
+etrafında simetrik biçimde ortaya ya da uçlara doğru itebiliyor. Buradaki
+bozukluğun düzeltilmesi için yanlış biçimde bir müdahale: ortalamayı
+oynatabilir, ama keskinleştirmeden bağımsız olarak ve gereken yönde değil. Sınıf
 ağırlıklı modelde bozuk olan şey ise *kaymış bir önsel* — model şikâyetleri
 olduklarından yaygın sanıyor. Platt ölçeklemenin iki parametresi var, bir eğim
 ve bir kesim noktası [@platt1999probabilistic]; kesim noktası da tam olarak bir
@@ -2386,7 +2401,8 @@ gizliyor. Takası görmenin tek yolu iki modeli belge belge çapraz tablolamak.
 ```
 ::: {.fig-cap}
 Manşetteki 7,35 puan bir net rakam. Model değiştirmek 332 belgeyi düzeltiyor,
-149'unu bozuyor — gerçek bir kazanç, ama üçte biri geri veriliyor. O 149 belge
+149'unu bozuyor — gerçek bir kazanç, ama brüt kazancın %45'i geri veriliyor
+(149/332); geriye net 183 kalıyor. O 149 belge
 sizin en değerli vakalarınızsa, toplam sayı size yalan söylüyor demektir.
 :::
 ::::
@@ -2821,10 +2837,12 @@ dengesizlik, eşikler ve maliyetler tek bir kesikle en berrak hâlde. Hangi
 parçaların oynadığını söyleyelim.
 
 Üç şey olduğu gibi taşınıyor: **macro-F1**, **çoğunluk sınıfı tabanı** ve
-hatalarınızı güvene göre sıralayıp okumak. İki şey biçim değiştiriyor. Tek bir
-eşik, her biri `cal` üzerinde ayarlanan **sınıf başına bir eşiğe** dönüşüyor ve
-Elkan'ın formülü, tam bir $K \times K$ maliyet matrisi üzerinde bir argmin'e
-dönüşüyor: $\hat{y} = \arg\min_i \sum_j p_j C_{ij}$. En çok değişen kalibrasyon:
+hatalarınızı güvene göre sıralayıp okumak. İki şey biçim değiştiriyor. Tek
+etiketli çok sınıflı durumda ayarlanacak bir eşik yok — sınıflar birbiriyle
+yarışır, dolayısıyla karar kalibre olasılıklar üzerinde bir **argmax**'tır ve
+Elkan'ın formülü tam bir $K \times K$ maliyet matrisi üzerinde bir argmin'e
+dönüşür: $\hat{y} = \arg\min_i \sum_j p_j C_{ij}$. Sınıf başına eşikler, aşağıdaki
+çok etiketli duruma aittir; orada sınıflar birbiriyle yarışmaz. En çok değişen kalibrasyon:
 Platt ve isotonic ikili eşlemeler, dolayısıyla çok sınıflı durumda ya bire-karşı-
 hepsi kalibrasyon ya da bir matris/vektör ölçekleme varyantı gerekiyor — ve
 @guo2017calibration'ın en üst etiket ECE'si bir basitleştirme olmaktan çıkıp
@@ -3030,9 +3048,11 @@ silin.
 ## Daha derine inmek için {#sec-siniflandirma-derine}
 
 Önce şunu yapın: sınıflandırıcınızın tahmin ettiği olasılıkları histogram
-olarak çizin. 0 ve 1'de yığılıyorlarsa, elinizde olasılık modeli taklidi yapan
-bir sıralama modeli var demektir — ihtiyacınız olan şey daha büyük bir encoder
-değil, kalibrasyon (@sec-siniflandirma-kalibrasyon).
+olarak çizin. 0 ve 1'de yığılıyorlarsa bu, tek başına bir hüküm değil,
+kalibrasyonu gözlenen frekanslara karşı kontrol etmek için bir gerekçedir —
+gerçekten kolay bir problem, hem kendinden emin hem doğru olasılıklar üretir.
+Güvenilirlik diyagramını çizin; güven hak edilmemişse ihtiyacınız olan şey daha
+büyük bir encoder değil, kalibrasyon (@sec-siniflandirma-kalibrasyon).
 
 | kaynak | ne olduğu |
 |:--|:--|

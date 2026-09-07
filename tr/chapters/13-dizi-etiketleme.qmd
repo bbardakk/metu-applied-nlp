@@ -388,8 +388,12 @@ CRF                                    0                            0
 fine-tuned BERTurk                    49                           90
 ```
 
-[CRF yasak bir geçiş üretemez; fine-tune edilmiş transformer ise — bu
-bölümün en iyi modeli, 91,92 span F1 ile — 139 tane üretiyor.]{.hl} Bu ters
+[CRF hiçbir bütçede yasak bir geçiş üretmedi; fine-tune edilmiş transformer
+ise — bu bölümün en iyi modeli, 91,92 span F1 ile — 139 tane üretiyor.]{.hl}
+CRF'nin sıfırını garanti edilmiş değil, ölçülmüş olarak okuyun: sıradan bir CRF
+*sonlu* geçiş puanları öğrenir, dolayısıyla geçersiz bir geçişi ancak pahalı
+kılabilir, imkânsız değil. Onu elemek sert bir kısıt ister; bir sonraki bölüm
+tam olarak bu. Bu ters
 durum insanları şaşırtıyor. Sebebi kalite değil, yapı.
 
 Softmax etiketleyici her konumda en yüksek puanlı etiketi *bağımsız* seçer.
@@ -457,10 +461,14 @@ de çözümleyicidir.
 
 ### Grameri öğrenilmiş değil yapısal kılmak
 
-CRF'in yalnızca ampirik olarak sağladığı garantiyi almak için bir CRF katmanı
-eklemek zorunda değilsiniz. Softmax logit'leri üzerine bir geçiş maskesi koyup
-Viterbi ile çözmek, çıkarım anında bunu veriyor — fazladan parametre yok,
-yeniden eğitim yok:
+Öğrenilmiş bir modelin yalnızca ampirik olarak sağladığı iyi biçimliliği almak
+için bir CRF katmanı eklemek zorunda değilsiniz. Softmax logit'leri üzerine bir
+geçiş maskesi koyup Viterbi ile çözmek, çıkarım anında bunu veriyor — fazladan
+parametre yok, yeniden eğitim yok. Aşağıdaki sabit hakkında bir not: $-10^4$
+büyük ama *sonlu* bir cezadır ve `-inf`'in log-sum-exp içinde `nan` üretmesine
+karşı seçilmiştir. Geçersiz bir yolu gerçekçi her puan aralığında kaybettirir;
+matematiksel olarak imkânsız kılmaz. Gerçek kısıtı istiyorsanız geçersiz
+geçişleri ve başlangıç durumlarını fiyatlandırmak yerine arama uzayından çıkarın:
 
 ``` python
 import torch
@@ -870,7 +878,11 @@ puan önde. Yani [iki bin beş yüz civarı etiketli cümlelik BERTurk, yirmi bi
 cümlelik elle mühendislik edilmiş CRF'nin verdiğini veriyor]{.hl} — buna
 etiketlemede dört ila on kat azalma diyebilirsiniz; ölçülen kesişimin
 desteklediği aralık bu. Bu görevde ön eğitimin
-dürüst gerekçesi budur ve folklorün ima ettiğinden küçüktür. O kesişimin
+dürüst gerekçesi budur ve folklorün ima ettiğinden küçüktür. Bu karşılaştırmanın
+ne olduğu konusunda kesin olun: bir **etiket verimliliği** iddiası; encoder'ın
+bütçesi değişirken CRF'inki 20.000'de sabit duruyor. Eşit bütçede encoder'ın
+kazandığı iddiası değil — eşleşmiş 2.000 cümlede önde olan, bir üstteki satırda
+CRF. O kesişimin
 altında klasik hat bir yedek plan değil; daha iyi modeldir.
 
 `illegal` sütununa ikinci bir bakış atmaya değer, çünkü F1 sütununun
@@ -976,7 +988,7 @@ umursadığınız soruyu soruyor.
 
 **Token doğruluğu** her token'ı sayar; `O` olan %61'lik kısım dâhil. Her yere
 `O` demek zaten 61,36 alıyor. Yani bu metriğin bilgi taşıyan aralığı, 61 ile
-90'ların başı arasındaki on beş puan. Üstelik durum, çoğu cümlesinde hiç
+90'ların başı arasındaki otuz küsur puan. Üstelik durum, çoğu cümlesinde hiç
 varlık bulunmayan gerçekçi derlemlerde iyileşmiyor, kötüleşiyor. Bir modeli
 bitmemişken bitmiş gösteren metrik budur.
 
@@ -1350,7 +1362,7 @@ Alternatiflerin hepsi token başına tek etiket kısıtından vazgeçiyor:
 
 | yaklaşım | fikir | bedeli |
 |:--|:--|:--|
-| Span sayımı | *k* uzunluğuna kadar her aday span'i puanla, her birini sınıflandır | $O(n^2)$ aday; güçlü ve basit bir taban çizgisi |
+| Span sayımı | *k* uzunluğuna kadar her aday span'i puanla, her birini sınıflandır | $O(nk)$ aday — ki bu ancak *k*, *n* ile büyüdüğünde $O(n^2)$ olur; güçlü ve basit bir taban çizgisi |
 | Biaffine / bağımlılık tarzı | her (başlangıç, bitiş) çiftini biaffine bir katmanla puanla [@yu2020named] | iç içe geçmeyi doğal olarak kaldırır; standart güçlü sonuç |
 | MRC çerçevelemesi | tür başına bir soru olarak "kurumlar nerede?" diye sor [@li2020unified] | tür başına bir ileri geçiş; tür tanımını modelin içine sokar |
 | Kelime-kelime ızgara etiketleme | her token çifti arasındaki ilişkiyi sınıflandır — komşuluk, kuyruk-baş [@li2022w2ner] | iç içe geçmeyi ve süreksizliği tek bir formülasyonda ele alır |
@@ -1499,11 +1511,15 @@ Sınırlara. Token düzeyinde F1 kısmi puan verir: dört token'lık bir kurumun
 token'ı doğruysa dörtte üç alırsınız. Span düzeyi ise türün, ilk token'ın ve
 son token'ın üçünün de eşleşmesini ister; aynı tahmin orada sıfır alır.
 
-Dolayısıyla aradaki fark, modelin türü doğru bilip bir kenarı yanlış bilme
-sıklığının doğrudan ölçüsüdür. Span düzeyini raporlayın, çünkü sonraki adımlardaki
-hiçbir tüketici bir şirket adının dörtte üçünü kullanamaz. Ama farkı da
-izleyin: açılan bir fark, hatalarınızın sınır hatası olduğunu söyler ve
-sınır hatalarının çözümü tür hatalarınınkinden farklıdır.
+Ama farkı bir sınır hatası *oranı* diye okumayın. İçinde birkaç şey karışık:
+kısmi örtüşmeler, token token sayıldığı için farklı uzunluktaki span'ler ve uzun
+varlıklardaki tür hataları — hepsi mikro-ortalamalı, yani dört token'lık bir
+hata bir token'lığın dört katı ağırlık taşıyor. Bu, sınır hatalarının var
+olduğunun işareti; kaç tane olduğunun ölçüsü değil. Sayıyı istiyorsanız hata
+türlerini doğrudan sayın — tam, yalnızca sınır, yalnızca tür, uydurma, kaçırılan
+— yirmi satırlık bir betik ve çok daha eyleme dönük bir tablo. Her hâlükârda span
+düzeyini raporlayın, çünkü sonraki adımlardaki hiçbir tüketici bir şirket adının
+dörtte üçünü kullanamaz.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1560,9 +1576,14 @@ benziyorsa, modelinizi değil veri kümenizi ölçmüşsünüz demektir.
 ::: {.callout-note collapse="true"}
 ## 6. LLM çıkarıcınız belgede olmayan bir şirket döndürdü. F1'e katkısı nedir?
 
-Sıfır — ve daha derin cevap şu: puanlanamaz bile. Span metrikleri token
-konumları üzerinden tanımlıdır; metinde geçmeyen bir dizginin konumu yoktur,
-dolayısıyla altın bir span ile karşılaştırılacak bir şey yoktur.
+**Yanlış pozitif** olarak sayılır ve asıl önemlisi, bir şey olarak sayılmak
+zorunda olmasıdır. Span metrikleri token konumları üzerinden tanımlıdır; konumu
+olmayan bir dizginin altın bir span ile karşılaştırılacak hiçbir yanı yoktur —
+bu da satırı değerlendirmeden tümüyle çıkarmayı cazip kılar. Çıkarmayın:
+hizalanamayan çıktıyı sessizce atmak, uydurmayı sıfır fiyatlandırır ve
+çıkarıcıyı olduğundan iyi gösterir. Ya kesinliğe karşı yanlış pozitif olarak
+puanlayın ya da F1'in yanında açık bir geçersiz çıktı oranı bildirin.
+Protokolde hangisini yaptığınızı söyleyin.
 
 Ama rapora "halüsinasyon" yazmadan önce kimin hatası olduğunu kontrol edin.
 Burada ölçüldü: dönen 1.419 bahsin 31'i hizalanamadı — ve bunların 27'si

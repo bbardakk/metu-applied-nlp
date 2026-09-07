@@ -399,8 +399,12 @@ CRF                                    0                            0
 fine-tuned BERTurk                    49                           90
 ```
 
-[The CRF cannot emit an illegal transition; the fine-tuned transformer — the
-best model in this chapter, at 91.92 span F1 — emits 139 of them.]{.hl} That
+[The CRF emitted no illegal transition at any budget; the fine-tuned
+transformer — the best model in this chapter, at 91.92 span F1 — emits 139 of
+them.]{.hl} Read the CRF's zero as measured, not as guaranteed: an ordinary CRF
+learns *finite* transition scores, so it can only make an invalid transition
+expensive, never impossible. Ruling one out takes a hard constraint, which is
+the next section. That
 inversion surprises people, and the reason is structural rather than a matter
 of quality.
 
@@ -470,9 +474,15 @@ that has to match.
 
 ### Making the grammar structural instead of learned
 
-You do not have to add a CRF layer to get the guarantee the CRF only supplies
-empirically. A transition mask over the softmax logits, decoded with Viterbi,
-gives it at inference time — no extra parameters, no retraining:
+You do not have to add a CRF layer to get the well-formedness a learned model
+only supplies empirically. A transition mask over the softmax logits, decoded
+with Viterbi, gives it at inference time — no extra parameters, no retraining.
+One note on the constant below: $-10^4$ is a large finite penalty, chosen
+because it survives float arithmetic where `-inf` produces `nan` in a
+log-sum-exp. It makes an illegal path lose in any realistic score range; it does
+not make it mathematically impossible. If you want the true constraint, remove
+the invalid transitions and start states from the search space rather than
+pricing them.
 
 ``` python
 import torch
@@ -890,7 +900,11 @@ half thousand labelled sentences of BERTurk buy what twenty thousand
 sentences of hand-engineered CRF buy]{.hl} — call it a fourfold to tenfold
 reduction in annotation, which is the range the measured crossover actually
 supports and the honest case for pre-training on this
-task, and smaller than the folklore suggests. Below that crossover the
+task, and smaller than the folklore suggests. Be exact about what that
+comparison is: a **label-efficiency** claim, in which the encoder's budget
+varies while the CRF's stays at 20,000. It is not a claim that the encoder wins
+at a matched budget — at a matched 2,000 sentences the CRF is the one in front
+in the row above. Below that crossover the
 classical pipeline is not a fallback; it is the better model.
 
 The `illegal` column is worth a second look, because it says something the F1
@@ -996,7 +1010,7 @@ the question you care about.
 
 **Token accuracy** counts every token, including the 61% that are `O`.
 Predicting `O` everywhere already scores 61.36, so the informative range of
-this metric is the fifteen points between 61 and the low 90s — and it gets
+this metric is the thirty-odd points between 61 and the low 90s — and it gets
 worse, not better, on realistic corpora where most sentences contain no
 entity at all. It is the metric that makes a model look finished when it is
 not.
@@ -1380,7 +1394,7 @@ The alternatives all give up the one-label-per-token constraint:
 
 | approach | idea | cost |
 |:--|:--|:--|
-| Span enumeration | score every candidate span up to length *k*, classify each | $O(n^2)$ candidates; a strong, simple baseline |
+| Span enumeration | score every candidate span up to length *k*, classify each | $O(nk)$ candidates, which is $O(n^2)$ only when *k* grows with *n*; a strong, simple baseline |
 | Biaffine / dependency-style | score every (start, end) pair with a biaffine layer [@yu2020named] | handles nesting natively; the standard strong result |
 | MRC framing | ask "where are the organisations?" as a question per type [@li2020unified] | one forward pass per type; brings the type description into the model |
 | Word-word grid tagging | classify the relation between every token pair — next-neighbour, tail-head [@li2022w2ner] | handles nesting and discontinuity in one formulation |
@@ -1529,11 +1543,15 @@ a four-token organisation score three quarters. Span-level requires the type,
 the first token and the last token all to match, so that same prediction
 scores zero.
 
-The gap is therefore a direct measurement of how often the model gets the
-type right and an edge wrong. Report span-level, because no downstream
-consumer can use three quarters of a company name — but keep an eye on the
-gap, because a widening one tells you your errors are boundary errors, which
-have different fixes than type errors.
+Do not read the gap as a boundary-error *rate*, though. It mixes several
+things: partial overlaps, spans of different lengths counted token by token,
+and type errors on long entities, all micro-averaged so that a four-token
+mistake weighs four times a one-token one. It is a signal that boundary errors
+are present, not a measurement of how many. If you want the number, count the
+error types directly — exact, boundary-only, type-only, spurious, missed —
+which is a twenty-line script and a far more actionable table. Report
+span-level either way, because no downstream consumer can use three quarters of
+a company name.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -1590,9 +1608,13 @@ half. If your gap looks like that, you measured your dataset, not your model.
 ::: {.callout-note collapse="true"}
 ## 6. Your LLM extractor returns a company that is not in the document. What is the F1 contribution?
 
-Zero, and the deeper answer is that it cannot be scored at all. Span metrics
-are defined over token offsets; a string that does not appear in the text has
-no offsets, so there is nothing to compare against a gold span.
+It counts as a **false positive**, and the important part is that it must
+count as something. Span metrics are defined over token offsets, and a string
+with no offsets has nothing to compare against a gold span — which makes it
+tempting to drop the row from the evaluation entirely. Do not: silently
+discarding unalignable output prices invention at zero and flatters the
+extractor. Either score it as a false positive against precision, or report an
+explicit invalid-output rate alongside F1. Say in the protocol which you did.
 
 But before you write "hallucination" in the report, check whose bug it is.
 Measured here: of 1,419 returned mentions, 31 would not align — and 27 of

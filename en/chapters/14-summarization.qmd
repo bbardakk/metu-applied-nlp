@@ -211,9 +211,12 @@ The audit says these summaries are composed rather than copied, which is a
 prediction about how well *selecting* sentences can do. Worth checking against
 the numbers rather than trusting the inference.
 
-The extractive family selects sentences from the source. It cannot
-hallucinate — every word was in the document — and it cannot compress below
-a sentence. Full test set, 3,397 articles:
+The extractive family selects sentences from the source. It cannot invent
+*wording* — every word was in the document — and it cannot compress below a
+sentence. Note the limit of that guarantee: a selected sentence can still
+misrepresent the source, because the condition, the negation, the attribution
+or the exception that governs it may live in a sentence you did not select.
+Extraction rules out fabricated phrasing, not distortion by omission. Full test set, 3,397 articles:
 
 ```text
 system                    R-1     R-2     R-L    words   time
@@ -258,9 +261,12 @@ caps the recall a single extracted sentence can reach on the second.
 
 ::: {.callout-warning appearance="simple"}
 No single-sentence extractive system on this corpus can exceed 24.89 ROUGE-1,
-because that is what perfect sentence selection achieves. The gap between
-lead-2's 14.04 and that 24.89 is all the room there is for better selection;
-everything above 24.89 requires *writing*, not selecting.
+because that is what perfect one-sentence selection achieves. Keep the scope
+attached to the number every time you quote it: it bounds *single-sentence*
+selection at this length budget, not extraction in general — a multi-sentence
+selector, or a different length budget, is a different oracle and could land
+either side of it. The gap between lead-2's 14.04 and that 24.89 is the room
+there is for better one-sentence selection.
 
 That is a corpus property, computed in 1.8 seconds, and it tells you whether
 to reach for an abstractive model before you train anything.
@@ -529,8 +535,8 @@ evasive. Never conclude from it alone. The next two sections are what to add.
 
 ## Abstractive summarization {#sec-summarization-abstractive}
 
-Extraction is capped at 24.89 on this corpus, so the rest of the ground
-belongs to models that *write*. Three framings have been used, and the
+Single-sentence extraction is capped at 24.89 on this corpus, so most of the
+remaining ground belongs to models that *write*. Three framings have been used, and the
 history is worth two paragraphs because it explains why the current answer
 looks so anticlimactic.
 
@@ -617,11 +623,15 @@ and the one most often chosen by accident.
 
 **Map-reduce.** Chunk, summarize each chunk, then summarize the summaries.
 Cost is linear in document length, it parallelises perfectly, and it is the
-default in every framework. What it loses is **anything that spans a chunk
+default in every framework. What it puts at risk is **anything that spans a chunk
 boundary**: a contract clause qualified twelve pages later, a retraction, a
-narrative arc. Each chunk summarizer sees a window with no idea what came
-before, so it cannot know which of its details will matter globally, and the
-reduce step can only work with what the map step happened to keep.
+narrative arc. Each chunk summarizer sees a window with little idea what came
+before, so it cannot reliably tell which of its details will matter globally,
+and the reduce step can only work with what the map step happened to keep.
+Partial remedies exist and cost tokens: overlap the chunks, carry a running
+summary into each map call, or run a second pass once the reduce step has told
+you what the document is about. None of them recovers a dependency the map step
+threw away.
 
 **Refine, or hierarchical rollup.** Carry a running summary forward, updating
 it with each chunk. Preserves cross-chunk continuity, and is strictly
@@ -1057,8 +1067,12 @@ output forever.
 
 **Cost is dominated by input, not output.** Measured over the 500 articles
 summarized here: **890 prompt tokens per article against 53 generated**, a
-ratio of nearly 17 to 1 — and these are 300-word articles, the short end of
-anything you would want summarized. For long documents under map-reduce the
+*token* ratio of nearly 17 to 1 — and these are 300-word articles, the short
+end of anything you would want summarized. Convert that to money with your own
+price sheet before quoting it as a cost ratio: output tokens are typically
+billed at three to five times input, so 17:1 in tokens is closer to 3:1 or 4:1
+in currency. The conclusion survives the conversion here; on a task that
+generates more than it reads, it would not. For long documents under map-reduce the
 ratio gets worse, because the intermediate summaries are read again.
 
 The arithmetic is @sec-serving's: what you pay for is *reading*, so the lever is
@@ -1096,7 +1110,8 @@ state: the tokenizer, the normalizer, and the reference set.
 
 On this corpus the same predictions score **14.03** with a Turkish-correct
 tokenizer and **22.03** with `rouge-score`'s default, which treats `ç`, `ğ`,
-`ı`, `ö`, `ş` and `ü` as punctuation and mutilates 44.4% of Turkish words.
+`ı`, `ö`, `ş` and `ü` as punctuation and so splits 44.4% of Turkish words
+into fragments.
 Stemming moves it another five points. So "41" could be a strong system, or a
 weak system measured generously, and the number alone cannot tell you.
 
@@ -1108,12 +1123,17 @@ number is not comparable to anything computed correctly.
 ## 2. Before training anything, how do you know whether extraction can work?
 
 Compute the oracle. For each document, take the single sentence with the
-highest ROUGE against the reference, and average. That is what *perfect*
-sentence selection achieves, so no extractive system can beat it.
+highest ROUGE against the reference, and average. That is what *perfect
+one-sentence* selection achieves, so no single-sentence extractive system can
+beat it — say "single-sentence" out loud, because a multi-sentence selector is
+bounded by a different oracle.
 
-Here it is **24.89**, and lead-2 already reaches 14.69 — so all the remaining
-room in extraction is ten points, and everything above 24.89 requires
-writing. On CNN / DailyMail the same measurement gives 40.58, which is why
+Here it is **24.89** and lead-2 reaches **14.04**, both on the full 3,397-article
+test set — so about ten points of room are left for better one-sentence
+selection, and anything past 24.89 needs either more sentences or writing.
+(Quote the pair from one sample: on this chapter's 500-article subsample the
+same two numbers are 25.05 and 14.69, and mixing a figure from each is how
+gaps get invented.) On CNN / DailyMail the same measurement gives 40.58, which is why
 extractive systems were respectable there for a decade.
 
 Two lines of code, and it decides your architecture before you spend a GPU
@@ -1128,7 +1148,10 @@ your measurement than a discovery, and the way to find out is a **control
 whose answer you already know**.
 
 Here the control is free: lead-2 is copied verbatim from the article, so it
-*cannot* be unfaithful, and any flag on it is a false positive. Running it
+introduces no wording that is not in the source, and any flag a *lexical*
+faithfulness proxy raises on it is a false positive. (It could still mislead a
+reader by omission — but that is not what this proxy claims to detect, which is
+exactly what makes it a clean control for it.) Running it
 exposed two bugs in two successive versions of the proxy — both the same
 mistake, tokenising the two sides of the comparison differently.
 
@@ -1293,8 +1316,10 @@ high, build the extractive system and stop. If it is low, you have just
 justified a generative model — with a number, to somebody who asked why.
 
 If you have no reference summaries, run the oracle against the document's own
-title or first sentence. It is a weaker signal and it still tells you whether
-the answer is *in* the document or has to be composed.
+title or first sentence — and remove whatever you used as the reference from
+the candidate pool, or the oracle selects it and scores a meaningless perfect
+match. It is a weaker signal even done correctly, and it still tells you
+whether the answer is *in* the document or has to be composed.
 
 ### Step 3 — build lead-k and TextRank
 
@@ -1417,7 +1442,7 @@ harness — this chapter found two separate bugs that way.
   on CNN / DailyMail and **14.03** here, where lead-*2* beats it. Report the
   lead baseline always; assume it is strong never.
 
-- **`rouge-score` mutilates 44.4% of Turkish words.** Its tokenizer treats
+- **`rouge-score` splits 44.4% of Turkish words into fragments.** Its tokenizer treats
   `ç ğ ı ö ş ü İ` as punctuation, so `görüştü` becomes `['g','r','t']`. The
   debris matches at random and inflates ROUGE-1 by about 60% — unevenly, from
   +22% for the oracle to +80% for a random baseline. The rankings survive;
