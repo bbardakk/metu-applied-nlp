@@ -47,7 +47,7 @@ decision that removes an entire class of failure — and each will be argued
 against by someone who wants one more feature, which is why they are written
 down before anyone is invested.
 
-## Six decisions, and what was rejected {#sec-capstone-decisions}
+## Seven decisions, and what was rejected {#sec-capstone-decisions}
 
 An architecture decision record is worth writing only if it records the
 alternative honestly. The compressed form — and note that one row below is not
@@ -58,13 +58,13 @@ table:
 |:--|:--|:--|
 | **Model access** | one gateway in front of all providers | direct SDK calls per service — cheaper to start, and then attribution, pinning and rate limits have five implementations (@sec-gateway) |
 | **Where the loop lives** | durable execution with checkpointed state | in-memory loop behind a request handler — fine until a deploy lands mid-conversation (@sec-deployment) |
-| **Retrieval** | hybrid search over the policy corpus, with citations | full-context stuffing of all policies — simpler, and @sec-serving's prefill cost makes it the dominant latency term |
+| **Retrieval** | hybrid search over the policy corpus, with citations | full-context stuffing of all policies — simpler, and @sec-serving's prefill cost makes it the dominant latency term. Note the alternative this row does *not* reject: BM25 or dense retrieval alone, which @sec-retrieval found beating unweighted rank fusion on its corpus. Measure the single retrievers before assuming the hybrid |
 | **PII** | detect and tokenise reversibly at the boundary | mask destructively — safe and it breaks order lookup (@sec-guardrails) |
 | **Refunds** | agent proposes, service enforces the ceiling, human approves above it | agent calls the refund API with a limit in the prompt — a limit in a prompt is a request (@sec-agent-security) |
 | **Eval** | golden set in the repo, gate on every prompt change | manual spot-checks before release — @sec-production-eval measured what slips through |
 | **Where the provider sits** | a Türkiye-region deployment where one exists, otherwise a standard contract under KVKK Article 9 | "the gateway abstracts it away" — the gateway centralises the choice, it does not make it a technical one (@sec-governance-kvkk) |
 
-: Six decisions; the rejected column is the one to read
+: Seven decisions; the rejected column is the one to read
 {tbl-colwidths="[16,34,50]"}
 
 Two of these deserve their reasoning spelled out, because they are the ones
@@ -114,9 +114,17 @@ The useful discipline before building is a budget assembled from measurements
 you already have. Every figure below is quoted from an earlier chapter, and the
 arithmetic is the only new thing.
 
+Read the whole section as a **starting estimate, not a validated budget for this
+platform**. Each number came from a different model, a different corpus and a
+different task, and several transfer badly: the PII precision belongs to Turkish
+support text with this book's identifier mix, and the attack and detection rates
+belong to one model with one prompt and one attack set. Treat them as the
+assumptions to write down and then measure first, which is what the closing
+sentence of this section is about.
+
 **Latency.** @sec-serving's split — prefill around 2,000 tokens per second
-against decode at 190 — means a token you *write* costs about eleven times a
-token you *read*. Which half dominates is therefore a question about your own
+against decode at 190 — means a token you *write* takes about eleven times as
+long as a token you *read*, on that hardware. Which half dominates is therefore a question about your own
 ratio rather than a universal fact, and the ratio changes as soon as you make
 the retrieval decision. At 7,427 in and 64 out, the request @sec-serving
 reports as 91% prefill, decode is 8%. At the shape planned for below — a
@@ -163,10 +171,15 @@ in fifteen real identifiers is not caught by the union, which is a number to put
 in the DPIA rather than to hide.
 
 **Security.** @sec-agent-security's attack success of **92–100%** against an
-agent with an outward tool, and best-case detection of **14.7%**, is why the
+agent with an outward tool, and a detection rate of **14.7%** for the one
+detector prompt with a usable false-positive rate, on the three attack framings
+that were demonstrated to work — not a general "best case" — is why the
 architecture separates the agent that reads tickets from the one that can move
 money. That is not a mitigation with a residual rate; it is a pair that has been
-broken.
+broken — provided the handoff between them is a validated structured payload
+rather than free text the second agent reads as instruction, and the refund
+service authorises against the user rather than against whatever the first agent
+asked for. Two processes alone are not the boundary; the data contract is.
 
 **Routing.** @sec-classification measured an LLM's verbalised confidence as a
 detector of its own errors at **AUROC 0.667**, against 0.843 for a fine-tuned
@@ -211,7 +224,8 @@ cost per resolved ticket, not cost per session.
 ## What breaks {#sec-capstone-retro}
 
 The honest retrospective, written as the failures this book's measurements
-predict rather than as war stories. Each is a thing that will happen.
+predict rather than as war stories. Each is a plausible failure mode to test for
+and plan around.
 
 **The eval set will be too small and too easy.** It starts as fifty cases
 someone wrote in an afternoon, it gets easier as you fix what is in it, and its
@@ -248,7 +262,9 @@ review.
 
 **The model will be upgraded underneath you.** @sec-gateway's alias problem: if
 you record only the requested model, you find out weeks later from a quality
-regression. Two attributes prevent it (@sec-observability).
+regression. Two attributes do not prevent the upgrade — pinning the version
+does — but they are what lets you *detect and investigate* it the same day
+(@sec-observability).
 
 What would be done differently, in one line: **write the eval and the attack
 before writing the agent.** Both are cheap at the start and neither gets written
@@ -375,9 +391,10 @@ exists in the set at all (@sec-production-eval). The dashboard is green about
 contains a confidently wrong answer.
 
 Then rule out the boring cause before the interesting ones: a metric moving less
-than its noise floor is not moving. @sec-production-eval measured that floor at
-**0.60 points**, which is the number that tells you whether there is anything to
-investigate.
+than its noise floor is not moving. @sec-production-eval measured a run-to-run
+`sd` of **0.26 points** and a five-run *range* of **0.60**; the range is what a
+single new run is compared against, and the `sd` is what a gate threshold is
+built from. Say which you are quoting.
 :::
 
 ## Interview questions {#sec-capstone-interview}

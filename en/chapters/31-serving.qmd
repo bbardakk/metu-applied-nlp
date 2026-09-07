@@ -74,8 +74,10 @@ prompt tokens   prefill   prefill tok/s      decode tok/s
 ```
 
 Prefill runs at roughly **2,000 tokens per second**; decode at roughly **190**.
-[Reading a token is about eleven times cheaper than writing one]{.hl} — on the
-4,247-token row, 0.54 milliseconds against 6.2 — and it is the ratio rather
+[On this hardware, prefill time per token was about eleven times lower than
+decode time per token]{.hl} — on the 4,247-token row, 0.54 milliseconds against
+6.2. That is a statement about *time*, not about a provider's price list, where
+output tokens usually cost several times input — and it is the ratio rather
 than the absolute numbers that survives a change of hardware. Take both figures
 from the same row: decode slows as the context grows (5.2 ms at 96 tokens,
 6.2 ms at 4,247), so pairing the best prefill with the worst decode inflates
@@ -454,9 +456,13 @@ From @sec-summarization, summarizing a 300-word news article measured
 shape is typical of anything with a system prompt, a schema and retrieved
 context, which is to say most production LLM features.
 
-[What you pay for is reading, not writing]{.hl}, and that inverts the usual
-intuition about where to optimise. Asking for shorter answers saves very
-little. Sending less saves a lot.
+[On this shape of workload, most of what you pay for is reading]{.hl}, and that
+inverts the usual intuition about where to optimise. One conversion step before
+you act on it: providers bill output tokens at several times input, so a 17:1
+token ratio is nearer 3:1 or 4:1 in money, and a cache hit discounts the input
+side further. Do the multiplication with your own price sheet. On this ratio it
+survives — asking for shorter answers saves little, sending less saves a lot —
+and on a task that generates more than it reads it would not.
 
 The worksheet has four lines and one multiplication:
 
@@ -566,7 +572,7 @@ ones with no quality cost, and teams routinely start at the bottom.
 | **Prompt caching** | up to 153× prefill, measured above | a prompt ordered by stability | [first, always]{.pro} |
 | **Smaller model** | 3–10× on everything | quality, measurably | when the eval says it holds |
 | **Quantization** | memory and bandwidth | some quality, task-dependent | when memory is the binding constraint |
-| **Speculative decoding** | latency only, not cost | a draft model to host | when TTFT is the complaint and cost is not |
+| **Speculative decoding** | decode latency only, not cost | a draft model to host | when *decode* is the slow half — long answers — and cost is not the complaint. It does nothing for a prefill-bound request |
 | **Continuous batching** | throughput | per-user latency | when the server is busy, not before |
 
 : Six levers and what each one trades away {tbl-colwidths="[22,26,28,24]"}
@@ -584,8 +590,12 @@ cost is task-dependent — which means it belongs in your eval suite, not in a
 blog post's benchmark table.
 
 **Speculative decoding** attacks the serial part directly. A small draft model
-proposes several tokens; the large model verifies them in a single parallel
-pass and accepts the longest correct prefix [@leviathan2023speculative]. The
+proposes several tokens; the large model scores them all in a single parallel
+pass and a modified rejection-sampling step decides how many to keep, resampling
+the first rejected position from a corrected distribution
+[@leviathan2023speculative]. "Accepts the longest correct prefix" is the useful
+picture and not quite the mechanism: acceptance is stochastic, and a token the
+draft got *right* can still be rejected. The
 output distribution is provably unchanged — this is not an approximation — and
 the win is in wall-clock, typically 2–3× when the draft model agrees often.
 Note what it does *not* do: the large model still processes every token, so
@@ -615,8 +625,11 @@ against 190 tokens per second — so a request with a long prompt and a short
 answer spends nearly all its time reading. At 7,427 tokens of context, 91% of
 the wall clock was over before the first character appeared.
 
-If that is your shape, no decoding parameter and no faster model will help
-much, and the levers are prompt length and prompt caching. If instead you are
+If that is your shape, the levers are prompt length and prompt caching, and
+speculative decoding in particular will do nothing — it speeds up decode.
+A genuinely faster model does still help, because prefill is compute-bound and a
+smaller model has less compute to do; what will not help is anything aimed at
+the token-by-token half. If instead you are
 generating thousands of tokens, the answer is the opposite one, which is why
 the ratio is the first thing to measure rather than the last.
 :::
@@ -770,7 +783,8 @@ in direct conflict, and somebody has to be told which one they are buying.
 
 ## The 2026 toolbox {#sec-serving-tools}
 
-Forty short requests against a 3B model on a laptop needs exactly two things,
+About 150 requests against a 3B model on a laptop — roughly 40 distinct
+conditions, each measured five times — needs exactly two things,
 which is the first table. The second is what you would actually serve on, and
 none of it was used here — the numbers in this chapter are ratios, and ratios
 are the part that survives the move to a real card.
@@ -816,9 +830,9 @@ one.
 
 ### Step 3 — measure your cache, then break it
 
-Send the same long prompt twice and record both. Then insert a timestamp at
-the *top* of the prompt and send it twice more. The second pair should lose the
-speedup entirely. Keep both numbers; the difference is what prompt ordering is
+Send the same long prompt twice and record both. Then send it twice more with a
+*fresh* timestamp at the *top* of the prompt on each call — the same timestamp
+twice would still cache. The second pair should lose the speedup entirely. Keep both numbers; the difference is what prompt ordering is
 worth.
 
 ### Step 4 — size the KV cache in gigabytes
@@ -937,10 +951,13 @@ once you know your own ratio.
   @kwon2023pagedattention]. Reporting the throughput gain without the latency
   cost is how a review gets misled.
 
-- **You pay for reading, not writing.** 890 prompt tokens against 53 generated
-  in this book's own summarization measurement. Asking for shorter answers saves
-  almost nothing; sending less saves almost everything. Boilerplate removal
-  beats model selection.
+- **Most of what you pay for is reading.** 890 prompt tokens against 53
+  generated in this book's own summarization measurement — a token ratio, which
+  becomes nearer 3:1 or 4:1 once output tokens are priced higher. Asking for
+  shorter answers saves little; sending less saves a lot. Boilerplate removal
+  beats model selection, and it is the one form of "send less" with no quality
+  risk — dropping retrieved context or few-shot examples is a quality decision
+  and belongs in the eval.
 
 - **Order the levers by what they cost you.** Fewer tokens and prompt caching
   are free of quality risk and go first. A smaller model, quantization

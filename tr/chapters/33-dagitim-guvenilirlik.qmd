@@ -70,9 +70,13 @@ büyüyor ve her istekte parası ödeniyor. Ayrıca istemcinin geçmişi
 düzenleyebilmesi demek; @sec-ajan-guvenligi'nin bu konuda söyleyecekleri var.
 
 ::: {.column-margin}
-İstemcide tutulan durumun token maliyetini hafife almak kolay. Yirmi sıralık bir
-konuşma son istekte on dokuz sıralık geçmişi yeniden gönderiyor; dolayısıyla
-prompt oturum boyunca kabaca karesel büyüyor — ve @sec-servis'in ölçümleri bunun
+Bir geçmişi taşımanın token maliyetini hafife almak kolay ve bu, geçmişin
+*nerede* durduğuna bağlı değil. Yirmi sıralık bir konuşma son istekte on dokuz
+sırayı yeniden gönderiyor; dolayısıyla son prompt doğrusal, oturumun toplam
+prompt token'ı ise kabaca karesel büyüyor — geçmişi istemci de göndermiş olsa
+sunucu tarafındaki bir oturum deposu da göndermiş olsa aynı aritmetik, çünkü
+parasını ödediğiniz şey modele ulaşan şey. İstemcide tutulan durumun değiştirdiği
+şey kimin düzenleyebileceği, neye mal olduğu değil — ve @sec-servis'in ölçümleri bunun
 bir fatura problemi olmasından çok önce prefill'in gecikmeye hâkim olduğunu
 gösteriyor. Prompt önbellekleme tam da burada yardımcı oluyor, yeter ki geçmiş
 yalnızca ekleme yapılan türden olsun ve tepede oynak hiçbir şey oturmasın.
@@ -123,7 +127,9 @@ doğrudan bir API çağırmak bunu bozar, çünkü tekrar oynatma özgününden 
 yol izlerdi.
 
 Bu da ajanların üzerine tuhaf biçimde oturuyor ve bu konuda açık sözlü olmakta
-yarar var. **Bir LLM çağrısı sistemdeki en az belirlenimci şeydir.** Çözüm
+yarar var. **Bir LLM çağrısı, dışsal ve potansiyel olarak belirlenimci olmayan
+bir işlem gibi ele alınmalıdır** — sıcaklık 0'da bile, çünkü batch'leme, donanım
+ve sessiz bir model güncellemesi çıktıyı oynatır. Çözüm
 zekice değil, yapısal: model çağrısı, iş akışı kodunun içinde verilen bir karar
 değil, sonucu kaydedilip tekrar oynatılan bir *adımdır* — Temporal'ın
 sözlüğünde bir etkinlik. İş akışı düzenler; belirlenimsizlik kaydettiği
@@ -245,12 +251,22 @@ anahtar, anahtar değildir.
 |:--|:--|:--|
 | Araç argümanlarının özeti | [hayır]{.con} | model fikrini değiştirdiğinde değişir — bu bölümün ölçtüğü arıza |
 | Deneme başına rastgele kimlik | [hayır]{.con} | her yeniden denemede yeni bir anahtar, ki bu hiç olmamasıyla aynı şey |
-| `(oturum kimliği, adım indisi)` | [evet]{.pro} | aynı adımın yeniden denemeleri arasında kararlı; alışıldık doğru cevap |
+| `(oturum kimliği, adım indisi)` | [evet]{.pro} | aynı adımın yeniden denemeleri arasında kararlı — tek bir adım birkaç yan etkili çağrı yapıyorsa bir alt çağrı indisi ekleyin, yoksa çakışırlar |
 | Yukarı akış istek kimliği | [evet]{.pro} | bir isteğin uçtan uca en fazla bir yan etki üretmesi gerektiğinde doğru olan |
 
 : Dört aday anahtar ve işe yarayan ikisi {tbl-colwidths="[26,18,56]"}
 
-Pratikte işe yarayıp yaramayacağına iki uygulama notu karar veriyor.
+Anahtarı kiracı kapsamına da alın; böylece iki müşteri aynı mantıksal işlem
+kimliğinde çakışamaz.
+
+Pratikte işe yarayıp yaramayacağına üç uygulama notu karar veriyor.
+
+**Aynı anahtar farklı argümanlarla geldiğinde ne olacağına karar verin.** Cazip
+davranış — saklanmış sonucu döndürmek — yanlıştır: *farklı* bir isteğe sessizce
+eski bir cevap verir. Stripe'ın API'si isteğin bir parmak izini anahtarla
+birlikte saklar ve parametreleri eşleşmeyen bir yeniden kullanımı reddeder;
+kopyalanacak davranış budur. Argümanları kayıtla birlikte saklayın, tekrar
+oynatmada karşılaştırın ve uyuşmazlıkta gürültülü biçimde başarısız olun.
 
 **Kayıt ile etki birlikte commit olmalı.** Etki sizin veritabanınızdaki bir
 satırsa bu tek bir işlemdir ve problem çözülmüştür. Etki uzak bir çağrıysa — ki
@@ -278,7 +294,7 @@ yazmaktır.
 
 | araç | telafi | dürüst mü? |
 |:--|:--|:--|
-| Kayıt oluştur | sil | [evet]{.pro} |
+| Kayıt oluştur | sil | [çoğunlukla]{.pro} — satır gider, ama oluşturulmasıyla birlikte çoktan tetiklenmiş olan (bir webhook, aşağı akışta bir olay, gönderilmiş bir bildirim) geri tetiklenmez |
 | Kart çek | iade | çoğunlukla — ücret ve ekstre satırı hayatta kalır |
 | Yer ayır | iptal et | genellikle, başkasının aldığı bir rezervi serbest bıraktıysa değil |
 | Bir kanala gönder | mesajı sil | [hayır — insanlar okudu]{.con} |
@@ -339,8 +355,10 @@ döngüsü bir istek değil: dakikalar sürebiliyor ve tavan koşunun ortasında
 bazı araçlar zaten yürütüldükten sonra — geliyor. Belirti, gerçek yan etkileri
 olan ve sonucu olmayan kırpılmış bir koşu.
 
-Çözüm bir zaman aşımı ayarı değil, yapısal: isteği kabul edin, bir iş kuyruğa
-alın, bir kimlik döndürün ve döngüyü bir işçi koşsun. Bu değişiklik aynı zamanda
+İş, denetiminizdeki bir sınırın içinde güvenilir biçimde bitiyorsa zaman aşımını
+ona göre yükseltmek meşru ve çok daha ucuz bir çözümdür. Onun ötesinde çözüm
+yapısal: isteği kabul edin, bir iş kuyruğa alın, bir kimlik döndürün ve döngüyü
+bir işçi koşsun. Bu değişiklik aynı zamanda
 size ilerlemeyi, iptali ve bir ölü mektup yolunu koyacağınız yeri de veriyor.
 :::
 

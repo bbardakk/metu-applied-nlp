@@ -68,9 +68,13 @@ turn, paid for on every request. It also means the client can edit the history,
 which @sec-agent-security has opinions about.
 
 ::: {.column-margin}
-The token cost of client-held state is easy to underestimate. A twenty-turn
-conversation resends nineteen turns of history on the last request, so the
-prompt grows roughly quadratically over the session — and @sec-serving's
+The token cost of carrying a history is easy to underestimate, and it is not
+specific to *where* the history lives. A twenty-turn conversation resends
+nineteen turns on the last request, so the last prompt grows linearly and the
+session's total prompt tokens grow roughly quadratically — the same arithmetic
+whether the client sent the history or a server-side session store did, because
+what you pay for is what reaches the model. What client-held state changes is
+who can edit it, not what it costs — and @sec-serving's
 measurements show prefill dominating latency well before that becomes a bill
 problem. Prompt caching helps exactly here, provided the history is append-only
 and nothing volatile sits at the top.
@@ -119,7 +123,9 @@ API directly from workflow code all break it, because the replay would take a
 different path than the original.
 
 Which lands awkwardly on agents, and it is worth being blunt about it. **An LLM
-call is the least deterministic thing in your system.** The resolution is
+call has to be treated as an external, potentially non-deterministic operation**
+— even at temperature 0, where batching, hardware and a silent model update all
+move the output. The resolution is
 structural rather than clever: the model call is a *step* — an activity, in
 Temporal's vocabulary — whose result is recorded and replayed, not a decision
 made inside workflow code. The workflow orchestrates; the non-determinism lives
@@ -241,12 +247,22 @@ So derive it from something upstream and stable:
 |:--|:--|:--|
 | Hash of tool arguments | [no]{.con} | changes when the model changes its mind — the failure this section measured |
 | Random id per attempt | [no]{.con} | a new key every retry, which is the same as having none |
-| `(session id, step index)` | [yes]{.pro} | stable across retries of the same step; the usual right answer |
+| `(session id, step index)` | [yes]{.pro} | stable across retries of the same step — add a sub-call index when one step makes several side-effecting calls, or they collide |
 | Upstream request id | [yes]{.pro} | right when one request must produce at most one side effect end to end |
 
 : Four candidate keys, and the two that work {tbl-colwidths="[26,18,56]"}
 
-Two implementation notes decide whether it works in practice.
+Scope the key to the tenant as well, so two customers cannot collide on the same
+logical operation id.
+
+Three implementation notes decide whether it works in practice.
+
+**Decide what happens when the key repeats with different arguments.** The
+tempting behaviour — return the stored result — is wrong: it silently answers a
+*different* request with an old answer. Stripe's API stores a fingerprint of the
+request alongside the key and rejects a reuse whose parameters do not match, and
+that is the behaviour to copy. Store the arguments with the record, compare on
+replay, and fail loudly on a mismatch.
 
 **The record and the effect must commit together.** When the effect is a row in
 your own database that is one transaction and the problem is solved. When the
@@ -275,7 +291,7 @@ not after the incident.
 
 | tool | compensation | honest? |
 |:--|:--|:--|
-| Create a record | delete it | [yes]{.pro} |
+| Create a record | delete it | [mostly]{.pro} — the row goes, but anything that already fired on its creation (a webhook, a downstream event, a sent notification) does not un-fire |
 | Charge a card | refund | mostly — the fee and the statement line survive |
 | Book a slot | cancel | usually, unless it released a hold someone else took |
 | Post to a channel | delete the message | [no — people read it]{.con} |
@@ -336,8 +352,9 @@ not a request: it can take minutes, and the cap arrives mid-run — after some
 tools have already executed. The symptom is a truncated run with real side
 effects and no result.
 
-The fix is structural, not a timeout setting: accept the request, enqueue a job,
-return an id, and let a worker run the loop. That change also gives you the
+If the work reliably finishes inside a bound you control, raising the timeout to
+match is a legitimate fix and much cheaper. Past that, the fix is structural:
+accept the request, enqueue a job, return an id, and let a worker run the loop. That change also gives you the
 place to put progress, cancellation and a dead-letter path.
 :::
 

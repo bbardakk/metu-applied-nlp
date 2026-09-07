@@ -76,8 +76,11 @@ prompt tokens   prefill   prefill tok/s      decode tok/s
 ```
 
 Prefill saniyede kabaca **2.000 token**, decode ise kabaca **190** hızında
-çalışıyor. [Bir token okumak yazmaktan yaklaşık on bir kat ucuz]{.hl} — 4.247
-token'lık satırda 0,54 milisaniyeye karşı 6,2 — ve bir donanım değişikliğinden
+çalışıyor. [Bu donanımda token başına prefill süresi, token başına decode
+süresinin yaklaşık on bir katı daha düşüktü]{.hl} — 4.247 token'lık satırda 0,54
+milisaniyeye karşı 6,2. Bu, *süre* hakkında bir ifade; çıktı token'larının
+girdinin birkaç katına faturalandığı bir sağlayıcı fiyat listesi hakkında değil
+— ve bir donanım değişikliğinden
 sağ çıkan şey mutlak sayılar değil bu oran. İki rakamı da aynı satırdan alın:
 bağlam büyüdükçe decode yavaşlıyor (96 token'da 5,2 ms, 4.247'de 6,2 ms), yani
 en iyi prefill'i en kötü decode'la eşleştirmek farkı şişirir.
@@ -456,9 +459,14 @@ token'ına karşı 53 üretilmiş token** ölçmüştü — neredeyse 17'ye 1'li
 Bu biçim, bir sistem prompt'u, bir şema ve erişilmiş bağlamı olan her şeyin
 tipik biçimi, ki bu da üretimdeki LLM özelliklerinin çoğu demek.
 
-[Parasını ödediğiniz şey yazmak değil okumak]{.hl} ve bu, nerede optimizasyon
-yapılacağına dair alışıldık sezgiyi tersine çeviriyor. Daha kısa cevaplar
-istemek çok az tasarruf sağlar. Daha az göndermek çok tasarruf sağlar.
+[Bu biçimdeki bir yükte ödediğinizin çoğu okumak]{.hl} ve bu, nerede optimizasyon
+yapılacağına dair alışıldık sezgiyi tersine çeviriyor. Buna göre hareket etmeden
+önce bir çevrim adımı: sağlayıcılar çıktı token'larını girdinin birkaç katına
+faturalandırır, dolayısıyla 17'ye 1'lik bir token oranı parada 3'e 1 ya da 4'e
+1'e yakındır ve bir önbellek isabeti girdi tarafını daha da indirir. Çarpmayı
+kendi fiyat listenizle yapın. Bu oranda sonuç sağ çıkıyor — daha kısa cevaplar
+istemek az kazandırır, daha az göndermek çok kazandırır — okuduğundan çok üreten
+bir görevde çıkmazdı.
 
 Çizelgenin dört satırı ve bir çarpması var:
 
@@ -570,7 +578,7 @@ olmayanlar ve takımlar rutin olarak en alttan başlıyor.
 | **Prompt önbellekleme** | prefill'de 153×'e kadar, yukarıda ölçüldü | kararlılığa göre sıralanmış bir prompt | [her zaman, ilk]{.pro} |
 | **Daha küçük model** | her şeyde 3–10× | kalite, ölçülebilir biçimde | değerlendirme dayandığını söylediğinde |
 | **Nicemleme** | bellek ve bant genişliği | bir miktar kalite, göreve bağlı | bağlayıcı kısıt bellek olduğunda |
-| **Spekülatif çözümleme** | yalnızca gecikme, maliyet değil | barındırılacak bir taslak model | şikâyet TTFT'ken ve kısıt maliyet değilken |
+| **Spekülatif çözümleme** | yalnızca decode gecikmesi, maliyet değil | barındırılacak bir taslak model | yavaş yarı *decode* olduğunda — uzun cevaplar — ve şikâyet maliyet değilken. Prefill sınırlı bir istek için hiçbir şey yapmaz |
 | **Sürekli batch'leme** | iş hacmi | kullanıcı başına gecikme | sunucu meşgulken, öncesinde değil |
 
 : Altı kol ve her birinin feda ettiği {tbl-colwidths="[22,26,28,24]"}
@@ -588,8 +596,12 @@ optimizasyonu ve maliyet göreve bağlı — yani yeri bir blog yazısının öl
 tablosu değil, sizin değerlendirme süitiniz.
 
 **Spekülatif çözümleme** doğrudan seri kısma saldırıyor. Küçük bir taslak model
-birkaç token öneriyor; büyük model bunları tek bir paralel geçişte doğrulayıp en
-uzun doğru öneki kabul ediyor [@leviathan2023speculative]. Çıktı dağılımının
+birkaç token öneriyor; büyük model hepsini tek bir paralel geçişte puanlıyor ve
+değiştirilmiş bir reddetme örneklemesi adımı kaçının tutulacağına karar verip
+reddedilen ilk konumu düzeltilmiş bir dağılımdan yeniden örnekliyor
+[@leviathan2023speculative]. "En uzun doğru öneki kabul eder" işe yarar bir
+resim ama tam olarak mekanizma değil: kabul olasılıksaldır ve taslağın *doğru*
+bildiği bir token bile reddedilebilir. Çıktı dağılımının
 değişmediği kanıtlanmış durumda — bu bir yaklaşıklama değil — ve kazanç duvar
 saatinde, taslak model sık sık aynı fikirde olduğunda tipik olarak 2–3×.
 *Yapmadığı* şeye dikkat edin: büyük model hâlâ her token'ı işliyor, dolayısıyla
@@ -618,8 +630,11 @@ saniyede yaklaşık 2.000'e karşı 190 token — dolayısıyla uzun prompt'lu v
 cevaplı bir istek zamanının neredeyse tamamını okuyarak geçirir. 7.427 token
 bağlamda duvar saatinin %91'i, ilk karakter belirmeden önce bitmişti.
 
-Biçiminiz buysa, hiçbir çözümleme parametresi ve hiçbir daha hızlı model pek
-işe yaramaz; kollar prompt uzunluğu ve prompt önbellekleme olur. Buna karşılık
+Biçiminiz buysa kollar prompt uzunluğu ve prompt önbellekleme olur; özellikle
+spekülatif çözümleme hiçbir şey yapmaz — o decode'u hızlandırır. Gerçekten daha
+hızlı bir model yine de yardım eder, çünkü prefill hesap sınırlıdır ve daha
+küçük bir modelin yapacak daha az hesabı vardır; yardım etmeyecek olan, token
+token ilerleyen yarıya yönelik her şeydir. Buna karşılık
 binlerce token üretiyorsanız cevap tam tersi olur — oranın en son değil en önce
 ölçülecek şey olmasının nedeni de bu.
 :::
@@ -777,8 +792,8 @@ Sonra rahatsız edici kısmı söyleyin: bir p99 SLO'su ile azami iş hacmi doğ
 
 ## 2026 alet çantası {#sec-servis-araclar}
 
-Bir dizüstünde 3B'lik bir modele karşı kırk kısa istek tam olarak iki şeye
-ihtiyaç duyuyor; birinci tablo o. İkincisi gerçekte üstünde servis yapacağınız
+Bir dizüstünde 3B'lik bir modele karşı yaklaşık 150 istek — kabaca 40 ayrı
+koşul, her biri beş kez ölçülmüş — tam olarak iki şeye ihtiyaç duyuyor; birinci tablo o. İkincisi gerçekte üstünde servis yapacağınız
 şey ve hiçbiri burada kullanılmadı — bu bölümdeki sayılar oranlar ve gerçek bir
 karta geçişte hayatta kalan kısım oranlar.
 
@@ -824,8 +839,9 @@ sınamalısınız.
 ### Adım 3 — önbelleğinizi ölçün, sonra bozun
 
 Aynı uzun prompt'u iki kez gönderip ikisini de kaydedin. Sonra prompt'un
-*tepesine* bir zaman damgası ekleyip iki kez daha gönderin. İkinci çift
-hızlanmayı tümüyle yitirmeli. İki sayıyı da saklayın; aradaki fark prompt
+*tepesine* her çağrıda *yeni* bir zaman damgası koyarak iki kez daha gönderin —
+aynı damgayı iki kez koymak yine önbelleğe düşerdi. İkinci çift hızlanmayı
+tümüyle yitirmeli. İki sayıyı da saklayın; aradaki fark prompt
 sıralamasının değeridir.
 
 ### Adım 4 — KV önbelleğini gigabayt cinsinden boyutlandırın
@@ -948,10 +964,13 @@ bildiğinizde çok daha kolay değerlendirilir.
   hacmi kazancını gecikme maliyeti olmadan raporlamak, bir değerlendirmenin
   yanıltılma biçimidir.
 
-- **Parasını yazmanın değil, okumanın ödüyorsunuz.** Bu kitabın kendi özetleme
-  ölçümünde 53 üretilmiş token'a karşı 890 prompt token'ı. Daha kısa cevaplar
-  istemek neredeyse hiçbir şey kazandırmaz; daha az göndermek neredeyse her şeyi
-  kazandırır. Şablon metni ayıklamak model seçmeyi yener.
+- **Ödediğinizin çoğu okumak.** Bu kitabın kendi özetleme ölçümünde 53 üretilmiş
+  token'a karşı 890 prompt token'ı — bir token oranı; çıktı token'ları daha
+  pahalı fiyatlandığında bu 3'e 1 ya da 4'e 1'e yaklaşır. Daha kısa cevaplar
+  istemek az kazandırır; daha az göndermek çok kazandırır. Şablon metni ayıklamak
+  model seçmeyi yener ve kalite riski olmayan tek "daha az gönder" biçimi odur —
+  erişilmiş bağlamı ya da örnekleri atmak bir kalite kararıdır ve değerlendirmeye
+  aittir.
 
 - **Kolları size neye mal olduklarına göre sıralayın.** Daha az token ve prompt
   önbellekleme kalite riski taşımaz ve önce gelir. Daha küçük bir model, nicemleme

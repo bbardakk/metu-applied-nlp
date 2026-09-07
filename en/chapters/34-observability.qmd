@@ -65,9 +65,11 @@ matter more than any individual attribute name.
 forwarding notice. Documentation, blog posts and instrumentation libraries
 written before the split point at pages that no longer hold the spec.
 
-**Most of them are not stable.** Counting the stability badges in the current
-span, agent-span and metric documents: **286 of 308 marked items in the span
-conventions are `Development`, and only 22 are `Stable`** — with much the same
+**Most of them are not stable.** Counting the stability badges — one per marked
+item, which is not the same as one per distinct attribute, since an attribute
+can be marked in more than one document — in the current span, agent-span and
+metric documents: **286 of 308 marked items in the span conventions are
+`Development`, and only 22 are `Stable`** — with much the same
 ratio in the agent and metric documents. The new repository has no tagged
 release at all.
 
@@ -86,7 +88,7 @@ rather than free text:
 |:--|:--|:--|
 | a model call | `{gen_ai.operation.name} {gen_ai.request.model}` | `chat llama3.2:3b` |
 | a tool call | `execute_tool {gen_ai.tool.name}` | `execute_tool lookup` |
-| a retrieval | `{gen_ai.operation.name} {gen_ai.data_source.id}` | `embeddings kb-main` |
+| a retrieval | `{gen_ai.operation.name} {gen_ai.data_source.id}` | `retrieve kb-main` — use the retrieval operation for the search itself and keep `embeddings` for the call that produced the vectors; they are two spans, not one |
 | an agent turn | `{gen_ai.operation.name}` | `invoke_agent` |
 
 : Span naming, as the specification defines it {tbl-colwidths="[20,42,38]"}
@@ -139,8 +141,12 @@ gen_ai.invoke_agent.duration
 
 [The serving measurements from @sec-serving are not a separate exercise; they
 are two of the standard metrics.]{.hl} If you instrument to the convention you
-get the prefill/decode split as a dashboard rather than as a one-off
-experiment.
+get something close to the prefill/decode split as a dashboard rather than as a
+one-off experiment. Close, not identical: measured from the client, TTFT also
+contains queueing at the server and the first decode step, so it is prefill plus
+whatever the request waited for. Watch the two together and remember that a
+rising TTFT can mean a longer prompt or a busier server, and only a server-side
+breakdown separates them.
 
 ## The hierarchy, and where to hang each id {#sec-observability-hierarchy}
 
@@ -217,8 +223,9 @@ bytes per run        3,167
 content share        48.3%
 ```
 
-Half the volume is the prompt and completion text — and [these are toy prompts,
-so 48.3% is a floor, not an estimate]{.hl}. The runs above averaged 301 prompt
+Half the volume is the prompt and completion text — and [these are toy prompts:
+content was 48.3% in this sample, and its share rises in the projection below as
+soon as only the prompt grows]{.hl}. The runs above averaged 301 prompt
 tokens. @sec-summarization measured a realistic single-shot request at **890
 prompt tokens**, and @sec-serving worked with contexts of 4,258. Holding the
 measured structure fixed at 1,636 bytes per run and scaling the measured 1,531
@@ -426,8 +433,10 @@ evaluation with cost per *correct* answer; here it is cost per resolved ticket,
 per completed task, per accepted suggestion.
 
 Computing it means the outcome has to be on the trace, which is a two-line
-change at the root span and impossible to add retrospectively — you cannot
-group by a dimension you did not record.
+change at the root span. Add it before you need it: you cannot group by a
+dimension you did not record, and recovering it afterwards means joining traces
+to some other system on a shared id — possible when that id was recorded, and a
+data-engineering project rather than a dashboard filter.
 :::
 
 ## Interview questions {#sec-observability-interview}
@@ -479,9 +488,9 @@ that span's prompt. Then turn it into a regression test.
 **Q: Your monitoring bill tripled after adding LLM tracing. Why?**
 
 Almost certainly content. Structure is small and roughly fixed per run; prompts
-are not, and they grow with context. Measured here, moving from 301-token
-prompts to 4,258-token ones takes a run from 3.2 KB to 42.5 KB with the same
-number of spans. The fix is sampling content while keeping structure on
+are not, and they grow with context. Projected from this chapter's measurement,
+moving from 301-token prompts to 4,258-token ones takes a run from 3.2 KB to
+23.3 KB with the same number of spans. The fix is sampling content while keeping structure on
 everything, and keeping content on errors.
 
 **Q: How do you keep personal data out of your traces?**
@@ -542,8 +551,15 @@ explaining the bill.
 User, team, feature, environment. Put the first three in baggage at the root,
 install a baggage span processor, and confirm they appear on every child span —
 if they do not, the processor is missing, because span attributes do not
-propagate on their own. Environment goes on the Resource. Then produce cost per
-feature for a day.
+propagate on their own. Environment goes on the Resource.
+
+Then check where that baggage goes. Baggage travels in an HTTP header on every
+outbound call the context reaches, including calls to your model provider and to
+third-party tools, so a user id in baggage is a user id you are sending to them.
+Redacting spans before export does not close that path — it is a different
+channel. Configure the propagator so baggage is not injected on external calls,
+or keep anything identifying out of baggage and attach it with a span processor
+instead. Then produce cost per feature for a day.
 
 ### Step 4 — produce cost per unit of value
 

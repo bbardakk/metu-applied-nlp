@@ -34,8 +34,18 @@ A **security boundary** holds against someone actively trying to break it. That
 is @sec-agent-security's subject, and the technique that defeats most guardrails
 is embarrassingly simple: try again, slightly differently.
 
-[Guardrails are probabilistic filters, so an attacker gets unlimited retries
-against a component that is right most of the time.]{.hl} "Most of the time" is a
+A terminology note before the table, because the word is used more broadly
+elsewhere: in this book a **guardrail** is a filter that decides by inference —
+a classifier, a judge, a heuristic — and a **boundary** is a rule the runtime
+enforces regardless of what any model said. A deterministic check can be either,
+depending on where it sits: the TCKN checksum later in this chapter is exact
+arithmetic, and it is still a guardrail, because what it feeds is a redaction
+decision rather than a permission. Elsewhere you will see "guardrail" cover both;
+what matters is the distinction, not the label.
+
+[The guardrails in this sense are probabilistic filters, so an attacker gets
+unlimited retries against a component that is right most of the time.]{.hl}
+"Most of the time" is a
 fine property for reducing accidental harm and a useless one for stopping
 deliberate harm. The practical consequence is architectural: a guardrail belongs
 *in front of* a permission system, never *instead of* one. If the only thing
@@ -46,7 +56,7 @@ notices, the refund limit is not enforced.
 |:--|:--|:--|
 | **stops** | accidents, drift, unusual inputs | deliberate attempts |
 | **built from** | classifiers, regexes, prompts, judges | permissions, allowlists, capability limits |
-| **fails** | probabilistically, and quietly | loudly, or not at all |
+| **fails** | probabilistically, and quietly | by design, loudly or not at all — in practice, only as well as it is implemented, so a boundary needs its own tests |
 | **retries help the attacker** | yes — this is the whole problem | no |
 | **evidence it works** | measured false-positive and false-negative rates | an argument about what is reachable |
 
@@ -150,7 +160,12 @@ containing the right number too. A validator configured as a filter deletes
 precisely the records a compliance reviewer would care most about.
 
 For calibration on how much work the checksum is doing: a random eleven-digit
-string passes it **9,960 times in 1,000,000**, or about **1 in 100**. That is
+string passes it **9,960 times in 1,000,000**, or about **1 in 100**. The
+first digit was sampled from 1–9, matching the rule that a TCKN cannot start
+with zero, which is why the measured rate lands on 1% — exactly the
+$9 \times 10^8$ valid numbers over the $9 \times 10^{10}$ strings with a
+non-zero leading digit. Allow leading zeros and the same count over $10^{11}$
+strings gives 0.9% instead. That is
 strong but not decisive — on a corpus with a lot of numeric strings, the
 checksum alone still leaves roughly one false positive per hundred candidates.
 
@@ -318,7 +333,7 @@ organising principle is reversibility.
 
 | class | examples | default | what to require |
 |:--|:--|:--|:--|
-| **Reversible** | read a record, run a query, draft a message, create a document nobody sees yet | allow | logging only |
+| **Reversible** | read a record, run a query, draft a message, create a document nobody sees yet | allow | logging only — with the caveat that a *read* is reversible and not always harmless: reading data this user is not entitled to cannot be undone once it is in the transcript, so authorisation is a separate axis from reversibility |
 | **Reversible with effort** | update a record, cancel an order, move a file | allow | an audit trail and a documented undo path |
 | **Irreversible, bounded** | send an email, post a message, issue a small refund | confirm | approval above a threshold; rate limits |
 | **Irreversible, unbounded** | payment, deletion, any external publication, anything touching another person | deny by default | explicit per-action approval, and a limit enforced outside the model |
@@ -360,10 +375,15 @@ The mechanics that matter:
    both the audit trail @sec-governance needs and the labelled set that tells you
    which approvals were rubber-stamped.
 
-That last point is the one that decays. [An approval queue where 99% of items are
-approved is not oversight; it is a delay.]{.hl} Measure the rejection rate, and
-when it collapses, either the gate is on the wrong actions or the reviewers have
-nothing to reject with — both fixable, neither visible without the number.
+That last point is the one that decays. [An approval queue where 99% of items
+are approved *may* be oversight working perfectly or a rubber stamp, and the
+approval rate alone cannot tell you which.]{.hl} A well-targeted gate in front of
+a well-behaved agent should approve almost everything. The measurement that
+distinguishes the two is not the rate: seed the queue with items you know are
+wrong and count how many reviewers catch. If they catch them, a 99% approval
+rate is good news; if they do not, you have a delay with a signature on it.
+Track the rejection rate too — a collapse is worth investigating — but audit
+with planted errors before you conclude anything from it.
 
 ## Kill switches, and undoing what already happened {#sec-guardrails-killswitch}
 
@@ -473,8 +493,11 @@ whether anyone can use it.
 An eleven-digit regex found all 360 planted Turkish national IDs here — and
 **60% of its hits were not national IDs**. Turkish mobile numbers written
 without spaces are exactly eleven digits, and so are order references, tracking
-codes and meter readings. Driving redaction from that detector masks the order
-number the support agent needs; driving alerts from it produces an alert people
+codes and meter readings. Separate the two failures, because they cost different
+things: a phone number matched by a *national-ID* detector is the wrong type and
+usually still personal data you would want redacted, while an order reference is
+not personal data at all and masking it is pure damage. Driving redaction from
+that detector masks the order number the support agent needs; driving alerts from it produces an alert people
 ignore within a week.
 
 The 40% precision figure depends on decoy density, which is a property of your
@@ -670,8 +693,12 @@ which records the filter removes, and that they are all real personal data.
 ### Step 4 — add a second, independent signal
 
 A context check, or an NER model (@sec-sequence-labeling). Measure it alone, then
-as a union with the checksum. The union should beat both; if it does not, the two
-signals are failing on the same items and you need a different second signal.
+as a union with the checksum. Be clear about what a union can and cannot do: it
+can only *raise* recall, since it fires whenever either does, and it can only
+*lower* precision, since it inherits both detectors' false positives. So the
+thing to check is whether the recall it adds is worth the precision it costs —
+and if it adds no recall at all, the two signals are failing on the same items
+and you need a different second signal.
 
 ### Step 5 — make redaction reversible
 
@@ -761,10 +788,13 @@ is @sec-agent-security, and its sources are there.
   systems, never instead of them]{.hl} — any limit that matters is enforced in
   code, outside the model.
 
-- **Report precision, not recall.** An eleven-digit regex found 100% of planted
-  Turkish national IDs and **60% of its hits were not national IDs**, because a
-  Turkish mobile written without spaces is also eleven digits. Precision is what
-  decides whether the people who have to use the guardrail keep it switched on.
+- **Report precision *and* recall, and price both errors.** An eleven-digit
+  regex found 100% of planted Turkish national IDs and **60% of its hits were
+  not national IDs**, because a Turkish mobile written without spaces is also
+  eleven digits. A missed identifier is a leak; an unnecessary redaction is a
+  support agent who cannot see the order number. Recall is the number that looks
+  finished, and precision is usually the one that decides whether the people who
+  have to use the guardrail keep it switched on.
 
 - **Validation buys precision and deletes real personal data.** The TCKN checksum
   took precision from **40.0% to 99.0%** and recall from 100% to **84.7%** — and

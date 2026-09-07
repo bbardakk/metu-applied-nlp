@@ -33,16 +33,19 @@ event into a ladder, where each rung is cheaper and blinder than the one above.
 |:--|:--|:--|:--|
 | **Offline eval** | seconds, no users | regressions on cases you thought of | anything your suite does not contain |
 | **CI gate** | one build | a bad change *before* merge | whether the change helps real users |
-| **Shadow** | double inference, no user impact | crashes, latency, malformed output on live inputs | quality — nobody sees the output |
+| **Shadow** | double inference, no user impact | crashes, latency, malformed output on live inputs | the *effect on users* — nobody is served the output, so nothing about behaviour, satisfaction or downstream action is observable |
 | **Canary** | a slice of real users | quality failures, on a small blast radius (@sec-deployment) | small effects — the slice is too small to resolve them |
-| **A/B test** | days, and real exposure | whether it actually helps | fast-moving regressions; you are committed for the duration |
+| **A/B test** | days, and real exposure | whether it actually helps | fast-moving regressions — unless you wire in guardrail metrics and a stopping rule, which you should; an A/B test is not a commitment to run it out |
 
 : Five rungs, in the order a change should climb them {tbl-colwidths="[14,20,33,33]"}
 
 The mistake is not skipping a rung. It is *believing* a rung about something it
 cannot see. A shadow deployment that runs clean tells you the new prompt does
-not crash; it tells you nothing about whether its answers are worse, because no
-human read one. A green CI gate tells you the change did not regress the cases
+not crash; on its own it says nothing about whether the answers are worse,
+because nobody looked at one. That last part is a choice, not a limit of the
+method: shadow outputs are stored, and you can score them afterwards against a
+reference, with a validated judge, or by reading a sample. What shadow can never
+give you is how users would have *responded* to them. A green CI gate tells you the change did not regress the cases
 in your suite, which is a claim about your suite.
 
 This chapter is mostly about the second rung, because it is the one teams get
@@ -164,8 +167,10 @@ Prompt C reorders the same six rules and changes nothing else.
 
 [Reordering six rules that were not otherwise touched cost 3.4 points of field
 accuracy and 9.2 points of exact match, concentrated almost entirely in one
-field.]{.hl} Nothing in the diff would draw a comment in review. The rules are
-the same rules.
+field.]{.hl} The reason this is easy to wave through is that the diff contains
+no new text: every line already existed and only their order moved, which is the
+one kind of change a reviewer has no content to react to. The rules are the same
+rules.
 
 **Which of those two numbers survives a test, and which does not.** Both
 prompts ran the same 100 items, so the comparison is paired, and the per-item
@@ -296,8 +301,8 @@ rule that generalises:
 
 ::: {.fig-cap}
 The deleted rule is not the interesting case. The reordered prompt is: a diff
-that no reviewer would question, nearly six times the noise floor, and entirely
-inside one field.
+whose every line is a line that was already there, nearly six times the five-run
+range, and entirely inside one field.
 :::
 ::::
 
@@ -314,8 +319,9 @@ is worse than no gate, because it launders the override into a green check.
 ## The golden set has a lifecycle {#sec-production-eval-golden}
 
 The suite above was generated, which is honest for measuring a noise floor and
-useless for measuring quality: it contains exactly the phenomena its templates
-contain. A real golden set comes from real traffic, and it is not a static
+useful for exactly the capabilities its templates define — and not
+representative of production quality, because it contains exactly the phenomena
+those templates contain and nothing else. A real golden set comes from real traffic, and it is not a static
 artefact.
 
 **It is born from failures.** The first entries should be things that actually
@@ -489,8 +495,12 @@ threshold.
 No, and this is the chapter's central measurement.
 
 Reordering six rules — none added, none removed, no wording changed — cost
-**3.40 points of field accuracy and 9.20 points of exact match**, roughly six
-times the noise floor. The whole regression sat in one field: `day` fell from 91
+**3.40 points of field accuracy and 9.20 points of exact match**. Name the
+denominator when you quote a multiple: that is roughly six times the five-run
+*range* of 0.60 points, and about thirteen times the run-to-run `sd` of 0.26.
+Every "× noise" figure in this chapter is against the range, because that is
+what a reader compares a single new run to; `sd` is the number to build the
+threshold from. The whole regression sat in one field: `day` fell from 91
 to 74 out of 100.
 
 The mechanism is nameable. Across a 40-item probe, every wrong `day` under both
@@ -547,9 +557,13 @@ benchmark saturation, arriving in your own repository. And traffic moves out fro
 under it — new phrasings, new features, new customers — so the set describes last
 year's product.
 
-A stale set is worse than no set, because it produces a green check. Retire items
-nothing fails, add items from recent failures, record when each entered, and
-treat refresh as routine work rather than a project.
+A stale set is worse than no set, because it produces a green check. Keep two
+sets rather than one: a **regression** set that only ever grows, where an item
+earned its place by once being a real failure and stays forever precisely so an
+old bug cannot return unnoticed, and a **representative** set sampled from
+current traffic and refreshed on a schedule. Retiring items nothing fails is
+right for the second and wrong for the first. Record when each item entered,
+and treat refresh as routine work rather than a project.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -704,10 +718,14 @@ case; a regression that is only a number becomes an argument.
 
 ### Step 5 — build the gate and measure its false-block rate
 
-Wire the suite into CI so it blocks a merge. Then submit five changes that change
-nothing at all and record how often it blocks them. If that rate is above a few
-percent, your threshold is too tight — go back to step 2 rather than to the
-override button.
+Wire the suite into CI so it blocks a merge. Then submit no-op changes and
+record how often it blocks them — and pick the count from the precision you
+need, because five will not do it: zero blocks out of five still leaves a 95%
+Wilson upper bound of **43%**, which cannot distinguish "a few percent" from
+"disastrous". Resolving a few-percent rate takes on the order of a hundred
+trials, which is cheap when the no-op is a whitespace commit and a scripted
+re-run. If the measured rate is above a few percent, your threshold is too
+tight — go back to step 2 rather than to the override button.
 
 ### Step 6 — run it at temperature 0 as well
 

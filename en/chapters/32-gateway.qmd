@@ -94,9 +94,17 @@ settle the real number on completion. This is what most gateways do, and it
 means a budget can be exceeded by roughly one request's worth of output per
 concurrent caller. Usually fine — but state it, so nobody is surprised.
 
-**Cap the output.** Set `max_tokens` per virtual key, which turns an unknown
-into a known and makes the first option cheap. This is the one teams skip, and
-it is the only one that makes the arithmetic exact.
+**Cap the output.** Set `max_tokens` per virtual key. It does not make the cost
+*known* — a request can stop anywhere below the cap — but it bounds it, which is
+what makes the first option cheap: a reservation against a known ceiling is a
+reservation you can actually afford to make. This is the one teams skip.
+
+One implementation detail decides whether any of this holds under load. The
+check and the reservation must be **atomic** — a Lua script on Redis, a
+`SELECT … FOR UPDATE`, a conditional write — because read-then-write across $c$
+concurrent callers lets all $c$ of them see the same remaining budget and all
+of them pass. The overshoot is then $c$ requests, not one, and it grows with
+your traffic exactly when you least want it to.
 
 ::: {.column-margin}
 The same asymmetry decides what a cost dashboard can *do*. Input cost is
@@ -207,11 +215,13 @@ baseline that should fail cannot tell you anything.
 
 Three practical notes, none of which need a paper:
 
-**A cascade pays for the cheap call twice on escalation.** The escalated
-request costs small-model tokens *plus* large-model tokens, so a cascade that
-escalates 50% of traffic saves much less than half. The break-even escalation
-rate is the number to compute before building it, and it depends on your price
-ratio, not on the benchmark's.
+**An escalated request pays for both calls.** It costs small-model tokens
+*plus* large-model tokens, so a cascade that escalates a fraction $e$ of traffic
+costs $C_{\text{small}} + e \cdot C_{\text{large}}$ against $C_{\text{large}}$
+for sending everything to the big model. At $e = 0.5$ and a 10× price ratio that
+is $0.1 + 0.5 = 0.6$ of the large model's bill — a real saving, and nothing like
+half. Compute the break-even rate before building it, with your price ratio
+rather than the benchmark's.
 
 **Routing changes the model, so it inherits every problem from
 @sec-gateway-failover.** Different output format, different tool-call syntax,
@@ -231,11 +241,18 @@ prompt caching: that one reuses a *prefix's* KV cache inside the server, this
 one returns a stored answer and never calls the model at all.
 
 **Exact-match caching** keys on `(model, full prompt, parameters)` and returns a
-byte-identical previous response. It carries no quality risk by construction: if
-the key matches, the request is the one you already answered. The only real
-decisions are what belongs in the key — the model *version* and the decoding
-parameters, or a temperature change quietly serves stale output — and how long
-entries live.
+byte-identical previous response. Its quality risk is not zero — it is
+*controllable*, which is a different claim: the identical prompt is the right
+answer only while everything the answer depended on and the key did not capture
+has stayed the same. That list is longer than it looks. The model *version*, not
+just the alias, or a silent provider upgrade serves yesterday's model. The
+decoding parameters, or a temperature change serves stale output. The tenant and
+the caller's permissions, or you serve one customer's answer to another. Any
+tool result or retrieved document the answer was built from. And time itself,
+which is what a TTL is for — *what is our refund policy* has a shelf life even
+when nothing else changes. Get the key and the TTL right and the risk really is
+gone; get them wrong and it is invisible, because a stale hit looks exactly like
+a correct one.
 
 **Semantic caching** embeds the request and returns a stored answer when some
 previous request is *similar enough*. Same word, different feature, and the
@@ -272,8 +289,8 @@ negation and a changed quantity. Meanwhile the genuinely identical question,
 bottom on 0.609.
 
 The consequence is arithmetic rather than opinion. The lowest true pair is
-0.609 and the highest false pair is 0.982, so **the two classes overlap
-completely and no single threshold separates them**.
+0.609 and the highest false pair is 0.982, so the two classes' ranges interleave
+and **no single threshold separates them on this set**.
 
 The two error types are not interchangeable, so sweep the thresholds with that
 in mind. A *miss* costs a model call and the user never knows. A *false hit*
@@ -347,7 +364,7 @@ So treat the two caches as different features with different bars:
 
 | | quality risk | where it belongs |
 |:--|:--|:--|
-| Exact-match | [none by construction]{.pro} | on by default, everywhere |
+| Exact-match | [controllable — none once the key and TTL capture everything the answer depended on]{.pro} | on by default, everywhere |
 | Semantic | [a wrong answer, silently]{.con} | only with a measured false-positive rate on your own traffic, and never on anything consequential |
 
 : Two caches that share a name {tbl-colwidths="[18,38,44]"}
@@ -355,7 +372,9 @@ So treat the two caches as different features with different bars:
 And note that accuracy is not the only axis a semantic cache moves. It is also
 a store of prompts and answers sitting inside the one component every request
 passes through, which makes three things the gateway's problem rather than
-somebody else's:
+somebody else's. The first two apply to the exact-match cache too — it stores
+prompts and it can cross tenants just as easily; only the third is specific to
+similarity:
 
 - **Key by tenant, and by user where the data is personal.** A cache keyed on
   the embedding alone will serve one customer's answer to another customer's
@@ -425,7 +444,7 @@ wrong in a way anybody notices.
 |:--|:--|:--|
 | Redaction | strip or tokenize personal data before it leaves | one implementation, uniformly applied — @sec-guardrails has the mechanics |
 | Audit | who called what model with what, and when | the gateway is the only component that sees every call |
-| Residency | route EU data to EU endpoints | a routing decision, and routing already lives here |
+| Residency | route EU data to EU endpoints | the routing half is a routing decision, and routing already lives here. It is only the half: the contract with the provider, where sub-processors sit, and where logs and caches land all have to agree, and an EU endpoint alone settles none of them |
 | Retention | do not log prompts containing personal data, or log them briefly | one retention rule rather than five |
 
 : Four policies and why one place beats five {tbl-colwidths="[16,40,44]"}

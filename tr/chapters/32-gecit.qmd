@@ -99,9 +99,18 @@ tamamlanınca gerçek sayıya oturtun. Çoğu geçidin yaptığı bu ve bu, bir 
 eşzamanlı çağıran başına kabaca bir isteklik çıktı kadar aşılabileceği anlamına
 geliyor. Genellikle sorun değil — ama bunu söyleyin ki kimse şaşırmasın.
 
-**Çıktıyı tavanlayın.** Sanal anahtar başına `max_tokens` belirleyin; bu,
-bilinmeyeni bilinene çevirir ve ilk seçeneği ucuzlatır. Takımların atladığı seçenek
-bu ve aritmetiği kesin kılan tek seçenek de bu.
+**Çıktıyı tavanlayın.** Sanal anahtar başına `max_tokens` belirleyin. Bu maliyeti
+*bilinir* kılmaz — bir istek tavanın altında herhangi bir yerde durabilir — ama
+sınırlar; ilk seçeneği ucuzlatan da budur: bilinen bir tavana karşı yapılan bir
+rezervasyon, gerçekten göze alabileceğiniz bir rezervasyondur. Takımların atladığı
+seçenek bu.
+
+Bir gerçekleme ayrıntısı, bunların yük altında ayakta kalıp kalmayacağına karar
+veriyor. Kontrol ile rezervasyon **atomik** olmalı — Redis üzerinde bir Lua
+betiği, bir `SELECT … FOR UPDATE`, koşullu bir yazma — çünkü eşzamanlı $c$ çağıran
+arasında oku-sonra-yaz, $c$'sinin de aynı kalan bütçeyi görmesine ve hepsinin
+geçmesine izin verir. Aşım o zaman bir istek değil $c$ istektir ve tam da
+istemediğiniz anda, trafiğinizle birlikte büyür.
 
 ::: {.column-margin}
 Aynı asimetri bir maliyet panosunun *ne yapabileceğine* de karar veriyor. Girdi
@@ -217,11 +226,13 @@ söyleyemez.
 
 Hiçbiri makale gerektirmeyen üç pratik not:
 
-**Bir şelale, yükseltmede ucuz çağrının parasını iki kez öder.** Yükseltilen
-istek küçük model token'ları *artı* büyük model token'ları kadar tutar;
-dolayısıyla trafiğin %50'sini yükselten bir şelale yarıdan çok daha azını
-kazandırır. Başabaş yükseltme oranı, onu kurmadan önce hesaplanacak sayıdır ve
-ölçütünkine değil, sizin fiyat oranınıza bağlıdır.
+**Yükseltilen bir istek her iki çağrının da parasını öder.** Küçük model
+token'ları *artı* büyük model token'ları kadar tutar; dolayısıyla trafiğin $e$
+kesrini yükselten bir şelale, her şeyi büyük modele göndermenin
+$C_{\text{büyük}}$'üne karşı $C_{\text{küçük}} + e \cdot C_{\text{büyük}}$ tutar.
+$e = 0{,}5$ ve 10 katlık bir fiyat oranında bu, büyük modelin faturasının
+$0{,}1 + 0{,}5 = 0{,}6$'sı — gerçek bir tasarruf ve yarıya hiç benzemiyor. Başabaş
+oranı onu kurmadan önce, ölçütünkiyle değil kendi fiyat oranınızla hesaplayın.
 
 **Yönlendirme modeli değiştirir, dolayısıyla @sec-gecit-devretme'deki her
 problemi devralır.** Farklı çıktı biçimi, farklı araç çağırma söz dizimi, farklı
@@ -241,11 +252,18 @@ mekanizma: o, sunucunun içinde bir *önekin* KV önbelleğini yeniden kullanıy
 ise saklanmış bir cevap döndürüyor ve modeli hiç çağırmıyor.
 
 **Tam eşleşmeli önbellekleme** `(model, tam prompt, parametreler)` üzerinden
-anahtarlanır ve bayt bayt aynı olan önceki bir cevabı döndürür. Kuruluş gereği
-kalite riski taşımaz: anahtar eşleşiyorsa istek, zaten cevapladığınız istektir.
-Tek gerçek kararlar anahtara neyin gireceği — model *sürümü* ve çözümleme
-parametreleri, yoksa bir sıcaklık değişikliği sessizce bayat çıktı servis eder —
-ve girdilerin ne kadar yaşayacağıdır.
+anahtarlanır ve bayt bayt aynı olan önceki bir cevabı döndürür. Kalite riski
+sıfır değil, *denetlenebilir* — farklı bir iddia: aynı prompt doğru cevaptır,
+yeter ki cevabın dayandığı ve anahtarın yakalamadığı her şey aynı kalmış olsun.
+O liste göründüğünden uzun. Yalnızca takma ad değil model *sürümü*, yoksa sessiz
+bir sağlayıcı yükseltmesi dünkü modeli servis eder. Çözümleme parametreleri,
+yoksa bir sıcaklık değişikliği bayat çıktı servis eder. Kiracı ve çağıranın
+yetkileri, yoksa bir müşterinin cevabını başkasına servis edersiniz. Cevabın
+üzerine kurulduğu her araç sonucu ya da erişilmiş belge. Ve bir TTL'in var olma
+sebebi olan zamanın kendisi — *iade politikamız nedir*, başka hiçbir şey
+değişmese bile raf ömrü olan bir sorudur. Anahtarı ve TTL'i doğru kurun, risk
+gerçekten yok olsun; yanlış kurun, görünmez olsun — çünkü bayat bir isabet, doğru
+bir isabete birebir benzer.
 
 **Anlamsal önbellekleme** isteği gömer ve önceki bir istek *yeterince benzer*
 olduğunda saklanmış bir cevabı döndürür. Aynı kelime, farklı özellik ve fark şu:
@@ -281,7 +299,8 @@ değiştirilmiş bir miktar. Bu arada gerçekten özdeş olan soru — *çalış
 saatleriniz nedir* ile *ne zaman açıksınız* — 0,609 ile en dipte oturuyor.
 
 Sonuç bir görüşten çok bir aritmetik. En düşük doğru çift 0,609, en yüksek yanlış
-çift 0,982; dolayısıyla **iki sınıf tümüyle örtüşüyor ve hiçbir tek eşik onları
+çift 0,982; dolayısıyla iki sınıfın aralıkları iç içe geçiyor ve **bu kümede
+hiçbir tek eşik onları
 ayırmıyor**.
 
 İki hata tipi birbirinin yerine geçmez; eşikleri bunu akılda tutarak tarayın.
@@ -358,14 +377,16 @@ yüksek puanı almasıydı.
 
 | | kalite riski | yeri neresi |
 |:--|:--|:--|
-| Tam eşleşmeli | [kuruluş gereği yok]{.pro} | varsayılan olarak açık, her yerde |
+| Tam eşleşmeli | [denetlenebilir — anahtar ve TTL, cevabın dayandığı her şeyi yakaladığında yok]{.pro} | varsayılan olarak açık, her yerde |
 | Anlamsal | [sessizce yanlış bir cevap]{.con} | yalnızca kendi trafiğinizde ölçülmüş bir yanlış pozitif oranıyla ve asla sonuç doğuran hiçbir şeyde değil |
 
 : Adı ortak olan iki önbellek {tbl-colwidths="[18,38,44]"}
 
 Ve doğruluğun, anlamsal bir önbelleğin oynattığı tek eksen olmadığına dikkat
 edin. Aynı zamanda, her isteğin geçtiği tek bileşenin içinde duran bir prompt ve
-cevap deposu; bu da üç şeyi başkasının değil geçidin problemi yapıyor:
+cevap deposu; bu da üç şeyi başkasının değil geçidin problemi yapıyor. İlk ikisi
+tam eşleşmeli önbellek için de geçerli — o da prompt saklar ve kiracılar arasında
+en az onun kadar kolay geçer; yalnızca üçüncüsü benzerliğe özgü:
 
 - **Kiracıya göre, veri kişiselse kullanıcıya göre anahtarlayın.** Yalnızca
   gömmeye göre anahtarlanmış bir önbellek, bir müşterinin cevabını başka bir
@@ -437,7 +458,7 @@ yalnızca biri kimsenin fark edeceği bir biçimde yanlış olur.
 |:--|:--|:--|
 | Maskeleme | kişisel veriyi dışarı çıkmadan önce sıyırmak ya da token'laştırmak | tek bir uygulama, tekdüze biçimde uygulanmış — mekaniği @sec-korkuluklar'da |
 | Denetim | kimin, ne zaman, hangi modeli, neyle çağırdığı | her çağrıyı gören tek bileşen geçit |
-| İkametgâh | AB verisini AB uç noktalarına yönlendirmek | bir yönlendirme kararı ve yönlendirme zaten burada yaşıyor |
+| İkametgâh | AB verisini AB uç noktalarına yönlendirmek | yönlendirme yarısı bir yönlendirme kararı ve yönlendirme zaten burada yaşıyor. Yalnızca yarısı: sağlayıcıyla yapılan sözleşme, alt işleyicilerin nerede olduğu ve kütüklerle önbelleklerin nereye düştüğü de uyuşmalı; tek başına bir AB uç noktası hiçbirini çözmez |
 | Saklama | kişisel veri içeren prompt'ları kaydetmemek ya da kısa süre kaydetmek | beş yerine tek bir saklama kuralı |
 
 : Dört politika ve tek bir yerin beşi neden yendiği {tbl-colwidths="[16,40,44]"}
