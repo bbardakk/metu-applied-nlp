@@ -24,7 +24,9 @@ about four minutes.
   reason the rest of this book exists.
 
 **What we will look at.** One dataset, run through both of the previous
-chapters' methods, scored the same way. We start by choosing the metric —
+chapters' methods, scored the same way. A *bake-off*, in the engineering
+sense, is a controlled comparison: several candidate methods, one task, one
+protocol, and the same measuring stick for all of them. We start by choosing the metric —
 which turns out to be most of the work — then run counting, then coordinates,
 then test the specific promise chapter 3 made about Turkish. After that: why
 the loser lost, the one number that changes the answer entirely, what each
@@ -515,8 +517,8 @@ in these 233,508 reviews — the dataset ships already lowercased. So the two
 paths coincide here.
 
 That is not the same as the corpus being clean; it is the opposite. U+0307
-(COMBINING DOT ABOVE) sits in **4,183 of these documents, 8.39% of the
-corpus**, and nothing but `str.lower()` applied to an `İ` produces that mark.
+(COMBINING DOT ABOVE) sits in **4,183 documents of the 50,000-review working
+subsample — about 8.4% of it**, and nothing but `str.lower()` applied to an `İ` produces that mark.
 The bug was committed upstream, before the data reached us, and baked into the
 text permanently. Our own `[a-zçğıöşü]+` pattern does not treat a combining
 mark as a word character either, so in those documents `tavsiye` splits into
@@ -667,10 +669,14 @@ resolvable by this design at all: 73.51 against 71.95, 71.95 against 70.39, and
 61.39 against 61.36 are all inside it.
 
 One comparison is settled properly later in the chapter: the sparse–dense gap
-gets a McNemar test on paired predictions, $\chi^2 = 684.2$. The rest do not,
-and this chapter does not pretend otherwise. What is missing is a bootstrap
-interval per row and a paired test per adjacent pair — the protocol
-@dror2018hitchhikers lays out — and exercise 8 asks you to supply it.
+gets a McNemar test on paired predictions, $\chi^2 = 684.2$. Note what that
+test is about — McNemar compares the two methods' *error rates*, so it settles
+the accuracy column, not the macro-F1 one the ranking is sorted on. A macro-F1
+difference is not a paired count of errors and needs a paired bootstrap or a
+randomization test instead. The rest do not get either, and this chapter does
+not pretend otherwise. What is missing is a bootstrap interval per row and a
+paired test per adjacent pair — the protocol @dror2018hitchhikers lays out —
+and exercise 8 asks you to supply it.
 :::
 
 ::: {#gloss-recall .column-margin .term-gloss}
@@ -731,8 +737,8 @@ index, an ANN structure, the first layer of a network. It does not pay in
 storage, and this chapter's own table is the counter-example.
 
 Put that as a ratio and it depends on which sparse model you compare against.
-Against the best-scoring one — which needs word *and* character n-grams to
-get there — it is a 1,017-fold compression for a 19% relative loss. Against
+Against the best-scoring one — word unigrams *and* bigrams, 101,659 columns —
+it is a 1,017-fold compression for a 19% relative loss. Against
 plain word tf-idf and its 30,195 columns it is 302-fold, which is the figure
 in the summary table later in this chapter.
 
@@ -836,8 +842,9 @@ budget that buys perfect coverage is spent on modelling morphology, and it is
 taken from the budget that was modelling meaning.
 
 Which is why, having solved the out-of-vocabulary problem completely,
-fastText scores **61.36** where word2vec scores **61.39**. The fix worked
-perfectly and bought nothing.
+fastText scores **61.36** where word2vec scores **61.39**. Coverage went to
+100%; macro-F1 was effectively unchanged in this run — a gap of 0.03 points,
+well inside the noise this chapter measures on itself.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -934,7 +941,11 @@ Those two counts are also the whole of a significance test, so we may as well
 run it. McNemar's test on paired predictions [@mcnemar1947note] uses exactly
 the off-diagonal: $\chi^2 = (|1315 - 272| - 1)^2 / (1315 + 272) = 684.2$ on one
 degree of freedom, which is as far past any conventional threshold as this book
-will ever get. The sparse–dense gap is real and nothing about it is marginal.
+will ever get. Read it for what it is: a test that the two methods make errors
+at different rates, which is a statement about accuracy. The macro-F1 gap is
+the same direction and far larger than the noise floor above, but confirming
+*it* would take a paired bootstrap over the test rows, not this test. The
+sparse–dense gap is real and nothing about it is marginal.
 
 That is worth stating precisely *because* most of the other gaps in this
 chapter are not tested at all. See the caution below the leaderboard. The interesting question is what the 272 look like.
@@ -1264,7 +1275,7 @@ selective baseline this chapter is arguing against.
 
 ## Choosing, on purpose
 
-Five methods, one dataset, and enough measurements to stop guessing. Here is
+Seven methods, one dataset, and enough measurements to stop guessing. Here is
 the whole thing as a decision rather than a leaderboard.
 
 | | [Strengths]{.pro} | [Weaknesses]{.con} | Choose it when |
@@ -1272,7 +1283,7 @@ the whole thing as a decision rather than a leaderboard.
 | **Bag of words** | Fastest to build and reason about. Beat TF-IDF here on short documents. Coefficients readable word by word. | No length normalisation; long documents dominate. No notion of which words are informative. | You want a baseline in five minutes that is genuinely hard to beat, and your documents are short. |
 | **TF-IDF (words)** | The standard strong baseline. Down-weights ubiquitous words. Trivially interpretable and auditable. | [Hurt]{.con} by IDF on short texts — lost to raw counts here. One column per word form: 895 columns for one Turkish verb. Zero generalisation to unseen forms. | Documents are long enough for term frequency to mean something, and you have thousands of labels. |
 | **TF-IDF (word bigrams)** | Best score in this chapter, 76.21. Captures multi-word negation that unigrams miss. Still a linear model you can read. | 3.4× the columns. Gains shrink as documents get longer. Still blind to unseen vocabulary. | You have labels and the task turns on short phrases — sentiment, intent, triage. This should be your default. |
-| **TF-IDF (char n-grams)** | Immune to spelling: no vocabulary to fall outside of. Strongest sparse method in the low-label regime. Language-agnostic — no tokeniser to get wrong. | 144.8 MB and 301 non-zeros per document. Lower macro-F1 than plain counting at full data. Coefficients are not human-readable. | Spelling is unreliable, the language is agglutinative, or you have no trustworthy tokeniser. |
+| **TF-IDF (char n-grams)** | Robust to spelling: a misspelt word still shares most of its n-grams with the correct one. (The vectorizer does learn a finite n-gram vocabulary and discards unseen n-grams — the point is that a new *word* rarely produces only new n-grams.) Strongest sparse method in the low-label regime. Language-agnostic — no tokeniser to get wrong. | 144.8 MB and 301 non-zeros per document. Lower macro-F1 than plain counting at full data. Coefficients are not human-readable. | Spelling is unreliable, the language is agglutinative, or you have no trustworthy tokeniser. |
 | **Averaged word2vec** | 100 dimensions for 61.4 macro-F1 — 302× fewer dimensions than word tf-idf. Trained without labels. [Ahead of both sparse methods tested here]{.pro} under ~1,500 labels. Semantic neighbours you can inspect. | `KeyError` on 46.4% of unseen word forms. Confident nonsense on rare in-vocabulary words. Averaging dilutes negation. Word order gone. | Labels are scarce, or you need compact vectors for similarity search over millions of documents. |
 | **Averaged fastText** | Every string gets a vector — coverage is 100% by construction. Handles the missing diacritics and typos in real user text. Best of any method at 250 labels. | Neighbours are [orthographic, not semantic]{.con}: `kalitesiz` → `kalitesi`. 2× word2vec's training time. Bought perfect coverage for +0.0 macro-F1 here. | The text is user-generated and misspelled, the language is agglutinative, and you cannot control the input vocabulary. |
 | **doc2vec** | One vector per document with no averaging heuristic. Learns document-level structure averaging cannot. | [Worst]{.con} score here, 55.13. Inference needs gradient steps: 16× slower per document, forever. Extra hyperparameters. | Documents are long and clean and you have measured that it beats averaging on *your* data. Rarely, on short text. |
@@ -1331,9 +1342,12 @@ For sentiment on product reviews this rarely bites, because most reviews are
 entirely positive or entirely negative and the bag is sufficient. For
 "which component is the customer complaining about", it is fatal.
 
-Every method in this chapter is a function from a *set* of words to a vector.
-To distinguish those two sentences the representation has to be a function of
-the *sequence*: something that reads `kalite`, then `iyi`, and produces a
+Every method in this chapter is a function from an unordered *bag* of units to
+a vector. Bigrams and character n-grams widen the unit — they catch `çok iyi`
+as one feature — but the bag of bigrams is still a bag, and two sentences that
+use the same pairs in a different arrangement collapse together again. To
+distinguish those two sentences the representation has to be a function of the
+*sequence*: something that reads `kalite`, then `iyi`, and produces a
 different state than if it had read `kalite`, then `kötü`. That is a language
 model, and it is @sec-language-models. Making that state depend on every
 other word at once is attention, and it is @sec-transformers.
@@ -1405,11 +1419,13 @@ before you fix either.
 ::: {.callout-note collapse="true"}
 ## 4. Would 300-dimensional vectors, or pretrained ones, have changed the verdict?
 
-They would move the numbers and not the shape.
+They would move the numbers and not the shape. That first clause is an
+expectation, not a measurement — neither variant was run here, and the
+reasoning below is why you would expect it, not evidence that it holds.
 
 Larger vectors and pretrained Turkish embeddings [@mikolov2018advances] would
-lift the dense curve — probably a few points, and more at the left edge
-where extra pretraining data matters most. What they cannot do is fix
+be expected to lift the dense curve — probably a few points, and more at the
+left edge where extra pretraining data matters most. What they cannot do is fix
 averaging: the negation cosines and the exactly-1.0000 word-order result are
 properties of the mean, not of the vectors being meant. The crossover would
 shift right; it would not disappear.
@@ -1570,8 +1586,9 @@ change your answer. An answer with no number is an opinion; an answer with no
    of the two you expected to move more, and why.
 8. **Supply the intervals this chapter does not have.** Bootstrap the 10,000
    test rows 1,000 times and put a 95% interval on every row of the combined
-   leaderboard. Then run a paired McNemar test on each adjacent pair, the way
-   the sparse–dense comparison is tested above. Report which of the seven gaps
+   leaderboard. Then run a paired test on each adjacent pair — McNemar for the
+   accuracy column, a paired bootstrap for macro-F1, since McNemar tests error
+   rates and not F1. Report which of the seven gaps
    survive and which do not, and rewrite the ranking sentence accordingly. Then
    repeat the whole chapter with five seeds and see how much of your answer was
    the seed. @dror2018hitchhikers is the protocol.

@@ -32,8 +32,8 @@ That is the whole chapter.
 It is worth saying up front, because the techniques below — bag-of-words,
 TF-IDF — are sometimes dismissed as historical. They are not. They are the
 sparse half of a field whose dense half you will meet in @sec-embeddings, they
-still win on small data, they still power production search, and every
-interview for an applied NLP role will probe whether you understand them.
+still win on small data, they still power production search, and interviews
+for applied NLP roles routinely probe whether you understand them.
 
 More importantly: the *decisions* they force you to make are the same
 decisions a modern pipeline forces on you. Only here, you can see them.
@@ -122,8 +122,10 @@ interviewers actually ask about.
 
 That first row hides a trap worth naming here, because it costs nothing to
 avoid and everything to miss. Python's `str.lower()` implements the Unicode
-default case mapping, which is written for English, and Turkish has two `i`
-letters and two `I` letters:
+*default* case mapping — the language-independent one, which the standard
+defines alongside language-specific tailorings that it does not apply unless
+you ask. Turkish is one of the languages that needs a tailoring, because it has
+two `i` letters and two `I` letters:
 
 ```python
 "İSTANBUL".lower()              # 'i̇stanbul' — 'i' + U+0307, nine characters
@@ -138,8 +140,9 @@ the word a user types, forever. @sec-bake-off hits this bug on a real corpus and
 
 Read the last column with suspicion: it is a default, not a rule. Every one
 of these steps is a bet that the distinction it erases does not matter for
-*your* task. Lowercasing is free in topic classification and fatal in named
-entity recognition. The only way to settle it is to try both and measure.
+*your* task. Lowercasing is usually free in topic classification and removes
+a useful cue in named entity recognition, where capitalisation is part of the
+signal. The only way to settle it is to try both and measure.
 
 Stemming and lemmatization both aim at the same thing — collapsing
 inflected forms — but they are not the same operation. Stemming
@@ -241,9 +244,9 @@ merge  9: 'low' + '</w>' -> 'low</w>'  (seen 5 times)
 merge 10: 'w' + 'i' -> 'wi'  (seen 3 times)
 ```
 
-Look at what happened without anyone supplying a grammar. The algorithm
-discovered `est` — the English superlative suffix — as its very first unit,
-because superlatives are frequent. It discovered `low` and `new` as stems.
+Look at what happened without anyone supplying a grammar. The algorithm's
+first two merges build `est` — the English superlative suffix — and the third
+attaches the word boundary to it, because superlatives are frequent. It discovered `low` and `new` as stems.
 [Nobody told it that English has suffixes.]{.hl} It counted.
 
 The payoff is what happens to a word the model has never seen. To tokenize,
@@ -360,8 +363,9 @@ becoming `<UNK>`.
 
 ::: {.fig-cap}
 Training (top) and inference (bottom) are the same merge list read in the same
-order. The first three merges on this toy corpus build `est` — the English
-superlative — out of bare characters, purely because superlatives are frequent
+order. The first three merges on this toy corpus build `est</w>` — the English
+superlative, with its word boundary — out of bare characters, purely because
+superlatives are frequent
 [@sennrich2016neural]. At inference those merges are replayed on a word the model
 has never seen, and `lowest` falls apart into two pieces it knows well. Nothing in
 this procedure knows what a suffix *is*.
@@ -649,7 +653,7 @@ fail in opposite directions.
 | | Characters | Subwords (BPE, WordPiece, Unigram) | Whole words |
 |---|---|---|---|
 | Vocabulary size | [~100 for ASCII; tens of thousands for multilingual Unicode — 256 if you work in bytes]{.pro} | 30k–100k | [Unbounded — it never closes]{.con} |
-| Out-of-vocabulary words | [The problem cannot arise — every word is already built from characters]{.pro} | [Cannot arise — an unrecognised word falls back to shorter pieces]{.pro} | [Constant, and worst for the words you care about]{.con} |
+| Out-of-vocabulary words | [Cannot arise *if* the character set is closed — guaranteed only when you work in bytes]{.pro} | [Rare — an unrecognised word falls back to shorter pieces, provided the vocabulary covers every character or falls back to bytes. WordPiece without that fallback still emits `[UNK]`]{.pro} | [Constant, and worst for the words you care about]{.con} |
 | Sequence length | [5–10× longer; long sequences are both slower and more expensive]{.con} | [Moderate]{.pro} | [Shortest]{.pro} |
 | Meaning per unit | [Almost none — `p` means nothing]{.con} | Partial; often morpheme-like | [A whole unit of meaning]{.pro} |
 | Morphologically rich languages | Handles them, expensively | [Handles them well — it recovered Turkish suffixes above]{.pro} | [Fails badly]{.con} |
@@ -1341,9 +1345,9 @@ The six zero entries contribute nothing, which is why this stays cheap even
 when the vocabulary has 200,000 columns. Divide through:
 
 $$
-\frac{1.5108}{2.3590} = 0.6404
+\frac{1.5108}{2.3591} = 0.6404
 \qquad
-\frac{1.0000}{2.3590} = 0.4239
+\frac{1.0000}{2.3591} = 0.4239
 $$
 
 and those are exactly the numbers `TfidfVectorizer` printed above.
@@ -1361,9 +1365,10 @@ weighting schemes empirically and this is roughly the one that won, which is
 why it became the default in every library you will touch.
 
 ::: {.column-margin}
-Think of it as converting counts into *proportions of attention*. A 50-word
-report and a 5,000-word report both end up spending a total of one unit of
-attention; the question becomes how they divide it, not how much they have.
+Think of it as putting every document on a sphere of the same radius. A 50-word
+report and a 5,000-word report both end up at unit *length* — the squares of
+the components sum to one, not the components themselves — so the question
+becomes which direction each one points, not how far it reaches.
 :::
 
 ::: {.anlp-widget}
@@ -1527,8 +1532,10 @@ d3  0.667  0.289  1.000  0.258
 d4  0.258  0.447  0.258  1.000
 ```
 
-Compare the two panels. Under raw counts, d1 and d4 look 26% similar — but
-they share only the word `the`. TF-IDF correctly collapses that to 11%.
+Compare the two panels. Under raw counts, d1 and d4 sit at a cosine of 0.26 —
+but they share only the word `the`. TF-IDF correctly pulls that down to 0.11.
+(A cosine is not a percentage of anything; it is the cosine of the angle
+between the two vectors, and only comparisons between cosines are meaningful.)
 Every pair drops, and the pairs that drop most are the ones whose only
 common ground was a stop word.
 
@@ -1710,7 +1717,10 @@ the feature count from 32,318 to 249,522, a 7.7× increase, *and made
 accuracy worse*. n-grams are a local patch, not a solution. The real fix is
 @sec-transformers.
 
-**It cannot handle negation.** This one costs real money in production:
+**It cannot represent the scope of negation.** The word *not* is a feature
+like any other, and a classifier can learn that its presence shifts the odds —
+what a bag of words cannot recover is *what* was negated. This one costs real
+money in production:
 
 ```text
 "no leak was found"  vs  "a leak was found"
@@ -1900,8 +1910,11 @@ as ours (BM25 uses a probabilistic variant). The fraction replaces raw term
 frequency with a *saturating* one: as $c(t,d)$ grows the term approaches
 $k_1 + 1$ and stops growing, so the tenth occurrence of a word adds almost
 nothing — that is `sublinear_tf` with a tunable ceiling. And $b \in [0,1]$
-interpolates between ignoring document length ($b = 0$) and dividing it out
-entirely ($b = 1$) — that is L2 normalisation with a dial instead of a switch.
+interpolates between ignoring document length ($b = 0$) and dividing the term
+frequency by the document's length relative to the corpus average ($b = 1$).
+That is the same *concern* L2 normalisation addresses — long documents should
+not win on length alone — handled by a different formula and with a dial
+instead of a switch.
 Lucene's defaults are $k_1 = 1.2$ and $b = 0.75$ [@robertson2009probabilistic].
 :::
 - **Google's own text classification guide** still recommends this
