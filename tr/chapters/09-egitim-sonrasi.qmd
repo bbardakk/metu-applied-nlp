@@ -55,8 +55,11 @@ bile yok.
 ::: {.column-margin}
 Kendiniz deneyin: Hub'da `Llama-3.1-8B` ve `Llama-3.1-8B-Instruct` adlı
 modeller aynı ön eğitim koşusundan geliyor. Birincisi base model. İkincisi bu
-bölümdeki iki aşamadan geçmiş. Davranış farkı muazzam; maliyet farkı ise
-kabaca dört büyüklük mertebesi.
+bölümdeki iki aşamadan geçmiş. Davranış farkı muazzam; maliyet farkı büyük ama
+bu iki model için yayımlanmış değil. Ölçek fikri vermesi için: InstructGPT'nin
+kendi rakamları SFT artı PPO'yu 64,9 petaflop-güne, ön eğitimi 3.640'a koyuyor
+— yani kabaca %1,8, 56 katlık bir fark; üstelik ödül modeli ve etrafındaki her
+şey bunun dışında.
 :::
 
 Aynı base model'e kesinlikle bildiği olgusal bir soru sorun, ama tamamlanacak
@@ -246,7 +249,8 @@ geldiğini öğrenmesinden ibarettir.
 `tokenizer.apply_chat_template(messages, tokenize=False)` çağırıp sonucu bir
 kez ekrana basın. Her model ailesi farklı işaretler kullanıyor ve eğitim ile
 servis arasındaki bir şablon uyuşmazlığı, hiçbir yerde hata mesajı vermeden
-ince ve giderilemez biçimde daha kötü bir model üretir. Bunun dışında doğru
+kaliteyi sessizce düşürür — insanların haftalarca veriyi suçlayacağı kadar
+sessizce. Bunun dışında doğru
 olan bir fine-tune'un beklenenin altında kalmasının açık ara en yaygın sebebi
 budur.
 :::
@@ -393,8 +397,10 @@ değil.
 
 ::: {.column-margin}
 fp32 ana kopya, en az bariz olan ve insanların ilk silmeye çalıştığı satır. O
-olmadan, $1$ büyüklüğündeki bir ağırlığa eklenen $10^{-8}$ büyüklüğündeki bir
-güncelleme bf16'da doğrudan $1$'e yuvarlanır ve eğitim sessizce durur.
+olmadan, $1$ büyüklüğündeki bir ağırlığa eklenen $10^{-5}$ büyüklüğündeki bir
+güncelleme bf16'da doğrudan $1$'e yuvarlanır — fp32 ise onu 1,00001 olarak
+tutar — ve eğitim sessizce durur. Örneği dikkatli seçin: $10^{-8}$ fp32'de de
+kaybolurdu, çünkü tek hassasiyette kabaca yedi ondalık hane vardır.
 Ağırlıkların yüksek hassasiyetli bir kopyasını tutmak, düşük hassasiyetli
 eğitimi hiç değilse çalışır kılan şeydir.
 :::
@@ -597,9 +603,10 @@ dolayısıyla yaygın $\alpha = 2r$ teamülü "adaptörü 2 ile ölçekle" demek
 daha egzotik bir anlam taşımıyor.
 
 Üstelik bu teamül topluluğun, yazarların değil. Yazarlar $\alpha$'yı
-"denediğimiz ilk $r$'ye" ayarlayıp bir daha dokunmadıklarını bildiriyor — bu
-da $\alpha = r$, yani tam olarak 1'lik bir ölçek çarpanı ve onu hiç
-ayarlamadıklarının itirafı. [$\alpha = 2r$'yi bir sonuç değil, başkasının
+"denediğimiz ilk $r$'ye" ayarlayıp bir daha dokunmadıklarını bildiriyor — bu,
+onu hiç ayarlamadıklarının itirafı ve her rankta $\alpha = r$ demek *değil*.
+İlk denediğiniz $r = 8$ olduğu için $\alpha$'yı 8'de sabitleyin; $r = 16$ artık
+$\alpha/r = 0{,}5$ ile koşuyordur. [$\alpha = 2r$'yi bir sonuç değil, başkasının
 sizin yerinize seçtiği bir varsayılan olarak görün.]{.hl}
 
 ::: {.callout-tip appearance="simple"}
@@ -735,7 +742,9 @@ sabit değil, bu araç için seçilmiş bir teamül.</p>`
 
 Varsayılanlar, attention ve MLP üzerinde $r{=}16$ adaptörü olan Llama 3.1 8B
 (8,03B parametre) — 41.943.040 parametre, yani modelin %0,52'si. Tam
-fine-tune: **119,7 GiB**; saatlik kiralayabileceğiniz hiçbir şeye sığmıyor.
+fine-tune: **119,7 GiB**; yaygın 24–80 GB'lık tek GPU yapılandırmalarının
+tamamının ötesinde ve gerçek bir batch boyutunda aktivasyonları da eklediğinizde
+141 GB'lık H200'ün ötesinde.
 LoRA: **15,5 GiB**, 24 GB'lık bir tüketici kartı. QLoRA: **4,3 GiB**, bir
 dizüstü.
 
@@ -983,10 +992,14 @@ $$
 \mathcal{L}_{\text{RM}} = -\,\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\!\left(r_\phi(x, y_w) - r_\phi(x, y_l)\right)\right]
 $$
 
-Yalnızca $r_\phi$'nin *farkları* kısıtlanıyor, dolayısıyla ödül ölçeği keyfî. Bu
-olgu iki kez işe yarayacak: ödül modellerinin kayıpla değil sıralama
-doğruluğuyla raporlanmasının nedeni bu ve birkaç satır sonra $Z(x)$ teriminin
-sadeleşmesini sağlayan da bu.
+Bir prompt içinde yalnızca $r_\phi$'nin *farkları* kısıtlanıyor; dolayısıyla
+ödüller ancak $x$'in bir toplamsal fonksiyonuna kadar belirlenmiş oluyor: her
+cevaba aynı $f(x)$'i ekleyin, hiçbir şey değişmez. Bunu "ölçek keyfî" diye
+okumayın. Bütün ödülleri iki ile çarpmak modeli değiştirir —
+$\sigma(1) = 0{,}731$'e karşı $\sigma(2) = 0{,}881$ — bağlantı sıcaklığını da
+buna göre yeniden ölçeklemediğiniz sürece. Birkaç satır sonra $Z(x)$ teriminin
+sadeleşmesini sağlayan şey de bu toplamsal serbestlik; çünkü bir prompt'un iki
+cevabı için kayma aynıdır.
 
 İkincisi, politika o dondurulmuş ödüle karşı, referansa tasmalanmış hâlde
 eniyileniyor:
@@ -1122,10 +1135,14 @@ ve kod alışılmadık ölçüde şanslı alanlar. @sec-akil-yuruten bu fikri so
 kadar zorlarsanız ne olduğunu izliyor.
 :::
 
-Takas net: öğrenilmiş bir reward model her görevi kapsar ama hack'lenebilir;
-bir doğrulayıcı hack'lenemez ama neredeyse hiçbir şeyi kapsamaz. Üretim
-reçetelerinin ikisini birden, verinin farklı altkümelerinde kullanmasının
-sebebi bu.
+Takas neredeyse net: öğrenilmiş bir reward model her görevi kapsar ve
+hack'lenmesi kolaydır; bir doğrulayıcı neredeyse hiçbir şeyi kapsamaz ve
+hack'lenmesi çok daha zordur — ama yalnızca kendi şartnamesi ve uygulaması
+kadar. Boşlukları olan bir test takımı, görünen vakaları sabit döndüren bir
+programı ödüllendirir; gevşek bir cevap ayrıştırıcısı, regex'ine uyan her şeyi
+ödüllendirir. @sec-akil-yuruten bunun pratikte canı yakan hâlini içeriyor.
+Üretim reçetelerinin ikisini birden, verinin farklı altkümelerinde
+kullanmasının sebebi bu.
 
 ### Elinizdeki veriye göre seçmek
 
@@ -1400,11 +1417,13 @@ ekiplerin çoğu bunlardan ikisini denemiştir.
    birlikte çalışan şeyler. En güçlü yaygın mimari, sizin *formatınızı ve
    tonunuzu* öğrenmiş bir fine-tune modelin, sizin *olgularınızı* sağlayan
    retrieval'la getirilmiş belgeler üzerinden cevap vermesidir.
-2. **Base model'e asla DPO uygulamayın.** DPO'nun loss'u, policy'yi donmuş bir
-   referansa karşı iki *sabit* tamamlama üzerinde karşılaştırır ve bu
-   tamamlamaların referanstan geldiğini varsayar. Talimat izleyen bir modelin
-   yazdığı tercih verisi için base model kötü bir referanstır ve hedef,
-   kendisini tercihe değil bu uyumsuzluğa harcar. Her zaman önce SFT.
+2. **Doğrudan base model'den DPO'ya geçmeyin.** DPO'nun loss'u, policy'yi
+   donmuş bir referansa karşı iki *sabit* tamamlama üzerinde karşılaştırır ve en
+   iyi, o tamamlamalar referansın üretebileceği şeylere benzediğinde çalışır.
+   Talimat izleyen bir modelin yazdığı tercih verisi için base model zayıf bir
+   referanstır ve hedef, kendisini tercihe değil bu uyumsuzluğa harcar. Loss'ta
+   bunu yasaklayan hiçbir şey yok — bu, tanımlılık koşulu değil, dağılım uyumu
+   hakkında bir tespit — ama işleyen reçete önce SFT.
 :::
 
 ## Felaket unutması {#sec-unutma}
@@ -1484,7 +1503,10 @@ yüksek top-1 de iyidir; ilk satır ise modelin Hub'dan geldiği hâli.
 
 O tablodaki üç şey, kendilerini tanıtan paragraftan daha değerli.
 
-**İki fine-tune da unutuyor ve tam olanı yaklaşık 4,6 kat daha fazla unutuyor.**
+**Eski başlık altında iki uyarlama da daha kötü görünüyor, tam olanı yaklaşık
+4,6 kat daha fazla.** Bu oranın ne olduğunu söyleyelim: %12,5'e karşı %2,7,
+donmuş bir başlık üzerinden ölçülmüş *göreli kayıp artışlarının* oranıdır; bir
+modelin 4,6 kat daha fazla Türkçe unuttuğunun ölçümü değil.
 Görevle hiç ilgisi olmayan metinde tam bir fine-tune, modelin masked-language
 loss'unun %12,5'ine ve top-1 doğruluğunun dört puanına mal oluyor. Bu, dramatik
 anlamda felaket değil — model hâlâ Türkçe konuşuyor — ama ön eğitim sırasında
@@ -1492,8 +1514,8 @@ parasını ödediğiniz şeyin gerçek, ölçülebilir bir kaybı; üstelik bu m
 daha kimsenin sormayacağı bir görev karşılığında satın alınmış bir kayıp.
 
 **LoRA hasarı azaltıyor; ortadan kaldırmıyor.** +%2,7 küçük bir sayı ama sıfır
-değil ve kaynaştırılmış model, geldiği modele göre Türkçede gerçekten daha
-kötü. Parametre verimli ayarlamanın unutamayacağını söyleyen biri, aslında geri
+değil ve kaynaştırılmış model, birlikte başladığı başlık üzerinden ölçülebilir
+biçimde daha kötü okunuyor. Parametre verimli ayarlamanın unutamayacağını söyleyen biri, aslında geri
 alınabilirlik argümanını tekrarlayıp ona unutma argümanı adını veriyordur.
 
 **Hasar, eğitim verisinin bulunduğu yerde en büyük.** İnsanları şaşırtan satır
@@ -1510,8 +1532,8 @@ kurmadığı yoklama; çünkü görev test kümesinin yanında gereksiz görün�
 **Siz izlediğiniz sayı iyileşirken iki yoklama da kötüleşti.** Her satırda ve
 her yoklama kümesinde kayıp yükseldi, top-1 düştü; duygu skoru ise ters yöne
 gitti. Tam fine-tune,
-labdaki en iyi duygu modeli — 83,90 macro-F1 ile o tablonun tepesinde — ve
-buradaki en kötü Türkçe modeli, hem de iki yoklamada birden. İki olgudan
+labdaki en iyi duygu modeli — 83,90 macro-F1 ile o tablonun tepesinde — ve bu
+yoklama altında üçünün en zayıfı, hem de iki kümede birden. İki olgudan
 hiçbiri diğerinin değerlendirmesinden görünmüyor. Tuzağın tam biçimi bu:
 kötüleşen bir model değil, ölçtüğünüz tek şeyde iyileşen bir model.
 :::
@@ -1717,11 +1739,12 @@ gösteridir.
   karşılaştırma gözüyle bakın, bir kaynak planlama rakamı gibi değil.
 - **Tek seed, tek veri kümesi, tek dil.** Bunlar tek bir bölünme üzerinde iki
   epoch'luk koşular. $r=8$ ile $r=64$'ü ayıran 0,30 ve $r=1$ ile $r=4$'ü ayıran
-  0,03, farklı bir seed'le tekrar çalıştırdığınızda alacağınız gürültünün epey
-  içinde — bunlara bir sıralama okumayın. Gürültünün içinde *olmayan* şeyler ise
-  1. satır ile geri kalan her şey arasındaki fark, parametre sayıları
-  arasındaki fark ve tam fine-tune ile her LoRA satırı arasındaki
-  doğruluk-macro-F1 ayrımı.
+  0,03, tek bir seed'in çözemeyeceği büyüklükte farklar — bunlara bir sıralama
+  okumayın. Satır başına tek seed'le bu bölüm hangi farkın gürültü olduğunu
+  söyleyemez; söyleyebileceği şey, 1. satır ile geri kalan her şey arasındaki
+  farkın diğerlerinden çok daha büyük olduğu — parametre sayıları arasındaki
+  fark ve tam fine-tune ile her LoRA satırı arasındaki doğruluk-macro-F1 ayrımı
+  gibi.
 
 ### Sıra sizde
 

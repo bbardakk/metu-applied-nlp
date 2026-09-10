@@ -148,11 +148,17 @@ model into something you could talk to used about 13,000 supervised prompts —
 five million tokens of prompt text — plus 33,000 prompts for the reward model
 and 31,000 for the reinforcement-learning stage [@ouyang2022training].
 
-[Pretraining saw roughly 58,000 times more text than supervised fine-tuning
-did.]{.hl} That ratio is the most useful single fact about this pipeline,
+[Pretraining saw roughly 58,000 times the *prompt* tokens that supervised
+fine-tuning did.]{.hl} Read the denominator carefully: those five million tokens
+are prompts only, and an SFT example is a prompt plus a response, with the loss
+usually taken on the response. The ratio against the complete training text is
+smaller, and neither paper reports it. Even so the order of magnitude is the most useful single fact about this pipeline,
 because it explains a pattern you would otherwise find baffling: a fine-tune
-reliably changes *how* a model answers and almost never changes *what it
-knows*. The knowledge was installed in stage 1. Stages 2 and 3 are a coat of
+reliably changes *how* a model answers, and moves *what it knows* only at the
+margins. @sec-post-training measures both, and facts can be taught later — it is
+just that a few million tokens against three hundred billion is not the place to
+install a worldview, and retrieval is usually the easier way to keep facts
+current. The bulk of the knowledge was installed in stage 1. Stages 2 and 3 are a coat of
 paint — an important one, applied by skilled people, on a building someone
 else spent tens of millions of dollars constructing.
 
@@ -212,9 +218,10 @@ about **dollars**, and @sec-reasoning is where the dollars go.
 The last column is why this chapter matters even if you never train anything.
 [The pretraining decisions are the ones you inherit and cannot undo.]{.hl} If
 the tokenizer splits Turkish badly, every downstream user pays for it forever.
-If the data cutoff is December 2023, no fine-tune tells the model who won an
-election in 2025. If the corpus contained little Turkish, no adapter conjures
-the missing competence.
+If the data cutoff is December 2023, later training *can* teach the model who
+won an election in 2025 — you then own the coverage, the reliability and the
+interference, which is why retrieval usually wins for facts that keep moving.
+If the corpus contained little Turkish, an adapter has very little to build on.
 
 **What we will look at.** What pretraining produces and — more usefully —
 what it does not. Then the three decisions that consume the budget before any
@@ -445,9 +452,10 @@ Two bookkeeping notes before you reuse this table. The mix column is the
 paper's own rounded figures and sums to 101%, not 100%. And the last column is
 the paper's reported epoch count, not something you can recompute from the
 other two: share × 300B ÷ tokens available gives 3.5 for WebText2 against the
-2.9 printed, and 3.0 for Wikipedia against the 3.4 printed. Both columns are
-rounded, and the epochs come from the actual sampling schedule rather than from
-these rounded shares. Read the table for the *shape* of the argument — quantity
+2.9 printed, and 3.0 for Wikipedia against the 3.4 printed. These are the
+figures the original table reports; they do not reconcile exactly, and rounded
+shares are not enough to establish why. Read the table for the *shape* of the
+argument — quantity
 is not weight — and not as a set of numbers that close.
 
 Four years later Llama 3 reports its mixture by *topic* rather than by source,
@@ -555,8 +563,9 @@ is the tokenizer.
 unbounded vocabulary. That framing is correct and incomplete. At pretraining
 scale the tokenizer is not a preprocessing convenience — [it is how the
 compute budget gets divided between languages]{.hl}, and the division is
-permanent. You cannot fine-tune your way out of it, because changing the
-tokenizer changes the embedding table, which changes every weight downstream.
+permanent for practical purposes. An ordinary fine-tune leaves the segmentation
+exactly where it was; replacing it is a separate project, with its own cost,
+described in @sec-pretraining-interview.
 
 Llama 3's tokenizer is a good example of the decision being made explicitly.
 Its 128,000-token vocabulary is 100,000 tokens taken from OpenAI's `tiktoken`
@@ -617,10 +626,14 @@ The "same content" column is the aggregate ratio over the whole corpus; the
 computed separately so that one long outlier cannot drive the headline. For
 five of the six tokenizers the two agree to within 0.02, which is the sanity
 check that the aggregate is not an artefact. GPT-2 is the exception, at 1.98
-against 1.92. The aggregate is a length-weighted mean of the per-sentence
-ratios, so an aggregate above the median says the longer sentences are the
-expensive ones — GPT-2's Turkish penalty grows with sentence length rather than
-being a flat surcharge. Worth knowing before you quote a single number for it.
+against 1.92. Resist reading a length effect into that gap. The aggregate is a
+length-weighted mean of the per-sentence ratios, and a weighted mean can sit
+above a median without any relationship to length at all: three equal-length
+sentences with ratios 1, 1 and 2 give an aggregate of 1.33 against a median of
+1. The two figures also come from different samples here — 1,157 pairs against
+the first 800. Testing whether GPT-2's Turkish penalty grows with sentence
+length means plotting the per-sentence ratio against length on one common set of
+pairs, which this table does not do.
 
 ```{ojs}
 //| echo: false
@@ -829,8 +842,8 @@ single time it appears.
 matters.** On *evlerinizden* ("from your houses") Llama 3 produces
 `ev | ler | iniz | den` — exactly the four morphemes, a textbook
 segmentation. The Turkish-native Cosmos tokenizer produces
-`ev | lerinizden`: two tokens, cheaper, and morphologically meaningless,
-since `lerinizden` is not a unit of anything.
+`ev | lerinizden`: two tokens, cheaper, and blind to the internal structure,
+since `lerinizden` spans three morphemes rather than being one.
 
 So the two metrics genuinely can disagree. Compression is what you pay for
 and is easy to measure. Morphological alignment is what might help the model
@@ -885,8 +898,9 @@ full decision, including when a Turkish-native model wins outright, is
 
 You can estimate the compute of any pretraining run — how many
 [FLOPs](#gloss-flop){#term-flop .term-ref} it consumed — from two numbers, the
-parameter count $N$ and the token count $D$, and be accurate to under half a
-percent. That is unusual enough in systems work to be worth taking seriously,
+parameter count $N$ and the token count $D$. For the matrix multiplies that
+dominate, the estimate is good to well under a percent — attention is the term
+it leaves out, and this section comes back to when that matters. That is unusual enough in systems work to be worth taking seriously,
 and it is the tool that lets you sanity-check a press release.
 
 **One caveat first, because it decides which number you put in $N$.** The $6ND$
@@ -1105,23 +1119,26 @@ Where did the missing 6.5 points go? Two places, and it is worth separating
 them, because one is a fact about datacentres and the other is a fact about
 our own arithmetic.
 
-**Most of it is downtime.** The paper says so in a sentence that is easy to
-skim past. During a 54-day snapshot of pretraining there were **466 job
+**Most of it is probably downtime.** The paper says so in a sentence that is
+easy to skim past. During a 54-day snapshot of pretraining there were **466 job
 interruptions** — 47 planned, 419 unexpected — and the run sustained ">90%
-effective training time" [@grattafiori2024llama3]. So:
+effective training time" [@grattafiori2024llama3]. Take that bound as exactly
+0.90 and apply one stage's 41% to the whole run, and:
 
 $$
 41\% \times 0.90 = 36.9\%
 $$
 
-That accounts for **4.1** of the 6.5 points. Not bad kernels, not a weak
+Both of those are choices, so 36.9% is an illustrative figure rather than a
+number the paper reports. On that reading it would account for **4.1** of the
+6.5 points. Not bad kernels, not a weak
 framework, not incompetence. Hardware fails, a node drops out, the job
 restarts from the last checkpoint and redoes work. At 16,000 GPUs running for
 weeks, something breaking every three hours is not a crisis — it is the
 weather.
 
-**The remaining 2.4 points are our fault, not the cluster's.** We divided by
-$6ND$, and $6ND$ omits attention. The paper's MFU counts every FLOP the run
+**The rest looks like our own accounting, not the cluster's.** We estimated the
+numerator as $6ND$, and $6ND$ omits attention. The paper's MFU counts every FLOP the run
 actually issued, including the attention matrices; our numerator does not. We
 are comparing two different measurements and calling the difference waste.
 Add attention back, using the $6Lnd$-per-token correction we derived above and
@@ -1129,7 +1146,7 @@ the paper's own schedule — 8K context for the bulk of the run, then
 "approximately 800B training tokens" ramping through six stages to 128K
 [@grattafiori2024llama3]:
 
-| model | $6ND$ only | attention-corrected | paper's MFU $\times\,0.90$ |
+| model | $6ND$ only | attention-corrected | 41% $\times\,0.90$, illustrative |
 |:--|--:|--:|--:|
 | Llama 3.1 8B | 13.9% | 15.8–17.2% | not published |
 | Llama 3.1 70B | 25.5% | 27.4–29.0% | not published |
@@ -1329,11 +1346,21 @@ $$
 \underbrace{1.61\times10^{10}}_{\text{per generated token}} \;=\; 4.5\times10^{13}
 $$
 
-[Forty-five trillion generated tokens, and the serving bill has equalled the
-training bill.]{.hl} A service producing 100 billion tokens a day passes that
-point in 450 days. Any product with real usage crosses it, and after that
-every additional token of pretraining you *did* is paying for itself in
-inference savings you *keep*.
+[Forty-five trillion generated tokens, and the serving FLOPs have equalled the
+training FLOPs.]{.hl} A service producing 100 billion tokens a day passes that
+point in 450 days. Any product with real usage crosses it.
+
+Say what that point is and is not. It is FLOP parity for *one* model: the moment
+its lifetime inference has cost as much arithmetic as its training. It is not
+the point at which extra pretraining pays for itself, because training the same
+model on more tokens does not lower its inference cost per token — the parameter
+count does that. The break-even that answers "should we have trained longer" is
+between two models $A$ and $B$ of *equal quality*:
+$T_{\text{break}} = (\text{Train}_A - \text{Train}_B)/(\text{Serve}_B - \text{Serve}_A)$
+per token, which is the calculation that makes a smaller, longer-trained model
+worth its extra training run. And the build-versus-buy question is a third
+thing again, comparing training plus deployment plus operations against an API
+invoice.
 
 **And 45 trillion is the most favourable number you will ever get.** It
 compares FLOPs to FLOPs, which quietly assumes a generated token and a trained
@@ -1511,7 +1538,8 @@ that commitment.
 :::
 
 The fully-open row exists for a reason that matters more to a university than
-to a startup: [it is the only row on which science works.]{.hl} If you want to
+to a startup: [it is the row on which controlled replication and ablation are
+straightforward.]{.hl} If you want to
 ask "does adding Turkish data at 5% help or hurt English?", you need the data
 and the code, not just the weights. The Pile [@gao2020pile], RefinedWeb
 [@penedo2023refinedweb], Dolma [@soldaini2024dolma], and FineWeb
@@ -1695,11 +1723,15 @@ pretraining chapter rather than a preprocessing one.
 Changing the tokenizer changes the embedding table, which changes every weight
 downstream. It is not impossible: you can extend the vocabulary, initialise the
 new embeddings from the pieces they replace, and continue pretraining until the
-model settles — a documented and occasionally worthwhile procedure. What it is
-not is cheap or safe. It costs a pretraining-scale run, it risks degrading
-everything the model already does well, and it is a different project from
-fine-tuning. [The tokenizer is how the compute budget gets divided between
-languages, and undoing that division costs what making it cost.]{.hl} Absent
+model settles — a documented and occasionally worthwhile procedure, and
+vocabulary-adaptation methods exist that initialise the new rows from the old
+ones rather than from scratch. What it is not is free or safe. Its cost scales
+with how much of the vocabulary you change, what you start from and what quality
+you will accept, and it risks degrading things the model already does well; it
+is not automatically a second pretraining run, and it is not an ordinary
+fine-tune either. [The tokenizer is how the compute budget gets divided between
+languages, and undoing that division is a project with its own budget.]{.hl}
+Absent
 that project, a user of a 1.98× tokenizer pays the surcharge in context window,
 in latency, and on every API invoice, for the life of the model.
 
@@ -1814,8 +1846,10 @@ decisions you are stuck with afterwards.
 2. **What is the single pretraining decision you cannot undo later?** The
    tokenizer. Everything else — instruction behaviour, safety, domain
    knowledge, even a good deal of factual content — can be moved by
-   post-training (@sec-post-training). The tokenizer cannot, because changing it
-   invalidates the embedding table and every weight after it. Quantify the
+   post-training (@sec-post-training). The tokenizer is the one that resists,
+   because changing it means rebuilding the embedding table the rest of the
+   weights were trained against — possible, but a project rather than a
+   fine-tune. Quantify the
    stakes with the fertility table: a Turkish user on GPT-2's tokenizer pays
    **1.98×** the tokens of an English user for the same content, and on BERTurk
    **0.58×**. Same language, same text, a 3.4× spread driven entirely by a

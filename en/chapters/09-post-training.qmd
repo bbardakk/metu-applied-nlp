@@ -48,8 +48,10 @@ turn around and address you.
 Try this yourself: on the Hub, models named `Llama-3.1-8B` and
 `Llama-3.1-8B-Instruct` are the same pretraining run. The first is the base
 model. The second has been through the two stages in this chapter. The
-difference in behaviour is enormous; the difference in cost is about four
-orders of magnitude.
+difference in behaviour is enormous; the difference in cost is large but not
+published for these two models. For scale, InstructGPT's own figures put SFT
+plus PPO at 64.9 petaflop-days against 3,640 for pretraining — about 1.8%, or a
+factor of 56, before the reward model and everything around it.
 :::
 
 Ask the same base model a factual question it certainly knows, and phrase it as
@@ -243,8 +245,8 @@ mostly the model learning what follows the assistant header token.
 **Never hand-write the template.** Call
 `tokenizer.apply_chat_template(messages, tokenize=False)` and print the result
 once. Every model family uses different markers, and a template mismatch
-between training and serving produces a model that is subtly, unfixably worse
-with no error message anywhere. This is the single most common way an
+between training and serving quietly degrades quality with no error message
+anywhere — quietly enough that people spend weeks blaming the data. This is the single most common way an
 otherwise correct fine-tune underperforms.
 :::
 
@@ -387,8 +389,10 @@ optimizers all change this table. The 16 is a default, not a law.
 
 ::: {.column-margin}
 The fp32 master copy is the least obvious row and the one people try to delete
-first. Without it, an update of size $10^{-8}$ added to a weight of size $1$
-rounds straight back to $1$ in bf16 and the training silently stalls. Keeping
+first. Without it, an update of size $10^{-5}$ added to a weight of size $1$
+rounds straight back to $1$ in bf16 — while fp32 keeps it, as 1.00001 — and the
+training silently stalls. Pick the example carefully: $10^{-8}$ would vanish in
+fp32 as well, since single precision has about seven decimal digits. Keeping
 one high-precision copy of the weights is what makes low-precision training
 work at all.
 :::
@@ -589,9 +593,10 @@ widespread convention $\alpha = 2r$ means nothing more exotic than "scale the
 adapter by 2".
 
 That convention is the community's, not the authors'. They report setting
-$\alpha$ "to the first $r$ we try" and then leaving it alone — which is
-$\alpha = r$, a scale factor of exactly 1, and an admission that they never
-tuned it. [Treat $\alpha = 2r$ as a default someone else picked for you, not
+$\alpha$ "to the first $r$ we try" and then leaving it alone — which is an
+admission that they never tuned it, and which is *not* $\alpha = r$ at every
+rank. Fix $\alpha$ at 8 because you tried $r = 8$ first, and $r = 16$ then runs
+at $\alpha/r = 0.5$. [Treat $\alpha = 2r$ as a default someone else picked for you, not
 as a result.]{.hl}
 
 ::: {.callout-tip appearance="simple"}
@@ -729,8 +734,8 @@ widget, not a measured constant.</p>`
 
 The defaults are Llama 3.1 8B (8.03B parameters) with an $r{=}16$ adapter on
 attention and MLP — 41,943,040 parameters, or 0.52% of the model. Full
-fine-tune: **119.7 GiB**, which does not fit on anything you can rent by the
-hour. LoRA: **15.5 GiB**, a 24 GB consumer card. QLoRA: **4.3 GiB**, a laptop.
+fine-tune: **119.7 GiB**, past every common 24–80 GB single-GPU configuration
+and past the 141 GB H200 only once you add activations at a real batch size. LoRA: **15.5 GiB**, a 24 GB consumer card. QLoRA: **4.3 GiB**, a laptop.
 
 ::: {.callout-warning appearance="simple"}
 **What this widget leaves out is the part that will surprise you.** It counts
@@ -974,10 +979,13 @@ $$
 \mathcal{L}_{\text{RM}} = -\,\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\!\left(r_\phi(x, y_w) - r_\phi(x, y_l)\right)\right]
 $$
 
-Only *differences* of $r_\phi$ are constrained, so the reward scale is
-arbitrary. That fact matters twice: it is why reward models are reported by
-ranking accuracy rather than by loss, and it is what makes the $Z(x)$ term
-cancel a few lines from now.
+Only *differences* of $r_\phi$ within a prompt are constrained, so rewards are
+identified only up to an additive function of $x$: add the same $f(x)$ to every
+response and nothing changes. Do not read that as "the scale is arbitrary".
+Doubling every reward does change the model — $\sigma(1) = 0.731$ against
+$\sigma(2) = 0.881$ — unless you rescale the link temperature to match. The
+additive freedom is what makes the $Z(x)$ term cancel a few lines from now,
+because the offset is the same for both responses to one prompt.
 
 Second, the policy is optimised against that frozen reward, leashed to the
 reference:
@@ -1116,9 +1124,13 @@ code are unusually lucky domains. @sec-reasoning follows what happens
 when you push this idea as far as it goes.
 :::
 
-The trade is clean: a learned reward model covers any task but can be hacked;
-a verifier cannot be hacked but covers almost nothing. Which is why production
-recipes use both, on different subsets of the data.
+The trade is close to clean: a learned reward model covers any task and is easy
+to hack; a verifier covers almost nothing and is much harder to hack, but only
+as far as its specification and implementation go. A test suite with gaps rewards
+a program that hard-codes the visible cases; a loose answer parser rewards
+whatever matches its regex. @sec-reasoning has the version of this that bites in
+practice. Which is why production recipes use both, on different subsets of the
+data.
 
 ### Choosing, by what data you have
 
@@ -1393,11 +1405,14 @@ two.
    alternatives; they compose. The strongest common architecture is a
    fine-tuned model that has learned your *format and tone*, answering over
    retrieved documents that supply your *facts*.
-2. **Never DPO a base model.** DPO's loss compares the policy against a frozen
-   reference on two *fixed* completions, and it assumes those completions came
-   from the reference. A base model is a bad reference for preference data
-   written by an instruction-following model, and the objective spends itself
-   on that mismatch instead of on the preference. SFT first, always.
+2. **Do not DPO straight from a base model.** DPO's loss compares the policy
+   against a frozen reference on two *fixed* completions, and it works best when
+   those completions look like things the reference would produce. A base model
+   is a poor reference for preference data written by an instruction-following
+   model, and the objective spends itself on that mismatch instead of on the
+   preference. Nothing in the loss forbids it — this is a statement about
+   distribution match, not a definedness condition — but SFT first is the
+   recipe that works.
 :::
 
 ## Catastrophic forgetting {#sec-forgetting}
@@ -1476,16 +1491,19 @@ top-1 are both better, and the base row is the model as the Hub ships it.
 Three things in that table are worth more than the paragraph that introduced
 them.
 
-**Both fine-tunes forget, and the full one forgets about 4.6× more.** On text
-that has nothing to do with the task, a full fine-tune costs 12.5% of the
-model's masked-language loss and four points of top-1 accuracy. That is not
+**Both adaptations look worse under the old head, and the full one by about
+4.6× more.** Say what that ratio is: 12.5% against 2.7% is a ratio of *relative
+loss increases* measured through a frozen head, not a measurement that one model
+forgot 4.6 times as much Turkish. On text that has nothing to do with the task,
+a full fine-tune costs 12.5% of the model's masked-language loss and four points
+of top-1 accuracy. That is not
 catastrophic in the dramatic sense — the model still speaks Turkish — but it is
 a real, measurable loss of the thing you paid for during pretraining, bought
 with a task nobody will ever ask this model about again.
 
 **LoRA reduces the damage; it does not avoid it.** +2.7% is small, but it is not
-zero, and the merged model is genuinely worse at Turkish than the model it came
-from. Anyone who tells you parameter-efficient tuning cannot forget is quoting
+zero, and the merged model reads measurably worse through the head it started
+with. Anyone who tells you parameter-efficient tuning cannot forget is quoting
 the reversibility argument and calling it the forgetting argument.
 
 **The damage is worst where the training data was.** This is the row that
@@ -1503,8 +1521,8 @@ team builds, because it looks redundant next to the task test set.
 **Both probes deteriorated while the number you were watching improved.**
 Loss rose and top-1 fell on every row and every probe set; the sentiment score
 went the other way. The full fine-tune is the best sentiment model in the lab — 83.90
-macro-F1, the top of that table — and it is the worst Turkish model here, on
-both probes. Neither fact is visible from the other's evaluation. This is the
+macro-F1, the top of that table — and it is the weakest of the three under this
+probe, on both sets. Neither fact is visible from the other's evaluation. This is the
 trap in its exact shape: not a model that got worse, but a model that got
 better at the one thing you measured.
 :::
@@ -1706,9 +1724,10 @@ demonstration, not an experiment.
   a comparison between rows, not as a provisioning figure.
 - **One seed, one dataset, one language.** These are two-epoch runs on a single
   split. The 0.30 that separates $r=8$ from $r=64$, and the 0.03 separating
-  $r=1$ from $r=4$, are well inside the noise you would get from re-running
-  with a different seed — do not read a ranking into them. What is *not* inside
-  the noise is the gap between row 1 and everything else, the gap between the
+  $r=1$ from $r=4$, are the size of differences a single seed cannot resolve —
+  do not read a ranking into them. With one seed per row this chapter cannot
+  say which gaps are noise and which are not; what it can say is that the gap
+  between row 1 and everything else is far larger than the rest, as is the
   parameter counts, and the accuracy-versus-macro-F1 split between the full
   fine-tune and every LoRA row.
 
