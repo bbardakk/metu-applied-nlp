@@ -589,24 +589,26 @@ Note this assumes 3 items" is read as **3**, and marked wrong.
 
 Which makes the 320-token ceiling on the answer phase more interesting than it
 should be. Measured mean answer lengths come out between 243 and 276 tokens
-against that ceiling, and a mean that close to a hard cap means a real share of
-answers are running into it and being cut mid-sentence — where the last number
-is whatever digit the truncation happened to land on. We did not record the
-exact fraction on this sweep, which was a mistake in experiment design rather
-than an interesting property of the model.
+against that ceiling — close enough that the cap is worth investigating, but not
+close enough to tell you anything about how many answers actually hit it. A mean
+of 276 is consistent with every answer being 276 tokens and none truncated, and
+with a mixture of short answers and answers stopped dead at 320. We did not
+record the flag that would settle it, which was a mistake in experiment design
+rather than an interesting property of the model.
 
-And it is worse than a uniform tax, which is the part worth slowing down for.
-Mean answer length is **lowest in the no-thinking row** (243 tokens) and higher
-in *every* thinking row (276, 267, 260, 273, 275). The penalty therefore falls
-hardest on exactly the rows being compared against the baseline, and lightest on
-the baseline itself — so whatever this artefact is doing, it is doing more of it
-to thinking than to not-thinking.
+There is a tempting second step here, and it does not go through. Mean answer
+length is **lowest in the no-thinking row** (243 tokens) and higher in *every*
+thinking row (276, 267, 260, 273, 275), which looks like the penalty falling
+hardest on exactly the rows being compared against the baseline. But means do not
+determine cap-hit rates, so this ordering does not establish that the thinking
+rows are truncated more often. It establishes that we cannot rule it out.
 
 What we cannot do is sign the correction. Those five numbers do not move
 monotonically with the budget, and neither does accuracy, so there is no clean
 story of the form "the bias shrinks as the curve climbs, therefore the true gap
-is larger than it looks". All we can say is that the rows are not equally
-affected, that the direction of the net distortion is unknown, and that some
+is larger than it looks". All we can say is that we do not know which rows are
+affected or how much, that the direction of the net distortion is unknown, and
+that some
 unidentifiable part of this curve's shape belongs to our instrument rather than
 to the model. The two cannot be separated from what we saved.
 
@@ -665,13 +667,15 @@ vs no-thinking baseline, two-proportion z-test (n=200 each)
 
 **None of the tested budgets shows a statistically clear improvement over not
 thinking at all.** The 95% interval on every row is about $\pm 7$ points wide,
-and the intervals overlap heavily — though not universally: the 128-token row's
-interval, 54.1–67.5, excludes both the baseline's 70.0 and the 512 row's 71.5.
-That is worth pausing on, because it cuts the other way from the usual mistake.
-Non-overlapping intervals are not a significance test either: the two-sample
-test on that same pair gives $z = -1.89$, which does not reject at the 5% level.
-Interval containment and a hypothesis test answer different questions, and only
-the second one is the one being asked here. The 512 row is bolded because it is
+and every pair of them overlaps. What the 128-token row's interval, 54.1–67.5,
+does exclude is the *point estimates* 70.0 and 71.5 — and those are different
+facts. Its interval still overlaps the baseline's on 63.3–67.5 and the 512
+row's on 64.9–67.5. Neither containment nor overlap is a significance test:
+against the baseline the two-sample test gives $z = -1.89$, which does not
+reject at the 5% level, while against the 512 row it gives $z = -2.22$, which
+does. Read that second number with the care it deserves — it is one uncorrected,
+unpaired comparison picked out of a sweep of six, and this chapter is not
+reporting it as a finding. The 512 row is bolded because it is
 the largest number in the column, not because it is the best budget — at
 $z = +0.33$ that bolding is decoration, and you should read it with suspicion.[^paired-test]
 
@@ -682,10 +686,10 @@ $z = +0.33$ that bolding is decoration, and you should read it with suspicion.[^
     majority they both get right — would have more power. We report $z$ because
     our result files saved only the per-budget mean, which throws the pairing
     away. The lab at the end of this chapter records per-problem correctness at
-    every step, so you are not stuck with our mistake. Note the direction: a
-    more sensitive test could only *narrow* these gaps into significance, so
-    "not separable" is the weakest form of this chapter's claim, not the
-    strongest.
+    every step, so you are not stuck with our mistake. Do not over-claim the
+    direction: a paired test uses the item-level disagreements directly, which
+    usually helps when the two conditions get the same problems right, but "same
+    two hundred problems" does not by itself guarantee it.
 
     Two consequences we owe you. First, the sensitivity figures in the callout
     below are computed for the *unpaired* test, so they overstate how blind this
@@ -867,8 +871,8 @@ capacity estimate.</p>`
 **One task, one model, one prompt format.** This curve is Qwen3-1.7B on GSM8K,
 and it is worth being explicit that **we did not get the textbook shape**. The
 canonical picture — cheap early gains, a knee, then a flat tail — is what the
-literature reports for large models. Our small model instead spent its first
-three budgets *below* the baseline and its last one exactly on it.
+literature reports for large models. Our small model instead spent its first two
+non-zero budgets *below* the baseline and its last one exactly on it.
 
 That is not a contradiction of the literature; it is the same finding from the
 other side of the scale threshold. Recall from @sec-cot-two-ways that
@@ -1089,7 +1093,14 @@ The honest version is the one @sec-reasoning-lab asks you to run: hold the token
 budget fixed and split it both ways — `8 × 256` against `1 × 2048`. We report
 the saturation curve because the *shape* is the point, and the shape is a
 property of the aggregation at any budget. Where the two strategies cross at
-equal cost is a question this run was not designed to answer.
+equal cost is a question this run was not designed to answer — and note how far
+from equal they are. Eight samples at a 256-token cap and one at 2,048 match on
+*thinking* tokens only. Carry the answer phase across from the table above and
+the eight-sample arm emits roughly $8 \times 516 = 4{,}128$ output tokens
+against the 2,048 row's 1,637: about 2.5× the cost, before the repeated prompt
+prefill and any verifier calls. That is arithmetic on the table, not a
+re-measurement, and it is why an equal-budget comparison has to be budgeted in
+total tokens or money rather than in caps.
 
 **And one more thing it does not isolate.** At a 512-token budget, 96% of our
 traces are truncated (@sec-budgets) — so this curve is measured inside exactly
@@ -1194,8 +1205,10 @@ best.
 
 ::: {#gloss-verifier .column-margin .term-gloss}
 **verifier** — a model trained to score candidate solutions rather than to
-generate them. *Outcome*-supervised verifiers (**ORMs**) judge only the final
-answer; *process*-supervised ones (**PRMs**) judge each step. You will meet both
+generate them. The distinction is in the *training label*: *outcome*-supervised
+verifiers (**ORMs**) are trained against final-answer correctness, though they
+may read the whole solution; *process*-supervised ones (**PRMs**) are trained
+against a label on each step. You will meet both
 acronyms in every paper on this topic.
 [↩](#term-verifier){.term-back}
 :::
@@ -1330,13 +1343,13 @@ section as a decision keyed on that.
 
 | your situation | spend it on | why |
 |:--|:--|:--|
-| answers are checkable, latency has slack | more parallel samples | errors are independent; the vote concentrates |
+| answers are checkable, latency has slack | more parallel samples | samples are drawn independently, so the vote concentrates unless one wrong answer carries real probability mass |
 | answers are checkable, latency is tight, **and the server has spare capacity** | more parallel samples, batched | eight traces cost the time of one — but eight requests' worth of your fleet |
 | the task needs long derivations | a longer single trace | later steps genuinely need earlier ones |
 | you can *execute* the answer | run it — tests, a solver, a unit check | the cheapest verifier is not a model |
 | you have labelled solutions, or an off-the-shelf PRM | a verifier over samples | scoring beats counting; it reads the work |
 | you have samples but no scorer | weight the votes by the model's own confidence | free, and it attacks the same 9.2 points |
-| answers are free-form text | neither, yet | nothing here has anything to aggregate on |
+| answers are free-form text | a scoring rule before anything else | voting needs an equivalence test between answers; reranking needs a comparable score, and neither has to be exact ground truth |
 | the model is *systematically* wrong | none of the above | voting amplifies bias; fix the model or the prompt |
 
 ## Where reasoning helps, and where it only burns tokens {#sec-cot-limits}
@@ -1542,12 +1555,14 @@ vs no-thinking baseline (n=200, paired: same reviews, same seed)
   budget  1024:      +4.0    z = +0.89       chi-sq =  0.98   not separable
 ```
 
-**Exactly one row in this sweep is statistically real, and it is a harm.** The
-128-token budget costs 13 points, and both tests agree emphatically — McNemar
-puts it at $\chi^2 = 14.20$ against a 3.84 threshold, driven by 35 reviews the
-baseline got right and thinking got wrong against only 9 in the other direction.
-The apparent four-point *gain* at the top of the table is noise: $\chi^2 = 0.98$,
-nowhere near separable.[^classify-mcnemar]
+**Only one row in this sweep shows a statistically clear difference, and it is a
+harm.** The 128-token budget costs 13 points, and both tests agree emphatically
+— McNemar puts it at $\chi^2 = 14.20$ against a 3.84 threshold, driven by 35
+reviews the baseline got right and thinking got wrong against only 9 in the other
+direction. The apparent four-point *gain* at the top of the table does not clear
+the bar: $\chi^2 = 0.98$. Say that as it stands — this sample gives no clear
+evidence of an improvement, which is not the same as evidence that the true
+effect is zero.[^classify-mcnemar]
 
 [^classify-mcnemar]: This sweep ran after we had fixed the harness to save
     per-problem correctness, so unlike @sec-budgets we can run McNemar here —
@@ -2051,8 +2066,10 @@ to show — still could not separate *any* budget from the baseline.
 
 So run the accuracy column, but read it as an error bar rather than a curve.
 What you can measure sharply at $n=100$ is everything that is not a proportion
-of correct answers: **tokens spent per problem** (a mean over hundreds of tokens
-each, so its standard error is tiny) and the **truncation rate** — at 97% and
+of correct answers: **tokens spent per problem** — the observation is the
+problem, not the token, so report the distribution across problems and a
+problem-level interval for the mean rather than assuming a long output makes the
+estimate sharp — and the **truncation rate** — at 97% and
 $n = 100$ its Wilson interval is about $[91.5,\, 99.0]$, tight enough to act on
 and asymmetric enough to remind you that Wald intervals lie near the edges. Those two are where the knee
 actually lives, and they are the reason this lab works on a laptop at all. The
@@ -2089,7 +2106,9 @@ Two traps to check for before you trust a single number:
 Sweep at least `[0, 128, 256, 512, 1024, 2048]`, where 0 means
 `enable_thinking=False`. For each budget record five things per problem: the
 answer, whether it was correct, thinking tokens, answer tokens, and whether the
-trace was truncated.
+trace was truncated. Log two more flags while you are there, because this
+chapter's own sweep is missing them: whether the *answer* hit its cap, and
+whether the answer-extraction rule found anything at all.
 
 Use a task with an exactly checkable answer. GSM8K is the obvious one; a
 multiple-choice set from your own domain is a better one, because the point of
@@ -2115,8 +2134,10 @@ Resist the urge to predict the shape. We expected one curve to rise and flatten
 and the other to be flat or falling, and **we got neither** — the GSM8K curve
 never separated from its baseline at all, and the classification curve dropped
 13 points before climbing back to it. What actually distinguished the two tasks
-was not the accuracy column but the **cost of a token**: 3.1× on GSM8K against
-88.6× on classification, for the same nothing.
+was not the accuracy column but the **output tokens per problem**: 3.1× on
+GSM8K at its 512-token budget against 88.6× on classification at its 1,024-token
+budget — different budgets, so compare the rows rather than the headline, and
+note that the price of a token has not changed at all.
 
 So compare four things across your two tasks, in this order: the token
 multiplier, the truncation rate, the accuracy delta, and only then whether that
@@ -2269,13 +2290,20 @@ metric rather than a diagnostic you check after something looks wrong.
 Usually the five samples — and the more interesting finding is that voting
 wastes most of what you paid for.
 
-Parallel sampling gives you equal tokens, *less correlated* errors, and the
-latency of a single trace if you can batch. Do not upgrade that to independent:
-the samples are drawn independently, but the errors are not, because the same
-model on the same problem makes the same systematic mistakes — a misread
-question or a wrong formula recurs across samples, which is exactly why voting
-cannot fix a problem the model consistently misunderstands. Sequential budget
-gives you one trace whose errors are correlated with themselves.
+Parallel sampling gives you equal tokens and the latency of a single trace if
+you can batch. Be careful with the word *independent*, because it is true in one
+sense and misleading in the other. For a fixed problem and model, samples drawn
+from independent randomness do have independent error indicators — that much is
+just probability. What that does not buy you is a vote that concentrates on the
+right answer. If one wrong answer carries most of the sampling mass, five
+independent draws agree on it, and the vote is confidently wrong. The condition
+voting actually needs is that the correct answer outweighs any single wrong one,
+which is a fact about the model on that problem and not about how the samples
+were drawn. Across a *population* of problems the picture changes again: shared
+difficulty makes the errors correlated when you average over questions.
+Sequential budget, by contrast, gives you one trace whose errors are inherited
+down its own length — plausibly a worse position, though this chapter did not
+measure the comparison.
 
 But measure the aggregation step. Across our five-sample run [the correct answer
 was somewhere in the set **85.8%** of the time; majority voting returned it
@@ -2387,9 +2415,10 @@ Candidates who have only read about it talk about benchmark scores.
    Not as a causal record. It is a narrative produced alongside the answer, and
    its agreement with the actual cause is an empirical quantity you have to
    measure — we measured it by planting information and checking disclosure.
-   The result to quote: 71% of the damage from a planted wrong answer showed up
-   as answers that were neither correct nor the planted one, so a naive
-   disclosure check would have caught almost none of it. What a trace *is* good
+   The result to quote: of the 42 problems a planted wrong answer flipped from
+   right to wrong, 71% landed on a third number rather than the planted one — a
+   share of those flips, not of the net accuracy loss, which was 26 problems.
+   A naive disclosure check would have missed most of them. What a trace *is* good
    for is debugging and triage. Treat it as a hypothesis about the model's
    behaviour, and hold it to the same evidentiary standard as any other
    hypothesis.
@@ -2466,9 +2495,11 @@ number every argument in this literature is implicitly about.
   answer, and its rate of agreement with the real cause is a number you must
   measure rather than assume.
 - **A misleading claim in the context does more damage than it gets credit
-  for.** When we planted a wrong answer, 71% of the accuracy we lost went to
-  answers that were *neither* the right one nor the planted one. Detecting only
-  "did the model repeat the injected answer" would have missed most of the harm.
+  for.** When we planted a wrong answer, 71% of the *right-to-wrong flips* — 30
+  of 42 — went to answers that were neither the right one nor the planted one.
+  (The net accuracy loss is a different number, 26 problems, because 16 flipped
+  the other way.) Detecting only "did the model repeat the injected answer"
+  would have missed most of those flips.
 - **Measure your detector before you believe its output.** The no-hint arm has
   nothing to disclose, so every keyword hit on it is a free false positive; that
   check found `ta's` matching "Gre**ta's**". Reading fourteen traces by hand then
