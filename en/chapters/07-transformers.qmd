@@ -172,18 +172,22 @@ XX^{\top} = \begin{array}{r|rrr}
 \end{array}
 $$
 
-Two things go wrong, and each one alone is fatal.
+Two limitations show up in this example, and each one alone is enough to sink it.
 
 **Similarity is symmetric.** $x_i \cdot x_j = x_j \cdot x_i$, necessarily. So
 "the verb wants its object" and "the object wants its verb" are forced to be
 the *same score*. Be precise about what that does and does not force: the
 attention *weights* can still differ, because softmax normalises each row by
 its own denominator, so $\alpha_{ij} \neq \alpha_{ji}$ in general. What is lost
-is the ability to rank the two directions differently — every row is reading
-the same underlying similarity table, so no head can decide that the verb
-wants its object more than the object wants its verb. Grammar is full of
-relations that run one way and not the other, and a symmetric score table
-cannot distinguish a single one of them.
+is control over the score table itself: no head can give verb-wants-object a
+*higher score* than object-wants-verb, because the two are the same entry.
+Row normalisation still separates the weights — with $d_k = 1$ and
+$Q = K = [1, 2]^{\top}$ the two off-diagonal weights come out 0.731 and 0.119 —
+so directional attention does not disappear. What disappears is the freedom to
+choose it: the head can only express the directions that row-normalising a
+symmetric table happens to produce. Grammar is full of relations that run one
+way and not the other, and separate projections are how you get to score them
+that way.
 
 **Self-similarity swamps everything else.** A token's score against itself is
 $x \cdot x$, its squared length, and here that is the largest entry in every
@@ -192,8 +196,10 @@ row. Push the matrix through a softmax and `içti` puts its **largest** weight,
 layer computes an expensive approximation to *leave every token alone*.
 
 ::: {.column-margin}
-Strictly, $x_i \cdot x_i$ beats $x_i \cdot x_j$ only when
-$\|x_j\| \le \|x_i\|$ — a longer neighbour can outscore you. Our three toy
+Strictly, $x_i \cdot x_i \ge x_i \cdot x_j$ is *guaranteed* whenever
+$\|x_j\| \le \|x_i\|$, by Cauchy–Schwarz. The converse does not hold — with
+$x_i = (1,0)$ and $x_j = (0,2)$ the neighbour is longer and the diagonal still
+wins, 1 against 0 — so a longer neighbour can outscore you but need not. Our three toy
 vectors all have $\|x\|^2 = 1.07$, so here the diagonal wins outright. The
 general claim is weaker but still damaging: an unprojected score inflates
 self-similarity by construction, whether or not the two tokens are related.
@@ -1133,10 +1139,13 @@ Two costs do move, and they matter later in this chapter:
   $h \cdot n^2$. At $n = 1024$, $h = 32$ that is 33.5M entries instead of
   1.05M — a 32× increase in the memory that @sec-attention-cost is about, and
   in the softmax work, which is not a matrix multiply.
-- **Each head gets narrower.** A head of width $d/h$ can only express an
-  attention pattern of rank $\le d/h$. At $d = 4096$ that is 128 per head
-  instead of 4096. You are trading one high-rank relation for 32 low-rank
-  ones — usually a good trade, and always a trade.
+- **Each head gets narrower.** A head of width $d/h$ constrains the
+  *pre-softmax score* matrix $QK^{\top}$ to rank $\le d/h$. At $d = 4096$ that is
+  128 per head instead of 4096. Note where the bound stops: row-wise softmax
+  does not preserve it. With $d_k = 1$ and $Q = K = [1, 2]^{\top}$, $QK^{\top}$
+  has rank 1, while the softmaxed matrix has determinant 0.1497 and therefore
+  rank 2. So the trade is one high-rank *score* relation for 32 low-rank ones —
+  usually a good trade, and always a trade.
 :::
 
 ### The payoff, in numbers
@@ -1500,10 +1509,13 @@ $x + \operatorname{FFN}(\operatorname{N}(x))$:
 That is the block output — stage 4 in the widget below. Two things to notice.
 The *bias* column is untouched, because no row of $W_2$ writes to it. And rows
 3, 7 and 8 never got used: those detectors did not fire for any of the three
-tokens, so whatever their rows contain made no difference here. In a trained
-model that is the normal case rather than the exception — for any one input,
-most of the feed-forward layer is switched off. Hold on to that, because it is
-the entire premise of @sec-moe.
+tokens, so whatever their rows contain made no difference here. Under ReLU,
+exact zeros like these are the normal case rather than the exception. Two
+caveats before you generalise it: the GELU and SiLU activations most current
+models use are not exactly zero anywhere, so "switched off" becomes "contributing
+very little", and either way the dense layer still computes every row. That
+second point is what @sec-moe is about — skipping the arithmetic, not merely
+having little to show for it.
 
 ### The whole block
 
@@ -1588,7 +1600,7 @@ argued for somewhere above or below.
 
 | component | the problem it exists to solve | what breaks without it |
 |:--|:--|:--|
-| *any* learned score matrix | raw similarity $x_i \cdot x_j$ is symmetric and inflates the diagonal | relations cannot be directed; every token attends mostly to itself |
+| *any* learned score matrix | raw similarity $x_i \cdot x_j$ is symmetric and inflates the diagonal | the two directions of a relation share one score; every token attends mostly to itself |
 | *factoring* it into $W^Q$, $W^K$ | one $d \times d$ matrix per head is 16× the parameters, and pins the cache at width $d$ | training cost balloons and GQA becomes inexpressible |
 | separate $W^V$ | what a token *advertises* is not what it should *deliver* | routing and content are forced to be the same thing |
 | dot product | need one cheap comparable score for all $n^2$ pairs | no scalable way to compare every pair |
@@ -1899,8 +1911,11 @@ fixed:
 
 A standard deviation of $10^{-14}$ across 256 different absolute positions is
 the identity holding exactly, in floating point. Every position vector also
-has the same length, $\sqrt{d/2} = 5.656854$, to ten digits — the encoding
-adds direction, never magnitude.
+has the same length, $\sqrt{d/2} = 5.656854$, to ten digits. That is a property
+of the position vector, not of the sum: adding it changes the embedding's norm,
+since $\lVert x + p \rVert^2 = \lVert x \rVert^2 + \lVert p \rVert^2 + 2\,x \cdot p$
+depends on the angle between them. RoPE, further down, is the scheme that leaves
+the norm alone.
 
 ::: {.callout-warning appearance="simple" icon="false"}
 **Read the middle column honestly.** The mean is *not* monotonic in $k$: offset
@@ -2018,12 +2033,16 @@ positions ($n = 0, 100, 1000, 5000$):
 Now the same measurement on the additive scheme, where the position vector is
 summed into the embedding before projection:
 
-| offset $m-n$ | score at $n=0$ | at $n=100$ | at $n=1000$ | spread |
+| offset $m-n$ | score at $n=0$ | at $n=100$ | at $n=1000$ | spread over all four |
 |--:|--:|--:|--:|--:|
 | 0 | 31.19 | 26.98 | 48.15 | 26.3 |
 | 1 | 31.82 | 27.54 | 47.52 | 26.6 |
 | 10 | 13.74 | 20.55 | 38.85 | 25.1 |
 | 200 | 1.86 | 6.43 | 25.00 | 23.1 |
+
+Three of the four positions are printed; the spread column covers all four,
+which is why the first two rows are wider than the visible columns alone would
+give.
 
 [A spread of $10^{-13}$ against a spread of 26.]{.hl} With addition, "five
 tokens back" means something different at position 0 than at position 5,000,
@@ -2105,9 +2124,13 @@ a gap we will measure rather than assume in @sec-context-engineering.
 
 ## Encoder-only, decoder-only, encoder-decoder {#sec-model-families}
 
-Here is a fact that sounds like a simplification and is not:
-[the structural difference between BERT and GPT is which entries of the
-attention matrix are allowed to be non-zero.]{.hl}
+Here is a fact that sounds like a simplification and mostly is not:
+[the structural difference between BERT-style and GPT-style *self-attention* is
+which entries of the attention matrix are allowed to be non-zero.]{.hl} Two
+qualifications travel with it, and the rest of this section makes both: an
+encoder–decoder is two stacks joined by cross-attention, which no mask over one
+stack produces, and the names BERT and GPT also carry particular embeddings,
+normalisation placements and training objectives.
 
 Same blocks, same multi-head attention, same feed-forward sublayer, same
 residual stream. What differs is a [causal mask](#gloss-causal-mask){#term-causal-mask .term-ref} applied to the scores before the
@@ -2757,8 +2780,10 @@ layers, 8 experts, top-2 routing:
 | MoE, 8 experts, top-2 | **36.5B** | **10.7B** |
 
 The MoE model holds 5.7× the parameters of the dense one and does 1.67× the
-arithmetic. Its memory bill follows the first number and its latency follows
-the second.
+arithmetic. Its memory bill follows the first number; the second is a
+first-order estimate of the per-token arithmetic, not a latency figure. What you
+actually wait for also depends on how evenly the routing spreads across experts,
+on the communication that spreading costs, and on batch size and bandwidth.
 
 ::: {.callout-warning appearance="simple" icon="false"}
 **You rent the GPU for the total and get the latency of the active.** All 36.5B
@@ -2788,10 +2813,12 @@ $$
 The classical fix for load balancing is an auxiliary loss penalising uneven
 usage — an explicit correction for a failure mode the main objective is happy
 to walk into. But it is a second objective fighting the first, and by 2025 the
-largest open MoEs had dropped it: DeepSeek-V3 balances instead with a
-per-expert bias added to the routing score and adjusted online, carrying no
-gradient of its own. Check which mechanism a model uses rather than assuming
-the auxiliary loss is there.
+largest open MoEs had demoted it: DeepSeek-V3 balances mainly with a per-expert
+bias added to the routing score and adjusted online, carrying no gradient of its
+own. "Mainly" is the operative word — it keeps a small complementary
+sequence-wise balancing loss alongside that mechanism. Check which mechanism a
+model actually uses, and in what proportion, rather than assuming the auxiliary
+loss is either present or gone.
 
 The 29% active fraction in the table above is a property of *this*
 configuration, not of MoE. The direction the field went is **finer
@@ -2921,9 +2948,10 @@ model's ability to ask.
 $Q$ is what a token is looking *for*; $K$ is what it offers to be found *by*;
 $V$ is what it actually contributes once found. [$Q$ and $K$ together decide
 **where** information moves; $V$ alone decides **what** moves.]{.hl} Tie them
-and a token's advert becomes identical to its query, so the score table becomes
-symmetric and asymmetric relations — *which verb governs me* — become
-inexpressible. It also biases every token toward itself, since $x \cdot x$ is
+and a token's advert becomes identical to its query, so the score table is
+forced to be a symmetric Gram matrix. Row normalisation can still produce
+different weights in the two directions; what a head loses is the ability to
+*choose* them, since both directions read one entry. It also biases every token toward itself, since $x \cdot x$ is
 the largest score in a row unless a neighbour is longer; that second effect is
 a tendency, not a guarantee.
 
@@ -3034,8 +3062,10 @@ it, and the order gives you away.
    gets non-linear processing of its own. The feed-forward half applies
    per-token depth: $W_1$ is a bank of detectors and $W_2$ is what each
    broadcasts when it fires. Get the proportion right, because most candidates
-   have it backwards: [two thirds of every transformer block's parameters are
-   the feed-forward sublayer]{.hl}, not attention.
+   have it backwards: in the standard $d_{\text{ff}} = 4d$ block used
+   throughout this chapter, [two thirds of a transformer block's parameters are
+   the feed-forward sublayer]{.hl}, not attention. The ratio follows from that
+   choice of $d_{\text{ff}}$, so check it before quoting it elsewhere.
 
 3. **How do you estimate whether a model fits on your GPU?** Two numbers, added.
    Weights: parameters × bytes per parameter (7B at fp16 = 14 GB). KV cache:

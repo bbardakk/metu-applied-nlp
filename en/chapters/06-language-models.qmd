@@ -46,8 +46,9 @@ Those are the unigram representations. Both sentences contain the same
 can tell them apart. @sec-bake-off's word-bigram model does better on this
 particular pair — `iyi fiyat` and `fiyat iyi` are different columns — but it
 is still an unordered bag, now of pairs, and it buys that sensitivity by
-multiplying the vocabulary. Order is being approximated by widening the
-unit, not represented.
+multiplying the vocabulary. Say that carefully: those bigram columns really do
+encode local order — this is not a representation that has no access to it.
+What they cannot do is score a *sentence*, or produce the next word.
 
 Here is the same pair scored by the models in this chapter — the
 probability each assigns to the whole sentence, trained on nothing but
@@ -67,10 +68,12 @@ reordering the words cannot change the product — a bag of words wearing a
 probability distribution as a hat. The bigram model breaks the tie and prefers the
 sentence a Turkish speaker would also prefer, by a factor of about three.
 
-[That factor of three is the whole of Part II in miniature.]{.hl} It is
-the first time in this book that order is *represented* rather than
-approximated by widening the unit, and it came from one structural change:
-conditioning each word on the one before it. Everything from here to @sec-reasoning
+[That factor of three is the whole of Part II in miniature.]{.hl} The new
+thing is not that order has become visible — bigram features made it visible in
+@sec-bake-off. It is that an ordered sequence now has a *probability*, which is
+the same object you can use to rank two sentences and to generate the next word,
+and it came from one structural change: conditioning each word on the one
+before it. Everything from here to @sec-reasoning
 is a longer and longer answer to the question "conditioned on *what*,
 exactly?"
 
@@ -261,6 +264,17 @@ word types surviving the count threshold, with the hapax words folded into
 one class more, because it must also be able to emit `</s>`. The two numbers
 are the same vocabulary counted for two different jobs.
 
+Watch that extra class, because the count models predict `</s>` as well — the
+test table below counts 10,000 of those events. Anywhere a count model's
+probabilities have to sum to one over everything it can emit, the terminator
+belongs in the support with the 29,773, so a strict implementation smooths over
+29,774. On this corpus that moves the add-one arithmetic below by less than a
+hundredth of a percentage point, which is exactly why it goes unnoticed. Define
+the support once and use the same number for smoothing, for the softmax and for
+the count of prediction events; three different definitions in one pipeline is
+the most common way a published perplexity becomes incomparable with anyone
+else's.
+
 Two housekeeping decisions do real work later, so they are worth stating
 plainly.
 
@@ -270,10 +284,12 @@ model has to predict *that the review ends*. Without the terminator the
 probabilities do not sum to one over sentences of all lengths, and the
 model cannot be used to generate anything, because it would never stop.
 
-**Words seen once are replaced by `<unk>`.** @sec-bake-off measured that
-58.6% of Turkish review word forms are hapax; keeping them means
-estimating 43,579 probabilities from one observation each. Mapping them
-to a single "unknown word" symbol leaves 29,773 words, and gives the
+**Words seen once are replaced by `<unk>`.** @sec-bake-off measured 58.6%
+hapax on its own 40,000-review split — a different sample from this one, so take
+it as the scale of the problem rather than as this corpus's number. Here the
+threshold takes 72,087 distinct forms down to 29,773, so more than forty
+thousand forms would otherwise have had a probability estimated from a single
+observation each. Mapping them to a single "unknown word" symbol gives the
 model a way to assign non-zero probability to words it has never seen.
 It also has a consequence we will come back to, at some length, because
 it is the most common way published perplexity numbers are made
@@ -850,9 +866,13 @@ contribution was *what* to fall back to.
 Not the trigram's 333.5. The 5-gram's 353.8.
 
 Every column of that table is limited by counts, and the higher orders
-are starved hardest — 98% of training 5-grams were singletons, so
-doubling the data roughly halves that fraction and buys the 5-gram model
-real estimates where it previously had none. The trigram already had a
+are starved hardest — 98% of training 5-grams were singletons, and the extra
+data turns some of those singleton contexts into repeated observations, buying
+the 5-gram model real estimates where it previously had none. How far the
+singleton fraction falls is not something you can read off the corpus size: it
+depends on how much of the new text repeats 5-grams already seen and how many
+new ones it introduces, and for 5-grams of Turkish reviews most of it will be
+new. Measure it rather than assuming a halving. The trigram already had a
 context match for 69.6% of test predictions; the extra data mostly
 sharpens estimates it already had.
 
@@ -1394,10 +1414,13 @@ the day, and LSTMs [@hochreiter1997long] made the long-range gradients
 trainable enough to be practical.
 
 There is a reason that took twenty years. Differentiating $h_t$ with respect to
-$h_{t-k}$ multiplies $k$ Jacobians together, so the gradient shrinks or grows
-roughly like $\lVert W_h \rVert^k$: below one it vanishes and the model never
-learns a dependency ten words back; above one it explodes and training diverges
-in a single step [@bengio1994learning]. In practice you clip the gradient norm
+$h_{t-k}$ multiplies $k$ Jacobians together, and for a tanh unit each factor is
+$\operatorname{diag}(1 - h_t^2)\,W_h$ — the recurrent weights, but scaled by the
+activation derivative along the trajectory the network actually took. Repeated
+products of those factors are what vanish or explode [@bengio1994learning]. The
+recurrent weights set the scale; they do not settle it on their own. A scalar
+$W_h = 2$ looks explosive until the unit saturates: at $h_t = 0.99$ the local
+derivative is $(1 - 0.99^2)\times 2 = 0.0398$, and the gradient is shrinking. In practice you clip the gradient norm
 to stop the explosion [@pascanu2013difficulty], and you change the architecture
 to stop the vanishing — an LSTM's cell state is *added to* rather than
 multiplied by a weight matrix, which gives the gradient a path with no
@@ -1436,19 +1459,22 @@ would you actually deploy?
 | Training time | [~1 second]{.pro} | [~2 minutes]{.con} |
 | Novel contexts | [better — 526.7]{.pro} | [worse — 554.4]{.con} |
 | Seen contexts | [273.1]{.con} | [better — 265.9]{.pro} |
-| Generates novel text | [barely — 5.8% of its 8-word spans copied at $n=3$, 91.6% at the $n=5$ that makes it fluent]{.con} | [yes — 0.0% copied]{.pro} |
+| Repeats training text | [5.8% of its 8-word spans copied verbatim at $n=3$, 91.6% at the $n=5$ that makes it fluent]{.con} | [0.0% copied]{.pro} |
 | Gives you embeddings | [no]{.con} | [yes, free]{.pro} |
 | Adding data | [retrain in seconds]{.pro} | [retrain in minutes]{.con} |
-| Scales with more data | [saturates]{.con} | [keeps improving]{.pro} |
+| Returns from more data | [flattening at this scale]{.con} | [still steep]{.pro} |
 | Debuggable | [inspect the counts]{.pro} | [inspect nothing]{.con} |
 
 : What each model is actually for, on 38,000 Turkish reviews {tbl-colwidths="[30,35,35]"}
 
 The practical reading: **at this scale, use the n-gram model, and use
 both if you can afford it.** The neural model earns its place not by
-today's perplexity but by the two rows near the bottom — it composes
-rather than copies, and it is the only one of the two that gets better
-when you give it a hundred times more data. That is a bet on the future,
+today's perplexity but by the two rows near the bottom — it does not reproduce
+training text, and its returns from a hundred times more data are the ones that
+keep going. That is a comparison of slopes, not a claim that counting stops
+improving; string overlap is also a measure of copying rather than of meaning,
+so read the 0.0% as "assembles its own word sequences", not as "says something
+new". That is a bet on the future,
 and this chapter is the moment in the book where the bet is placed.
 
 ## Intuition checks
@@ -1481,16 +1507,22 @@ should keep stepping down.
 
 Because they are wrong about different things. The split by seen and
 unseen context shows the neural model ahead on familiar contexts (265.9
-vs 273.1) and behind on novel ones (554.4 vs 526.7), so a mixture can
-recover whichever model happens to be right on each event.
+vs 273.1) and behind on novel ones (554.4 vs 526.7), so a mixture is exposed to whichever model
+is better on each *kind* of event. It does not know, event by event, which one
+to trust: it always averages, and the averaging is what pays.
 
 Be careful with the general claim, because the usual version of it is false.
 What interpolation guarantees is weaker: by Jensen's inequality the mixture's
 log loss is never worse than the $\lambda$-weighted average of the two models'
-log losses, so it always beats the *worse* model. Beating the *better* one
-needs their strengths to be genuinely complementary, and adding a weak model
+log losses, so it is never worse than the *worse* model. "Never worse" is the
+honest word: at $\lambda = 0$ or $1$, or when the two models put the same
+probability on every event, the inequality is an equality. Beating the *better*
+one needs their strengths to be genuinely complementary, and adding a weak model
 to a strong one at a badly chosen $\lambda$ makes things worse. Fitting
-$\lambda$ on held-out data is what protects you — it can collapse to 0 or 1.
+$\lambda$ on held-out data is what protects you — it can collapse to 0 or 1 —
+but a weight chosen on development data is still a bet that the same trade-off
+holds on the test set, not a guarantee that the mixture beats its best
+component there.
 Here it came out at 0.50, which is itself the evidence: on this corpus the
 data says the two are worth the same.
 :::
@@ -1504,8 +1536,9 @@ actually wins on perplexity. The fluency is retrieval, not generation. Sparsity
 explains it: 98% of training 5-grams occur once, so a four-word context
 usually admits exactly one continuation — the one that followed last
 time. It also means the model cannot be shown to a user without a
-plagiarism review, and it cannot improve, because there is nothing there
-to improve.
+plagiarism review. More data would help it — the singleton contexts are exactly
+what extra text fills in — but what it buys is more retrieved continuations, not
+a model that composes.
 :::
 
 ## Interview questions

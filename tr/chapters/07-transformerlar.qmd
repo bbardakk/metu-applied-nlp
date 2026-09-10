@@ -183,18 +183,22 @@ XX^{\top} = \begin{array}{r|rrr}
 \end{array}
 $$
 
-Burada iki şey ters gider ve her biri tek başına ölümcüldür.
+Bu örnekte iki sınırlama görünür hâle gelir ve her biri tek başına onu batırmaya yeter.
 
 **Benzerlik simetriktir.** Zorunlu olarak $x_i \cdot x_j = x_j \cdot x_i$'dir.
 Yani "fiil nesnesini arıyor" ile "nesne fiilini arıyor" *aynı skoru* almaya
 mahkûmdur. Bunun neyi zorunlu kıldığı konusunda kesin olalım: attention
 *ağırlıkları* yine de farklı olabilir, çünkü softmax her satırı kendi
 paydasıyla normalleştirir; genel olarak $\alpha_{ij} \neq \alpha_{ji}$'dir.
-Kaybolan şey iki yönü farklı sıralayabilme yeteneğidir — her satır aynı
-benzerlik tablosunu okuduğu için hiçbir head, fiilin nesnesini nesnenin
-fiilini istediğinden daha çok istediğine karar veremez. Oysa dilbilgisi, tek
-yönlü işleyen ilişkilerle doludur ve simetrik bir skor tablosu bunların bir
-tanesini bile ayırt edemez.
+Kaybolan şey skor tablosunun kendisi üzerindeki denetimdir: hiçbir head,
+fiil-nesnesini-arıyor ilişkisine nesne-fiilini-arıyordan *daha yüksek bir skor*
+veremez, çünkü ikisi aynı girdidir. Satır normalizasyonu ağırlıkları yine de
+ayırır — $d_k = 1$ ve $Q = K = [1, 2]^{\top}$ ile köşegen dışı iki ağırlık
+0,731 ve 0,119 çıkar — yani yönlü attention ortadan kalkmaz. Ortadan kalkan
+şey onu *seçme* özgürlüğü: head yalnızca simetrik bir tabloyu satır satır
+normalleştirmenin ürettiği yönleri ifade edebilir. Oysa dilbilgisi tek yönlü
+işleyen ilişkilerle doludur ve onları öyle puanlayabilmenin yolu ayrı
+izdüşümlerden geçer.
 
 **Kendine benzerlik diğer her şeyi bastırır.** Bir token'ın kendisine karşı
 skoru $x \cdot x$, yani uzunluğunun karesidir ve burada bu değer her satırdaki
@@ -204,8 +208,11 @@ Fiil hiçbir şeye uzanmaz. Katman, pahalı bir hesapla *her token'ı kendi hali
 bırakmanın* yaklaşık bir kopyasını üretir.
 
 ::: {.column-margin}
-Kesin konuşmak gerekirse $x_i \cdot x_i$, $x_i \cdot x_j$'yi yalnızca
-$\|x_j\| \le \|x_i\|$ olduğunda geçer — daha uzun bir komşu sizi geçebilir. Üç
+Kesin konuşmak gerekirse $x_i \cdot x_i \ge x_i \cdot x_j$ ilişkisi,
+$\|x_j\| \le \|x_i\|$ olduğunda Cauchy–Schwarz gereği *garantidir*. Tersi
+geçerli değil: $x_i = (1,0)$ ve $x_j = (0,2)$ ile komşu daha uzundur ama köşegen
+yine 1'e 0 kazanır — yani daha uzun bir komşu sizi geçebilir, geçmek zorunda
+değildir. Üç
 oyuncak vektörümüzün hepsinde $\|x\|^2 = 1{,}07$, dolayısıyla burada köşegen
 açık ara kazanıyor. Genel iddia daha zayıf ama yine de zarar verici:
 izdüşümsüz bir skor, iki token ilişkili olsun olmasın, kendine benzerliği
@@ -1136,11 +1143,14 @@ kazanacak:
   saklar. $n = 1024$, $h = 32$ için bu, 1,05M yerine 33,5M girdi demek —
   konusu ayrıca ele alınan (@sec-attention-maliyeti) bellekte ve matris çarpımı
   olmayan softmax işinde 32 kat artış.
-- **Her head daralır.** $d/h$ genişliğindeki bir head yalnızca rankı $\le d/h$
-  olan bir attention örüntüsü ifade edebilir. $d = 4096$ için bu, head başına
-  4096 yerine 128 demektir. Yüksek ranklı tek bir ilişkiyi düşük ranklı 32
-  ilişkiyle takas ediyorsunuz — genellikle iyi bir takas, ama her hâlükârda bir
-  takas.
+- **Her head daralır.** $d/h$ genişliğindeki bir head, *softmax öncesi skor*
+  matrisi $QK^{\top}$'ın rankını $\le d/h$ olmaya zorlar. $d = 4096$ için bu,
+  head başına 4096 yerine 128 demektir. Sınırın nerede bittiğine dikkat: satır
+  satır softmax bu sınırı korumaz. $d_k = 1$ ve $Q = K = [1, 2]^{\top}$ ile
+  $QK^{\top}$'ın rankı 1'dir, softmax'tan geçmiş matrisin determinantı ise
+  0,1497, yani rankı 2. Dolayısıyla takas ettiğiniz şey yüksek ranklı tek bir
+  *skor* ilişkisine karşılık düşük ranklı 32 ilişki — genellikle iyi bir takas,
+  ama her hâlükârda bir takas.
 :::
 
 ### Kazanç, sayılarla
@@ -1497,9 +1507,12 @@ Blok çıktısı bu — aşağıdaki widget'ta 4. aşama. Dikkat edilecek iki ş
 *Sabit* sütununa dokunulmadı, çünkü $W_2$'nin hiçbir satırı oraya yazmıyor. Bir
 de 3., 7. ve 8. satırlar hiç kullanılmadı: o dedektörler üç token'ın hiçbiri
 için ateşlenmedi, dolayısıyla satırlarında ne olduğunun burada bir önemi
-olmadı. Eğitilmiş bir modelde bu, istisna değil normal durumdur — herhangi bir
-girdi için feed-forward katmanının çoğu kapalıdır. Bunu aklınızda tutun, çünkü
-@sec-moe bütünüyle bu öncüle dayanır.
+olmadı. ReLU altında böyle tam sıfırlar istisna değil normal durumdur. Bunu
+genellemeden önce iki çekince: güncel modellerin çoğunun kullandığı GELU ve SiLU
+hiçbir yerde tam olarak sıfır değildir, yani "kapalı" ifadesi "çok az katkı
+veriyor"a dönüşür; ve her iki durumda da yoğun katman bütün satırları yine de
+hesaplar. @sec-moe'nin konusu tam olarak bu ikinci nokta — aritmetiği atlamak,
+yalnızca sonucunda az şey kalması değil.
 
 ### Bloğun tamamı
 
@@ -1583,7 +1596,7 @@ gerekçesi ya yukarıda ya aşağıda tartışılıyor.
 
 | bileşen | var olma sebebi olan sorun | o olmadan ne bozulur |
 |:--|:--|:--|
-| öğrenilmiş *herhangi* bir skor matrisi | ham benzerlik $x_i \cdot x_j$ simetriktir ve köşegeni şişirir | ilişkiler yönlendirilemez; her token çoğunlukla kendisine bakar |
+| öğrenilmiş *herhangi* bir skor matrisi | ham benzerlik $x_i \cdot x_j$ simetriktir ve köşegeni şişirir | bir ilişkinin iki yönü tek bir skoru paylaşır; her token çoğunlukla kendisine bakar |
 | onu $W^Q$, $W^K$ olarak *çarpanlara ayırmak* | head başına bir $d \times d$ matris 16 kat parametre demektir ve cache'i $d$ genişliğine mıhlar | eğitim maliyeti şişer ve GQA ifade edilemez hale gelir |
 | ayrı bir $W^V$ | bir token'ın *ilan ettiği* şey, *teslim etmesi gereken* şey değildir | yönlendirme ile içerik aynı şey olmaya zorlanır |
 | iç çarpım | $n^2$ çiftin tamamı için ucuz ve karşılaştırılabilir tek bir skor gerekir | her çifti karşılaştırmanın ölçeklenebilir bir yolu kalmaz |
@@ -1905,8 +1918,11 @@ tutunca:
 
 256 farklı mutlak konum boyunca $10^{-14}$'lük bir standart sapma, özdeşliğin
 kayan noktada birebir tuttuğu anlamına gelir. Ayrıca her konum vektörünün
-uzunluğu, on hane hassasiyetle aynıdır: $\sqrt{d/2} = 5{,}656854$ — encoding
-yön ekler, asla büyüklük değil.
+uzunluğu, on hane hassasiyetle aynıdır: $\sqrt{d/2} = 5{,}656854$. Bu, konum
+vektörünün bir özelliği; toplamın değil. Onu eklemek embedding'in normunu
+değiştirir, çünkü
+$\lVert x + p \rVert^2 = \lVert x \rVert^2 + \lVert p \rVert^2 + 2\,x \cdot p$
+aradaki açıya bağlıdır. Normu olduğu gibi bırakan şema, aşağıdaki RoPE.
 
 ::: {.callout-warning appearance="simple" icon="false"}
 **Ortadaki sütunu dürüstçe okuyun.** Ortalama, $k$'ya göre monoton *değildir*:
@@ -2026,12 +2042,15 @@ key, $d = 64$, birbirinden çok farklı dört mutlak konumdan ($n = 0, 100, 1000
 Şimdi aynı ölçüm, konum vektörünün izdüşümden önce embedding'e eklendiği
 toplamalı şema için:
 
-| kaydırma $m-n$ | $n=0$'da skor | $n=100$'de | $n=1000$'de | yayılım |
+| kaydırma $m-n$ | $n=0$'da skor | $n=100$'de | $n=1000$'de | dört konumun yayılımı |
 |--:|--:|--:|--:|--:|
 | 0 | 31,19 | 26,98 | 48,15 | 26,3 |
 | 1 | 31,82 | 27,54 | 47,52 | 26,6 |
 | 10 | 13,74 | 20,55 | 38,85 | 25,1 |
 | 200 | 1,86 | 6,43 | 25,00 | 23,1 |
+
+Dört konumun üçü basılı; yayılım sütunu dördünü birden kapsıyor, ilk iki
+satırın yalnızca görünen sütunların vereceğinden geniş çıkmasının sebebi de bu.
 
 [$10^{-13}$'lük bir yayılıma karşı 26'lık bir yayılım.]{.hl} Toplamayla, "beş
 token geride" ifadesi 0. konumda başka, 5.000. konumda başka bir şey demek
@@ -2113,9 +2132,13 @@ varsaymak yerine ölçmek gerekir.
 
 ## Encoder-only, decoder-only, encoder-decoder {#sec-model-aileleri}
 
-Kulağa aşırı basitleştirme gibi gelen ama olmayan bir gerçek:
-[BERT ile GPT arasındaki yapısal fark, attention matrisinin hangi girdilerinin
-sıfırdan farklı olmasına izin verildiğidir.]{.hl}
+Kulağa aşırı basitleştirme gibi gelen ama büyük ölçüde olmayan bir gerçek:
+[BERT tarzı ile GPT tarzı *self-attention* arasındaki yapısal fark, attention
+matrisinin hangi girdilerinin sıfırdan farklı olmasına izin verildiğidir.]{.hl}
+Yanında iki kayıt geliyor ve bu bölümün geri kalanı ikisini de yapıyor: bir
+encoder–decoder, cross-attention ile birbirine bağlanmış iki yığındır ve tek bir
+yığın üzerindeki hiçbir maske bunu üretmez; ayrıca BERT ve GPT adları belirli
+embedding, normalizasyon yerleşimi ve eğitim hedefi tercihlerini de taşır.
 
 Aynı bloklar, aynı multi-head attention, aynı feed-forward alt katmanı, aynı
 residual akış. Değişen tek şey, softmax'tan önce skorlara uygulanan
@@ -2768,7 +2791,11 @@ uzman, top-2 yönlendirme alalım:
 | MoE, 8 uzman, top-2 | **36,5B** | **10,7B** |
 
 MoE modeli yoğun modelin 5,7 katı parametre tutuyor ve 1,67 katı aritmetik
-yapıyor. Bellek faturası ilk sayıyı, gecikmesi ikinci sayıyı takip ediyor.
+yapıyor. Bellek faturası ilk sayıyı takip ediyor; ikincisi ise token başına
+aritmetiğin birinci mertebeden kestirimi, bir gecikme rakamı değil. Fiilen
+beklediğiniz süre, yönlendirmenin uzmanlara ne kadar dengeli dağıldığına, o
+dağılımın getirdiği iletişim maliyetine, batch boyutuna ve bant genişliğine de
+bağlı.
 
 ::: {.callout-warning appearance="simple" icon="false"}
 **GPU'yu toplam için kiralar, aktif olanın gecikmesini alırsınız.** 36,5B
@@ -2799,10 +2826,12 @@ $$
 Yük dengeleme için klasik çözüm, dengesiz kullanımı cezalandıran yardımcı bir
 kayıp — ana amacın seve seve düştüğü bir hata moduna karşı açıkça konulmuş bir
 düzeltme. Ama bu, birinciyle kavga eden ikinci bir amaç ve 2025'e gelindiğinde en
-büyük açık MoE'ler onu bırakmıştı: DeepSeek-V3 bunun yerine yönlendirme skoruna
-uzman başına eklenen ve çevrimiçi ayarlanan, kendi gradyanı olmayan bir bias ile
-dengeliyor. Yardımcı kaybın orada olduğunu varsaymak yerine modelin hangi
-mekanizmayı kullandığına bakın.
+büyük açık MoE'ler onu ikinci plana atmıştı: DeepSeek-V3 dengeyi ağırlıklı
+olarak yönlendirme skoruna uzman başına eklenen ve çevrimiçi ayarlanan, kendi
+gradyanı olmayan bir bias ile kuruyor. "Ağırlıklı olarak" burada kilit ifade:
+o mekanizmanın yanında küçük, tamamlayıcı bir dizi düzeyi (sequence-wise)
+dengeleme kaybını koruyor. Yardımcı kaybın var ya da yok olduğunu varsaymak
+yerine, modelin gerçekte hangi mekanizmayı hangi oranda kullandığına bakın.
 
 Yukarıdaki tablodaki %29'luk aktif oran, MoE'nin değil *bu yapılandırmanın* bir
 özelliği. Alanın gittiği yön **daha ince tanecikliliğe** doğru: top-2 ile 8 büyük
@@ -3048,8 +3077,11 @@ dinliyor; sıralama sizi ele verir.
    kendine ait doğrusal olmayan işlemi gördüğü yer feed-forward alt katmanıdır. Feed-forward yarısı
    token başına derinlik uygular: $W_1$ bir dedektör bankası, $W_2$ ise her
    dedektör ateşlediğinde yaydığı şeydir. Oranı doğru bilin, çünkü adayların çoğu
-   tersini söylüyor: [her transformer bloğunun parametrelerinin üçte ikisi
-   feed-forward alt katmanıdır]{.hl}, attention değil.
+   tersini söylüyor: bu bölüm boyunca kullanılan standart
+   $d_{\text{ff}} = 4d$ bloğunda [bir transformer bloğunun parametrelerinin üçte
+   ikisi feed-forward alt katmanıdır]{.hl}, attention değil. Oran bu
+   $d_{\text{ff}}$ tercihinden çıkar; başka türlü kurulmuş bir blok için
+   aktarmadan önce kontrol edin.
 
 3. **Bir modelin GPU'nuza sığıp sığmadığını nasıl kestirirsiniz?** İki sayı,
    toplanır. Ağırlıklar: parametre × parametre başına byte (fp16'da 7B = 14 GB).
@@ -3069,9 +3101,10 @@ dinliyor; sıralama sizi ele verir.
    18,63 GiB. Bunu 32 head ve 32 katmanla çarpın; naif sürüm yavaş değil,
    imkânsızdır.
 
-5. **Encoder-only mu, decoder-only mu, encoder-decoder mı?** Ayrım tamamen
-   attention matrisinin hangi girdilerinin sıfırdan farklı olmasına izin
-   verildiğiyle ilgilidir. Encoder-only her şeyi iki yönlü görür ve tam bir
+5. **Encoder-only mu, decoder-only mu, encoder-decoder mı?** Self-attention
+   düzeyinde ayrım, attention matrisinin hangi girdilerinin sıfırdan farklı
+   olmasına izin verildiğiyle ilgilidir; encoder–decoder ise buna ek olarak iki
+   yığını cross-attention ile birbirine bağlar. Encoder-only her şeyi iki yönlü görür ve tam bir
    metnin temsiline ihtiyacınız olduğunda doğru tercihtir — sınıflandırma, arama
    ve oradaki bütün sonuçlar (@sec-siniflandirma). Decoder-only nedensel olarak
    maskelenmiştir ve üretim için gereken odur. Encoder-decoder ikisini birden
