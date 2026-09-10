@@ -19,7 +19,7 @@ anything under about 1.5× as within the noise of a warm machine.
 **Learning objectives.** After this chapter you can:
 
 - explain what each sampling parameter does to the probability distribution;
-- make a model emit schema-valid output every single time;
+- make a model emit schema-valid output whenever it is allowed to finish;
 - use logprobs for confidence, routing, and abstention;
 - diagnose repetition and degeneration instead of tuning parameters at random.
 
@@ -232,7 +232,7 @@ The usual controls, and what each costs:
 | Presence penalty | a flat subtraction the first time a token appears | same failure mode, milder; does not escalate |
 | Frequency penalty | a subtraction proportional to how often it has appeared | escalates with every repeat, so long outputs drift |
 
-: Four ways to stop a loop, and what each one costs {tbl-colwidths="[26,38,36]"}
+: Five ways to stop a loop, and what each one costs {tbl-colwidths="[26,38,36]"}
 
 The repetition penalty $\theta$ acts on the raw logit, and its sign handling is
 the part implementations get wrong:
@@ -292,7 +292,7 @@ distorting version, which is the right default and worth knowing you are using.
 ```{=html}
 <div class="fig-title">One decoding step, with and without a grammar</div>
 <svg viewBox="0 0 764 300" style="max-width:744px" role="img"
-     aria-label="A diagram of a single decoding step. On the left, the model has produced the partial output open brace, quote, label, quote, colon, and the next-token distribution is shown as four candidates with probabilities: quote at 0.61, the word maybe at 0.18, a newline at 0.12, and the word positive at 0.09. In the unconstrained path, sampling can select any of the four, and three of them produce output that is not valid against the schema. In the constrained path, a finite-state machine compiled from the schema knows that only a quote can legally continue at this point, so the logits of the other three are set to negative infinity and their probability becomes zero; the quote is renormalised to probability one. A caption notes that the grammar guarantees the shape of the output and says nothing about whether the content is correct.">
+     aria-label="A diagram of a single decoding step. On the left, the model has produced the partial output open brace, quote, label, quote, colon, and the next-token distribution is shown as four candidates with probabilities: quote at 0.61, the word maybe at 0.18, a newline at 0.12, and the word positive at 0.09. In the unconstrained path, sampling can select any of the four; this implementation emits canonical JSON with no whitespace, so only the quote continues a valid document and the other three, newline included, do not. In the constrained path, a finite-state machine compiled from the schema knows that only a quote can legally continue at this point, so the logits of the other three are set to negative infinity and their probability becomes zero; the quote is renormalised to probability one. A caption notes that the grammar guarantees the shape of the output and says nothing about whether the content is correct.">
 
   <text x="10" y="16" class="t-xs t-b t-muted">PARTIAL OUTPUT SO FAR</text>
   <rect x="10" y="26" width="220" height="34" rx="6" class="chip"/>
@@ -323,7 +323,7 @@ distorting version, which is the right default and worth knowing you are using.
 
   <text x="400" y="118" class="t-xs t-b t-accent">CONSTRAINED — THE AUTOMATON MASKS FIRST</text>
   <rect x="400" y="128" width="354" height="58" rx="6" class="box-accent"/>
-  <text x="577" y="148" class="t-xs t-mid t-muted">the FSM compiled from the schema allows only <tspan class="t-mono">"</tspan> here,</text>
+  <text x="577" y="148" class="t-xs t-mid t-muted">this schema emits canonical JSON, so only <tspan class="t-mono">"</tspan> continues here,</text>
   <text x="577" y="162" class="t-xs t-mid t-muted">so the other three logits are set to −∞</text>
   <text x="577" y="178" class="t-xs t-mid t-b t-accent">invalid output is unreachable</text>
 
@@ -573,14 +573,17 @@ below the confidence it stated. That is the firm finding.
 The one people quote is the bottom bin, and it deserves more caution than it
 usually gets: 5 correct out of 15, a 33.3% point estimate with an interval of
 $[15, 58]$. That interval contains 50%, so this does not establish "below
-chance". What it does establish is the operational point anyway — **a label
-probability near 0.5 carries no usable information** — and it is the version to
-repeat. (The model reports a log-probability; 0.5 is the probability, which is
-about $-0.69$ in logs. Convert before you threshold.)
+chance" — and a wide interval is not evidence of uselessness either. What this
+bin does establish is narrower: **a label probability near 0.5 is not a
+calibrated estimate of being right**, on fifteen items. (The model reports a
+log-probability; 0.5 is the probability, which is about $-0.69$ in logs. Convert
+before you threshold.)
 
-[A label probability near 0.5 does not mean "coin flip" in the sense of "half
-right"; it means the number is not telling you anything.]{.hl} Do not read the
-number as a calibrated probability.
+[Do not read a label probability near 0.5 as "right half the time".]{.hl} What
+it may still be good for is *ordering*: an uncalibrated score can rank documents
+well enough to route the doubtful ones to a human, which is exactly what the
+abstention experiment below does. Judge that use on an accuracy–coverage curve,
+not on this bin.
 
 Two fixes, in order of effort. **Temperature scaling** [@guo2017calibration]
 fits a single scalar $T$ on a held-out slice and divides the logits by it — the
@@ -917,7 +920,7 @@ Everything in this chapter ran on one laptop with the versions below.
 | library | version used | what it is for here |
 |:--|:--|:--|
 | `ollama` | 0.24.0 | serving `qwen3.5:9b` and `llama3.2:3b`, and the `format` parameter that enforces a schema |
-| Python | 3.14.5 | schema validation is twenty lines of the stdlib `json` module; the abstention curve uses `numpy`, which is not stdlib |
+| Python | 3.14.5 | `json.loads` from the stdlib parses; the twenty lines around it are our own checks for required fields and enum values, since parsing is not schema validation. The abstention curve uses `numpy`, which is not stdlib |
 
 : The stack these numbers came from {tbl-colwidths="[24,16,60]"}
 
@@ -1059,8 +1062,9 @@ in your evaluation should be reported.
 
 - **Logprobs discriminate well and calibrate badly.** AUC **0.9492** against
   the label and **0.8268** for predicting its own correctness, at **7.04%**
-  ECE — with the 0.90–0.95 bin right only 68.0% of the time and the bin nearest 0.5
-  bin right **33.3%** on 15 items. Rank with them; do not quote them.
+  ECE — with the 0.90–0.95 bin right only 68.0% of the time and the bin nearest
+  0.5 right on **5 of 15** items, with substantial uncertainty. Rank with them;
+  do not quote them as probabilities.
 
 - **Abstention is the cheapest accuracy you will buy.** Dropping the
   least-confident 20% took accuracy from **86.75% to 92.50%** with no model
