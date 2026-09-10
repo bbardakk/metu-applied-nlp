@@ -423,7 +423,7 @@ before and after factorization:
 
 | word pair | PPMI rows, 19-D | SVD, 5-D | what happened |
 |---|--:|--:|---|
-| `apple` – `banana` | 0.40 | **1.00** | never share a sentence in this corpus; the compression is what links them |
+| `apple` – `banana` | 0.40 | **1.00** | never share a sentence in this corpus; the shared contexts already link them, and the compression is what makes the link decisive |
 | `king` – `queen` | 0.55 | **0.90** | already right, and got stronger |
 | `apple` – `man` | 0.79 | **0.85** | the one-sentence accident — *not* deleted, but no longer first |
 
@@ -444,9 +444,10 @@ in the same sentence in this corpus, so nothing links them *directly*. What
 links them is that they keep the same company — both follow `eats`, both
 precede `is sweet fruit`. The raw PPMI rows already register that as a cosine
 of 0.40, because shared contexts are shared coordinates; what the compression
-does is strengthen it to 1.00, enough to reorder the neighbour list. This is
-transitivity, and low-rank compression is what makes it decisive rather than
-what makes it visible.
+does is strengthen it to 1.00, enough to reorder the neighbour list. Call this
+shared-context generalisation rather than transitivity — cosine similarity is
+not a transitive relation in the mathematical sense — and note that low-rank
+compression is what makes it decisive rather than what makes it visible.
 
 This is latent semantic analysis [@deerwester1990indexing], and it came before
 word2vec by more than twenty years.
@@ -534,8 +535,9 @@ So counting works. We built a space by hand, and royalty landed on one side
 and food on the other. Why did the field abandon it?
 
 One reason, and it is not accuracy: the co-occurrence matrix is
-vocabulary-by-vocabulary. At 100,000 words that is ten billion cells you have
-to hold before you can factorize anything. The alternative is to never build
+vocabulary-by-vocabulary. At 100,000 words that is ten billion *possible*
+cells — sparse storage keeps only the non-zeros, but it is still one monolithic
+artifact you have to build before you can factorize anything. The alternative is to never build
 the matrix at all — and instead learn the vectors by asking the model to
 *predict*.
 
@@ -1339,7 +1341,11 @@ still move by $100 \times \text{lr}$. What it actually prevents is a single
 large residual multiplied by a context vector whose norm has grown. The clean
 fix is to divide each row's accumulated gradient by how many times its index
 occurred in the batch — `np.bincount(targets.ravel(), minlength=V)` gives the
-counts — which recovers the per-pair semantics word2vec has by construction.
+counts. Be clear about what that buys: it bounds the step a frequent word takes
+and stops the update scaling with batch frequency. It does not reproduce
+sequential SGD, which recomputes the gradient at the parameters left by the
+previous example; averaging gradients all evaluated at the same point is a
+different update, with a different effective step size.
 The clip is not a modelling choice; it is the cheap version, and the price of
 vectorising an inherently sequential algorithm. It is also a good example of
 why "I reimplemented the paper and it didn't work" is usually about
@@ -1358,16 +1364,18 @@ $$
 \mathbf{v}_w \cdot \mathbf{u}_c = \mathrm{PMI}(w, c) - \log K
 $$
 
+— at the optimum, with the dot products free to take any value. The neural
+network was a matrix factorization wearing a costume.
+
 Note that this is PMI, not the PPMI of route A, and the difference is not
 cosmetic. The implicit matrix holds $-\infty$ in every cell for a pair that
 never co-occurs, which no factorization can represent — which is exactly why
 Levy and Goldberg go on to propose the *shifted positive* PMI matrix,
 $\mathrm{SPPMI}(w,c) = \max(\mathrm{PMI}(w,c) - \log K,\ 0)$, as the explicit
-matrix you would actually build. The two routes agree on the theorem; the
-clipping is the practical patch both of them need.
-
-at the optimum. The neural network was a matrix factorization wearing a
-costume.
+matrix you would actually build. Note where the clipping lives: it is a patch
+applied when you *construct* an explicit SPPMI matrix. Training SGNS clips
+nothing — it simply never has to represent a $-\infty$, because it only ever
+sees the pairs it samples.
 
 Look closely at what that sentence claims. Nowhere in word2vec does anyone
 build a PMI matrix — the algorithm only ever sees one pair at a time and
@@ -1376,10 +1384,13 @@ the dot product for any pair of words, you get that pair's PMI, minus a
 constant. The matrix was never constructed; it was *reached*.
 
 The $-\log K$ term has a plain reading too. Raising $K$ means each real pair
-is contrasted against more fakes, which drives every dot product down by the
-same fixed amount. Since a constant shift moves all words equally, it changes
-almost nothing about the geometry — which is exactly why $K$ is one of the
-less important settings in the whole method.
+is contrasted against more fakes, which lowers the target for every dot product
+by the same fixed amount. Be careful with the intuition here: the shift is
+uniform in the *implicit matrix*, and that is not the same as translating every
+word vector by a common offset — no set of $d$-dimensional vectors reproduces a
+constant added to every inner product exactly. In practice $K$ is still one of
+the less important settings, which is an empirical observation rather than a
+consequence of the algebra.
 
 ::: {.callout-note collapse="true"}
 ## Where the $-\log K$ comes from
@@ -1415,12 +1426,17 @@ $$
 
 The one assumption doing real work is that $z$ can be chosen freely for every
 pair. It cannot — the dot products all share the same underlying vectors, and
-with $d$ far below the vocabulary size the model must compromise. That
-compromise is precisely the low-rank approximation an SVD would have given
-you.
+with $d$ far below the vocabulary size the model must compromise. What the
+theorem fixes is the *target*; it says nothing about how the compromise is
+made, and that is where the two routes part company. A truncated SVD minimises
+squared reconstruction error and weights every cell of the matrix equally.
+SGNS minimises a logistic loss weighted by how often each pair was actually
+sampled. Both are low-rank approximations to the same target and they are
+approximations under different losses, so at a given $d$ they do not
+generally produce the same vectors.
 
 A second assumption is hiding in the notation, and it matters because it
-contradicts the code you are about to write. Writing the noise weight as
+contradicts the code above. Writing the noise weight as
 $K\,P(w)P(c)$ assumes negatives are drawn from the *raw* unigram distribution.
 word2vec draws them from $P_\alpha(c) \propto f(c)^{0.75}$ instead — the
 exponent from two sections ago — and carrying that through gives
@@ -1506,9 +1522,11 @@ matrix the algorithm factorizes.
 ::: {.fig-cap}
 The routes look unrelated — one is linear algebra on a count matrix, the
 other is stochastic gradient descent on a classifier — but @levy2014neural
-proved they arrive at the same place. Skip-gram with negative sampling is
+showed they are aimed at the same target. Skip-gram with negative sampling is
 implicitly factorizing the PMI matrix that route A approximates by clipping it
-into PPMI, shifted by $\log K$.
+into PPMI, shifted by $\log K$. Aimed at, not landing on: the equivalence is
+exact for unconstrained dot products, and at the low rank you actually use the
+two optimise different losses.
 :::
 ::::
 
@@ -1522,16 +1540,18 @@ every paper you read: when a new method beats an old one, some of the
 improvement is the method and some is the tuning, and the split is rarely
 reported.
 
-Which leaves the practical question of when to take which route. Since they
-arrive at the same place, the choice is entirely about engineering:
+Which leaves the practical question of when to take which route. Since they aim
+at the same target and land close enough that @levy2015improving could not
+separate them once the hyperparameters matched, the choice is mostly about
+engineering:
 
 | | [Counting]{.pro} (PPMI + SVD) | [Predicting]{.pro} (word2vec) |
 |---|---|---|
 | Memory | Holds a $V \times V$ matrix. Stored densely that is 160 billion cells at $V = 400{,}000$ — but nobody stores it densely: the matrix is sparse, and GloVe builds exactly this one, for exactly this vocabulary, to produce the vectors used throughout this chapter. The real cost is that it is a single monolithic artifact, expensive to build and expensive to update | Streams the corpus; memory is $V \times d$ regardless of corpus size |
 | Corpus size | Comfortable on small corpora, where every count is precious | Needs a lot of text before the gradient noise averages out |
-| Determinism | [Same input, same output, every time]{.pro} | [Random initialisation and sampling; two runs differ]{.con} |
+| Determinism | [Same input, same output — for an exact solver. Randomized truncated SVD, the default at scale, needs a fixed seed, and singular vectors are only determined up to a sign either way]{.pro} | [Random initialisation and sampling; two runs differ]{.con} |
 | New data | [Recount and refactorize from scratch]{.con} | [Keep training from where you stopped]{.pro} |
-| Inspectability | [Every intermediate is a table you can read]{.pro} | [Nothing meaningful to look at until it finishes]{.con} |
+| Inspectability | [Every intermediate is a table you can read]{.pro} | [Little to read mid-training beyond the loss and the current nearest neighbours]{.con} |
 | Tuning burden | Window size, PPMI variant, $d$ | Window, $d$, $K$, subsampling $t$, learning rate, epochs |
 
 : The same destination, different engineering {tbl-colwidths="[19,40,41]"}
@@ -1642,8 +1662,8 @@ norm: 6.118
 That is what a word is now: one hundred numbers, none of which means
 anything on its own. The dimensions are not "royalty" and "gender" — they
 are an arbitrary basis of a learned space, and asking what dimension 37
-means is like asking what the third principal component of a height-weight
-dataset means. Sometimes there is an answer; usually there is not.
+means is like asking what a principal component of some multivariate dataset
+means on its own. Sometimes there is an answer; usually there is not.
 
 ```python
 for w in ["king", "pump", "turkey", "python", "bank"]:
@@ -2419,9 +2439,12 @@ differently on them, as we will see below.
 
 ### The space is not isotropic
 
-If embeddings used their space well, two random words would be about as
-often at 90° as at any other angle, and mean cosine would be near zero. They
-are not.
+If embeddings used their space well, two random words would sit at a mean
+cosine of zero. Be precise about the null, because the obvious phrasing is
+wrong: for independent unit vectors drawn uniformly in $d$ dimensions the
+angles do *not* spread evenly — they concentrate near 90°, with mean cosine 0
+and variance $1/d$. Isotropy means no direction is special, not that every
+angle is equally likely. This space is not isotropic.
 
 ```python
 rng = np.random.default_rng(0)
@@ -2439,14 +2462,22 @@ vals = (S @ S.T)[np.triu_indices(4000, k=1)]
   after subtracting the mean, mean cosine: -0.000
 ```
 
-Every vector has a large shared component, so all words point somewhat the
-same way and 56.9% of random pairs have positive cosine. On its own that
-figure proves little — under an isotropic null the share would be 50%, and
-56.9% out of 8 million pairs is a small excess. The diagnostic is the line
-below it: the mean vector has norm 0.171, and subtracting it drives the mean
-cosine to zero. The vectors occupy a narrow cone rather than the full
-sphere — the same defect we saw in the toy SVD, where every word had a
-negative first coordinate.
+Every vector has a shared component, so all words point somewhat the same way
+and 56.9% of random pairs have positive cosine. On its own that figure proves
+little — under an isotropic null the share would be 50%, and the 8 million pairs
+behind it come from 4,000 vectors, so they are nowhere near independent
+observations.
+
+Nor are the mean cosine and the mean-vector norm two separate pieces of
+evidence. For $n$ unit vectors they are the same number:
+$\bar{c} = (n\lVert\bar{v}\rVert^2 - 1)/(n-1)$, and
+$(4000 \times 0.171^2 - 1)/3999 = 0.029$ exactly. What the two lines together
+say is that there is a shared directional component of a *measurable size*,
+and that removing it leaves a mean cosine of zero — a real finding, and a
+milder one than a narrow cone. At a mean cosine of 0.029 the vectors are not
+crammed into a sliver of the sphere; they are tilted off centre. Note also
+what centring does not buy: a zero mean removes the shared direction, it does
+not make the covariance spherical.
 
 Subtracting the mean vector removes most of it, and removing the top few
 principal components as well removes more; @mu2018allbutthetop showed this
@@ -2735,7 +2766,9 @@ the circumstances.
 | **PPMI + SVD** | No training loop; deterministic, so the same corpus gives the same vectors twice. Every step is inspectable. Works on small corpora. | Needs the $V \times V$ co-occurrence matrix — sparse, so the cost is the number of non-zeros, and a truncated SVD never forms the dense version. Still the largest object in the pipeline. No out-of-vocabulary handling. Awkward to update with new text. | The corpus is small, the vocabulary is modest, and you need to be able to explain every number. |
 | **word2vec** | Streams over the corpus, so you never hold the whole thing in memory — the model itself is still two $V \times d$ tables. Fast, well-understood, implementations everywhere. Skip-gram is strong on rare words. | Out-of-vocabulary words raise an error, full stop. Sensitive to hyperparameters. Little to inspect mid-training beyond the loss. | You have a large domain corpus in a language without heavy morphology and want vectors specific to it. |
 | **GloVe** | Trained on the global matrix, so it sees corpus-wide statistics rather than one window at a time. Pretrained vectors are excellent and free. | Requires building the co-occurrence matrix first, which is the memory cost you were avoiding. Same OOV failure. | You want good English vectors immediately and have no reason to train anything. |
-| **fastText** | Any word gets a vector, including one invented five seconds ago. Typo-tolerant. Dramatically better for agglutinative languages. | Slower and larger — it stores n-gram vectors on top of word vectors, and every lookup is a sum. Assumes spelling similarity implies meaning similarity: `kitap`/`kitle` at 0.667. Weakest on short words. | Turkish, Finnish, Hungarian, Arabic — or any user-generated text where spelling is unreliable. |
+| **fastText** | Any word gets a vector, including one invented five seconds ago. Typo-tolerant. Far better out-of-vocabulary coverage on agglutinative languages — whether that
+converts into task accuracy is a separate measurement, and @sec-bake-off found
+it did not on one. | Slower and larger — it stores n-gram vectors on top of word vectors, and every lookup is a sum. Assumes spelling similarity implies meaning similarity: `kitap`/`kitle` at 0.667. Weakest on short words. | Turkish, Finnish, Hungarian, Arabic — or any user-generated text where spelling is unreliable. |
 
 : Static word embedding methods {tbl-colwidths="[12,29,29,30]"}
 
@@ -2800,7 +2833,7 @@ exactly the specification for the next part of the book.
 | No word order | *pump failed / valve fine* and its reverse are identical | Sequence models (@sec-language-models) |
 | Out-of-vocabulary words | word2vec raises `KeyError`; 7.3% of Turkish tokens | Subwords (fastText, BPE) |
 | Antonyms look like synonyms | `increase`/`decrease` at 0.881 | Task-supervised fine-tuning |
-| Anisotropic geometry | 56.9% of random pairs have positive cosine | Mean removal, whitening |
+| Anisotropic geometry | mean cosine 0.029 against 0 under an isotropic null, from a mean vector of norm 0.171; centring removes it | Mean removal, whitening |
 | Quality collapses on rare words | `eutectic` → `tiwai` | Domain adaptation, subwords |
 | Bias absorbed from the corpus | `homemaker` +0.363 on the woman axis | No clean fix; measure and document |
 
@@ -2956,14 +2989,17 @@ vectors and the vectors are the thing you keep. Write $\sigma(v \cdot u)$,
 point out that `score - labels` is the residual, and add that the single
 hidden layer carries no activation function. One caveat worth keeping: an
 ordinary logistic regression fits weights over *fixed* features, and this
-fits both vectors at once, which makes the objective bilinear rather than
-convex. The per-example arithmetic is the same; the optimisation problem is
-not. If they push back
+fits both vectors at once. The *score* $v \cdot u$ is bilinear in the two
+learned vectors, so the loss is not jointly convex in them. The per-example
+arithmetic is the same; the optimisation problem is not. If they push back
 with "but isn't this a neural network?", the answer is ready: yes, a shallow
 one, and the two are names for the same thing. Then deliver the key point:
-@levy2014neural proved the
-optimum is a factorization of the shifted PMI matrix, so the "neural" method
-and the "count" method are the same method.
+@levy2014neural showed the
+unconstrained optimum is a factorization of the shifted PMI matrix, so the
+"neural" method and the "count" method are aiming at the same object — and add
+the qualifier that separates someone who read the paper from someone who read
+the tweet: at the low rank you actually train, the two optimise different
+losses and need not agree.
 
 **Q: What do skip-gram and CBOW each predict, and when would you prefer
 each?**
@@ -3013,10 +3049,10 @@ separates people who have read a blog post from people who have run the code.
 
 Unanswerable without a baseline, which is the point of the question. Mean
 cosine between random GloVe pairs is 0.029 with standard deviation 0.119, so
-0.3 is roughly two and a half standard deviations above the mean — high. But
-the distribution is corpus- and model-specific, so quote your own baseline.
-Then mention anisotropy: the vectors occupy a cone, 56.9% of random pairs
-have positive cosine, and centring the space removes most of that
+0.3 is about 2.3 standard deviations above the mean — high. But the
+distribution is corpus- and model-specific, so quote your own baseline. Then
+mention anisotropy: the mean cosine is 0.029 rather than 0, which is a shared
+directional component, and centring the space removes it
 [@mu2018allbutthetop].
 
 **Q: Your semantic search returns antonyms as top matches. Why, and what do

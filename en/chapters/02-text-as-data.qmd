@@ -151,11 +151,16 @@ result is a word. Lemmatization returns the dictionary form and needs to
 know that `left` is the past tense of `leave` in one sentence and a
 direction in another.
 
-The honest modern answer to "which should I use?" is *probably neither*.
-Stemming was a workaround for sparse vocabularies, and subword tokenization
-(below) solves the same problem better. But you should be able to explain
-the distinction, because it is one of the most reliably asked questions in
-the field.
+The honest modern answer to "which should I use?" depends on the pipeline. If
+you are feeding a pretrained transformer, use the model's own tokenizer and do
+neither: subword tokenization (below) already handles the rare-word half of what
+stemming was for. Be precise about what that does *not* do, though — subwords
+split a rare word into pieces; they do not collapse `kullanıyorum` and
+`kullandık` into one shared column. Where you need that — lexical search, a
+sparse classifier, anything counting term matches — a stemmer is still doing
+real work, and @sec-turkish-nlp measures it taking Turkish recall@1 from 28.0%
+to 95.3%. Either way you should be able to explain the distinction, because it
+is one of the most reliably asked questions in the field.
 
 ::: {#gloss-stop-word .column-margin .term-gloss}
 **stop word** — a word so common that some pipelines throw it away
@@ -454,8 +459,10 @@ html`<div style="font-size:0.9rem;">
 ### Who pays for Turkish {#sec-text-as-data-turkish}
 
 Now the part that matters if you work in a language other than English. A
-tokenizer is trained on a corpus, and that corpus is overwhelmingly English.
-The consequence is measurable. Here is Article 1 of the Universal
+tokenizer is trained on a corpus, and how efficiently it encodes a language
+depends on how much of that language the corpus contained — which, for the
+tokenizers most people use, means mostly English. The consequence is
+measurable. Here is Article 1 of the Universal
 Declaration of Human Rights, in the official English and Turkish texts, run
 through OpenAI's tokenizers:
 
@@ -592,11 +599,13 @@ rather than a gloss. Frequency is a good proxy for morphology, not a substitute
 for it — and at equal vocabulary size, unigram LM segments closer to morphology
 than BPE does [@bostrom2020byte].
 
-Two conventions collide in those outputs, and they are worth naming. Real
-tokenizers do not run BPE on the raw string; they first **pre-tokenize** it,
-splitting on whitespace and punctuation with a regex, and only then merge
-within each piece. Word boundaries therefore have to survive into the token
-itself, or detokenisation would be ambiguous. GPT's encodings attach the
+Two conventions collide in those outputs, and they are worth naming. The
+GPT- and BERT-style tokenizers do not run BPE on the raw string; they first
+**pre-tokenize** it, splitting on whitespace and punctuation with a regex, and
+only then merge within each piece. (SentencePiece deliberately does not — it is
+built to run on the raw string, which is what makes it work on languages that do
+not delimit words with spaces.) Where a pre-tokenizer is used, word boundaries
+have to survive into the token itself, or detokenisation would be ambiguous. GPT's encodings attach the
 preceding space to the token — hence `' ev'` above, with a leading space —
 while SentencePiece [@kudo2018sentencepiece] substitutes a visible marker,
 `▁ev`. Same idea, two spellings; the figure uses the `▁` form because it is
@@ -609,7 +618,9 @@ gorusebileceklerimiz            8 tokens  ['gor','use','b','ile','cek','ler','im
 görüşebileceklerimiz           10 tokens  ['g','ör','ü','ş','eb','ile','cek','ler','im','iz']
 ```
 
-Writing correct Turkish costs 25% more than writing ASCII Turkish.
+On this word, writing correct Turkish costs 25% more than writing ASCII
+Turkish — ten tokens against eight. The direction is general; the exact factor
+is not, and it depends on the tokenizer and on which letters the text uses.
 
 Before you trust that number, one step has to happen that nobody mentions. `ö`
 can be stored two ways: as a single code point (U+00F6, "NFC") or as `o`
@@ -633,8 +644,9 @@ multilingual system on token counts alone.
 ## Intuition check: why not just use characters and skip all this?
 
 A character vocabulary is tiny (~100 symbols for English, 256 if you work in
-bytes), never has out-of-vocabulary
-problems, and needs no training. So why does everyone use subwords?
+bytes), has no out-of-vocabulary problem once the character set is closed —
+which bytes guarantee and a hand-picked alphabet does not — and needs no
+training. So why does everyone use subwords?
 
 **Because sequence length is the binding constraint.** The attention term grows
 with the *square* of sequence length while everything else in the layer grows
@@ -686,8 +698,8 @@ than raw frequency does. Second, Unigram LM is the only one that assigns a
 *probability* to each segmentation rather than one deterministic answer, which
 is what makes subword regularisation possible: sample a different segmentation
 each epoch and the model stops overfitting to one arbitrary split
-[@kudo2018subword]. `SentencePiece` [@kudo2018sentencepiece] is the
-*implementation* the last two usually arrive in, not a fourth algorithm — its
+[@kudo2018subword]. `SentencePiece` [@kudo2018sentencepiece] is a *toolkit*
+that implements **BPE and Unigram LM**, not a fourth algorithm — its
 contribution is treating the raw string, spaces included, as the input, which
 is why its tokens carry a `▁` where a space was.
 
@@ -868,9 +880,10 @@ print(f"|V| ~ {np.exp(logK):.1f} * N^{beta:.3f}")
 
 This is **Heaps' law** [@heaps1978information]: vocabulary grows as a power of
 corpus size, $|V| \approx K N^{\beta}$, with $\beta$ typically between 0.4 and
-0.6. The exponent is below 1, so the curve keeps rising and never flattens —
-the derivative $\mathrm{d}|V|/\mathrm{d}N = K\beta N^{\beta-1}$ is strictly
-positive for every $N$.
+0.6. The exponent is below 1, so the curve keeps rising without ever reaching a
+finite ceiling — the derivative $\mathrm{d}|V|/\mathrm{d}N = K\beta N^{\beta-1}$
+is strictly positive for every $N$, while shrinking towards zero. It looks flat
+on a plot long before it stops growing, which is the trap.
 
 [There is no corpus size at which you stop meeting new words. There is only a
 size at which you stop meeting them *quickly*.]{.hl} That is the whole argument
@@ -1338,8 +1351,11 @@ dimensions — square, add, take the root:
 
 $$
 \lVert v \rVert_2 = \sqrt{1.5108^2 + 1.5108^2 + 1.0000^2}
-= \sqrt{2.28259 + 2.28259 + 1.00000} = \sqrt{5.56518} = 2.3591
+\approx \sqrt{2.28259 + 2.28259 + 1.00000} = \sqrt{5.56518} \approx 2.3591
 $$
+
+Intermediate values are rounded for display; carried at full precision the norm
+is $2.35906509\ldots$, which is what the library uses.
 
 The six zero entries contribute nothing, which is why this stays cheap even
 when the vocabulary has 200,000 columns. Divide through:
@@ -1541,8 +1557,9 @@ d4  0.258  0.447  0.258  1.000
 
 Compare the two panels. Under raw counts, d1 and d4 sit at a cosine of 0.26 —
 but they share only the word `the`. TF-IDF correctly pulls that down to 0.11.
-(A cosine is not a percentage of anything; it is the cosine of the angle
-between the two vectors, and only comparisons between cosines are meaningful.)
+(A cosine is the cosine of the angle between the two vectors. It is not a
+calibrated percentage of semantic similarity, which is what reporting it as
+"26% similar" implies.)
 Every pair drops, and the pairs that drop most are the ones whose only
 common ground was a stop word.
 
@@ -1737,8 +1754,8 @@ raw counts  ->  cosine 0.866
 TF-IDF      ->  cosine 0.777
 ```
 
-Two sentences with opposite operational meaning are 78–87% similar depending on
-the weighting — TF-IDF helps a little, and nowhere near enough. If your
+Two sentences with opposite operational meaning sit at cosines of 0.78 to 0.87
+depending on the weighting — TF-IDF helps a little, and nowhere near enough. If your
 stop word list contains *no* — and most default lists do — they become 100%
 similar. This is the single most common way a text classifier silently fails
 a safety-critical review.
@@ -1869,7 +1886,7 @@ Putting the whole chapter's evidence in one place:
 | **Legible.** The model names its own features — `gun`, `orbit`, `doctor`. Defensible to a regulator. | **No synonymy.** `car` and `automobile` are as unrelated as `car` and `banana`. Exact match or nothing. |
 | **Strong baseline.** 0.853 here, and it beat averaged embeddings in @sec-embeddings — then beat them again on Turkish data in @sec-bake-off. | **No polysemy.** One column for `bank`, whatever it meant. |
 | **No training data beyond your own.** Nothing pretrained, nothing downloaded, no vendor. | **Vocabulary never closes.** New documents bring new words your matrix has no column for. |
-| **Deterministic and debuggable.** The same input gives the same output, and you can trace why. | **Negation is invisible.** Removing stop words deletes `not`; keeping them does not help much either. |
+| **Deterministic and debuggable.** The same input gives the same output, and you can trace why. | **Negation has no scope.** `not` is a feature like any other and can carry signal; what a bag cannot recover is *what* was negated — and removing stop words deletes it outright. |
 
 : Bag-of-words, honestly {tbl-colwidths="[50,50]"}
 
@@ -2164,8 +2181,11 @@ whether you normalized.
 **Q: Two documents have cosine similarity 0. What does that mean, and how
 likely is it in practice?**
 
-They share no terms at all. In a real corpus with stop words retained this
-is nearly impossible, because every document contains *the*. If you are
+They share no terms at all. On long English documents with stop words retained
+this is rare, because they tend to share common function words. On short ones —
+this book's 19-word Turkish reviews, a log line, a search query — it is
+routine, and so is it on domain text where two documents genuinely have no
+vocabulary in common. If you are
 seeing many zeros, you have probably over-aggressively filtered, or your
 documents are extremely short — which is itself a signal to move to dense
 representations (@sec-embeddings).
@@ -2196,9 +2216,16 @@ trick, it is a constraint on which operations you are allowed to perform.
   (mean-centering) makes every zero non-zero and puts you straight back at
   800 GB. PCA on the raw matrix does the same, because it mean-centers
   silently.
-- **Operations that preserve it.** Row-wise L2 normalization, cosine
-  similarity and matrix–vector products touch only the non-zeros and leave
-  the format intact.
+- **Operations that preserve it.** Row-wise L2 normalization and
+  matrix–vector products touch only the non-zeros and leave the format intact.
+- **Operations whose *input* stays sparse and whose *output* need not.** An
+  all-pairs cosine matrix is the one to watch: $XX^{\top}$ has a non-zero
+  wherever two documents share a single term, so on a corpus where every
+  document contains one common word it is completely dense — $n^2$ floats, which
+  at $n = 50{,}000$ is 20 GB. `cosine_similarity` returns a dense array by
+  default, and asking for a sparse one changes the storage format rather than
+  the number of non-zeros. Compute it in blocks, or keep only each row's nearest
+  neighbours.
 - **Truncated SVD if you want fewer dimensions.** Unlike PCA it skips the
   centering step, so it runs directly on the sparse matrix. That is latent
   semantic analysis, and the historical bridge to @sec-embeddings.
@@ -2303,8 +2330,10 @@ specific tokenizer.
 
 Describe the merge loop, then answer the real question: nothing special
 happens, which is the point. The word decomposes into known subwords, in the
-worst case single characters, so there is no `<UNK>` token and no
-information is discarded. Use the worked example from this chapter —
+worst case single characters, so there is no `<UNK>` token and no information is
+discarded — provided the base alphabet is covered, or byte fallback is
+available. Say that condition out loud, because it is what separates BPE from
+WordPiece, which will emit `[UNK]` without it. Use the worked example from this chapter —
 `lowest → low + est` from a model that never saw `lowest`.
 
 **Q: Stemming versus lemmatization — and would you use either today?**

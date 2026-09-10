@@ -436,8 +436,10 @@ bağlayan hiçbir şey yok. Onları bağlayan şey aynı kelimelerle arkadaşlı
 etmeleri — ikisi de `eats`'ten sonra geliyor, ikisi de `is sweet fruit`'ten
 önce. Ham PPMI satırları bunu zaten 0,40'lık bir kosinüs olarak kaydediyor,
 çünkü ortak bağlamlar ortak koordinat demek; sıkıştırmanın yaptığı, bunu komşu
-listesini yeniden sıralayacak kadar, 1,00'e çıkarmak. Buna geçişlilik denir ve
-düşük ranklı sıkıştırma onu görünür kılan şey değil, belirleyici kılan şeydir.
+listesini yeniden sıralayacak kadar, 1,00'e çıkarmak. Buna geçişlilik yerine
+ortak bağlam genellemesi deyin — kosinüs benzerliği matematiksel anlamda geçişli
+bir ilişki değildir — ve düşük ranklı sıkıştırmanın onu görünür kılan şey değil,
+belirleyici kılan şey olduğunu ekleyin.
 
 Buna latent semantic analysis (örtük anlamsal çözümleme) denir
 [@deerwester1990indexing] ve word2vec'ten yirmi yıldan fazla önce geldi.
@@ -1299,8 +1301,12 @@ biriken satır güncellemesini değil: batch'te yüz kez görünen bir kelime h�
 $100 \times \text{lr}$ kadar hareket edebilir. Gerçekte engellediği şey, normu
 büyümüş bir bağlam vektörüyle çarpılan tek bir büyük artığın patlaması. Temiz
 çözüm, her satırın biriken gradyanını o indeksin batch'te kaç kez geçtiğine
-bölmek — `np.bincount(targets.ravel(), minlength=V)` sayıları veriyor — ki bu da
-word2vec'in kuruluş gereği sahip olduğu çift başına semantiği geri kazandırıyor.
+bölmek — `np.bincount(targets.ravel(), minlength=V)` sayıları veriyor. Bunun ne
+kazandırdığı konusunda net olun: sık geçen bir kelimenin attığı adımı sınırlar ve
+güncellemenin batch sıklığıyla ölçeklenmesini durdurur. Ardışık SGD'yi yeniden
+üretmez — o, gradyanı bir önceki örneğin bıraktığı parametrelerde yeniden
+hesaplar; hepsi aynı noktada hesaplanmış gradyanları ortalamak farklı bir
+güncellemedir ve etkin adım boyu da farklıdır.
 Kırpma bir modelleme tercihi değil; ucuz sürüm ve doğası gereği ardışık olan bir
 algoritmayı vektörleştirmenin bedeli. Ayrıca "makaleyi yeniden kodladım ama çalışmadı"
 durumunun neden genellikle denklemlerle değil optimizasyon ayrıntılarıyla
@@ -1324,11 +1330,13 @@ hiç birlikte geçmemiş her çift için $-\infty$ taşır ve hiçbir çarpanlar
 bunu temsil edemez — Levy ve Goldberg'in bu sonuçtan yola çıkıp gerçekte
 kuracağınız açık matris olarak *kaydırılmış pozitif* PMI'ı, yani
 $\mathrm{SPPMI}(w,c) = \max(\mathrm{PMI}(w,c) - \log K,\ 0)$'ı önermelerinin
-nedeni tam olarak bu. İki rota teoremde anlaşıyor; kırpma ise ikisinin de
-ihtiyaç duyduğu pratik yama.
+nedeni tam olarak bu. Kırpmanın nerede olduğuna dikkat edin: açık bir SPPMI
+matrisi *kurarken* uygulanan bir yama. SGNS eğitimi hiçbir şey kırpmaz — bir
+$-\infty$'u temsil etmek zorunda hiç kalmaz, çünkü yalnızca örneklediği
+çiftleri görür.
 
-Optimumda böyle. Yapay sinir ağı, kılık değiştirmiş bir matris çarpanlarına
-ayırma yönteminden ibaretmiş.
+— optimumda ve iç çarpımlar herhangi bir değeri alabilirken. Yapay sinir ağı,
+kılık değiştirmiş bir matris çarpanlarına ayırma yönteminden ibaretmiş.
 
 Bu cümlenin tam olarak ne iddia ettiğine dikkatle bakın. word2vec'in hiçbir
 yerinde kimse bir PMI matrisi kurmuyor — algoritma her seferinde yalnızca tek
@@ -1339,10 +1347,11 @@ ona *varıldı*.
 
 $-\log K$ teriminin de sade bir okuması var. $K$'yı büyütmek, her gerçek
 çiftin daha çok sahteyle karşılaştırılması demek; bu da her iç çarpımı aynı
-sabit miktarda aşağı çeker. Sabit bir kaydırma bütün kelimeleri eşit
-oynattığı için geometri hakkında neredeyse hiçbir şeyi değiştirmez — $K$'nın
-yöntemin tamamındaki daha önemsiz ayarlardan biri olmasının sebebi tam olarak
-bu.
+sabit miktarda aşağı çeker. Buradaki sezgiye dikkat: kaydırma *örtük matriste*
+tekdüzedir ve bu, her kelime vektörünü ortak bir kaydırma kadar ötelemekle aynı
+şey değil — hiçbir $d$ boyutlu vektör kümesi, her iç çarpıma eklenen bir sabiti
+birebir üretmez. Pratikte $K$ yine yöntemin daha önemsiz ayarlarından biri; bu,
+cebirin bir sonucu değil ampirik bir gözlem.
 
 ::: {.callout-note collapse="true"}
 ## $-\log K$ nereden geliyor?
@@ -1379,11 +1388,16 @@ $$
 Gerçekten iş gören tek varsayım, $z$'nin her çift için serbestçe
 seçilebileceği. Seçilemez — iç çarpımların hepsi aynı altta yatan vektörleri
 paylaşır ve $d$ sözlük boyutunun çok altındayken model uzlaşmak zorunda
-kalır. Bu uzlaşma, tam olarak bir SVD'nin size vereceği düşük ranklı
-yaklaşımdır.
+kalır. Teoremin sabitlediği şey *hedeftir*; uzlaşmanın nasıl yapılacağı hakkında
+hiçbir şey söylemez ve iki rotanın yolları tam orada ayrılır. Kesik SVD karesel
+yeniden kurma hatasını en aza indirir ve matrisin her hücresini eşit ağırlıklar.
+SGNS ise her çiftin gerçekte kaç kez örneklendiğine göre ağırlıklanmış bir
+lojistik kaybı en aza indirir. İkisi de aynı hedefin düşük ranklı
+yaklaşımlarıdır ve farklı kayıplar altında yaklaşımlardır; dolayısıyla verili bir
+$d$'de genel olarak aynı vektörleri üretmezler.
 
-Gösterimde ikinci bir varsayım saklı ve önemi şurada: birazdan yazacağınız
-kodla çelişiyor. Gürültü ağırlığını $K\,P(w)P(c)$ diye yazmak, negatiflerin
+Gösterimde ikinci bir varsayım saklı ve önemi şurada: yukarıdaki kodla
+çelişiyor. Gürültü ağırlığını $K\,P(w)P(c)$ diye yazmak, negatiflerin
 *ham* tekil kelime dağılımından çekildiğini varsayar. word2vec ise onları
 $P_\alpha(c) \propto f(c)^{0{,}75}$ dağılımından çeker — iki bölüm önceki üs —
 ve bunu hesaba katarsak
@@ -1469,9 +1483,11 @@ algoritmanın hangi matrisi çarpanlarına ayırdığını değiştiriyor.
 ::: {.fig-cap}
 Güzergâhlar alakasız görünüyor — biri bir sayım matrisi üzerinde doğrusal
 cebir, diğeri bir sınıflandırıcı üzerinde stokastik gradyan inişi — ama
-@levy2014neural aynı yere vardıklarını kanıtladı. Negatif örneklemeli
+@levy2014neural aynı hedefe nişan aldıklarını gösterdi. Negatif örneklemeli
 skip-gram, A güzergâhının açıkça kurduğu PMI matrisini, $\log K$ kadar
-kaydırılmış hâliyle örtük olarak çarpanlarına ayırıyor.
+kaydırılmış hâliyle örtük olarak çarpanlarına ayırıyor. Nişan aldıklarını —
+vardıklarını değil: denklik, iç çarpımlar serbestken tamdır ve gerçekte
+kullandığınız düşük rankta ikisi farklı kayıpları eniyiler.
 :::
 ::::
 
@@ -1485,19 +1501,21 @@ taşımaya değer: yeni bir yöntem eskisini yendiğinde, iyileşmenin bir kısm
 yöntemden, bir kısmı ayar titizliğinden gelir ve bu ayrım nadiren
 raporlanır.
 
-Geriye pratik soru kalıyor: hangi güzergâhı ne zaman seçmeli? Aynı yere
-vardıklarına göre seçim tamamen mühendislikle ilgili:
+Geriye pratik soru kalıyor: hangi güzergâhı ne zaman seçmeli? Aynı hedefe nişan
+aldıklarına ve hiperparametreler eşitlendiğinde @levy2015improving'in
+ayıramayacağı kadar yakına düştüklerine göre, seçim çoğunlukla mühendislikle
+ilgili:
 
 | | [Saymak]{.pro} (PPMI + SVD) | [Tahmin etmek]{.pro} (word2vec) |
 |---|---|---|
 | Bellek | $V \times V$ matris tutar. Yoğun saklanırsa $V = 400{.}000$'de 160 milyar hücre eder — ama kimse onu yoğun saklamıyor: matris seyrektir ve GloVe tam olarak bu matrisi, tam olarak bu sözlük için, bu bölümde baştan sona kullanılan vektörleri üretmek üzere kuruyor. Asıl maliyet, onun kurulması ve güncellenmesi pahalı, tek parça bir yapıt olması | Derlemi akıtarak işler; bellek, derlem boyutundan bağımsız $V \times d$ |
 | Derlem boyutu | Her sayımın kıymetli olduğu küçük derlemlerde rahat | Gradyan gürültüsü ortalamaya oturana kadar çok metin ister |
-| Deterministiklik | [Aynı girdi, aynı çıktı, her seferinde]{.pro} | [Rastgele ilklendirme ve örnekleme; iki koşu farklı çıkar]{.con} |
+| Deterministiklik | [Aynı girdi, aynı çıktı — kesin bir çözücü için. Ölçekte varsayılan olan rastgeleleştirilmiş kesik SVD sabit bir tohum ister ve tekil vektörler her hâlükârda ancak işarete kadar belirlidir]{.pro} | [Rastgele ilklendirme ve örnekleme; iki koşu farklı çıkar]{.con} |
 | Yeni veri | [Baştan say, baştan çarpanlarına ayır]{.con} | [Bıraktığınız yerden eğitmeye devam edin]{.pro} |
-| İncelenebilirlik | [Her ara adım, okuyabileceğiniz bir tablo]{.pro} | [Bitene kadar bakılacak anlamlı bir şey yok]{.con} |
+| İncelenebilirlik | [Her ara adım, okuyabileceğiniz bir tablo]{.pro} | [Eğitim sırasında kayıp ve o anki en yakın komşular dışında okunacak pek bir şey yok]{.con} |
 | Ayar yükü | Pencere boyu, PPMI varyantı, $d$ | Pencere, $d$, $K$, altörnekleme $t$, öğrenme oranı, epoch sayısı |
 
-: Aynı varış noktası, farklı mühendislik {tbl-colwidths="[19,40,41]"}
+: Aynı hedef, farklı mühendislik {tbl-colwidths="[19,40,41]"}
 
 Bir fark o tabloya sığmıyor, çünkü pratik değil istatistiksel — ve istatistik
 altyapısı olan bir okuyucu için en önemlisi o. Kesilmiş SVD, Frobenius normunda
@@ -2364,9 +2382,12 @@ puanlar alıyor; birazdan göreceğiz.
 
 ### Uzay izotropik değil
 
-Embedding'ler kendi uzaylarını iyi kullansaydı, rastgele iki kelime 90°'de
-tıpkı başka herhangi bir açıdaki kadar sık bulunur ve ortalama kosinüs sıfıra
-yakın çıkardı. Öyle değil.
+Embedding'ler kendi uzaylarını iyi kullansaydı, rastgele iki kelimenin ortalama
+kosinüsü sıfır çıkardı. Boş hipotez konusunda kesin olalım, çünkü akla ilk gelen
+ifade yanlış: $d$ boyutta düzgün dağılmış bağımsız birim vektörler için açılar
+eşit yayılmaz — 90° çevresinde yoğunlaşır, ortalama kosinüs 0 ve varyans $1/d$
+olur. İzotropi, hiçbir yönün ayrıcalıklı olmaması demektir; her açının eşit
+olasılıklı olması değil. Bu uzay izotropik değil.
 
 ```python
 rng = np.random.default_rng(0)
@@ -2384,14 +2405,22 @@ vals = (S @ S.T)[np.triu_indices(4000, k=1)]
   after subtracting the mean, mean cosine: -0.000
 ```
 
-Her vektörün büyük bir ortak bileşeni var, bu yüzden bütün kelimeler bir
-miktar aynı yönü gösteriyor ve rastgele çiftlerin %56,9'unun kosinüsü pozitif
-çıkıyor. Bu rakam tek başına pek bir şey kanıtlamaz — izotropik bir boş hipotez
-altında pay %50 olurdu ve 8 milyon çift üzerinde %56,9 küçük bir fazlalık.
-Asıl tanı bir alt satırda: ortalama vektörün normu 0,171 ve onu çıkarmak
-ortalama kosinüsü sıfıra indiriyor. Vektörler kürenin tamamını değil, dar bir
-koniyi işgal ediyor — oyuncak SVD'de her kelimenin ilk koordinatının negatif
-çıkmasıyla aynı kusur.
+Her vektörün bir ortak bileşeni var, bu yüzden bütün kelimeler bir miktar aynı
+yönü gösteriyor ve rastgele çiftlerin %56,9'unun kosinüsü pozitif çıkıyor. Bu
+rakam tek başına pek bir şey kanıtlamaz — izotropik bir boş hipotez altında pay
+%50 olurdu ve arkasındaki 8 milyon çift 4.000 vektörden geliyor, yani bağımsız
+gözlem olmaktan çok uzaklar.
+
+Ortalama kosinüs ile ortalama vektörün normu da iki ayrı kanıt değil. $n$ birim
+vektör için ikisi aynı sayıdır:
+$\bar{c} = (n\lVert\bar{v}\rVert^2 - 1)/(n-1)$ ve
+$(4000 \times 0{,}171^2 - 1)/3999 = 0{,}029$, tam olarak. İki satırın birlikte
+söylediği şey, *ölçülebilir bir büyüklükte* ortak bir yönsel bileşen bulunduğu ve
+onu çıkarmanın ortalama kosinüsü sıfıra indirdiği — gerçek bir bulgu ve dar bir
+koniden daha ılımlı bir bulgu. 0,029'luk bir ortalama kosinüste vektörler kürenin
+bir diliminde sıkışmış değil; merkezden yana yatmış hâlde. Merkezlemenin
+satın almadığı şeye de dikkat: sıfır ortalama ortak yönü kaldırır, kovaryansı
+küresel yapmaz.
 
 Ortalama vektörü çıkarmak bunun büyük kısmını temizler; en büyük birkaç ana
 bileşeni de atmak daha fazlasını temizler. @mu2018allbutthetop bunun tek
@@ -2677,7 +2706,9 @@ işte o koşullar.
 | **PPMI + SVD** | Eğitim döngüsü yok; deterministik, yani aynı derlem iki kez aynı vektörleri verir. Her adım incelenebilir. Küçük derlemlerde çalışır. | $V \times V$ eş-oluşum matrisini ister — seyrek olduğu için maliyet sıfırdan farklı giriş sayısı kadardır ve kesik SVD yoğun hâlini hiç kurmaz. Yine de hattaki en büyük nesne odur. Sözlük dışı kelimeleri hiç ele almaz. Yeni metinle güncellemesi zahmetlidir. | Derlem küçük, sözlük mütevazı ve her sayıyı açıklayabilmeniz gerekiyorsa. |
 | **word2vec** | Derlemi akış hâlinde okur, dolayısıyla derlemin tamamını hiç bellekte tutmazsınız — modelin kendisi yine de iki $V \times d$ tablosudur. Hızlı, iyi anlaşılmış, her yerde gerçeklemesi var. Skip-gram nadir kelimelerde güçlüdür. | Sözlük dışı kelimeler hata fırlatır, nokta. Hiperparametrelere duyarlıdır. Eğitim sırasında kayıp dışında incelenecek pek bir şey yoktur. | Ağır biçimbilimi olmayan bir dilde büyük bir alan derlemi varsa ve ona özgü vektörler istiyorsanız. |
 | **GloVe** | Global matris üzerinde eğitilir, dolayısıyla tek pencereye değil derlem geneli istatistiklere bakar. Ön eğitimli vektörleri mükemmel ve ücretsizdir. | Önce eş-oluşum matrisini kurmayı gerektirir; yani kaçındığınız bellek maliyetini geri getirir. Aynı OOV problemi. | Hemen iyi İngilizce vektörler istiyorsanız ve bir şey eğitmek için sebebiniz yoksa. |
-| **fastText** | Her kelime bir vektör alır, beş saniye önce uydurulmuş olan bile. Yazım hatasına toleranslıdır. Eklemeli dillerde çarpıcı biçimde daha iyidir. | Daha yavaş ve daha büyüktür — kelime vektörlerinin üstüne bir de n-gram vektörleri saklar ve her arama bir toplamdır. Yazım benzerliğinin anlam benzerliği demek olduğunu varsayar: `kitap`/`kitle` 0,667. Kısa kelimelerde en zayıf hâlindedir. | Türkçe, Fince, Macarca, Arapça — ya da yazımın güvenilmez olduğu her kullanıcı üretimi metin. |
+| **fastText** | Her kelime bir vektör alır, beş saniye önce uydurulmuş olan bile. Yazım hatasına toleranslıdır. Eklemeli dillerde sözlük dışı kapsaması çok daha
+iyidir — bunun görev doğruluğuna dönüşüp dönüşmediği ayrı bir ölçüm ve
+@sec-karsilastirma birinde dönüşmediğini buldu. | Daha yavaş ve daha büyüktür — kelime vektörlerinin üstüne bir de n-gram vektörleri saklar ve her arama bir toplamdır. Yazım benzerliğinin anlam benzerliği demek olduğunu varsayar: `kitap`/`kitle` 0,667. Kısa kelimelerde en zayıf hâlindedir. | Türkçe, Fince, Macarca, Arapça — ya da yazımın güvenilmez olduğu her kullanıcı üretimi metin. |
 
 : Statik kelime embedding yöntemleri {tbl-colwidths="[12,29,29,30]"}
 
@@ -2746,7 +2777,7 @@ kitabın bir sonraki kısmının şartnamesini oluşturuyor.
 | Kelime sırası yok | *pump failed / valve fine* ile tersi özdeş | Dizi modelleri (@sec-dil-modelleri) |
 | Sözlük dışı kelimeler | word2vec `KeyError` fırlatıyor; Türkçe token'ların %7,3'ü | Alt kelimeler (fastText, BPE) |
 | Zıt anlamlılar eş anlamlı gibi görünüyor | `increase`/`decrease` 0,881 | Göreve denetimli fine-tuning |
-| Anizotropik geometri | Rastgele çiftlerin %56,9'unun kosinüsü pozitif | Ortalamayı çıkarma, beyazlatma |
+| Anizotropik geometri | izotropik boş hipotezdeki 0'a karşı 0,029 ortalama kosinüs; normu 0,171 olan bir ortalama vektörden geliyor ve merkezleme onu kaldırıyor | Ortalamayı çıkarma, beyazlatma |
 | Nadir kelimelerde kalite çöküyor | `eutectic` → `tiwai` | Alana uyarlama, alt kelimeler |
 | Derlemden emilen yanlılık | `homemaker` kadın ekseninde +0,363 | Temiz bir çözüm yok; ölçün ve belgeleyin |
 
@@ -2906,7 +2937,10 @@ optimizasyon problemi değil. Soruyu
 soran "ama bu bir sinir ağı değil mi?" derse cevabınız hazır: evet, sığ bir
 sinir ağı; ikisi aynı şeyin iki adı. Sonra kilit noktayı verin: @levy2014neural,
 optimumun kaydırılmış PMI matrisinin bir çarpanlara ayrılması olduğunu
-kanıtladı; yani "yapay sinir ağı" yöntemi ile "sayma" yöntemi aynı yöntemdir.
+gösterdi; yani "yapay sinir ağı" yöntemi ile "sayma" yöntemi aynı nesneye nişan
+alıyor — ve makaleyi okuyanı tweet'i okuyandan ayıran kaydı ekleyin: gerçekte
+eğittiğiniz düşük rankta ikisi farklı kayıpları eniyiler ve anlaşmak zorunda
+değildirler.
 
 **S: Skip-gram ve CBOW ayrı ayrı neyi tahmin eder, hangisini ne zaman tercih
 edersiniz?**
@@ -2954,11 +2988,11 @@ olanlardan ayırır.
 
 Bir baseline olmadan cevaplanamaz; sorunun amacı da bu zaten. Rastgele GloVe
 çiftleri arasındaki ortalama kosinüs 0,119 standart sapmayla 0,029, dolayısıyla
-0,3 ortalamanın kabaca iki buçuk standart sapma üstünde — yüksek. Ama dağılım
+0,3 ortalamanın kabaca 2,3 standart sapma üstünde — yüksek. Ama dağılım
 derleme ve modele özgüdür, o yüzden kendi baseline'ınızı verin. Sonra
 anizotropiden bahsedin: vektörler bir koniyi işgal ediyor, rastgele çiftlerin
-%56,9'unun kosinüsü pozitif ve uzayı ortalamak bunun büyük kısmını ortadan
-kaldırıyor [@mu2018allbutthetop].
+ortalama kosinüs 0 yerine 0,029 — bu, ortak bir yönsel bileşen demek — ve uzayı
+merkezlemek onu ortadan kaldırıyor [@mu2018allbutthetop].
 
 **S: Anlamsal aramanız en iyi eşleşme olarak zıt anlamlıları döndürüyor. Neden
 ve ne yaparsınız?**

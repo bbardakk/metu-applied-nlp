@@ -364,9 +364,11 @@ lowercasing sound like the trivial step. In Turkish it is a bug.
 ```
 
 Turkish has two `i` letters — dotted `i`/`İ` and dotless `ı`/`I` — and they
-are different letters, distinguishing different words. Python's default
-`str.lower()` implements the English rule: `I` becomes `i`. In Turkish, `I`
-must become `ı`, and `İ` must become `i`.
+are different letters, distinguishing different words. Python's `str.lower()`
+implements Unicode's *default* case mapping — the language-independent one —
+under which `I` becomes `i`. In Turkish, `I` must become `ı`, and `İ` must
+become `i`; that is one of the language-specific tailorings the standard
+defines and the default does not apply.
 
 ```python
 TR_LOWER = str.maketrans({"I": "ı", "İ": "i"})
@@ -387,8 +389,10 @@ tr_lower("İYİ")        # → 'iyi'
 The default rule silently merges `ıyı` into `iyi` and produces a
 combining-dot hybrid for `İYİ` that matches nothing in your vocabulary. Both
 are wrong; both fail quietly; both cost you accuracy you will attribute to
-the model. **Casefolding is locale-dependent, and the locale is part of the
-model.**
+the model. **Case conversion is locale-dependent, and the locale is part of the
+model.** (The operation here is lowercasing; Unicode *casefolding* is a
+related but distinct operation intended for caseless matching, and it has its
+own Turkish tailoring.)
 
 ::: {.column-margin}
 This class of bug is why the "just lowercase it" step in an English tutorial
@@ -518,7 +522,10 @@ paths coincide here.
 
 That is not the same as the corpus being clean; it is the opposite. U+0307
 (COMBINING DOT ABOVE) sits in **4,183 documents of the 50,000-review working
-subsample — about 8.4% of it**, and nothing but `str.lower()` applied to an `İ` produces that mark.
+subsample — about 8.4% of it**, which is consistent with an upstream
+case-conversion error on `İ`; a normalisation pass or another transform can
+leave the same mark, so treat it as the likeliest cause rather than the only
+one.
 The bug was committed upstream, before the data reached us, and baked into the
 text permanently. Our own `[a-zçğıöşü]+` pattern does not treat a combining
 mark as a word character either, so in those documents `tavsiye` splits into
@@ -554,8 +561,10 @@ with accuracy here. [↩](#term-f1-score-macro-f1){.term-back}
 *higher* accuracy than TF-IDF (92.14 vs 90.07) and *higher* macro-F1 (73.51 vs
 71.95) — fine. But every counting method has *lower* accuracy than the
 do-nothing baseline's 93.68, while scoring 22 to 28 macro-F1 points above it.
-Any method that finds negatives at all must trade away some of the free
-accuracy that ignoring them provided. If you optimise accuracy on this
+That is what the models evaluated here do: they buy negative-class recall with
+some of the free accuracy that ignoring the minority provided. It is not a law —
+a classifier that finds negatives *and* keeps false alarms low improves both
+numbers, and a perfect one maxes out both. If you optimise accuracy on this
 dataset you will select the model that does nothing.
 
 **Plain TF-IDF loses to plain counting here.** That is not what chapter 2's
@@ -713,9 +722,9 @@ The normal training regime for static embeddings is a hundred to a hundred
 thousand times that; @bojanowski2017enriching works at Wikipedia scale. So the
 measurement above is precisely **"static embeddings trained from scratch on
 0.9M tokens lose to counts extracted from the same 40,000 documents"** — not
-"static embeddings lose to counting". Pre-trained Turkish vectors would lift
-the dense curve and push the crossover right; this chapter did not measure by
-how much, and exercise 3 is where you find out.
+"static embeddings lose to counting". Pre-trained Turkish vectors would be
+expected to lift the dense curve; this chapter did not measure by how much, and
+@sec-embeddings' exercise 6 is where you find out.
 
 What does *not* depend on corpus size is the averaging defect. No amount of
 training data makes `kalite iyi fiyat kötü` and `kalite kötü fiyat iyi` stop
@@ -833,8 +842,9 @@ model's top-5 neighbours share a long prefix with the query. This chapter did
 not run it. Asked
 what is like `kalitesiz` ("low quality"), word2vec answers with five other
 ways to say a product is bad. fastText answers with the word `kalitesi`
-("its quality") — which is not a synonym, it is the *opposite* polarity
-sharing six leading characters.
+("its quality") — which is not a synonym: it is a neutral noun form that has
+lost the negative polarity `-siz` carried, and it earns its place by sharing
+six leading characters.
 
 This is @sec-embeddings' stated weakness — *assumes spelling similarity
 implies meaning similarity* — showing up as a measurable cost. The subword
@@ -1008,11 +1018,13 @@ $$
 \mathbf{d}_+ - \mathbf{d}_- = \frac{1}{5}\left(\mathbf{v}_{\text{liked}} - \mathbf{v}_{\text{disliked}}\right),
 $$
 
-so the entire semantic reversal survives at **one fifth strength**, while the
-four shared words contribute their full magnitude to both vectors and push the
-cosine towards 1. Lengthen the review to twenty words and the reversal is at
-one twentieth. *The longer the review, the more completely averaging erases
-the word that changed its meaning.*
+Be careful reading that $1/5$: it scales the shared words too, and cosine is
+invariant to a common factor, so the factor itself is not the problem. What
+matters is the *ratio* — one differing vector against four shared ones. Lengthen
+the review to twenty words and the differing term is unchanged while the shared
+sum has grown fourfold, so the two documents' directions converge. *The longer
+the review, the more completely the shared content drowns out the word that
+changed its meaning.*
 
 Worse, in a subword model $\mathbf{v}_{\text{liked}}$ and
 $\mathbf{v}_{\text{disliked}}$ are not even far apart, because `beğendim` and
@@ -1020,9 +1032,13 @@ $\mathbf{v}_{\text{disliked}}$ are not even far apart, because `beğendim` and
 pulls the numerator towards zero.
 
 TF-IDF has the opposite structure. `beğendim` and `beğenmedim` are two
-distinct columns; a document containing one has a hard zero in the other. No
-dilution is possible because there is no averaging — which is precisely why
-its cosines land at 0.19 rather than 0.78.
+distinct columns; a document containing one has a hard zero in the other, so
+the contrast is explicit rather than averaged away. It is not immune to
+dilution — with L2 normalisation, two $n$-term documents differing in one term
+sit at cosine $(n-1)/n$, which also goes to 1 as $n$ grows. What differs is the
+rate and the mechanism: the distinct columns keep the contrast on the page, and
+IDF can weight it up. That is why its cosines land at 0.19 rather than 0.78 on
+reviews of this length.
 
 **The analogy.** Averaging word vectors is taking the mean colour of a
 painting. Two paintings that differ only in that one is a sunrise and the
@@ -1074,12 +1090,20 @@ classifier sees.
 Read the word2vec column downwards before reading anything else. From 250
 labels to 40,000 — a 160-fold increase in training data — it goes 61.59, 61.02,
 59.52, 60.91, 61.52, 61.80, 60.94, 61.39: an irregular swing of about 2.3
-points that has no relationship to the amount of data. [That is this
-experiment's noise floor.]{.hl} It is a single run with a single seed, and the
-honest consequence is that any difference in this chapter smaller than roughly
-two macro-F1 points is not something this design can resolve — `bag of words`
-against `tf-idf` (1.56), `tf-idf` against `tf-idf char` (1.56), and word2vec
-against fastText (0.03) are all inside it.
+points that has no relationship to the amount of data. [Take that as a rough
+indication of how much this design moves for reasons unrelated to the thing
+being measured.]{.hl}
+
+Be exact about what it is not. A noise floor is the spread of *repeated runs of
+the same experiment*; these eight points differ in training size and in which
+documents were sampled, so they mix real curve shape with run-to-run variation
+and cannot be separated here. Still, a swing of 2.3 points with no trend across
+a 160-fold change in data is hard to read as signal, and it is a single run with
+a single seed. The honest consequence is that this chapter cannot *resolve*
+differences of a point or two — `bag of words` against `tf-idf` (1.56), `tf-idf`
+against `tf-idf char` (1.56), and word2vec against fastText (0.03) are all in
+that range. Settling them takes what exercise 8 asks for: repeated runs at a
+fixed training size, and a paired bootstrap over the test set.
 
 :::: {.anlp-fig}
 ```{=html}
@@ -1284,7 +1308,7 @@ the whole thing as a decision rather than a leaderboard.
 | **TF-IDF (words)** | The standard strong baseline. Down-weights ubiquitous words. Trivially interpretable and auditable. | [Hurt]{.con} by IDF on short texts — lost to raw counts here. One column per word form: 895 columns for one Turkish verb. Zero generalisation to unseen forms. | Documents are long enough for term frequency to mean something, and you have thousands of labels. |
 | **TF-IDF (word bigrams)** | Best score in this chapter, 76.21. Captures multi-word negation that unigrams miss. Still a linear model you can read. | 3.4× the columns. Gains shrink as documents get longer. Still blind to unseen vocabulary. | You have labels and the task turns on short phrases — sentiment, intent, triage. This should be your default. |
 | **TF-IDF (char n-grams)** | Robust to spelling: a misspelt word still shares most of its n-grams with the correct one. (The vectorizer does learn a finite n-gram vocabulary and discards unseen n-grams — the point is that a new *word* rarely produces only new n-grams.) Strongest sparse method in the low-label regime. Language-agnostic — no tokeniser to get wrong. | 144.8 MB and 301 non-zeros per document. Lower macro-F1 than plain counting at full data. Coefficients are not human-readable. | Spelling is unreliable, the language is agglutinative, or you have no trustworthy tokeniser. |
-| **Averaged word2vec** | 100 dimensions for 61.4 macro-F1 — 302× fewer dimensions than word tf-idf. Trained without labels. [Ahead of both sparse methods tested here]{.pro} under ~1,500 labels. Semantic neighbours you can inspect. | `KeyError` on 46.4% of unseen word forms. Confident nonsense on rare in-vocabulary words. Averaging dilutes negation. Word order gone. | Labels are scarce, or you need compact vectors for similarity search over millions of documents. |
+| **Averaged word2vec** | 100 dimensions for 61.4 macro-F1 — 302× fewer dimensions than word tf-idf. Trained without labels. [Ahead of both sparse methods tested here]{.pro} under ~1,500 labels. Semantic neighbours you can inspect. | `KeyError` on 46.4% of the distinct word forms in the test set. Confident nonsense on rare in-vocabulary words. Averaging dilutes negation. Word order gone. | Labels are scarce, or you need compact vectors for similarity search over millions of documents. |
 | **Averaged fastText** | Every string gets a vector — coverage is 100% by construction. Handles the missing diacritics and typos in real user text. Best of any method at 250 labels. | Neighbours are [orthographic, not semantic]{.con}: `kalitesiz` → `kalitesi`. 2× word2vec's training time. Bought perfect coverage for +0.0 macro-F1 here. | The text is user-generated and misspelled, the language is agglutinative, and you cannot control the input vocabulary. |
 | **doc2vec** | One vector per document with no averaging heuristic. Learns document-level structure averaging cannot. | [Worst]{.con} score here, 55.13. Inference needs gradient steps: 16× slower per document, forever. Extra hyperparameters. | Documents are long and clean and you have measured that it beats averaging on *your* data. Rarely, on short text. |
 
@@ -1342,12 +1366,19 @@ For sentiment on product reviews this rarely bites, because most reviews are
 entirely positive or entirely negative and the bag is sufficient. For
 "which component is the customer complaining about", it is fatal.
 
-Every method in this chapter is a function from an unordered *bag* of units to
-a vector. Bigrams and character n-grams widen the unit — they catch `çok iyi`
-as one feature — but the bag of bigrams is still a bag, and two sentences that
-use the same pairs in a different arrangement collapse together again. To
-distinguish those two sentences the representation has to be a function of the
-*sequence*: something that reads `kalite`, then `iyi`, and produces a
+Label that 1.0000 precisely, because one family in this chapter escapes it.
+The two rows above are **unigram TF-IDF and averaged embeddings**. Word
+bigrams are a different matter: `kalite iyi`, `iyi fiyat`, `fiyat kötü` against
+`kalite kötü`, `kötü fiyat`, `fiyat iyi` share no bigram at all, so this
+chapter's *winning* model — word 1–2 grams — separates this pair cleanly when
+those features survive `min_df`. Widening the unit does buy local order.
+
+What it does not buy is order in general. A bag of bigrams is still a bag: it
+sees a fixed window and nothing beyond it, so a dependency four words apart —
+*the pump the engineer replaced last week failed* — is outside what any
+fixed-length n-gram can represent, and the vocabulary cost of chasing it grows
+exponentially in the window. To handle that the representation has to be a
+function of the *sequence*: something that reads `kalite`, then `iyi`, and produces a
 different state than if it had read `kalite`, then `kötü`. That is a language
 model, and it is @sec-language-models. Making that state depend on every
 other word at once is attention, and it is @sec-transformers.
@@ -1373,7 +1404,8 @@ self-supervised training, and it is exactly the resource an embedding model
 converts into performance and a count model cannot use at all.
 
 Choose fastText over word2vec because the tickets are Turkish and
-user-written: 46.4% of unseen word forms were out of vocabulary here, and
+user-written: 46.4% of the test set's distinct word forms were outside the
+trained vocabulary here, and
 support tickets are worse than reviews.
 
 Then say the second half out loud: *label 2,000 more tickets and re-run this
@@ -1398,13 +1430,15 @@ after.
 ::: {.callout-note collapse="true"}
 ## 3. fastText fixed the out-of-vocabulary problem completely. Why did the score not move?
 
-Because out-of-vocabulary was not the binding constraint.
+Because coverage alone did not move the score in this comparison.
 
-Coverage went from 53.6% of word forms to 100%, and macro-F1 went from 61.39
-to 61.36. The two dense models are both limited by *averaging*, not by
-lookup: they place a sentence and its negation at cosine 0.78–0.96, and no
-improvement in the word vectors changes that, because the damage is done by
-the mean.
+Coverage went from 53.6% of word forms to 100%, and macro-F1 went from 61.39 to
+61.36. Read the comparison for what it is: two models trained by different
+methods, so it does not isolate coverage — fastText's subword vectors differ
+from word2vec's in more ways than one. What it does show is that buying perfect
+coverage did not pay here, and the chapter's other measurements point at
+averaging as the reason: both dense models place a sentence and its negation at
+cosine 0.78–0.96.
 
 There is also a cost hiding in the fix. fastText spends its capacity on
 character n-grams, so its nearest neighbours become morphological rather than
@@ -1426,9 +1460,13 @@ reasoning below is why you would expect it, not evidence that it holds.
 Larger vectors and pretrained Turkish embeddings [@mikolov2018advances] would
 be expected to lift the dense curve — probably a few points, and more at the
 left edge where extra pretraining data matters most. What they cannot do is fix
-averaging: the negation cosines and the exactly-1.0000 word-order result are
-properties of the mean, not of the vectors being meant. The crossover would
-shift right; it would not disappear.
+averaging — but separate the two results, because only one of them is a
+property of the mean. The exactly-1.0000 word-order figure is: averaging is
+invariant to permutation, so no vectors change it. The 0.78–0.96 negation
+cosines are not; those sentences differ in *which* word appears, and better
+vectors could put `beğendim` and `beğenmedim` further apart. Pretraining might
+move those numbers and might move the crossover with them. This chapter did not
+measure by how much, and neither claim above should be read as settled.
 
 The honest way to settle it is @sec-embeddings' exercise 6, which is now well
 specified: rerun this chapter's script with 300-dimensional pretrained
@@ -1444,7 +1482,7 @@ answer below is one this chapter measured, so you can quote a number instead of
 a preference.
 
 ::: {.column-margin}
-The pattern in all five: name the axis the question is really about — labels,
+The pattern in all four: name the axis the question is really about — labels,
 morphology, structure, cost — then give the measurement, then say what would
 change your answer. An answer with no number is an opinion; an answer with no
 *condition* is a slogan.
