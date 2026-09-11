@@ -449,10 +449,14 @@ fails, the instinct is to inspect the tool calls — and here the tool calls wer
 never the problem. Aggregation over accumulated observations is.
 
 Two rival explanations are worth taking seriously, and they end in different
-places. The first is context length, and it can be ruled out: the longest run
-in this table is 1,338 tokens, and @sec-context-engineering-rot runs the same
-model on the same shape of task out to 11,048 tokens with the curve
-essentially flat. Whatever fails at five lookups, it is not the window.
+places. The first is context length. Truncation is unlikely: the longest run
+in this table is 1,338 tokens, far inside the window, and
+@sec-context-engineering-rot runs the same model on a similar task out to
+11,048 tokens and stays between 88.3% and 100%. That makes running out of
+window an unlikely culprit. It does not rule out the effect of *accumulated
+observations* — how the model uses what it has collected, their format, what
+sits between them — which is a different thing from running out of room, and
+this design cannot separate it.
 
 The second cannot be ruled out with this design, so it has to be stated. *k*
 controls two things at once — how many observations the loop must carry, and
@@ -742,7 +746,8 @@ variable bindings. Three things follow: cost grows with the number of model
 calls because each one re-sends everything; nothing is ever forgotten,
 including mistakes, which is why a confused agent tends to stay confused in the
 same direction; and there is no rollback of the transcript unless you build
-one, while side effects never roll back at all. Then say what the rest of this
+one, and rolling it back does not undo external effects, which need their own
+transaction or compensation mechanism where one exists. Then say what the rest of this
 part adds: external files, a memory store, and sub-agents with their own
 transcripts are all ways of not living inside one message list.
 :::
@@ -823,8 +828,10 @@ text loop paid 3.5× the model calls for the same work.
 **Q: How would you decide between an agent and a pipeline?**
 
 By asking whether the control flow is data-dependent, not whether the task is
-hard. If the steps are known and stable, write them down — a pipeline is
-correct by construction, cheap, and debuggable at a line number. Reach for a
+hard. If the steps are known and stable, write them down — a fixed, tested
+pipeline takes the model out of deciding the next step, is cheap, and is
+debuggable at a line number. It still needs its inputs, computations and
+external effects validated; code can be silently wrong too. Reach for a
 loop when what you check second genuinely depends on what you found first. Then
 say what it costs you: an agent that fails returns a plausible answer having
 done something unexpected, which is a much worse debugging position than an
@@ -975,11 +982,13 @@ framework. Everything below reads differently afterwards.
 - **The exit is a prediction, not a condition.** Nothing checks whether the
   task is done, which is why a step cap is an architectural component rather
   than a tuning parameter.
-- **Reliability decays with the number of steps, and you can measure the
-  curve.** Here: **100% → 96% → 80% → 68% → 40%** for one to five lookups, at
+- **Accuracy fell with the number of lookups in this experiment.** Here:
+  **100% → 96% → 80% → 68% → 40%** for one to five lookups, at
   temperature 0 on a task with exact answers — n = 25 per cell, so the 40% is
   [23, 59] and it is the *direction* that is solid, not the shape.
-  @yao2024taubench and @kwa2025timehorizon measure the same decay at scale.
+  The lookups were batched into two model calls, so this is not five
+  sequential decisions; @yao2024taubench and @kwa2025timehorizon measure the
+  sequential version at scale.
 - **The loop was not what broke.** Tool use was perfect at every step count —
   exactly the right calls, none malformed, none capped — while accuracy fell 60
   points. Aggregation over collected observations is where the failure lives,
@@ -997,5 +1006,6 @@ framework. Everything below reads differently afterwards.
   the step cap on **60% of one-lookup tasks**, having retrieved the answer at
   step 0 and then repeated the call until the budget ran out.
 - **Choose an agent on branching, not difficulty.** If the steps are known,
-  write them down: a pipeline is correct by construction, cheap, and fails at a
-  line number. An agent that fails returns something plausible instead.
+  write them down: a fixed, tested pipeline removes the model from choosing the
+  next step, is cheap, and fails at a line number — though it still needs its
+  inputs and outputs validated. An agent that fails returns something plausible instead.

@@ -40,8 +40,8 @@ case for treating the window as a budget where **every token competes**:
   compose once — the transcript *is* the state, it only grows, and every model
   call re-sends all of it.
 - @sec-tool-design showed that a tool's return value is therefore a **write to
-  that state**, which is why a tool returning 50,000 tokens does not slow an
-  agent down so much as take the space its later steps needed.
+  that state**, which is why a tool returning 50,000 tokens can take space its
+  later steps need, and is carried into every later call.
 
 [So there are two questions, not one: "does it fit" — capacity is a real
 constraint — and, for everything that does, "what is each token
@@ -112,8 +112,9 @@ qwen3.5:9b, 60 tasks, two invented figures to find and sum
               60     96.7%   [88.7,  99.1]          11,048
 ```
 
-Sixty distractors scored *higher* than twelve, which is the first sign that
-what moves in this table is noise rather than context length. The intervals
+Sixty distractors scored *higher* than twelve. That non-monotone shape is
+consistent with noise, but it does not establish it — a real effect of content
+or position need not be monotone either. The intervals
 overlap heavily — but overlapping intervals are not a test, so here is one.
 The largest gap, 0 against 12 distractors (60/60 versus 53/60), sits on the
 same 60 tasks, so the right instrument is the paired one: all seven
@@ -123,8 +124,9 @@ conditions as independent samples, gives 0.013 — close here, and the wrong
 model of the data.) Across four comparisons the Bonferroni line is 0.0125, so
 it fails either way and I will not claim it. The comparison the
 headline rests on, 0 against 60 distractors, gives p = 0.50. So: adding 78×
-the tokens cost nothing this sample can detect, and the dip in the middle sits
-right at the edge of what 60 tasks can resolve either way.
+the tokens made no difference this sample can detect — which is not evidence
+that the conditions are equivalent — and the dip in the middle sits right at
+the edge of what 60 tasks can resolve either way.
 
 ### Why the easy test finds nothing
 
@@ -182,9 +184,12 @@ adding keys gives the mass somewhere else to go — *dilution*. Note this is a
 tendency and not an identity: the scores are not fixed while the denominator
 grows, and a model that learns to score the relevant token higher in a longer
 context can hold or increase its share. A
-literal string match survives dilution because it produces one very large
-similarity score the softmax cannot flatten; a semantic association produces
-several medium ones, and medium scores are exactly what dilution erases.
+literal string match plausibly holds up better because it produces one large
+score where a semantic association produces several medium ones — but even a
+large score is diluted: with a target logit $a$ and $N$ equal distractor logits
+$b$, the target's weight is $e^{a}/(e^{a} + N e^{b})$, which still falls as $N$
+grows for any finite gap. Treat this as a possible mechanism, unmeasured
+here.
 Separately, most advertised windows are not *trained* windows: a model trained
 at 8K and extended to 128K by RoPE scaling is being asked to interpolate
 positions it never saw, and interpolation quality falls with distance. That is
@@ -365,8 +370,11 @@ conclusion. The parent never sees the fifty documents. It sees one paragraph.
   and stays 40k forever       parent context: +200
 ```
 
-The saving is not the 40k. It is the 40k **multiplied by every subsequent
-model call in the parent's loop** — and how large that multiplier is depends on
+The saving is not the 40k. On the parent's side it is roughly
+$(40{,}000 - 200) \times M$ **over the $M$ model calls left in its loop** — a
+gross figure, from which the sub-agent's own 40k of reading, its fixed prompt
+and output, and any cache pricing still have to be subtracted, so treat the
+sketch as illustrative rather than as a bill. How large $M$ is depends on
 something @sec-agent-anatomy measured rather than assumed. When the steps are
 independent the model batches its tool calls: five lookups collapsed into 2.0
 model calls there, and the growth was nowhere near quadratic. When the steps
@@ -751,8 +759,8 @@ takes an hour and it decides which of the sections above you actually need.
 
 ## What to remember {#sec-context-engineering-summary}
 
-- **The window is a budget, not a container.** The question is never whether
-  something fits; it is what each token earns. Every token is re-sent on every
+- **The window is a budget, not a container.** Check both: whether the input
+  fits, and whether each part earns its cost. Every token is re-sent on every
   model call, so an uncurated context is multiplied by the number of steps.
 - **Count before you cut.** Tokens by category — system prompt, tool
   definitions, retrieved documents, tool results, history. The largest
@@ -760,9 +768,10 @@ takes an hour and it decides which of the sections above you actually need.
   *call* rather than per run.
 - **A claimed context length is a capacity, not a competence.** Of 17 models
   claiming 32K or more, only half held up at 32K [@hsieh2024ruler].
-- **Needle-in-a-haystack is the easy test, and it will pass.** This book's own
-  two attempts returned flat 100% curves — because the needle shared a rare
-  string with the question. Remove that overlap and **11 of 13 models fall
+- **Needle-in-a-haystack is the easy test, and it will pass.** @sec-rag's
+  retrieval run scored 100% at every position and size, and this chapter's
+  60-task version stayed between 88.3% and 100% with no monotone decline — both
+  with a needle that shared a rare string with the question. Remove that overlap and **11 of 13 models fall
   below half their short-context baseline at 32K**, GPT-4o from 99.3% to 69.7%
   [@modarressi2025nolima]. Evaluate with paraphrases.
 - **Isolation is the largest lever *when the shape is right*.** A read-heavy
@@ -775,10 +784,12 @@ takes an hour and it decides which of the sections above you actually need.
   it is not a saving.
 - **Compaction is lossy, and you choose the loss in advance.** Keep the task
   and live tool results verbatim, summarise decisions, drop consumed results
-  and recovered errors. Never summarise a number the answer must contain.
+  and resolved tracebacks — keeping a one-line lesson where it stops the same
+  error recurring. Preserve exact values the answer requires.
 - **Prefer identifiers to payloads.** A pointer costs ten tokens and a
   document costs two thousand, and most pointers are never dereferenced. Load
   eagerly only what is used on nearly every request.
-- **When the data has structure, query the structure.** Tables, code and
-  relational questions defeat chunk-and-embed outright; `run_sql` over a real
-  schema beats any amount of embedded rows.
+- **When the data has structure, query the structure.** Aggregates, joins and
+  exact lookups over tables are what `run_sql` over a real schema is for, and
+  chunk-and-embed handles them badly; semantic search over code or prose is a
+  different task, and most systems end up using the two side by side.

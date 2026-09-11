@@ -22,6 +22,9 @@ NumPy 2.5.2 on Python 3.14.5.
 - decide whether a VLM or a dedicated OCR pipeline is the right tool for a
   document task.
 
+The scope is document images and vision–language models; audio and video are
+outside this chapter.
+
 ## An image is a fixed number of tokens {#sec-multimodal-tokens}
 
 A transformer takes a sequence of vectors. @sec-transformers never cared where
@@ -93,7 +96,7 @@ Text tokens and image patches sit in one stream and attend to each other.
 ```
 
 ::: {.fig-cap}
-There is no separate image pathway **in this design** — @sec-multimodal-contrastive
+There is no separate cross-attention pathway inside the decoder **in this design** — @sec-multimodal-contrastive
 describes the alternative, where a frozen language model attends into the image
 through cross-attention instead. Patches become vectors, the question
 becomes vectors, and one sequence goes into the same stack — which is why a
@@ -120,11 +123,14 @@ capacity, not content. Holding the content constant is the point of the design,
 so the only thing varying is how many encoder pixels each character gets.
 
 Two accountings appear in this chapter and it is worth separating them here.
-**290** is the whole prompt as the server reports it: 256 image tokens, the
-image delimiters, and the 34-token instruction. **260** is the image alone —
-the 256 vectors plus its delimiters — and it is the number used in the
-text-versus-image comparison below, because the instruction is identical in both
-arms and cancels. Wherever this chapter says "as an image, 260", it means the
+**290** is the whole prompt as the server reports it for the transcription
+pages. **260** is what the image adds in the text-versus-image comparison below,
+where the instruction is identical in both arms and cancels. Do not try to
+rebuild either from parts: 256 vectors plus delimiters plus a 34-token
+instruction would come to 294, not 290, so the two counts treat the delimiters
+or the instruction differently, and this run did not keep the raw tokenizer
+output that would say which. Each figure is what its own measurement
+reported. Wherever this chapter says "as an image, 260", it means the
 *marginal* cost of attaching the picture.
 
 [For this model, an image costs a flat rate.]{.hl} The vision encoder resizes to
@@ -253,10 +259,12 @@ design in the figure above, and the one most open VLMs now follow.
 Knowing which you have in front of you tells you what you can change. Be
 precise about what "frozen" rules out: gradients still flow *through* a frozen
 language model, which is exactly how the resampler and the gates get trained —
-what is frozen is the language model's own weights, so its text behaviour
-cannot drift and you cannot teach it anything new through the image path. A
-single-stream model, by contrast, has no separate image pathway to intervene
-on.
+what is frozen is the language model's own weights, so its text-only
+behaviour cannot drift. The *system* still learns through the image path: the
+resampler and gates are trained, and they change what the frozen model does
+whenever an image is present. A single-stream model, by contrast, has no
+separate cross-attention pathway inside the decoder to intervene on — its
+separate modules are the vision encoder and the projector in front of it.
 
 The vision encoder in this chapter's model is a descendant of CLIP with a
 different loss [@zhai2023sigmoid], and its fixed pooled output size is why an
@@ -492,7 +500,7 @@ useful:
   asked to transcribe something it CANNOT resolve  invents fluent Turkish
 ```
 
-[The model knows what is not there. It does not know what it cannot read.]{.hl}
+[In this test the model refused every absent value. It did not know what it could not read.]{.hl}
 
 The distinction is not a quirk; it follows from how the two questions are
 posed. *Is Trabzon in this table* is a categorical judgement the model can make
@@ -571,9 +579,11 @@ and a probability distribution on the right, and both leave by the same door.
 ::::
 
 That gives a rule you can hold on to. **Ask a VLM questions.** Do not ask it to
-be an OCR engine and then trust the output as a transcript, because the failure
-mode is silent and fluent. If you need a transcript that fails loudly, use a
-tool that fails loudly.
+be an OCR engine and then trust the output as a transcript, because its failure
+mode is fluent. Do not assume the alternative fails loudly either: a dedicated
+engine gives you per-character confidences to gate on, which helps, and it can
+still turn one plausible word or digit into another. Whichever tool produces
+the transcript, validate the fields downstream systems will treat as facts.
 
 ## VLM or OCR? {#sec-multimodal-choosing}
 
@@ -595,27 +605,28 @@ photographs, and answers questions about them.
 
 ::: {#gloss-optical-character-recognition-ocr .column-margin .term-gloss}
 **Optical character recognition (OCR)** — turning an image of text into text.
-A dedicated engine fails visibly, which is its main advantage over a model
-that fails fluently.
+A dedicated engine exposes per-character confidences you can gate on, which is
+its main advantage over a model with no such signal; both can make plausible
+errors.
 [↩](#term-optical-character-recognition-ocr){.term-back}
 :::
 
 | | Dedicated OCR | Vision–language model |
 |:--|:--|:--|
 | Output when confident | text, with per-character confidences | text, no usable per-character signal |
-| Output when it fails | [garbage — visibly wrong, easy to gate on]{.pro} | [fluent, plausible, wrong]{.con} |
+| Output when it fails | [often visibly wrong, with confidences to gate on — plausible substitutions happen too]{.pro} | [fluent, plausible, wrong]{.con} |
 | Layout and reading order | needs its own model or heuristics | [handled, often well]{.pro} |
 | Answering *about* a document | [not its job — you build that on top]{.con} | [the thing it is for]{.pro} |
 | Charts and diagrams | [nothing useful]{.con} | reads them, with the caveat above |
-| Cost per page | cheap, local, no GPU needed | a flat 256+ tokens, plus generation |
+| Cost per page | cheap, local, no GPU needed | for this model's fixed-grid encoder, a flat 256+ tokens plus generation; tiling encoders charge per crop |
 | Turkish specifically | depends entirely on the engine's language packs | measured above: ~5× the English error rate |
 
 : Two tools, two failure modes {tbl-colwidths="[24,36,40]"}
 
 The practical architecture for document work in 2026 is usually **both**: a
 dedicated engine produces the transcript, and the VLM answers questions over
-the transcript *and* the image. That way the text you index is text that failed
-loudly if it failed, and the model is used for the part it is uniquely good at
+the transcript *and* the image. That way the text you index comes with
+confidences you can gate on, and the model is used for the part it is uniquely good at
 — reading layout, finding the field, understanding the chart.
 
 ## Intuition checks {#sec-multimodal-intuition}
@@ -628,7 +639,7 @@ with a measurement rather than an argument.
 
 No, and it is not close. The same sentence measured both ways cost **46.6
 tokens as English text and 260 as an image** — a 5.57× premium, 4.17× in
-Turkish. The image rate is *flat*, which is the part that surprises people: a
+Turkish. For this encoder the image rate is *flat*, which is the part that surprises people: a
 page holding one line and a page holding fourteen cost exactly the same. So
 photographing text you already have is pure waste, and the waste is larger the
 less the page contains.
@@ -663,12 +674,13 @@ another language, even when the component has nothing linguistic in it.
 ::: {.callout-note collapse="true"}
 ## 4. A VLM transcribed a page and the output reads perfectly. Is it correct?
 
-Not necessarily, and fluency is *evidence against* rather than for. The
+Not necessarily: fluency is not evidence of transcription accuracy. The
 measured failure mode is not garbled characters; it is a word the model could
 not resolve replaced by a shorter, grammatical, plausible one — output that
-looks better than an honest failure would. Classical OCR produces detectable
-garbage when it fails. If a downstream step will treat the transcript as truth,
-that difference decides the tool.
+looks better than an honest failure would. A classical engine at least attaches
+confidences to what it emits, but it can make plausible substitutions too. If a
+downstream step will treat the transcript as truth, compare the two tools'
+error rates on your own documents and validate the fields that matter.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -687,7 +699,7 @@ nothing in a forward pass separates reading from inferring.
 Usually you should run both. Use the dedicated engine for the transcript, so
 failures are loud and gateable, and the VLM for the things it is uniquely good
 at — layout, locating a field, reading a chart, answering questions about the
-page. Replacing a loud failure mode with a silent one is a downgrade even when
+page. Replacing a gateable failure mode with a silent one is a downgrade even when
 the average accuracy improves.
 :::
 
@@ -715,12 +727,12 @@ fourteen.
 Where do you look?**
 
 Resolution first, because it is the variable with a cliff rather than a slope.
-The fixed token budget means a denser or smaller-typed page pushes more
-information through the same bottleneck, and the degradation is not gradual —
+At smaller type the same content gets fewer encoder pixels per character, and
+the degradation is not gradual —
 here English went from 0.05% to 1.33% character error across the ladder and
 Turkish from 0.25% to 6.67%. Then check whether production pages differ from
 test pages in language, because the cliff sits in a different place for
-different scripts.
+different languages and glyph distributions.
 
 ### Testing whether you have shipped one
 
@@ -738,8 +750,8 @@ check you are likely to run.
 **Q: When would you not use a VLM?**
 
 When you need a transcript that a downstream system will trust. The failure
-mode is fluent and undetectable, so a silent error propagates into whatever you
-index or compute. Use a dedicated OCR engine there, keep the VLM for
+mode is fluent and hard to detect from the output itself, so a silent error
+propagates into whatever you index or compute. Use a dedicated OCR engine there, keep the VLM for
 understanding rather than transcription, and if you need both, run both — the
 extra cost is small next to a wrong number nobody caught.
 
@@ -759,7 +771,7 @@ Worth knowing about, not used above:
 
 | library | current version | when you would reach for it |
 |:--|:--|:--|
-| `paddleocr` | 3.7.0 | a strong dedicated OCR engine with layout analysis; the default first try for a transcript that must fail loudly |
+| `paddleocr` | 3.7.0 | a strong dedicated OCR engine with layout analysis; the default first try when you want a transcript with confidences to gate on |
 | `surya-ocr` | 0.22.1 | modern OCR plus reading-order and table detection, multilingual |
 | `easyocr` / `pytesseract` | 1.7.2 / 0.3.13 | lighter options; `pytesseract` wraps Tesseract, which is old, fast, and honest about failing |
 | `docling` | 2.123.0 | document conversion end to end, the @sec-rag stage-1 problem |
@@ -852,7 +864,7 @@ both ways. The ratio is the first thing to know and takes two minutes.
 | [Vision language models explained](https://huggingface.co/blog/vlms) — Hugging Face | the clearest short overview of how the pieces are assembled, kept current |
 | [`open_clip`](https://github.com/mlfoundations/open_clip) | open reimplementations of contrastive pretraining, with reproducible training recipes |
 | [OpenAI CLIP](https://github.com/openai/CLIP) | the original release; small enough to read end to end |
-| [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) / [Surya](https://github.com/VikParuchuri/surya) | the dedicated engines from @sec-multimodal-choosing — the tools whose failures are visible |
+| [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) / [Surya](https://github.com/VikParuchuri/surya) | the dedicated engines from @sec-multimodal-choosing — the tools whose output carries confidences you can gate on |
 | [LLaVA](https://github.com/haotian-liu/LLaVA) | visual instruction tuning as runnable code; the design most open VLMs still follow |
 | [3Blue1Brown](https://www.youtube.com/%403blue1brown) | the transformer and attention chapters apply unchanged to the image half; the vision encoder is the same machinery on different patches |
 
@@ -879,13 +891,13 @@ both ways. The ratio is the first thing to know and takes two minutes.
   encoders, which most 2025–2026 families use, charge a variable number instead.
   Look up your own encoder's rule before budgeting; that it *has* one is the
   useful part.
-- **Photographing text you already have costs 4–5×.** The same sentence: 46.6
+- **Photographing text you already have costs about 4.2–5.6×.** The same sentence: 46.6
   tokens as English text, 62.4 as Turkish text, **260 as an image**. The
   premium is *smaller* for Turkish only because @sec-turkish-nlp's tokenizer
   penalty already made the text expensive.
 - **Resolution is a cliff, not a slope, and the cliff is language-specific.**
-  Because the token budget is fixed, a denser page pushes more information
-  through the same bottleneck. English went 0.04% → **1.33%** character error
+  At smaller type the same content occupies fewer pixels per character; the
+  experiment changes readability, not the amount of source information. English went 0.04% → **1.33%** character error
   across the ladder; Turkish went 0.26% → **6.67%**.
 - **Turkish cost about 5× the error rate of English at every resolution**, on
   professionally translated pairs where the content was identical. No
@@ -895,13 +907,16 @@ both ways. The ratio is the first thing to know and takes two minutes.
 - **The failure mode is fluency, not garbage.** Diacritic loss was the minority
   of the damage (95.1% retained at the worst setting). The majority was a word
   the model could not resolve, replaced with a shorter, grammatical, plausible
-  one. Classical OCR fails visibly; a VLM fails in correct Turkish.
-- **The model knows what is not there; it does not know what it cannot read.**
-  Asked 90 times for a value absent from a table, it refused **90 times** and
+  one. A VLM fails in correct Turkish; do not assume a classical engine cannot.
+- **In this test the model refused every absent value; it did not know what it
+  could not read.** Asked 90 times for a value absent from a table, it refused
+  **90 times** — zero misses, which under independence still allows a miss rate
+  up to about 3.3%, and 90 questions drawn from 30 tables are not fully
+  independent — and
   read the present values at 98.9%. Absence is checkable against evidence;
   illegibility is not, because nothing in a forward pass separates reading from
   inferring.
-- **So use both tools.** Dedicated OCR for the transcript, where failures are
-  loud and gateable; the VLM for layout, locating fields, charts, and questions
-  about the page. Replacing a loud failure mode with a silent one is a
+- **So use both tools.** Dedicated OCR for the transcript, where failures come
+  with confidences you can gate on; the VLM for layout, locating fields, charts, and questions
+  about the page. Replacing a gateable failure mode with a silent one is a
   downgrade even when average accuracy improves.
