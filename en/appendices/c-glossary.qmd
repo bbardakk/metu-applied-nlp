@@ -16,11 +16,11 @@ translate second.
 | agent loop | ajan döngüsü | a while-loop around a model with tools: the model chooses an action, the runtime executes it, the result is appended, repeat until the model stops calling tools |
 | code mode | kod kipi | giving an agent a sandboxed interpreter instead of a fixed tool list, trading a readable whitelist for composability |
 | compaction | sıkıştırma | summarising or dropping parts of an agent's transcript so the context stops growing; lossy, and you choose the loss before knowing what will be needed |
-| context isolation | bağlam yalıtımı | running a read-heavy sub-task in its own window and returning only its conclusion, so the parent never pays for what it read |
+| context isolation | bağlam yalıtımı | running a read-heavy sub-task in its own window and returning only its conclusion, so the parent's context never carries what it read — the reading is still paid for, by the sub-agent |
 | effective context length | etkin bağlam uzunluğu | the length at which a model still performs, as opposed to the length it accepts; routinely far shorter than the advertised window |
 | guardrail | korkuluk | a runtime check that reduces accidental harm; not a security boundary, which is @sec-agent-security's distinction |
 | idempotency | etkisizlik (idempotans) | a call that can be repeated without repeating its effect; what makes a retried agent step safe |
-| parallel tool calling | paralel araç çağırma | a model emitting several tool calls in one turn, which collapses many loop iterations into one and is the largest single lever on agent cost |
+| parallel tool calling | paralel araç çağırma | a model emitting several tool calls in one turn, which collapses many loop iterations into one and is often one of the largest levers on agent cost when the calls are independent |
 | progressive disclosure | kademeli açılım | loading only the tool definitions relevant to a step instead of all of them, so a large tool surface does not tax every call |
 | prompt injection | prompt enjeksiyonu | instructions planted in content the model reads, which it cannot distinguish from your own |
 | step cap | adım bütçesi | the maximum number of loop iterations; not a tuning parameter but an admission that the loop's exit is a model decision and may never be taken |
@@ -35,7 +35,7 @@ translate second.
 |---|---|---|
 | adjudication | uzlaştırma | a third pass that settles disagreements between two annotators |
 | annotation guideline | etiketleme kılavuzu | the written rules that make labels reproducible by someone else |
-| class imbalance | sınıf dengesizliği | one label dominates, so accuracy stops carrying information |
+| class imbalance | sınıf dengesizliği | one label dominates, so accuracy has to be read against the majority-class baseline |
 | Cohen's kappa | Cohen kappa ◆ | agreement corrected for how much chance alone would produce |
 | deduplication | tekilleştirme | removing near-identical documents; *yinelenen ayıklama* also seen |
 | gold standard | altın standart | the labels treated as correct when scoring a model |
@@ -53,7 +53,7 @@ translate second.
 | abstention | çekimserlik | refusing to answer when confidence is low, so the answers you do give are more reliable; needs a score to threshold on |
 | constrained decoding | kısıtlı kod çözme | masking the logits at each step to the tokens a grammar allows, so invalid output becomes unreachable rather than unlikely |
 | decoding | kod çözme | turning the model's per-step scores into actual tokens; *çözümleme* would be *analysis*, a different operation |
-| logprob | log olasılık | the log probability the model assigned to a token; the cheapest confidence signal available. Cleanest when the answer is one token — over several tokens the conditional log probabilities add, so comparing sequences needs the same length and tokenization |
+| logprob | log olasılık | the log probability the model assigned to a token; the cheapest confidence signal available. Cleanest when the answer is one token — over several tokens the conditional log probabilities add, and sums over different lengths or tokenizations are defined but not comparable at face value |
 | min-p | min-p ◆ | a cutoff scaled to the top token's probability rather than to a fixed mass, so it adapts to how peaked the distribution is |
 | structured output | yapılandırılmış çıktı | output constrained to a schema rather than merely requested in prose |
 
@@ -80,8 +80,8 @@ translate second.
 | Brier score | Brier skoru ◆ | mean squared error of a predicted probability; rewards a model for being right *and* honest about it |
 | calibration | kalibrasyon | whether a score of 0.8 really means "right about 80% of the time"; a separate property from accuracy |
 | cascade | şelale | answer with a cheap model and escalate only on a validator failure |
-| checksum | sağlama toplamı | check digits that make a mistyped identifier detectable; catches every single-digit error by construction |
-| confusion matrix | karışıklık matrisi | the four counts — TP, FP, FN, TN — that every classification metric is computed from |
+| checksum | sağlama toplamı | check digits that make a mistyped identifier detectable; which errors are caught depends on the scheme — the TCKN checksum in the guardrails chapter catches every single-digit error, and not every scheme does |
+| confusion matrix | karışıklık matrisi | for a binary classifier, the four counts — TP, FP, FN, TN — that the usual metrics are computed from; with K classes it is a K×K table |
 | continuous batching | sürekli batch'leme ◆ | new requests join a running batch as slots free, instead of waiting for the whole batch to finish; the throughput lever in every modern server |
 | decision threshold | karar eşiği | the cut that turns a score into a label; a free parameter you choose on held-out data, not a property of the model |
 | drift | kayma | the input distribution moving away from the one you evaluated on, while nothing in your code changed |
@@ -104,7 +104,7 @@ translate second.
 | span | span ◆ | one timed unit of work in a trace; *aralık* would be *interval*, a different thing |
 | speculative decoding | spekülatif kod çözme ◆ | a small draft model proposes several tokens and the large model verifies them in one pass; same output distribution, fewer serial steps |
 | throughput | işlem hacmi / verimlilik | |
-| time to first token (TTFT) | ilk token'a kadar geçen süre (TTFT) ◆ | how long the reader waits before anything appears; dominated by prefill, and the number streaming is meant to improve |
+| time to first token (TTFT) | ilk token'a kadar geçen süre (TTFT) ◆ | how long the reader waits before anything appears — queueing, prefill and the first decode step; prefill often dominates on long prompts, and it is the number streaming is meant to improve |
 | tracing | izleme | recording each step of a request as a linked tree of spans |
 
 : {tbl-colwidths="[35,35,30]"}
@@ -275,7 +275,7 @@ translate second.
 | latent semantic analysis (LSA) | gizli anlambilimsel çözümleme ◆ | *LSA* dominant; PPMI/SVD on counts |
 | MinHash | MinHash ◆ | a fixed-size sketch of a set whose collisions estimate Jaccard similarity; the basis of near-duplicate detection at scale |
 | nearest neighbour | en yakın komşu | *komşu listesi* = neighbour list |
-| negative sampling | negatif örnekleme | replaces the softmax with binary real-or-fabricated decisions on sampled pairs; the per-example arithmetic is a logistic regression, though both vectors are learned so the objective is bilinear rather than convex |
+| negative sampling | negatif örnekleme | replaces the softmax with binary real-or-fabricated decisions on sampled pairs; the per-example arithmetic is a logistic regression, but the score is bilinear in two learned vectors and the joint objective is non-convex |
 | one-hot encoding | one-hot kodlama ◆ | no settled Turkish gloss; *one-hot* takes suffixes |
 | out-of-vocabulary (OOV) | sözlük dışı ◆ | *OOV oranı* = OOV rate |
 | pointwise mutual information (PMI) | noktasal karşılıklı bilgi ◆ | *PPMI* = pozitif PMI |
@@ -356,7 +356,7 @@ translate second.
 | byte-pair encoding (BPE) | byte-pair encoding ◆ | never translated; *BPE* in running text |
 | Common Crawl | Common Crawl ◆ | proper noun, never translated; the monthly web crawl most corpora start from |
 | corpus | derlem | plural *derlemler* |
-| fertility | doğurganlık | of a tokenizer: tokens per word. Comparable across languages only for the same tokenizer on matched content, and it is not the bill: languages differ in words per sentence too |
+| fertility | doğurganlık | of a tokenizer: tokens per word. Used to compare tokenizers on the same text, or languages under one tokenizer on matched content — and it is not the bill: languages differ in words per sentence too |
 | hapax legomena | hapax legomena ◆ | Latin, kept as-is; words occurring exactly once |
 | lemmatization | kök bulma | see *stemming* — the pair is easy to swap |
 | n-gram / bigram | n-gram ◆ / ikili n-gram | *n-gram* takes Turkish suffixes: *n-gram'lar* |

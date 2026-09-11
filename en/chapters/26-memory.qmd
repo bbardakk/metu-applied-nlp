@@ -97,16 +97,19 @@ The architecture that works for most systems is unglamorous and hybrid:
 
 [Facts go in rows; episodes go in vectors.]{.hl}
 
-The single most common production mistake in this area is putting facts in
-vectors. Not because the storage layer refuses: `pgvector` rows take ordinary
+A common design mistake in this area is putting facts in vectors without giving
+them an identity. Not because the storage layer refuses: `pgvector` rows take ordinary
 SQL `UPDATE`, `DELETE` and upsert, and every managed vector store has an
-id-keyed delete. The problem is that a vector store gives you no *key* for the
-fact. Nothing enforces one row per `(user, preferred_channel)`, so a corrected
+id-keyed delete. The problem is an append-only collection with no stable key for the
+fact. If nothing enforces one row per `(user, preferred_channel)`, a corrected
 preference becomes a second embedding sitting next to the first, both
 retrievable, and similarity search has no reason to prefer the new one. Both
 update and delete turn out to be requirements rather than nice-to-haves — one
-for correctness and one for law — and what makes them work is a keyed fact
-table, with the index as a derived view over it.
+for correctness and one for law — and what makes them work is fact identity
+enforced in the schema. A unique constraint on `(user_id, fact_type)` works just
+as well on a `pgvector` table that also stores the embedding; the point is the
+key, not where the vector lives, with any similarity index treated as a derived
+view over it.
 
 ## Write policies: the decision nobody makes on purpose {#sec-memory-write}
 
@@ -184,7 +187,10 @@ separated from recency.
 sum to 100% of the thirty items: *newer* if it names the July value and only
 that, *older* if it names the March value and only that, *hedged* if it names
 both, neither, or refuses. The 0.0% in the bare row is 0 of 30, not a rounded
-small number.
+small number. Read that row as an information control rather than a test of
+temporal reasoning: with no dates and no rule, nothing in the context says which
+fact is newer, so hedging — 83.3% here — is the defensible answer, and 0 of 30
+choosing the newer value is what a careful model should score.
 
 ```text
 qwen3.5:9b, 30 contradictions per condition, n = 30
