@@ -527,9 +527,11 @@ Test with paraphrases, not literal matches.
 
 Count, by category — system prompt, tool definitions, retrieved documents,
 tool results, history. Not because counting is virtuous but because the
-largest category is routinely not the one people assume, and the fixed costs
+largest category is routinely not the one people assume. The fixed costs
 (system prompt, tool definitions) are multiplied by every step in the loop, so
-they pay back more than they look like they should.
+their token count is larger than it looks — but a cached prefix bills those
+repeats at a discount, so rank categories by measured cost, not by tokens
+alone.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -611,9 +613,10 @@ matter disproportionately: they are paid once per *call*, not once per run.
 **Q: An agent costs three times its budget. Walk me through fixing it.**
 
 Measure by category first, and say why: the largest category is usually not
-the assumed one. Then in order of return — prune tool definitions and the
-system prompt, because they are multiplied by every step; cut what tools
-return to the fields actually used; isolate the read-heavy sub-task into its
+the assumed one. Then cut in order of measured cost, counting cache hits and
+token prices rather than raw tokens. The usual candidates: prune tool
+definitions and the system prompt, because they are multiplied by every step;
+cut what tools return to the fields actually used; isolate the read-heavy sub-task into its
 own context; then compact history with the facts kept verbatim. Re-measure
 accuracy at every stage with an interval, because each of those can cost
 points quietly.
@@ -657,22 +660,30 @@ are in @sec-context-engineering-deeper with links rather than versions.
 
 ## Lab: cut an agent's token usage without losing accuracy {#sec-context-engineering-lab}
 
-The order of these steps matters — measure, then cut the largest category,
-then re-measure. Doing it in any other order produces savings you cannot
-attribute.
+The order of these steps matters — measure, then cut, then re-measure. Doing
+it in any other order produces savings you cannot attribute. Cut first the
+category that contributes most to measured cost and can be reduced safely.
+That is not always the one with the most tokens: the cache-hit rate and the
+token prices decide what each token costs. Steps 2–5 list the usual
+candidates; if your measurement ranks them differently, follow the measurement.
 
 ### Step 1 — build the budget by category
 
 Instrument one real run. Count tokens for: system prompt, tool definitions,
-retrieved documents, tool results, conversation history. Print the table. Do
-not skip to the techniques; the point of this step is that you will be wrong
-about which category is largest.
+retrieved documents, tool results, conversation history. Next to each count,
+record its cost, with cached and uncached input tokens priced separately. Print
+the table. Do not skip to the techniques; the point of this step is that you
+will be wrong about which category is largest.
 
-### Step 2 — fix the fixed costs first
+### Step 2 — fix the fixed costs, if they dominate the bill
 
-System prompt and tool definitions are re-sent on *every* call, so they are
-multiplied by the step count. This is usually the cheapest large saving: prune
-tools nobody uses, and delete the instructions that accumulated.
+System prompt and tool definitions are re-sent on *every* call, so their
+tokens are multiplied by the step count. The bill is a different matter: a
+cached prefix is billed at a fraction of its first-call price
+(@sec-context-engineering-cache), so check the cache-hit rate and the token
+prices before putting them first. When they do dominate measured cost, this is
+usually the cheapest large saving: prune tools nobody uses, and delete the
+instructions that accumulated.
 
 ### Step 3 — cut what tools return
 
@@ -712,7 +723,8 @@ would keep if you could only keep one.
    largest. Most people are wrong.
 2. **Multiply by steps.** Take your system prompt and tool definitions, and
    multiply their token count by the average number of model calls per run.
-   That number is what pruning them is worth.
+   That number is what pruning them is worth in tokens; if the prefix is cached,
+   the saving on the bill is smaller.
 3. **Paraphrase your NIAH.** If you have a long-context evaluation, rewrite
    the questions so they share no distinctive words with the answers. Re-run.
    Report both curves.
@@ -764,8 +776,9 @@ takes an hour and it decides which of the sections above you actually need.
   model call, so an uncurated context is multiplied by the number of steps.
 - **Count before you cut.** Tokens by category — system prompt, tool
   definitions, retrieved documents, tool results, history. The largest
-  category is routinely not the assumed one, and fixed costs are paid per
-  *call* rather than per run.
+  category is routinely not the assumed one. Fixed costs are paid per *call*
+  rather than per run, but a cached prefix is billed at a discount, so rank
+  categories by measured cost.
 - **A claimed context length is a capacity, not a competence.** Of 17 models
   claiming 32K or more, only half held up at 32K [@hsieh2024ruler].
 - **Needle-in-a-haystack is the easy test, and it will pass.** @sec-rag's
