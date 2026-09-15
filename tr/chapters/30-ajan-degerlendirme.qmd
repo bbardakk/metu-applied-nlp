@@ -13,7 +13,8 @@ olabilir. Yazılım: `ollama` 0.24.0 üzerinden `qwen3.5:9b`, NumPy 2.5.2, Pytho
 
 **Öğrenme hedefleri.** Bu bölümün sonunda:
 
-- sonuç değerlendirmesini yörünge değerlendirmesinden ayırabilir ve her birinin
+- sonuç değerlendirmesini trajectory (ajanın izlediği çağrı, argüman, sonuç ve
+  karar dizisi) değerlendirmesinden ayırabilir ve her birinin
   tek başına neyi kaçırdığını söyleyebilirsiniz;
 - araç kullanımını bir hisle değil somut bir metrik kümesiyle
   puanlayabilirsiniz;
@@ -27,7 +28,7 @@ olabilir. Yazılım: `ollama` 0.24.0 üzerinden `qwen3.5:9b`, NumPy 2.5.2, Pytho
 farktan boyutlandırın, inanmadan önce hakemi denetleyin, aralıkları raporlayın.
 Ajanlar tek bir şey ekliyor ve o da "doğru"nun ne anlama geldiğini değiştiriyor.
 
-Bir sınıflandırıcı bir cevap üretir. Bir ajan bir cevap **ve bir yörünge**
+Bir sınıflandırıcı bir cevap üretir. Bir ajan bir cevap **ve bir trajectory**
 üretir — oraya götüren kararlar, araç çağrıları, gözlemler ve yeniden denemeler
 dizisi. İki çalıştırma cevapta anlaşıp oraya varmak için yaptıklarında tümüyle
 ayrışabilir ve o farklardan yalnızca biri bir doğruluk sayısında görünür.
@@ -35,7 +36,7 @@ ayrışabilir ve o farklardan yalnızca biri bir doğruluk sayısında görünü
 | | ne sorar | neyi kaçırır |
 |:--|:--|:--|
 | **Sonuç değerlendirmesi** | doğru cevabı üretti mi? | neye mal olduğunu, kaç yanlış dönüş yaptığını, oraya şansla varıp varmadığını, yolda yıkıcı bir şey yapıp yapmadığını |
-| **Yörünge değerlendirmesi** | oraya makul biçimde vardı mı? | cevabın gerçekten doğru olup olmadığını — yanlış bir cevaba giden verimli bir yol iyi puan alır |
+| **Trajectory değerlendirmesi** | oraya makul biçimde vardı mı? | cevabın gerçekten doğru olup olmadığını — yanlış bir cevaba giden verimli bir yol iyi puan alır |
 
 : İki değerlendirme, hiçbiri yeterli değil {tbl-colwidths="[22,34,44]"}
 
@@ -50,7 +51,8 @@ ikisini herkes atlıyor ve ikisi de belirli bir şeyi gizliyor. Sonra aynı otuz
 kazandırdığını çözüyor — ve bu, onun için yapılan alışıldık argümanın iddia
 ettiği şey değil. Sonra hiçbir kesin metriğin ulaşamadığı kısım;
 @sec-llm-degerlendirme'nin hakeminin bir ek uyarıyla geri döndüğü yer. Sonra
-senaryo testleri; dünyayı düzgün fikstürlediğinizde sıradan birim testleridir.
+senaryo testleri; test ortamını fixture (testin önceden hazırlanmış verisi ve
+başlangıç durumu) olarak düzgün kurduğunuzda bunlar sıradan birim testleridir.
 Sonra açık ölçütler ve bir sıralama tablosu konumunun neyin kanıtı olduğu. Ve
 son olarak her üretim kusurunu kalıcı bir teste dönüştüren döngü.
 
@@ -63,8 +65,8 @@ doğruluğu" dört kişi için dört farklı şey demek.
 | metrik | tanım | neyi yakalar |
 |:--|:--|:--|
 | **Sonuç doğruluğu** | nihai cevap doğru | gerçekten istediğiniz şey |
-| **Araç çağrısı kesinliği** | yapılan çağrıların gerekli olanların oranı | gereksiz iş, tekrarlanan sorgular, hiçbir yere varmayan keşif |
-| **Araç çağrısı duyarlılığı** | gereken çağrıların yapılanların oranı | kontrol etmeden cevaplayan ajan — çoğunlukla, ama her zaman değil, parametrik bellekten |
+| **Araç çağrısı kesinliği** (tool-call precision) | yapılan çağrılar içinde gerekli olanların oranı | gereksiz iş, tekrarlanan sorgular, hiçbir yere varmayan keşif |
+| **Araç çağrısı duyarlılığı** (tool-call recall) | gerekli çağrılar içinde yapılmış olanların oranı | kontrol etmeden cevaplayan ajan — çoğunlukla, ama her zaman değil, parametrik bellekten |
 | **Adım sayısı** | araç çağrıları ve model çağrıları, ayrı sayılmış | @sec-ajan-anatomisi'nin bulgusu: bunlar farklı sayılardır ve yalnızca biri faturanızı öngörür |
 | **Sonlanma oranı** | sınıra çarpmak yerine kendiliğinden duranların oranı | yalnızca sonuç raporunda başarı gibi görünen kusur biçimi |
 | **Doğru cevap başına maliyet** | istek başına ortalama token ÷ 0–1 oran olarak doğruluk | iki sistemi adil karşılaştıran tek maliyet sayısı |
@@ -72,16 +74,17 @@ doğruluğu" dört kişi için dört farklı şey demek.
 : Altı metrik {tbl-colwidths="[22,38,40]"}
 
 Araç çağrısı kesinliği ile duyarlılığının bir anlam taşıması için önce bir şeyin tanımlanması gerekiyor:
-*hangi* çağrılar gerekliydi. Tek bir altın yol kolay sürümdür ve genellikle
+*hangi* çağrılar gerekliydi. Tek bir referans yol kolay sürümdür ve genellikle
 yanlış olanıdır — iki araç birbirinin yerine geçebilir, önbelleklenmiş bir sonuç
 ikinci koşuda bir çağrıyı gereksiz kılabilir ve bir miktar keşif meşrudur. Tek
-bir yörünge yerine **kabul edilebilir bir yörünge kümesi** yazın ya da bir
+bir trajectory yerine **kabul edilebilir bir trajectory kümesi** yazın ya da bir
 çalıştırmayı, kurmak zorunda olduğu olgular üzerinden puanlayın; bunun için
 yaptığı çağrılar üzerinden değil.
 
 Atlanan ikisi duyarlılık ve sonlanmadır ve ikisi de belirli felaketleri gizler.
-Düşük araç çağrısı duyarlılığı genellikle ajanın verinizden değil bellekten
-cevapladığı anlamına gelir — tek olası sebep bu değil, ama yaygın olanı — @sec-arac-tasarimi, opak bir şemanın zamanın %41,7'sinde
+Düşük araç çağrısı duyarlılığı genellikle ajanın gerekli kaynağa başvurmak
+yerine bellekten cevapladığı anlamına gelir. Tek olası sebep bu değil ama en
+yaygını. @sec-arac-tasarimi, opak bir şemanın zamanın %41,7'sinde
 çağrılmadığını ve kendinden emin uydurulmuş düzyazı ürettiğini ölçtü. Düşük bir
 sonlanma oranı, çalıştırmaların bütçe bittiği için bittiği anlamına gelir ve
 yalnızca sonuç metriği o ana kadar tesadüfen doğru olanları başarı olarak
@@ -91,7 +94,7 @@ kaydeder.
 
 Peki ikinci eksen gerçekte ne katıyor? Tam olarak iki arama ve bir toplama
 gerektiren otuz görev, hiçbir şey tahmin edilemesin diye uydurma veri üzerinde.
-Sonuç, toplam doğruysa geçer. Yörünge, ajan tam olarak gereken iki çağrıyı
+Sonuç, toplam doğruysa geçer. Trajectory ise ajan tam olarak gereken iki çağrıyı
 yaptıysa — tekrar yok, yanlış hedef yok — ve kendiliğinden durduysa geçer. İki
 sistem: yapılandırılmış araç döngüsü ve elle yazılmış bir metin protokolü.
 
@@ -114,9 +117,9 @@ qwen3.5:9b, 30 tasks, 2 lookups needed
 ```
 
 Söylenecek ilk şey bu ölçümün *çözemediği* şey. Herkesin tartıştığı uyuşmazlık —
-sonuçta geçip yörüngede kalan bir çalıştırma — bir kez oldu. Ama o olayın
+sonuçta geçip trajectory'de kalan bir çalıştırma — bir kez oldu. Ama o olayın
 paydası otuz değil: sonuçta kalan bir çalıştırma onu zaten sergileyemez.
-**Sonuçta geçen on bir çalıştırmanın biri yörüngede kaldı: %9,1, Wilson aralığı
+**Sonuçta geçen on bir çalıştırmanın biri trajectory'de kaldı: %9,1, Wilson aralığı
 [1,6, 37,7].** Bu, iki yönde de bir iddiayı desteklemeyecek kadar geniş. %38'e
 yakın bir üst sınır tek başına koca bir kütüphaneyi haklı çıkarırdı.
 
@@ -167,7 +170,7 @@ uyuşmazlığı → otuz çalıştırmada [0,6, 16,7], olabileceği on birde
 [1,6, 37,7]. Tablonun sağlam biçimde ortaya koyduğu şey, sonuç metriğinin
 gizlediği israfın büyüklüğü — 2'ye karşı 7,10 çağrı ve %70'i tekrar — ve maliyet
 düzeltmesinin yönüdür. Sonuç farkının kendisi şüpheli değil: iki sistem aynı otuz
-görevi koştu, dolayısıyla karşılaştırma eşli ve hepsi tek yönde olan 19 uyumsuz
+görevi koştu, dolayısıyla karşılaştırma eşleştirilmiş ve hepsi tek yönde olan 19 uyumsuz
 çift üzerinde McNemar'ın exact testi p = 4 × 10⁻⁶ veriyor.
 :::
 
@@ -253,21 +256,21 @@ söylenmiş bir şeyi istedi.
 
 ::::
 
-## Bir yörüngeyi yargılamak {#sec-ajan-degerlendirme-hakem}
+## Bir trajectory'yi yargılamak {#sec-ajan-degerlendirme-hakem}
 
-Bazı yörünge sorularının kesin cevapları var — çağrı sayıları, tekrarlar,
+Bazı trajectory sorularının kesin cevapları var — çağrı sayıları, tekrarlar,
 sonlanma. Bazılarının yok: *bu denenmeye değer makul bir şey miydi?* Ve onlar
 için alet @sec-llm-degerlendirme'nin hakemidir; o bölümdeki her uyarı taşınmış
-hâlde, artı yörüngelere özgü bir tanesi.
+hâlde, artı trajectory'lere özgü bir tanesi.
 
 @sec-llm-degerlendirme, iki aday yer değiştirdiğinde hükmünü **maddelerin
-%38'inde** çeviren bir hakem ölçtü. Bir yörünge bir *dizidir*, dolayısıyla
+%38'inde** çeviren bir hakem ölçtü. Bir trajectory bir *dizidir*, dolayısıyla
 yanlı olabileceği daha az değil daha çok konum vardır. Herhangi bir rubrik
 puanına güvenmeden önce:
 
-- **Birebir aynı yörünge kontrolünü çalıştırın.** Bir yörüngeyi kendisine karşı
+- **Birebir aynı trajectory kontrolünü çalıştırın.** Bir trajectory'yi kendisine karşı
   puanlayın. @sec-llm-degerlendirme'deki iki hakem de bunu geçti ve sonra önemli
-  olan sondalarda keskin biçimde ayrıştı; dolayısıyla bunu geçmek yalnızca aletin
+  olan probe'larda keskin biçimde ayrıştı; dolayısıyla bunu geçmek yalnızca aletin
   bozuk olmadığını ortaya koyar.
 - **Ölçütleri bütünsel değil ayrı puanlayın.** *Doğru araçları çağırdı mı*,
   *gereksiz işten kaçındı mı*, *hatalardan toparlandı mı* — üzerine hareket
@@ -276,7 +279,8 @@ puanına güvenmeden önce:
 - **Kesin metriklerin yapabileceği işi onlara bırakın.** Bir hakemden araç
   çağrılarını saymasını istemeyin. Onları sayın.
 
-Hakemin asıl işi artık kalandır: israf gibi görünen keşifsel bir yolun gerçekten
+Hakemin asıl işi, sayılamayan geri kalan kısımdır: israf gibi görünen keşifsel
+bir yolun gerçekten
 makul bir hipotez olup olmadığı ve bir toparlanmanın makul mü yoksa şanslı mı
 olduğu.
 
@@ -287,10 +291,10 @@ Senaryolar, kullanıcılarınız sizin için üretmeden önce çalıştırmalar�
 biçiminizdir.
 
 Bir ajan için birim test bir senaryodur: sabit bir ortam, sabit bir istek ve ne
-olması gerektiğine dair bir iddia. Zor kısım ortamdır ve düzgün kurmaya değer,
+olması gerektiğine dair bir assertion (test koşulu). Zor kısım ortamdır ve düzgün kurmaya değer,
 çünkü diğer her şey ona bağlıdır.
 
-- **Yalnızca prompt'u değil dünyayı fikstürleyin.** Bir senaryo bilinen bir
+- **Yalnızca prompt'u değil, bütün dünyayı fixture'larla sabitleyin.** Bir senaryo bilinen bir
   durumda bir veritabanı, belirlenimci araç yanıtları ve bir saat ister. Aksi
   hâlde dünkü geçme ile bugünkü kalma, ajanınızla ilgisiz nedenlerle ayrışır.
 - **Gerçek izleri kaydedin ve tekrar oynatın.** Üretimdeki araç yanıtlarını
@@ -299,9 +303,9 @@ olması gerektiğine dair bir iddia. Zor kısım ortamdır ve düzgün kurmaya d
 - **Çok turlu iş için kullanıcıyı benzetin.** Kullanıcıyı oynayan ikinci bir
   model çok turlu değerlendirmeyi mümkün kılar — ve yukarıdaki her hakem
   uyarısını devralır, çünkü benzetimli bir kullanıcı rubrikli bir modeldir.
-- **Yalnızca yanıt üzerine değil yörünge üzerine iddia kurun.**
+- **Assertion'ları yalnızca yanıta değil trajectory'ye de yazın.**
   *`place_order`'dan önce `check_inventory` çağırmalı*, gerçek bir regresyonu
-  yakalayan türde bir iddiadır ve yalnızca sonuca bakan bir test bunu ifade
+  yakalayan türde bir assertion'dır ve yalnızca sonuca bakan bir test bunu ifade
   edemez.
 
 ## Ölçütler ve bir sıralama tablosunun söyledikleri {#sec-ajan-degerlendirme-olcutler}
@@ -349,7 +353,7 @@ regresyon testinin duyarlılığı bilinmiyordur ve yaygın durum, o yolu hiç
 işletmediği için geçmesidir.
 
 2. adım önceden tasarlanması gereken adımdır: korelasyon kimlikleriyle tam
-yörüngeleri kalıcılaştırmıyorsanız bir olay size bir test değil bir şikâyet
+trajectory'leri kalıcılaştırmıyorsanız bir olay size bir test değil bir şikâyet
 verir. @sec-cok-ajanli dağıtık izler hakkında aynı şeyi söyledi ve aynı ölçüm
 altyapısıdır.
 
@@ -360,7 +364,7 @@ Birikerek büyüyen iki alışkanlık:
   gösteren bir küme arasındaki farktır.
 - **Yalnızca testleri değil başarısız izleri de saklayın.** Bir düzeltme başka
   bir şeyi bozduğunda, özgün iz testin neyi koruduğunu açıklar; üç satırlık bir
-  iddia açıklayamaz.
+  assertion açıklayamaz.
 
 ## Sezgi kontrolleri {#sec-ajan-degerlendirme-sezgi}
 
@@ -382,12 +386,12 @@ Bunların hiçbiri bir doğruluk sayısında görünmüyor.
 :::
 
 ::: {.callout-note collapse="true"}
-## 2. Yörünge değerlendirmesi, sonuç değerlendirmesinin geçirdiği çalıştırmaları yakalıyor mu?
+## 2. Trajectory değerlendirmesi, sonuç değerlendirmesinin geçirdiği çalıştırmaları yakalıyor mu?
 
 Bu ölçüm bunu söyleyemiyor. Bir kez oldu — hem de olabileceği on bir
 çalıştırmada; %9,1 ve aralığı %2'den %38'e uzanıyor — ve iki eksende de %100
 alan kolun uyuşmazlık göstermesine yer bile yoktu. Yani sorunun sorulduğu
-hâline dürüst cevap "bu örneklem boyutunda çözülmedi". Yörünge değerlendirmesi
+hâline dürüst cevap "bu örneklem boyutunda çözülmedi". Trajectory değerlendirmesi
 yerini, cevaba bağlı olmayan nedenlerle hak eder:
 size sistemin ne yaptığını, çalıştırmaların neden bozulduğunu (%63,3'lük bir
 sınıra çarpma oranı yanlış değil bitmemiş çalıştırmalardır) ve doğruluğun
@@ -406,8 +410,10 @@ rakam odur.
 ::: {.callout-note collapse="true"}
 ## 4. Araç çağrısı duyarlılığı neden ölçülür?
 
-Çünkü düşük duyarlılık, ajanın verinize danışmadan cevapladığı anlamına gelir —
-parametrik bellekten, akıcı biçimde, hiçbir yerde hata olmadan.
+Çünkü düşük duyarlılık genellikle ajanın verinize danışmadan cevapladığı
+anlamına gelir — parametrik bellekten, akıcı biçimde, hiçbir yerde hata olmadan.
+Her zaman değil: birbirinin yerine geçebilen bir araç ya da önbellekteki bir
+sonuç da onu düşürebilir; bu yüzden sonuca varmadan önce ize bakın.
 @sec-arac-tasarimi opak bir şemanın zamanın **%41,7'sinde** çağrılmadığını ve
 kendinden emin uydurulmuş düzyazı ürettiğini ölçtü. Çağrılmayan bir araç ne kayıt
 ne kusur üretir, dolayısıyla beklediğiniz çağrıları saymaktan başka hiçbir şey
@@ -415,18 +421,18 @@ onu ortaya çıkarmaz.
 :::
 
 ::: {.callout-note collapse="true"}
-## 5. Bir LLM hakemi bir yörüngeyi puanlayabilir mi?
+## 5. Bir LLM hakemi bir trajectory'yi puanlayabilir mi?
 
 Kesin cevabı olmayan kısmı için — bu denenmeye değer makul bir şey miydi —
-@sec-llm-degerlendirme'nin her uyarısıyla ve bir tane daha. Bir yörünge bir
+@sec-llm-degerlendirme'nin her uyarısıyla ve bir tane daha. Bir trajectory bir
 dizidir, dolayısıyla bir hakemin yanlı olabileceği *daha çok* konum sunar ve o
 bölüm yalnızca bir yer değiştirmeden maddelerin %38'inde çeviren bir hakem ölçtü.
-Ölçütleri bütünsel değil ayrı puanlayın, önce birebir aynı yörünge kontrolünü
+Ölçütleri bütünsel değil ayrı puanlayın, önce birebir aynı trajectory kontrolünü
 çalıştırın ve bir hakemden sayabileceğiniz bir şeyi saymasını asla istemeyin.
 :::
 
 ::: {.callout-note collapse="true"}
-## 6. Ajanınız açık bir ajan ölçütünde birinci. Sevk etmeli misiniz?
+## 6. Ajanınız açık bir ajan ölçütünde birinci. Yayına almalı mısınız?
 
 Apaçık uygunsuz olmadığını öğrendiniz. Ölçütler @sec-llm-degerlendirme'nin üç
 problemini taşır — kontrol edemeyeceğiniz bulaşma, tepede doyum ve yapı
@@ -448,7 +454,7 @@ cevaplanabilir kıldığı sorular vardır.
 **S: Bir ajanı nasıl değerlendirirsiniz?**
 
 İki eksen ve her birinin tek başına neyi kaçırdığını söyleyin. Sonuç: doğru
-cevapladı mı. Yörünge: araç çağrısı kesinliği ve duyarlılığı, tekrarlar, araç ve
+cevapladı mı. Trajectory: araç çağrısı kesinliği ve duyarlılığı, tekrarlar, araç ve
 model çağrılarına ayrılmış adım sayısı ve sonlanma oranı. Sonra onları
 birbirine bağlayan maliyet metriği — *doğru* cevap başına token, çünkü istek
 başına rakam sıklıkla yanlış olan bir sistemi olduğundan iyi gösterir. Deneyimi
@@ -456,7 +462,7 @@ gösteren ayrıntı: düşük bir sonlanma oranı, çalıştırmaların bir sın
 anlamına gelir; ki bu bir akıl yürütme hatasından farklı bir onarımdır ve
 doğrulukta görünmez.
 
-**S: Yörünge değerlendirmesi neden kurmaya değer?**
+**S: Trajectory değerlendirmesi neden kurmaya değer?**
 
 Öncelikle sonuç değerlendirmesinin geçirdiği çalıştırmaları yakalamak için değil
 — tek bir görevde bu, olabileceği on bir çalıştırmada bir kez oldu ve aralık bir
@@ -470,17 +476,17 @@ nereye gittiğini bilmeyerek yayına alırdınız.
 
 **S: Bir kullanıcı ajanın yanlış bir şey yaptığını bildiriyor. Sonra ne olur?**
 
-İz kimliğiyle tam yörüngeyi çekin, fikstürlenmiş bir senaryoya indirin, hem
-sonuç hem yörünge üzerine iddialar yazın ve bir şey düzeltmeden önce testin
+İz kimliğiyle tam trajectory'yi çekin, fixture'larla sabitlenmiş bir senaryoya
+indirin, hem sonuç hem trajectory için assertion'lar yazın ve bir şey düzeltmeden önce testin
 başarısız olduğunu teyit edin — birinci günde geçen bir regresyon testi, yazıldığı
 hatayı yakalayabildiğini henüz göstermemiştir. İkinci adımın mimari bir ön koşul olduğunu söyleyin:
-kalıcılaştırılmış yörüngeler ve korelasyon kimlikleri olmadan bir olay bir test
+kalıcılaştırılmış trajectory'ler ve korelasyon kimlikleri olmadan bir olay bir test
 değil bir şikâyet üretir ve o ölçüm altyapısının olaydan önce var olması gerekir.
 
 **S: Bir ajan regresyonunu kullanıcılardan önce nasıl yakalarsınız?**
 
-Fikstürlenmiş bir ortam ve belirlenimci araç yanıtlarıyla gerçek trafikten
-senaryolar; cevabın yanı sıra yörünge üzerine de iddia kurarak —
+Fixture'larla sabitlenmiş bir ortam ve belirlenimci araç yanıtlarıyla gerçek
+trafikten senaryolar; cevabın yanı sıra trajectory için de assertion yazarak —
 *`place_order`'dan önce `check_inventory` çağırmalı*, yalnızca sonuca bakan bir
 testin ifade edemeyeceği bir regresyondur. Sonra ajanı bilinen birkaç şekilde
 bilerek bozup hangi metriğin hangisini yakaladığını kontrol ederek süiti
@@ -504,7 +510,7 @@ Bilmeye değer, yukarıda kullanılmadı:
 
 | kütüphane | güncel sürüm | ne zaman uzanırsınız |
 |:--|:--|:--|
-| `langsmith` | 0.11.2 | iz yakalama, veri kümesi yönetimi ve yörünge karşılaştırma |
+| `langsmith` | 0.11.2 | iz yakalama, veri kümesi yönetimi ve trajectory karşılaştırma |
 | `arize-phoenix` | 20.4.0 | açık kaynak izleme ve değerlendirme, kendi barındırdığınız |
 | `braintrust` | 0.35.0 | CI'a bağlanmış, çalıştırma başına puanlamalı değerlendirmeler |
 | `openinference-instrumentation` | 0.1.59 | LLM ve ajan span'leri için OpenTelemetry gelenekleri |
@@ -521,14 +527,14 @@ tek ucuz yoludur.
 
 ### Adım 1 — gerçek isteklerden yirmi senaryo
 
-Fikstürlenmiş ortam, belirlenimci araç yanıtları. Gerçek ifadeler, dağınık
+Fixture'larla sabitlenmiş ortam, belirlenimci araç yanıtları. Gerçek ifadeler, dağınık
 olanlar dâhil.
 
 ### Adım 2 — sonucu puanlayın
 
 Doğruluk. Zaten elinizde olan sayı budur.
 
-### Adım 3 — yörünge metriklerini ekleyin
+### Adım 3 — trajectory metriklerini ekleyin
 
 Her görevin gerektirdiği çağrılara karşı araç çağrısı kesinliği ve duyarlılığı,
 tekrarlar, adım sayısı, sonlanma oranı. Toplu değil çalıştırma başına kaydedin.
@@ -547,22 +553,23 @@ bir `"Error"` döndürmesini sağlayın — @sec-arac-tasarimi'nin toparlanmayı
 
 ### Adım 6 — hangi metriğin hangi bozulmayı yakaladığını kontrol edin
 
-Tabloyu raporlayın. Hiçbirini yakalamadıysa yörünge metriklerini az önce
-gerekçelendirmiş oldunuz. Sonuç doğruluğu üçünü de yakaladıysa "senaryolar fazla
+Tabloyu raporlayın. Sonuç doğruluğu bozulmaların hiçbirini yakalamadıysa ama
+trajectory metrikleri yakaladıysa, bu metriklerin gerekliliğini az önce
+göstermiş oldunuz. Sonuç doğruluğu üçünü de yakaladıysa "senaryolar fazla
 kolay" sonucuna atlamayın — bu üç kırılma da cevabı doğrudan bozuyor, dolayısıyla
 onları yakalamak zaten bir sonuç metriğinin *işidir*. İki metrik türünü ayıran
 senaryolar, ajanın doğru cevaba kötü bir yoldan vardığı senaryolardır: on kat
-pahalıya mal olan bir rota ya da kimsenin istemediği bir yan etki. Suiteniz
+pahalıya mal olan bir rota ya da kimsenin istemediği bir yan etki. Süitiniz
 hakkında sonuç çıkarmadan önce her birinden bir tane ekleyip yeniden koşun.
 
 ### Neyi teslim edeceksiniz
 
 Çalıştırma başına puanları, doğru cevap başına maliyet rakamlarını ve 6. adımdan
-hangi metriğin hangi bozulmayı sapladığını gösteren tabloyu.
+hangi metriğin hangi bozulmayı saptadığını gösteren tabloyu.
 
 ## Alıştırmalar {#sec-ajan-degerlendirme-alistirmalar}
 
-1. **Tek küme, iki puanlama.** Yirmi çalıştırmayı sonuç ve yörünge üzerinden
+1. **Tek küme, iki puanlama.** Yirmi çalıştırmayı sonuç ve trajectory üzerinden
    puanlayın. 2×2'yi raporlayın. Önce uyuşmazlık oranını öngörün.
 2. **Tekrarları sayın.** Bir ajanı bir gün ölçün ve araç çağrılarının ne kadarının
    zaten elinde olan bir şeyi istediğini hesaplayın.
@@ -577,7 +584,7 @@ hangi metriğin hangi bozulmayı sapladığını gösteren tabloyu.
    kadarı bir sınır tetiklendiği için bitiyor? Cevaplayamıyorsanız ölçülecek ilk
    şey budur.
 7. **Bir kullanıcı benzetin.** İki modelli çok turlu bir senaryo kurun, sonra
-   @sec-llm-degerlendirme'nin konum sondasını benzetimli kullanıcının kendisinde
+   @sec-llm-degerlendirme'nin konum probe'unu benzetimli kullanıcının kendisinde
    çalıştırın. O rubrikli bir modeldir ve aynı yanlılıklara sahiptir.
 
 ## Daha derine {#sec-ajan-degerlendirme-derinlesme}
@@ -591,7 +598,7 @@ gereken araç çağrılarına karşı sayın. O oran genellikle ilk sürprizdir.
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo) | ölçülebilir bir özellik olarak prompt enjeksiyon gürbüzlüğü; çoğu süitin tümüyle atladığı şey |
 | [SWE-bench](https://www.swebench.com/) | deponun kendi testleriyle doğrulama — akıcılıkla kandırılamayan bir sonuç metriğinin en temiz örneği |
 | [Hamel Husain — değerlendirme üzerine](https://hamel.dev/blog/posts/evals/) | süiti hayalî değil gerçek kusurlardan kurmanın uygulamalı gerekçesi |
-| [`langsmith`](https://github.com/langchain-ai/langsmith-sdk) / [`arize-phoenix`](https://github.com/Arize-ai/phoenix) | iz yakalama ve yörünge inceleme; regresyon döngüsünün dayandığı ölçüm altyapısı |
+| [`langsmith`](https://github.com/langchain-ai/langsmith-sdk) / [`arize-phoenix`](https://github.com/Arize-ai/phoenix) | iz yakalama ve trajectory inceleme; regresyon döngüsünün dayandığı ölçüm altyapısı |
 | [`ragas`](https://github.com/explodinggradients/ragas) | erişim yarısı için, ayrı puanlanmış; @sec-rag-kusurlar'a göre |
 
 : Makalelerin ötesi {tbl-colwidths="[42,58]"}
@@ -599,7 +606,7 @@ gereken araç çağrılarına karşı sayın. O oran genellikle ilk sürprizdir.
 | konu | kaynak |
 |:--|:--|
 | hakem olarak bir model ve yanlılıkları | @zheng2023judging; @wang2024large |
-| iki ajanı karşılaştırmak için eşli test | @mcnemar1947note |
+| iki ajanı karşılaştırmak için eşleştirilmiş test | @mcnemar1947note |
 | ölçüt bulaşması, ölçülmüş hâliyle | @sainz2023nlp |
 | bir yöntem olarak bütünsel ölçütleme | @liang2023holistic |
 | ölçekte araç kullanımı ölçütleri | @qin2024toolllm |
@@ -610,11 +617,11 @@ gereken araç çağrılarına karşı sayın. O oran genellikle ilk sürprizdir.
 ## Akılda kalması gerekenler {#sec-ajan-degerlendirme-ozet}
 
 - **Bir ajan bir cevap ve bir yol üretir; doğruluk yalnızca birini puanlar.**
-  Sonuç değerlendirmesi doğru olup olmadığını sorar; yörünge değerlendirmesi
+  Sonuç değerlendirmesi doğru olup olmadığını sorar; trajectory değerlendirmesi
   oraya varmak için ne yaptığını.
-- **Yörünge metriklerinin *farklı çalıştırmalar* işaretleyip işaretlemediği bu
+- **Trajectory metriklerinin *farklı çalıştırmalar* işaretleyip işaretlemediği bu
   büyüklükte bir ölçümle çözülmüyor.** Burada sonuçta geçen on bir
-  çalıştırmanın biri yörüngede kaldı — aralık %2 ile %38 arasında — ve her şeyi
+  çalıştırmanın biri trajectory'de kaldı — aralık %2 ile %38 arasında — ve her şeyi
   geçen kol zaten bir uyuşmazlık gösteremezdi. Yerlerini o sayıya bağlı olmayan
   bir nedenle hak ederler: sistemin ne yaptığını ve neden bozulduğunu
   gösterirler.
@@ -628,12 +635,14 @@ gereken araç çağrılarına karşı sayın. O oran genellikle ilk sürprizdir.
   gösterdi; doğru cevap başına **5,1 kattı** — sonucu yok sayan rakam farkı
   yaklaşık üç kat küçümsedi.
 - **Herkesin atladığı ikisini ölçün: araç çağrısı duyarlılığı ve sonlanma
-  oranı.** Düşük duyarlılık, hiçbir yerde hata olmadan parametrik bellekten
-  cevaplamak demektir; düşük bir sonlanma oranı, çalıştırmaların bir sınırda
+  oranı.** Düşük duyarlılık genellikle hiçbir yerde hata olmadan parametrik
+  bellekten cevaplamak demektir — ama ize bakın, çünkü birbirinin yerine
+  geçebilen bir araç ya da önbellek de onu düşürebilir; düşük bir sonlanma oranı, çalıştırmaların bir sınırda
   bitmesi demektir ve doğruluk bunu yanlış cevaplardan ayırt edemez.
-- **Bir hakem artık kalanı puanlayabilir, sayılabilir kısmı değil.** Ondan asla
-  araç çağrısı saymasını istemeyin, ölçütleri bütünsel değil ayrı puanlayın ve
-  önce birebir aynı yörünge kontrolünü çalıştırın — bir yörünge bir dizidir,
+- **Bir hakem sayılamayan geri kalan kısmı puanlayabilir; sayılabilir kısmı
+  değil.** Ondan asla araç çağrısı saymasını istemeyin, ölçütleri bütünsel değil
+  ayrı puanlayın ve
+  önce birebir aynı trajectory kontrolünü çalıştırın — bir trajectory bir dizidir,
   dolayısıyla @sec-llm-degerlendirme'nin %38 olarak ölçtüğü konum yanlılığı için
   daha çok konum sunar.
 - **Ölçütler eler; senaryolarınız karar verir.** Bulaşma, doyum ve yapı
@@ -642,4 +651,4 @@ gereken araç çağrılarına karşı sayın. O oran genellikle ilk sürprizdir.
 - **Her olay aynı gün bir teste dönüşür** — ve bir şey düzeltmeden önce başarısız
   olduğunu teyit edin, çünkü birinci günde geçen bir regresyon testi, hatayı
   yakalayabildiğini henüz göstermemiştir. Bu, ilk olaydan önce tasarlanmış, korelasyon kimlikleriyle
-  kalıcılaştırılmış yörüngeler gerektirir.
+  kalıcılaştırılmış trajectory'ler gerektirir.

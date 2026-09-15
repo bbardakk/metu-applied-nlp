@@ -26,7 +26,9 @@ have, which is also what the capstone asks of you.
 The example is a support platform for a mid-size Turkish e-commerce company.
 Agents answer customer questions about orders, shipping and returns, in Turkish,
 over roughly 40,000 conversations a month. Three tools: look up an order, check
-a shipment, start a return. Escalation to a human is always available.
+a shipment, open a return request. A return request can be cancelled; the
+refund payment is not an agent tool — the agent can only propose one, and the
+refund service decides. Escalation to a human is always available.
 
 The requirements that shape everything:
 
@@ -42,8 +44,9 @@ The requirements that shape everything:
 
 [The non-goals are worth more than the goals, and they should be written
 first.]{.hl} This system will not: generate marketing copy, answer questions
-outside orders and shipping, take any action a human cannot undo within one
-working day, or operate without a human escalation path. Each of those is a
+outside orders, shipping and returns, let an agent take any action a human cannot
+undo within one working day — money moves only through the refund service, under
+its ceiling and approval rule — or operate without a human escalation path. Each of those is a
 decision that removes an entire class of failure — and each will be argued
 against by someone who wants one more feature, which is why they are written
 down before anyone is invested.
@@ -151,19 +154,24 @@ your system prompt is a larger line item than the model you chose.
 
 **Telemetry.** @sec-observability measured **4.8 spans and 3,167 bytes per run**
 on 301-token prompts, of which **48.3% was prompt and completion text** — and at
-890-token prompts the same structure is **6,163 bytes with 73.4% content**. At
-40,000 runs a month that is roughly 190,000 spans and, with content recorded at
-that prompt size, about **0.25 GB**; on the measured 301-token prompts it is
-0.13 GB. Small either way. At a million runs it is 6 GB, and the decision to
+890-token prompts the same structure is **6,163 bytes with 73.4% content**. A
+run there is one agent invocation with its model and tool calls, and a
+conversation can hold several, so write the volume with *r*, the average runs
+per conversation: 40,000 × *r* runs a month. At *r* = 1 that is roughly 190,000
+spans and, with content recorded at that prompt size, about **0.25 GB**; on the
+measured 301-token prompts it is 0.13 GB. Multiply both by *r*; small either way. At a million runs it is 6 GB, and the decision to
 record content is a near-fourfold difference. Decide it deliberately, and sample
 content while keeping it on every error.
 
 **Evaluation.** @sec-llm-eval's sizing says 100 items resolves a 13.4-point
 difference and 1,000 resolves 4.8 — so a hundred-item golden set finds broken,
-not better. @sec-production-eval's paired gate is what makes small regressions
-visible anyway: a noise floor of **0.60 points**, a 1-point threshold, **4.3%
-false blocks** at 100 items and a review-invisible prompt regression still caught
-**99.4%** of the time.
+not better. A gate that compares runs on the same items is what makes small
+regressions visible anyway. @sec-production-eval measured a run-to-run `sd` of
+**0.26 points** (range 0.60) and used a 1-point threshold, about 4 × `sd`; in its
+resampling that gave **4.3% false blocks** at 100 items and caught a
+review-invisible prompt regression **99.4%** of the time. Those rates illustrate
+how the threshold behaves rather than measure a paired gate — the per-item
+pairings were not stored — so measure your own gate before relying on them.
 
 **Guardrails.** @sec-guardrails' detector numbers set the escalation rate: an
 eleven-digit pattern alone is **40% precise**, and pattern plus checksum-or-context
@@ -244,8 +252,10 @@ precision it masks the order numbers agents need, and the response will be to
 turn it off rather than to fix precision (@sec-guardrails).
 
 **The first serious incident will be an approval queue nobody rejects
-anything in.** 99% approval is a delay wearing oversight's clothes, and it is
-invisible until someone measures the rejection rate.
+anything in.** A 99% approval rate alone does not show it — a well-targeted gate
+should approve almost everything. Planted errors do: if reviewers approve items
+known to be wrong, the queue is a delay wearing oversight's clothes, and nobody
+sees it until someone runs that check (@sec-guardrails).
 
 **Someone will propose giving the ticket-reading agent the refund tool** to
 remove a hop. The answer is in @sec-agent-security, and it needs to be a
@@ -343,10 +353,12 @@ resolves a **13.4-point** difference and 1,000 resolves **4.8**. Most real
 improvements are 2–5 points, so a hundred-item set cannot see the thing it was
 built to see — as an unpaired comparison.
 
-But @sec-production-eval's gate is paired, comparing two runs on the *same*
-items, and there 100 items caught a 3.4-point regression **99.4%** of the time
-with a 1-point threshold. Same set, different question: use it as a gate, not as
-evidence that version B is better than version A in the population.
+But a gate compares two runs on the *same* items, and in @sec-production-eval's
+resampling a 1-point threshold on 100 items caught a 3.4-point regression
+**99.4%** of the time. That rate takes the observed drop as the true effect and
+could not match items across prompts, so it illustrates the threshold rather
+than measuring a paired gate. Same set, different question: use it as a gate,
+not as evidence that version B is better than version A in the population.
 :::
 
 ::: {.callout-note collapse="true"}
@@ -413,9 +425,9 @@ answers are syntheses of measurements made earlier in the book.
 
 **Q: Design a customer support agent for a Turkish e-commerce company.**
 
-Start with non-goals, because they remove failure classes: no actions
-irreversible within a working day, no scope outside orders and shipping, always
-a human escalation path. Then the shape — retrieval over policy documents rather
+Start with non-goals, because they remove failure classes: no agent action that
+cannot be undone within a working day, no scope outside orders, shipping and
+returns, always a human escalation path. Then the shape — retrieval over policy documents rather
 than long context, for the latency reason; a gateway for attribution and
 pinning; durable state so a deploy mid-conversation is survivable; PII tokenised
 reversibly at the boundary so lookups still work; and the refund ceiling
@@ -533,15 +545,19 @@ Four payload framings, twenty-five runs each, with a clean control
 
 ### Step 7 — measure your gate's noise floor and set a threshold
 
-Five identical runs, widest gap, threshold above it (@sec-production-eval). Then
-submit a no-op change and confirm the gate does not block it.
+Five identical runs; record the run-to-run `sd` as well as the widest gap, and
+set the threshold at roughly 4 × `sd` rather than just above the range
+(@sec-production-eval). Then measure the false-block rate on enough no-op
+changes to resolve it: zero blocks in five still leaves a 95% Wilson upper bound
+of 43%.
 
 ### What to hand in
 
 Your non-goals; the eval set with the time it took; the budget table with every
 cell cited or marked as a gap; three ADRs; the tool classification with one
 enforced limit and its test; your attack success rates with the clean control;
-and your measured noise floor with the threshold you chose.
+and your measured noise floor with the threshold you chose and its measured
+false-block rate.
 
 ## Exercises {#sec-capstone-exercises}
 

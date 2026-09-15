@@ -5,7 +5,9 @@
 [İngilizce 31. bölüm](../../en/chapters/31-serving.html). Buradaki ölçümler
 bilerek küçük — bir dizüstünde 3B'lik bir modele karşı 150 kadar kısa istek,
 toplam birkaç dakika. Yeterliler, çünkü önemli olan şey, *işareti ve nedeni* her
-makinede aynı olan bir oran: prefill compute-bound, decode bandwidth-bound.
+makinede aynı olan bir oran: prefill (prompt'un okunduğu aşama) compute-bound
+(hesap gücüyle sınırlı), decode (cevabın token token yazıldığı aşama)
+bandwidth-bound (bellek bant genişliğiyle sınırlı).
 Büyüklüğü taşınmıyor ve bölüm, aksini varsaymak yerine nerede taşınmayı
 bıraktığını söylüyor. Gözlemlenmesi için bir GPU filosu
 gereken her şey iddia edilmek yerine kaynak gösteriliyor. Her koşul beş kez
@@ -14,12 +16,13 @@ kayma uzun prompt satırlarında birikemesin; ve sabit bir kısa prompt her beş
 çağrıda denetim olarak yeniden zamanlanıyor. Burada basılan koşuda o denetim tüm
 oturum boyunca **%2,0** içinde kaldı; tablonun geri kalanını okunmaya değer kılan
 da bu. Yazılım: `ollama` 0.24.0, `llama3.2:3b` servis ediyor (Q4_K_M, 28 katman,
-24 dikkat başlığı, 8 KV başlığı, başlık boyutu 128), `num_ctx` 8192,
+24 attention head (paralel çalışan dikkat birimi), 8 KV head, head boyutu 128),
+`num_ctx` 8192,
 `temperature` 0, `OLLAMA_FLASH_ATTENTION=1` ve `OLLAMA_KV_CACHE_TYPE=q8_0`,
 Python 3.14.5 ve Apple Silicon üzerinde. Tam çipin önemi bu adın
 düşündürdüğünden fazla ve zamanlamalar hangi sınıf olduğunu söylüyor: 2,0 GB'lık
 bir ağırlık dosyasına karşı saniyede 190 decode token'ı, yaklaşık **380 GB/s**
-ağırlık akışı demek; bunu ancak yüksek bant genişlikli bir parça sürdürür. Aynı
+ağırlık akışı demek; bunu ancak bellek bant genişliği yüksek bir çip sürdürebilir. Aynı
 model 120 GB/s'lik bir dizüstünde saniyede 60 token civarında tavan yapar. Hızı
 değil oranı yeniden üretin.
 :::
@@ -36,8 +39,10 @@ değil oranı yeniden üretin.
   prompt düzenlerini tanıyabilirsiniz;
 - bugün ölçebileceğiniz token sayılarından bir istek başına maliyet çizelgesi
   kurabilirsiniz;
-- kalan kolları — daha küçük model, nicemleme, spekülatif kod çözme — her
-  birinin gerçekte neyi feda ettiğine göre sıralayabilirsiniz.
+- kalan kolları — daha küçük model, nicemleme (quantization: ağırlıkları daha
+  az bitle saklama), spekülatif kod çözme (speculative decoding: küçük bir
+  modelin önerdiği token'ları büyük modelin topluca doğrulaması) — her birinin
+  gerçekte neyi feda ettiğine göre sıralayabilirsiniz.
 
 ## Bir istek, birbirinden çok farklı iki yarı {#sec-servis-yarilar}
 
@@ -152,18 +157,18 @@ $$
 
 ::: {.fig-cap}
 Üst yarı ölçekli **değil**: decode kutuları, token başına döngü hiç görünsün
-diye büyütüldü. Duvar saatinde o 32 geçiş, prefill'in 2,29 saniyesine karşı 0,20
-saniye sürüyor; dürüst çizilseydi prefill'in 286 pikseline karşı yaklaşık 25
+diye büyütüldü. Wall-clock süresi (gerçekte geçen süre) açısından o 32 geçiş,
+prefill'in 2,29 saniyesine karşı 0,20 saniye sürüyor; dürüst çizilseydi prefill'in 286 pikseline karşı yaklaşık 25
 piksel kaplarlardı. Alttaki çubuk *ölçekli* ve akılda tutmaya değer olan biçim
 o. Prefill 4.247 token üzerinden tek bir geçiş; decode ise model üzerinden,
 çıktı token'ı başına bir tane olmak üzere 32 ayrı geçiş. O çubuk başka bir
 istek — 7.427 token bağlam, 64 token çıktı — akış açık
-hâlde ölçüldü ve üretimdeki isteklerin çoğunun aldığı biçim bu: duvar saatinin
-neredeyse tamamı ilk karakter belirmeden önce harcanıyor.
+hâlde ölçüldü ve üretimdeki isteklerin çoğunun aldığı biçim bu: wall-clock
+süresinin neredeyse tamamı ilk karakter belirmeden önce harcanıyor.
 :::
 ::::
 
-**Neye bakacağız.** Önce duvar saatinin gerçekte nereye gittiğine — ki üretim
+**Neye bakacağız.** Önce wall-clock süresinin gerçekte nereye gittiğine — ki üretim
 prompt uzunluklarında bu neredeyse tümüyle prefill'dir — ve akışın buna neden
 dokunamadığına. Sonra decode'u hızlandıran ve uzun bağlamı pahalılaştıran şey
 olan KV önbelleğine, hem de hiçbir şey kiralamadan önce hesaplayabileceğiniz
@@ -173,7 +178,7 @@ olmayan tek kola ve en büyük ölçülmüş kazanca, prompt önbelleklemeye. So
 sayı ve bir çarpmadan ibaret olan maliyet çizelgesine. Ve en sonunda kalan
 kollara — önerildikleri sıraya göre değil, başvurulması gereken sıraya göre.
 
-## Duvar saati gerçekte nereye gidiyor {#sec-servis-ttft}
+## Wall-clock süresi gerçekte nereye gidiyor {#sec-servis-ttft}
 
 ::: {#gloss-time-to-first-token-ttft .column-margin .term-gloss}
 **ilk token'a kadar geçen süre (TTFT)** — okuyucunun bir şey belirmeden önce ne
@@ -245,14 +250,14 @@ belleğe mal olmasının nedenidir. [↩](#term-kv-cache){.term-back}
 :::
 
 Bu doğrudan bir bellek-zaman takası ve bellek, siz herhangi bir şey kiralamadan
-önce hesaplanabilir. Önbellek her token için, her katmanda, her KV başlığında
+önce hesaplanabilir. Önbellek her token için, her katmanda, her KV head'inde
 bir anahtar ve bir değer tutar:
 
 $$
 \text{token başına bayt} \;=\; 2 \times L \times H_{kv} \times d_{\text{head}} \times \text{eleman başına bayt}
 $$
 
-Bu model fp16'da — 28 katman, 8 KV başlığı, başlık boyutu 128 — bu
+Bu model fp16'da — 28 katman, 8 KV head, head boyutu 128 — bu
 $2 \times 28 \times 8 \times 128 \times 2 = 114{.}688$ bayt, yani **token
 başına 112 KiB** eder. Pencereyle çarpın:
 
@@ -266,11 +271,11 @@ başına 112 KiB** eder. Pencereyle çarpın:
 {tbl-colwidths="[14,14,14,29,29]"}
 
 ::: {.column-margin}
-O tablo fp16 ve bu, varsayılan olan ve yapılması gereken ilk hesap. Bu
-zamanlamaların geldiği sunucu ise değildi: `OLLAMA_KV_CACHE_TYPE=q8_0`
-çalıştırıyordu — blok ölçeği de sayıldığında eleman başına 1,0625 baytlık 8
-bitlik bir önbellek, ki bu da **token başına 59,5 KiB** ve tam pencerede 7,4 GiB
-eder; fp16 değerinin biraz üstünde yarısı. *Önbelleği* nicemlemek ağırlıkları
+fp16 sütunları — iki oran sütunu da bunları kullanıyor — varsayılan olan ve
+yapılması gereken ilk hesap. Bu zamanlamaların geldiği sunucu ise q8_0 sütununu
+çalıştırıyordu: `OLLAMA_KV_CACHE_TYPE=q8_0`. Bu, blok ölçeği de sayıldığında
+eleman başına 1,0625 baytlık 8 bitlik bir önbellek; **token başına 59,5 KiB** ve
+tam pencerede 7,4 GiB eder, yani fp16 değerinin yarısından biraz fazlası. *Önbelleği* nicemlemek ağırlıkları
 nicemlemekten ayrı bir koldur, gerçekten bağlayıcı olan sayıyı oynatan odur ve
 varsayılan olarak kapalıdır. Bir kart boyutlandırmadan önce sunucunuzun
 hangisini çalıştırdığını kontrol edin, çünkü çıktıda bunu size söyleyen hiçbir
@@ -292,9 +297,9 @@ yanlış, "hangi bağlam uzunluğunda?"nın doğru soru olmasının nedeni bu; y
 sunucudaki varsayılan `num_ctx`in bu kadar önemli olmasının nedeni de: 131k'lık
 tam pencereyi isteyin, daha ilk istekten önce 14 GB taahhüt etmiş olun.
 
-O aritmetikteki 24 dikkat başlığına karşı 8 KV başlığı **gruplanmış sorgu
+O aritmetikteki 24 attention head'e karşı 8 KV head **gruplanmış sorgu
 dikkati** (grouped-query attention) ve sayının 42 değil 14 GiB olmasının
-nedeni onlar — her anahtar-değer çiftini üç başlık paylaşıyor. Bir servis
+nedeni onlar — her anahtar-değer çiftini üç head paylaşıyor. Bir servis
 maliyeti olarak görünen bir bellek bant genişliği optimizasyonu bu ve tekrar
 eden bir biçim: @sec-transformerlar'daki mimari seçimleri burada satır kalemi
 olarak yeniden beliriyor.
@@ -322,7 +327,7 @@ $$I \;=\; \frac{2NB}{N b} \;=\; \frac{2B}{b}$$
 
 ve neyin sadeleştiğine dikkat edin: model boyutu. Yoğunluk yalnızca batch'e ve
 hassasiyete bağlı. Bir çip, *ridge point*'inin — tepe FLOP/s bölü tepe bant
-genişliği — üstünde compute-bound olur; H100 sınıfı bir parça için bu kabaca
+genişliği — üstünde compute-bound olur; H100 sınıfı bir çip için bu kabaca
 $989 \text{ TFLOP/s} \div 3{,}35 \text{ TB/s} \approx 295$ FLOP/bayt. Yani
 fp16'da decode yaklaşık $B = 295$'e kadar bandwidth-bound kalıyor; dört bitlik
 ağırlıkla yaklaşık $B = 74$'e kadar.
@@ -421,7 +426,7 @@ kullanıcı adı ya da bir oturum kimliği kendinden sonraki her şeyi geçersiz
 4.000'i çöpe atar.
 
 **Prompt'u kararlılığa göre sıralayın.** Önce sistem yönergeleri, sonra araç
-şemaları, sonra birkaç örnek, sonra erişilmiş bağlam, sonra kullanıcının sırası.
+şemaları, sonra birkaç örnek, sonra erişilmiş bağlam, sonra kullanıcının mesajı.
 Çoğu takım prompt'ları akıllarına geldikleri sırada yazar; bu da oynak kısmı öne
 koyar ve kimsenin fark etmediği bir biçimde önbelleklemeyi kapatır.
 
@@ -578,7 +583,7 @@ olmayanlar ve takımlar rutin olarak en alttan başlıyor.
 | **Prompt önbellekleme** | prefill'de 153×'e kadar, yukarıda ölçüldü | kararlılığa göre sıralanmış bir prompt | [her zaman, ilk]{.pro} |
 | **Daha küçük model** | her şeyde 3–10× | kalite, ölçülebilir biçimde | değerlendirme dayandığını söylediğinde |
 | **Nicemleme** | bellek ve bant genişliği | bir miktar kalite, göreve bağlı | bağlayıcı kısıt bellek olduğunda |
-| **Spekülatif çözümleme** | öncelikle decode gecikmesi; maliyet servis verimliliğine ve fiyatlandırmaya bağlı | barındırılacak bir taslak model | yavaş yarı *decode* olduğunda — uzun cevaplar. Prefill baskınken uçtan uca yararı sınırlı; token başına API fiyatlandırmasında fatura düşmeyebilir, kendi barındırdığınız sistemde verim kazancı tamamlanan cevap başına maliyeti düşürebilir |
+| **Spekülatif kod çözme** | öncelikle decode gecikmesi; maliyet servis verimliliğine ve fiyatlandırmaya bağlı | barındırılacak bir taslak model | yavaş yarı *decode* olduğunda — uzun cevaplar. Prefill baskınken uçtan uca yararı sınırlı; token başına API fiyatlandırmasında fatura düşmeyebilir, kendi barındırdığınız sistemde verim kazancı tamamlanan cevap başına maliyeti düşürebilir |
 | **Sürekli batch'leme** | iş hacmi | kullanıcı başına gecikme | sunucu meşgulken, öncesinde değil |
 
 : Altı kol ve her birinin feda ettiği {tbl-colwidths="[22,26,28,24]"}
@@ -595,17 +600,20 @@ bozulma bildiriyor ve ikisi de hâlâ bozulma. Bu, kalite maliyeti olan bir bell
 optimizasyonu ve maliyet göreve bağlı — yani yeri bir blog yazısının ölçüt
 tablosu değil, sizin değerlendirme süitiniz.
 
-**Spekülatif çözümleme** doğrudan seri kısma saldırıyor. Küçük bir taslak model
+**Spekülatif kod çözme** doğrudan seri kısma saldırıyor. Küçük bir taslak model
 birkaç token öneriyor; büyük model hepsini tek bir paralel geçişte puanlıyor ve
 değiştirilmiş bir reddetme örneklemesi adımı kaçının tutulacağına karar verip
 reddedilen ilk konumu düzeltilmiş bir dağılımdan yeniden örnekliyor
 [@leviathan2023speculative]. "En uzun doğru öneki kabul eder" işe yarar bir
 resim ama tam olarak mekanizma değil: kabul olasılıksaldır ve taslağın *doğru*
 bildiği bir token bile reddedilebilir. Çıktı dağılımının
-değişmediği kanıtlanmış durumda — bu bir yaklaşıklama değil — ve kazanç duvar
-saatinde, taslak model sık sık aynı fikirde olduğunda tipik olarak 2–3×.
-*Yapmadığı* şeye dikkat edin: büyük model hâlâ her token'ı işliyor, dolayısıyla
-FLOP ve dolayısıyla maliyet düşmüyor. Para değil, gecikme satın alıyor.
+değişmediği kanıtlanmış durumda — bu bir yaklaşıklama değil — ve wall-clock
+süresindeki kazanç, taslak model sık sık aynı fikirde olduğunda tipik olarak
+2–3×. *Yapmadığı* şeye dikkat edin: büyük model hâlâ her token'ı işliyor,
+dolayısıyla FLOP sayısı düşmüyor; token başına API fiyatlandırmasında fatura da
+düşmüyor. Kendi barındırdığınız sistemde maliyet GPU süresini ve verimi izler;
+bu yüzden hızlanma, tamamlanan cevap başına maliyeti düşürebilir. Bunu kendi
+servis yükünüzde ölçün. Öncelikle satın aldığı şey gecikmedir.
 
 Bütün bunların altındaki ölçekteki aritmetik için — model boyutu, batch boyutu
 ve yonga bellek bant genişliğinin neyin ulaşılabilir olduğunu birlikte nasıl
@@ -628,10 +636,10 @@ Modele bakmadan önce, prompt token'larının çıktı token'larına oranına.
 Prefill ve decode çok farklı hızlarda çalışıyor — burada ölçüldüğü hâliyle
 saniyede yaklaşık 2.000'e karşı 190 token — dolayısıyla uzun prompt'lu ve kısa
 cevaplı bir istek zamanının neredeyse tamamını okuyarak geçirir. 7.427 token
-bağlamda duvar saatinin %91'i, ilk karakter belirmeden önce bitmişti.
+bağlamda wall-clock süresinin %91'i, ilk karakter belirmeden önce bitmişti.
 
 Biçiminiz buysa kollar prompt uzunluğu ve prompt önbellekleme olur; özellikle
-spekülatif çözümlemenin uçtan uca yararı sınırlıdır — o decode'u hızlandırır. Gerçekten daha
+spekülatif kod çözmenin uçtan uca yararı sınırlıdır — o decode'u hızlandırır. Gerçekten daha
 hızlı bir model yine de yardım eder, çünkü prefill hesap sınırlıdır ve daha
 küçük bir modelin yapacak daha az hesabı vardır; yardım etmeyecek olan, token
 token ilerleyen yarıya yönelik her şeydir. Buna karşılık
@@ -660,9 +668,9 @@ için.
 ## 3. 2 GB'lık bir modelin neden 14 GB belleğe ihtiyacı var?
 
 Çünkü ayak izi ağırlıklardan ibaret değil. KV önbelleği penceredeki her token
-için, her katmanda ve her KV başlığında bir anahtar ve bir değer tutuyor.
+için, her katmanda ve her KV head'inde bir anahtar ve bir değer tutuyor.
 
-Bu model fp16'da — 28 katman, 8 KV başlığı, başlık boyutu 128 — token başına
+Bu model fp16'da — 28 katman, 8 KV head, head boyutu 128 — token başına
 112 KiB eder; yani 131.072 token'lık bir pencere, 2,0 GB'lık bir model dosyasına
 karşı 14 GiB önbellek. Ama o oranın neyi karşılaştırdığını söyleyin: dört bitlik
 ağırlıklara karşı on altı bitlik bir önbellek. Eşit hassasiyette önbellek
@@ -685,7 +693,7 @@ kimliği, bir oturum tanımlayıcısı ya da yeni karılmış birkaç örneklik 
 bunu yapar ve hiçbiri bir performans hatasına benzemez.
 
 Çözüm prompt'u kararlılığa göre sıralamak — yönergeler, sonra şemalar, sonra
-örnekler, sonra erişilmiş bağlam, sonra kullanıcının sırası — ve kontrol, aynı
+örnekler, sonra erişilmiş bağlam, sonra kullanıcının mesajı — ve kontrol, aynı
 isteği iki kez gönderip prefill sürelerini karşılaştırmak. Soğuk ile sıcak bir
 büyüklük mertebesi ya da daha fazla farklı olmalı; burada ölçüldüğü hâliyle
 2,290 s'ye karşı 0,015 s.
@@ -780,7 +788,9 @@ oraya götüremez. Sonra: kararlı önek için prompt önbellekleme, ki burada
 prefill'de 153× ölçüldü; prompt'un kendisini kısaltmak, ki doğrusaldır; ve kalan
 beklemeyi okuma süresine çevirmek için akış. Her birinden sonra neyi ölçeceğinizi
 söyleyin ve spekülatif kod çözmenin listede yalnızca bir taslak model
-barındırabiliyorsanız ve kısıt maliyet değilse yer aldığını belirtin.
+barındırabiliyorsanız yer aldığını belirtin. Kazandırdığı şey decode
+gecikmesidir; maliyeti de düşürüp düşürmediği, hesaplamaya nasıl ödeme
+yaptığınıza bağlıdır.
 
 **S: 99'uncu yüzdelik bir gecikme SLO'su istiyoruz. Neye ihtiyacınız var?**
 
@@ -829,7 +839,8 @@ yeniden kullanmak değil, kendi sayılarınızı üretmek.
 
 Altı prompt uzunluğu, hiçbir şey önbelleğe girmesin diye her biri ayrı metinle,
 sabit ve kısa bir çıktı. Prompt token'ı, prefill saniyesi, çıktı token'ı, decode
-saniyesi kaydedin. İki hız düşer ve akılda tutulacak sayı onların oranıdır.
+saniyesi kaydedin. Bu kayıtlardan iki hız hesaplanır — prefill ve decode hızı —
+ve akılda tutulacak sayı ikisinin oranıdır.
 
 ### Adım 2 — TTFT eğrinizi bulun
 
@@ -848,7 +859,7 @@ sıralamasının değeridir.
 
 ### Adım 4 — KV önbelleğini gigabayt cinsinden boyutlandırın
 
-Modelinizin üstverisinden katman sayısını, KV başlığı sayısını ve başlık boyutunu
+Modelinizin üstverisinden katman sayısını, KV head sayısını ve head boyutunu
 alıp token başına baytı hesaplayın. Az önce yapılandırmak üzere olduğunuz bağlam
 uzunluğuyla çarpın. Cevap sizi şaşırtıyorsa, adımın amacı zaten oydu.
 
@@ -892,7 +903,8 @@ için önbellekli ve önbelleksiz prefill; yapılandırdığınız pencere için
    yeniden hesaplayın ve prompt'un hangi kısımlarını keseceğinizi söyleyin.
 
 5. **Bağlama karşı TTFT.** Kendi kurulumunuz için en az beş uzunlukta, prompt
-   uzunluğuna karşı ilk token'a kadar geçen süreyi çizin. Bir doğru uydurun.
+   uzunluğuna karşı ilk token'a kadar geçen süreyi çizin. Ölçümlere bir doğru
+   kestirin.
    Eğimi kullanarak sınamadığınız bir bağlam uzunluğundaki TTFT'yi tahmin edin,
    sonra sınayın.
 
@@ -938,7 +950,7 @@ bildiğinizde çok daha kolay değerlendirilir.
   okumanın yaklaşık **on bir katına** mal oluyor. Her servis kararı isteklerinizin
   hangi yarıdan yapıldığından çıkar.
 
-- **Gecikme genellikle prompt'tur.** 7.427 token bağlamda **duvar saatinin
+- **Gecikme genellikle prompt'tur.** 7.427 token bağlamda **wall-clock süresinin
   %91,0'i ilk karakter belirmeden önce bitmişti**. Akış o sayıyı değiştirmez;
   yalnızca isteğin geri kalanını görünür kılar. İlk token'a kadar geçen sürenin
   kolu prompt uzunluğu, ondan sonra da önbelleklemedir.
@@ -947,7 +959,7 @@ bildiğinizde çok daha kolay değerlendirilir.
   her token'ı yavaşlatarak: decode boş bir pencere ile 7.400 token'lık bir pencere
   arasında **saniyede 189'dan 141 token'a** düştü.
 
-- **KV önbelleği modeli cüce bırakabilir.** Token başına 112 KiB'de, 131k'lık
+- **KV önbelleği modelin kendisinden büyük olabilir.** Token başına 112 KiB'de, 131k'lık
   bir pencere **14 GiB önbellek** demek — 2,0 GB'lık dört bitlik bir dosyanın
   7,5 katı, aynı ağırlıkların fp16 hâlinin 2,3 katı, burada fiilen kullanılan
   sekiz bitlik önbellekle dosyanın 4,0 katı. Kurulumunuza uyanı alıntılayın; ama
@@ -979,5 +991,6 @@ bildiğinizde çok daha kolay değerlendirilir.
   taşımaz ve önce gelir; modelin kullandığı bağlamı atmak bir kalite kararıdır. Daha küçük bir model, nicemleme
   [@frantar2023gptq; @lin2024awq] ve spekülatif kod çözme
   [@leviathan2023speculative] her biri belirli bir şeyi takas eder — sırasıyla
-  kalite, kalite ve gecikme karşılığı para — ve yerleri başkasının çalıştırdığı
+  kalite, kalite ve daha düşük gecikme için barındırılan bir taslak model — ve
+  yerleri başkasının çalıştırdığı
   bir ölçüt tablosu değil, bir değerlendirmedir.
