@@ -1,3 +1,7 @@
+> **Bu repo taşındı / This repository has moved:** [bbardakk/uygulamali-dogal-dil-isleme](https://github.com/bbardakk/uygulamali-dogal-dil-isleme) · <https://bbardakk.github.io/uygulamali-dogal-dil-isleme/>
+>
+> Eski adresler yeni sitedeki aynı sayfaya yönlenir. Old addresses redirect to the same page on the new site.
+
 # Applied Natural Language Processing — From Tokens to Agents
 
 ODTÜ'de bilgisayar mühendisi olmayan mühendisler ve İstatistik öğrencilerine
